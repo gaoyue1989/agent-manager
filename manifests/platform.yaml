@@ -251,6 +251,38 @@ roleRef:
   name: platform-backend
   apiGroup: rbac.authorization.k8s.io
 ---
+# OpenSandbox 池 workload ns（deploy-opensandbox.sh 幂等共建；纯 Namespace 对象无字段冲突）：
+# per-service skillsync token Secret 的消费方落点（k8s.SkillsyncTokenSecret ensure +
+# 建池 SecretExists 前提门，sandbox-skills-syncd-design §5.2/§9.1）
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opensandbox
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: platform-backend-skillsync
+  namespace: opensandbox
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get","create","update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-backend-skillsync
+  namespace: opensandbox
+subjects:
+  - kind: ServiceAccount
+    name: platform-backend
+    namespace: agent-platform
+roleRef:
+  kind: Role
+  name: platform-backend-skillsync
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
