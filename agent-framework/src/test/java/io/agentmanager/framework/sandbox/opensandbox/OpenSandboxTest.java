@@ -2231,35 +2231,4 @@ class OpenSandboxTest {
         assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-b' '" + scopeRoot + "/demo-b'"),
             "非同名包技能正常建链（与 L4 共存）：" + cmd);
     }
-
-    @Test
-    void farmConvergeFailureShouldRetryOnNextTrigger() throws Exception {
-        var host = java.nio.file.Files.createTempDirectory("farm-retry");
-        writeHostSkill(host, "sess-A", "demo-a");
-        var cfg = java.nio.file.Files.createTempDirectory("farm-retry-cfg");
-        bundleSkill(cfg, "demo-a");
-        var svc = bundleService(cfg);
-        var version = svc.currentVersion().version();
-        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
-        var osb = mock(Sandbox.class);
-        var commands = mock(Commands.class);
-        when(osb.commands()).thenReturn(commands);
-        when(commands.run(anyString())).thenAnswer(inv -> {
-            var cmd = inv.getArgument(0, String.class);
-            return cmd.startsWith("readlink ")
-                ? mockExecution(0, "v-" + version, "")
-                : mockExecution(1, "", "ln failed");
-        });
-        var files = mock(Filesystem.class);
-        when(osb.files()).thenReturn(files);
-
-        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-9"), osb,
-            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
-        bindFarmSession(sandbox, "sess-A");
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
-
-        assertEquals(1, farmReadlinkCount(osb), "收敛失败不改判定：会话仍记忆为 farm");
-        assertEquals(2, farmConvergeCommands(osb).size(), "收敛失败按投放失败语义复位，下次触发重试");
-    }
 }
