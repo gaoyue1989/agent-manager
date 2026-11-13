@@ -20,11 +20,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/store"
 )
 
@@ -52,7 +54,28 @@ const (
 	// 池主容器名与 task-executor 监听地址（官方 sample 原样；SANDBOX_MAIN_CONTAINER 指向它）
 	sandboxPresetMainContainer = "sandbox"
 	sandboxPresetExecdPort     = "0.0.0.0:5758"
+	// commandWrapper 固定脚本名（skills-syncd §5.2：镜像仅提供二进制与 launcher 载体，
+	// 池化路径启动点由 preset 注入）
+	sandboxPresetLauncherPath = "/usr/local/bin/skillsync-launcher.sh"
+	// 池名与服务绑定后缀（C-1/C-2：池名必须为 {服务 k8s 名}-pool 且服务存在）
+	sandboxPoolServiceSuffix = "-pool"
+	// extraEnv 数量上限（skills-syncd §4.2 守护 env 键集 ×2 余量）
+	sandboxPoolExtraEnvMax = 8
 )
+
+// 技能同步缺省注入三键（PR-4a，skills-syncd §5.2 示例模板）：BASE_URL 按 {k8s 名}-svc
+// 集群内地址派生（与 docs/deployment.md「技能同步」egress 放行 FQDN 同形，dns+nft 策略
+// 按守护实际拨号域名匹配）；TOKEN secretKeyRef 引用 per-service Secret（k8s.SkillsyncTokenName，
+// 消费方落点 ns k8s.SandboxWorkloadNamespace）；INTERVAL 取守护缺省 1m。
+const (
+	skillsyncEnvBaseURL  = "SKILLSYNC_BASE_URL"
+	skillsyncEnvInterval = "SKILLSYNC_INTERVAL"
+	skillsyncInterval    = "1m"
+)
+
+// sandboxPoolExtraEnvKeyRe extraEnv 键白名单：仅 SKILLSYNC_ 前缀（§5.2 受控参数化，
+// 不接受任意 env 注入面）。
+var sandboxPoolExtraEnvKeyRe = regexp.MustCompile(`^SKILLSYNC_[A-Z0-9_]+$`)
 
 // SandboxCapacitySpec 池容量四键（上游 PoolCapacitySpec，int32 全必填）。
 type SandboxCapacitySpec struct {
@@ -74,16 +97,84 @@ func (s SandboxCapacitySpec) validate() error {
 	return nil
 }
 
+// SandboxPoolEnvSecretKeyRef extraEnv 的 Secret 引用形态（K8s EnvVar valueFrom 同形）。
+type SandboxPoolEnvSecretKeyRef struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+// SandboxPoolExtraEnv 池主容器注入的受控 env 项：value 或 secretKeyRef 二选一。
+type SandboxPoolExtraEnv struct {
+	Name         string                      `json:"name"`
+	Value        string                      `json:"value,omitempty"`
+	SecretKeyRef *SandboxPoolEnvSecretKeyRef `json:"secretKeyRef,omitempty"`
+}
+
 // CreateSandboxPoolInput 创建池入参。评审 d7：recycleStrategy 不是上游 POST /v1/pools 的
 // 请求字段（CreatePoolRequest 仅 name/template/capacitySpec，release-1.1.0 schema.py
 // 实证），收了会被 FastAPI 静默忽略——契约不收，回收策略取 CRD 默认 Delete（V4 语义不变）。
 // 但设计 §5.2 承诺枚举校验（黑盒第 1 轮实锤：recycleStrategy:"Bogus" → 201 静默丢弃），
 // 故入口侧仍做白名单校验（合法值接受但不透传，非法值 400 拒绝）。
+// 技能同步默认开启（PR-4a，skills-syncd §11）：绑定了服务的新建池缺省注入 SKILLSYNC_*
+// extraEnv + commandWrapper（D-1 内联守卫，偏斜退化为无守护旧行为）；DisableSyncd 为
+// 显式关闭入参（灰度/排障/回滚 runbook「池模板参数摘除」的替代）——true = 模板逐字段与
+// 历史形态一致（旧代码 dormant 保留，拨开关可完整回退）。ExtraEnv 为 C-2 手动通道：
+// 键级覆盖缺省派生值（同名后者胜）或追加其他 SKILLSYNC_* 键；不接受自由 PodSpec。
 type CreateSandboxPoolInput struct {
-	Name            string              `json:"name"`
-	Image           string              `json:"image,omitempty"`
-	CapacitySpec    SandboxCapacitySpec `json:"capacitySpec"`
-	RecycleStrategy string              `json:"recycleStrategy,omitempty"`
+	Name            string                `json:"name"`
+	Image           string                `json:"image,omitempty"`
+	CapacitySpec    SandboxCapacitySpec   `json:"capacitySpec"`
+	RecycleStrategy string                `json:"recycleStrategy,omitempty"`
+	ExtraEnv        []SandboxPoolExtraEnv `json:"extraEnv,omitempty"`
+	DisableSyncd    bool                  `json:"disableSyncd,omitempty"`
+}
+
+// validateSandboxExtraEnv 受控 extraEnv 校验：键白名单 + 形态二选一 + 引用完整性 +
+// 重复键 + 数量上限；违规一律 ErrInvalidForm（handler 400）。
+func validateSandboxExtraEnv(extraEnv []SandboxPoolExtraEnv) error {
+	if len(extraEnv) > sandboxPoolExtraEnvMax {
+		return fmt.Errorf("%w: extraEnv 数量超上限 %d（got %d）", ErrInvalidForm, sandboxPoolExtraEnvMax, len(extraEnv))
+	}
+	seen := make(map[string]bool, len(extraEnv))
+	for i, e := range extraEnv {
+		if !sandboxPoolExtraEnvKeyRe.MatchString(e.Name) {
+			return fmt.Errorf("%w: extraEnv[%d] 键 %q 不在白名单（^SKILLSYNC_[A-Z0-9_]+$）", ErrInvalidForm, i, e.Name)
+		}
+		if seen[e.Name] {
+			return fmt.Errorf("%w: extraEnv 键重复 %q", ErrInvalidForm, e.Name)
+		}
+		seen[e.Name] = true
+		switch {
+		case e.SecretKeyRef == nil:
+			if e.Value == "" {
+				return fmt.Errorf("%w: extraEnv[%d] %q 须携带 value 或 secretKeyRef 之一", ErrInvalidForm, i, e.Name)
+			}
+		case e.Value != "":
+			return fmt.Errorf("%w: extraEnv[%d] %q 的 value 与 secretKeyRef 互斥", ErrInvalidForm, i, e.Name)
+		case e.SecretKeyRef.Name == "" || e.SecretKeyRef.Key == "":
+			return fmt.Errorf("%w: extraEnv[%d] %q 的 secretKeyRef 须含 name 与 key", ErrInvalidForm, i, e.Name)
+		}
+	}
+	return nil
+}
+
+// validateSandboxPoolBinding 池名/服务绑定校验（C-1 校验预建池 + C-2 手动通道同端点，
+// G1 池与服务一一对应）：池名必须为 {服务 k8s 名}-pool 且该服务存在
+// （ServiceEntity.K8sName uniqueIndex 保证绑定唯一）；池名全局唯一由上游同名创建 409 兜底。
+// 返回解析出的服务 k8s 名（技能同步缺省注入按其派生 BASE_URL/Secret 名）。
+func (c *Core) validateSandboxPoolBinding(name string) (string, error) {
+	k8sName, ok := strings.CutSuffix(name, sandboxPoolServiceSuffix)
+	if !ok || k8sName == "" {
+		return "", fmt.Errorf("%w: pool 名必须为 {服务 k8s 名}-pool（got %q）", ErrInvalidForm, name)
+	}
+	var cnt int64
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("k8s_name = ?", k8sName).Count(&cnt).Error; err != nil {
+		return "", err
+	}
+	if cnt == 0 {
+		return "", fmt.Errorf("%w: pool %q 未绑定已存在的服务（k8s 名 %q 不存在）", ErrInvalidForm, name, k8sName)
+	}
+	return k8sName, nil
 }
 
 // validateRecycleStrategy 设计 §5.2 枚举校验：空（缺省）或 Delete/Restart/Noop 合法，
@@ -218,6 +309,14 @@ func (c *Core) AdminGetSandboxPool(name string) (json.RawMessage, error) {
 
 // AdminCreateSandboxPool POST /api/v1/admin/sandboxes/pools → POST /v1/pools
 // （Pod 模板由后端预设常量生成；image 缺省取平台默认 SANDBOX_IMAGE）。
+// 技能同步缺省注入（PR-4a）：DisableSyncd=false 且 per-service token Secret 已在池
+// workload ns（k8s.SandboxWorkloadNamespace；§9.1 平台下发/管理员预建两路径统一以对象
+// 存在为准）→ 注入三键 + commandWrapper（D-1 内联守卫，模板/镜像偏斜退化无守护旧行为）。
+// Secret 缺失 = 服务未接入 token（agent-framework 端点空 token 即关闭）→ 按旧行为建池，
+// 不让 secretKeyRef 引用不存在对象把 warm pod 卡死 CreateContainerConfigError
+// （platformconfig/template.go SKILLSYNC_TOKEN 键注释同口径）；隐式按服务灰度，补配 token
+// 后重建池即默认开启。DisableSyncd=true = 显式关闭（灰度/排障/回滚 runbook「池模板参数
+// 摘除」的替代），与 extraEnv 互斥（关同步又携同步 env 是矛盾语义）。
 func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (json.RawMessage, error) {
 	if err := validateSandboxName(in.Name); err != nil {
 		return nil, err
@@ -226,6 +325,16 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 		return nil, err
 	}
 	if err := validateRecycleStrategy(in.RecycleStrategy); err != nil {
+		return nil, err
+	}
+	if err := validateSandboxExtraEnv(in.ExtraEnv); err != nil {
+		return nil, err
+	}
+	if in.DisableSyncd && len(in.ExtraEnv) > 0 {
+		return nil, fmt.Errorf("%w: disableSyncd 与 extraEnv 互斥（显式关闭 = 完全旧行为）", ErrInvalidForm)
+	}
+	k8sName, err := c.validateSandboxPoolBinding(in.Name)
+	if err != nil {
 		return nil, err
 	}
 	image := strings.TrimSpace(in.Image)
@@ -237,13 +346,25 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 			}
 		}
 	}
+	extraEnv, wrapper, syncdMode := in.ExtraEnv, false, "disabled"
+	if !in.DisableSyncd {
+		exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(k8sName))
+		if err != nil {
+			return nil, fmt.Errorf("skillsync token secret check: %w", err)
+		}
+		if exists {
+			extraEnv, wrapper, syncdMode = withSkillsyncDefaults(k8sName, c.Cfg.Namespace, in.ExtraEnv), true, "default"
+		} else {
+			syncdMode = "no-token"
+		}
+	}
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
 		return nil, err
 	}
 	payload, err := json.Marshal(map[string]interface{}{
 		"name":         in.Name,
-		"template":     sandboxPresetPodTemplate(image),
+		"template":     sandboxPresetPodTemplate(image, extraEnv, wrapper),
 		"capacitySpec": in.CapacitySpec,
 	})
 	if err != nil {
@@ -253,11 +374,38 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 	if err := mapSandboxUpstream(status, body, err); err != nil {
 		return nil, err
 	}
-	// 管理操作审计（PlatformConfigEvent 同款先例：只记动作与对象，不记值；§10）
+	// 管理操作审计（PlatformConfigEvent 同款先例：只记动作与对象，不记值；§10）；
+	// syncd 记缺省注入三态（default/no-token/disabled），灰度观测按 D-5 result 维度口径区分
 	c.recordAudit("sandbox.pool.create", in.Name, actor, map[string]interface{}{
-		"capacitySpec": in.CapacitySpec, "image": image,
+		"capacitySpec": in.CapacitySpec, "image": image, "syncd": syncdMode,
 	})
 	return json.RawMessage(body), nil
+}
+
+// withSkillsyncDefaults 技能同步缺省三键与手动 extraEnv 的键级合并（PR-4a，skills-syncd
+// §5.2 示例模板）：缺省 BASE_URL（{k8s 名}-svc 集群内地址，与 docs/deployment.md「技能
+// 同步」egress 放行 FQDN 同形）/ TOKEN（secretKeyRef 引用 per-service Secret）/ INTERVAL
+// 在前，manual 同名键覆盖缺省值（C-2 灰度/特殊服务通道），其余键按入参顺序追加。
+func withSkillsyncDefaults(k8sName, namespace string, manual []SandboxPoolExtraEnv) []SandboxPoolExtraEnv {
+	merged := []SandboxPoolExtraEnv{
+		{Name: skillsyncEnvBaseURL, Value: fmt.Sprintf("http://%s-svc.%s.svc:%d", k8sName, namespace, k8s.AgentPort)},
+		{Name: k8s.SkillsyncTokenEnvKey, SecretKeyRef: &SandboxPoolEnvSecretKeyRef{Name: k8s.SkillsyncTokenName(k8sName), Key: k8s.SkillsyncTokenDataKey}},
+		{Name: skillsyncEnvInterval, Value: skillsyncInterval},
+	}
+	for _, m := range manual {
+		replaced := false
+		for i := range merged {
+			if merged[i].Name == m.Name {
+				merged[i] = m
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			merged = append(merged, m)
+		}
+	}
+	return merged
 }
 
 // AdminUpdateSandboxPool PUT /api/v1/admin/sandboxes/pools/:name → PUT /v1/pools/{name}
@@ -370,7 +518,7 @@ type sandboxPoolList struct {
 // sandboxSandboxPage 上游 GET /v1/sandboxes 响应（仅取分页元数据）。
 type sandboxSandboxPage struct {
 	Pagination struct {
-		TotalItems int `json:"totalItems"`
+		TotalItems int  `json:"totalItems"`
 		HasNext    bool `json:"hasNextPage"`
 	} `json:"pagination"`
 }
@@ -455,7 +603,7 @@ func (c *Core) ConsoleSandboxInstances(wsID uint) ([]SandboxInstanceItem, error)
 		}
 		var pageResp struct {
 			Items []struct {
-				ID     string            `json:"id"`
+				ID     string `json:"id"`
 				Status struct {
 					State string `json:"state"`
 				} `json:"status"`
@@ -489,8 +637,32 @@ func (c *Core) ConsoleSandboxInstances(wsID uint) ([]SandboxInstanceItem, error)
 }
 
 // sandboxPresetPodTemplate 池 Pod 模板预设（官方 sample sandbox_v1alpha1_pool.yaml
-// 逐字段复刻，d18：image 只替换主容器镜像）。
-func sandboxPresetPodTemplate(mainImage string) map[string]interface{} {
+// 逐字段复刻，d18：image 只替换主容器镜像）。extraEnv 追加主容器 env（secretKeyRef
+// 形态经 valueFrom）；commandWrapper 开启时 args 换为 D-1 内联守卫字面（launcher 脚本
+// 缺失 → 未加引号的 $W 展开为空 → 原命令原样执行，偏斜退化为无守护运行而非 crashloop）；
+// 两参数缺省 = 模板逐字段与历史形态一致。
+func sandboxPresetPodTemplate(mainImage string, extraEnv []SandboxPoolExtraEnv, commandWrapper bool) map[string]interface{} {
+	taskExecutorCmd := fmt.Sprintf("/opt/opensandbox/task-executor -listen-addr=%s -log-dir=/tmp", sandboxPresetExecdPort)
+	args := taskExecutorCmd
+	if commandWrapper {
+		args = fmt.Sprintf("W=%s; [ -x \"$W\" ] || W=\"\"; exec $W %s", sandboxPresetLauncherPath, taskExecutorCmd)
+	}
+	env := []map[string]interface{}{
+		{"name": "SANDBOX_MAIN_CONTAINER", "value": "main"},
+		{"name": "EXECD_ENVS", "value": "/opt/opensandbox/.env"},
+		{"name": "EXECD", "value": "/opt/opensandbox/execd"},
+	}
+	for _, e := range extraEnv {
+		m := map[string]interface{}{"name": e.Name}
+		if e.SecretKeyRef != nil {
+			m["valueFrom"] = map[string]interface{}{
+				"secretKeyRef": map[string]interface{}{"name": e.SecretKeyRef.Name, "key": e.SecretKeyRef.Key},
+			}
+		} else {
+			m["value"] = e.Value
+		}
+		env = append(env, m)
+	}
 	return map[string]interface{}{
 		"metadata": map[string]interface{}{
 			"labels": map[string]string{"app.kubernetes.io/name": "opensandbox"},
@@ -523,15 +695,11 @@ func sandboxPresetPodTemplate(mainImage string) map[string]interface{} {
 			},
 			"containers": []map[string]interface{}{
 				{
-					"name":  sandboxPresetMainContainer,
-					"image": mainImage,
+					"name":    sandboxPresetMainContainer,
+					"image":   mainImage,
 					"command": []string{"/bin/sh", "-c"},
-					"args":    []string{fmt.Sprintf("/opt/opensandbox/task-executor -listen-addr=%s -log-dir=/tmp", sandboxPresetExecdPort)},
-					"env": []map[string]string{
-						{"name": "SANDBOX_MAIN_CONTAINER", "value": "main"},
-						{"name": "EXECD_ENVS", "value": "/opt/opensandbox/.env"},
-						{"name": "EXECD", "value": "/opt/opensandbox/execd"},
-					},
+					"args":    []string{args},
+					"env":     env,
 					"volumeMounts": []map[string]interface{}{
 						{"name": "sandbox-storage", "mountPath": "/var/lib/sandbox"},
 						{"name": "opensandbox-bin", "mountPath": "/opt/opensandbox"},

@@ -232,6 +232,17 @@ func (f *FakeK8s) ServiceExists(ns, name string) (bool, error) {
 	return true, nil
 }
 
+func (f *FakeK8s) SecretExists(ns, name string) (bool, error) {
+	_, err := f.cs.CoreV1().Secrets(ns).Get(context.TODO(), name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // WaitReady 轮询 fake 中的 Deployment 状态。
 func (f *FakeK8s) WaitReady(ctx context.Context, ns, name string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

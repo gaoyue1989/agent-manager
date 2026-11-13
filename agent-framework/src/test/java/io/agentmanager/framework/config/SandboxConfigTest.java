@@ -35,6 +35,30 @@ class SandboxConfigTest {
     }
 
     @Test
+    void skillsSharedStoreShouldDefaultOffAndBindFromPositionalConstructor() {
+        var off = new SandboxConfig(
+            false, "opensandbox/code-interpreter:v1.1.0", 60, 30, 1024, 1,
+            List.of("/opt/code-interpreter/code-interpreter.sh"),
+            Duration.ofMillis(100),
+            true, true, 900,
+            true, true, false, 500, 30,
+            new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
+        assertEquals("", off.skillsSharedStore(),
+            "SANDBOX_SKILLS_SHARED_STORE 默认空 = 软链农场整体关闭（skills-syncd §6.4）");
+
+        var on = new SandboxConfig(
+            true, "img", 30, 30, 512, 1, List.of("sh"),
+            Duration.ofMillis(100),
+            true, true, 900,
+            true, true, true, true, 500, 30,
+            "tok", "/tmp/skills-bundle-cache", "/skills-store",
+            new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
+        assertEquals("/skills-store", on.skillsSharedStore());
+        assertEquals("tok", on.skillsSyncToken());
+        assertEquals("/tmp/skills-bundle-cache", on.skillsBundleCacheDir());
+    }
+
+    @Test
     void enabledFlagShouldBeOverridable() {
         var config = new SandboxConfig(
             true, "ubuntu:24.04", 30, 30, 512, 2, List.of("python", "main.py"),

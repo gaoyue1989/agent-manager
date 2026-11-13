@@ -19,6 +19,7 @@
 #
 # 约束:
 #   - 只创建 opensandbox-system / opensandbox 两个命名空间的资源，不触碰 agent-platform
+#     （4.1 的 Role/RoleBinding 建在 workload ns，仅引用 agent-platform 的 SA 不在其内创建对象）
 #   - API key 从主工作区 .env.secrets 的 OPENSANDBOX_API_KEY 读入 shell 变量，不回显
 #   - 网络: git/curl/docker 走 http://127.0.0.1:7890，慢则切备用 http://192.168.31.75:7890；
 #     阿里云官方 mirror（chart 默认 registry，本机 No-Proxy 直连）作为镜像补拉的兜底
@@ -180,6 +181,38 @@ fi
 rm -f "$SECRET_KEY_FILE"
 unset OPENSANDBOX_API_KEY
 log "ns/$NS_WORK 就绪; secret opensandbox-api-key 已注入（值不回显、不进 argv）"
+
+# 4.1 platform-backend 跨 ns 写 Secret 授权（skills-syncd D-8 消费方落点）：
+#     发布链路 ensure per-service {name}-skillsync-token 于 workload ns（池模板
+#     secretKeyRef 同 ns 解析，跨 ns 引用不成立）；资源建在 $NS_WORK 内、仅引用
+#     agent-platform 的 SA 不在其内创建任何对象。幂等 apply；平台若以其他身份运行
+#     （如 Helm chart 的专用 SA），改 subject 后重跑本步
+kubectl apply -n "$NS_WORK" -f - >/dev/null <<RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: platform-backend-skillsync-token
+  namespace: $NS_WORK
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-backend-skillsync-token
+  namespace: $NS_WORK
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: platform-backend-skillsync-token
+subjects:
+  - kind: ServiceAccount
+    name: platform-backend
+    namespace: agent-platform
+RBAC
+log "已授权 platform-backend(agent-platform) 于 ns/$NS_WORK 读写 skillsync token Secret"
 
 # ---------------------------------------------------------------------------
 # 5. helm install（幂等 upgrade --install）: base → controller → ingress-gateway → server

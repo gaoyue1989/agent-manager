@@ -11,7 +11,7 @@ func TestSensitiveKeys(t *testing.T) {
 		"LLM_API_KEY": true, "CHECKPOINT_PASSWORD": true,
 		"AGENT_REDIS_URL": true, "OPENSANDBOX_API_KEY": true,
 		"AGENT_PROTOCOL_AUTH_TOKEN": true, "AGENT_REMOTE_HEADERS_JSON": true,
-		"AGENT_A2A_JOB_TOKEN": true,
+		"AGENT_A2A_JOB_TOKEN": true, "SKILLSYNC_TOKEN": true,
 	}
 	got := SensitiveKeys()
 	if len(got) != len(want) {

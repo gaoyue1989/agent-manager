@@ -33,7 +33,7 @@
 
 ### 目标
 
-1. 会话开始的技能投影从「O(包技能全量) tar 物化」降为「O(启用技能数) 符号链接创建」（毫秒级）
+1. 会话开始的技能投影从「O(包技能全量) tar 物化」降为「O(启用技能数) 符号链接创建」（建链毫秒级，经单条 exec 投放，端到端 ≈1 次 exec RTT，如实口径见 §8）
 2. 消除包技能的每用户物理复制：同一 warm pod 内全服务共享一份（per-pod 一份，非 per-user）
 3. 版本新鲜度分钟级（守护轮询周期可配），版本切换对运行中会话零扰动
 4. 沙箱内新增常驻进程资源占用可忽略（单二进制、轮询间歇休眠）
@@ -215,17 +215,31 @@ ENTRYPOINT ["/usr/local/bin/entrypoint-wrap.sh"]
 #!/bin/sh
 # skillsync-launcher.sh —— 通用启动器：watchdog 拉起守护后 exec 传入命令
 # 两条铁律：1) 后台循环绝不阻塞主进程；2) exec 保持主进程语义
+log_file=/var/log/skills-syncd.log
+log_max_bytes=$((1024 * 1024))
 if [ -n "$SKILLSYNC_BASE_URL" ]; then
     (while :; do
-         setsid /usr/local/bin/skills-syncd 2>>/var/log/skills-syncd.log
+         setsid /usr/local/bin/skills-syncd 2>>"$log_file"
          sleep 30
+     done) &
+    (while :; do
+         sleep 30
+         if [ -f "$log_file" ] && [ "$(wc -c <"$log_file")" -gt "$log_max_bytes" ]; then
+             tail -c "$((log_max_bytes / 2))" "$log_file" >"$log_file.tmp" &&
+                 cat "$log_file.tmp" >"$log_file"
+             rm -f "$log_file.tmp"
+         fi
      done) &
 fi
 exec "$@"
 ```
 
 守护由 watchdog 循环拉起（D-6）：正常/异常退出均 ≤30s 重启（sleep 兼任崩溃循环节流阀）；
-stderr 统一重定向 `/var/log/skills-syncd.log`（§4.2 唯一日志落点）。
+stderr 统一重定向 `/var/log/skills-syncd.log`（§4.2 唯一日志落点）。守护正常态不退出
+（`context.Background()` 恒存活），watchdog 重启仅在崩溃后发生，故 §4.2 的上限截断由
+**独立周期循环**（同为 30s 节拍）执行：超 1MiB 触发，就地截断（`cat` 重写而非 `mv`，守护
+O_APPEND fd 不悬空、后续写入继续落原 inode）并保留尾部 512KiB（滞回：回落至半限，再涨
+半限才再触发，避免稳态反复重写）。
 
 ```sh
 #!/bin/sh
@@ -295,6 +309,21 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
 - 路径 `/internal/skills/version`、`/internal/skills/bundle`；token 经 env `SKILLSYNC_TOKEN` 配置
   （空 = 端点关闭，404）。**鉴权关系**：仅 token 校验，不参与 `ROUTER_AUTH_MODE`/业务鉴权链，
   且不经业务 Ingress 对外暴露（仅集群内访问）
+  > 补记（2026-11-13）：该断言在 host 模式（`INGRESS_HOST_SUFFIX` 非空）根路径直出下曾被
+  > 静默穿透（`/internal/skills/**` 与 `/actuator/**` 均经业务域名可达）。已由平台强制实现：
+  > host 模式 per-service Ingress 构造时把 `/internal`、`/actuator` 前缀改道
+  > `platform-router-svc`（router `location /` 恒 404），`validateIngress` 拒绝丢失或改指的
+  > overlay——backend/internal/k8s objects.go `hostModeInternalPath`、template.go
+  > `validateIngress`；运维口径见 docs/deployment.md §七之二/§七之三。
+  > 补记二（2026-11-13，评审修正）：「router 模式只路由 `/agent/{short}` 天然满足」不严格
+  > 成立——剥前缀透传任意子路径，`/agent/{short}/internal/skills/version` 与
+  > `/actuator/metrics` 经业务入口可达（守密性由 token 门兜住：无 token 401、未配 token
+  > 404，非漏洞；`ROUTER_AUTH_MODE` 鉴权是仅有的入口层防线）。已按纵深防御补齐：router
+  > nginx 内置段边界排除 `/agent/{short}/(internal|actuator)` 恒 404（manifests/
+  > platform-router.yaml，正则 location 先于泛化声明，守卫测试 backend/internal/k8s/
+  > router_test.go），两种模式外部表现一致。口径修正：**token 门为主控制，业务入口排除
+  > （router 内置 + host Ingress 排除表）为纵深防御**；守护消费经 `SKILLSYNC_BASE_URL`
+  > 集群内直连 svc，不经业务入口，不受排除影响。
 - 数据源 `/config`（PVC 只读 subPath，多副本天然一致）
 - **版本指纹 singleflight + ≤5s TTL 缓存**（D-4，修订 G2 的绝对化表述）：对包技能目录做 stat 指纹
   （relPath|mtime|size 排序遍历，2000 文件 ≈10-50ms）+ 服务级禁用集（B-2）。新鲜度语义由守护侧
@@ -329,19 +358,38 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
    （禁用变更 → 指纹变 → 守护重拉；被全局禁用的技能**内容不进 store**，恢复内容级隔离）；
    **用户级禁用维持原消费路径拦截**——不建链，且农场触发时对 manifest 已禁用/移除的既有软链执行删除
    （对齐现有容器内 rm 清理语义，覆盖会话中途禁用生效）
-4. **幂等与残留收敛（D-2）**：农场对 **manifest 内的包技能路径有全权**——目标态为软链，路径现存
-   任何物（缺失 / 悬空 / 降级会话 tar 物化残留的真实文件）统一收敛为软链；覆盖容器重启后可写层清空、
-   记账未失效的组合（H2 自愈条件）。「真实文件不替换」仅保护 manifest 判定为 L4 用户技能的名字
-   （同名归属由 manifest 裁决，与 SDK 消费层同源，规则 2）——降级残留若不收敛，同沙箱后续农场会话
-   将永久停留在陈旧私有副本（跨会话顺序复用是常态而非边角）
+4. **幂等与残留收敛（D-2）+ 稳态短路（D-10）**：农场对 **manifest 内的包技能路径有全权**——目标态为
+   软链，路径现存任何物（缺失 / 悬空 / 降级会话 tar 物化残留的真实文件）统一收敛为软链。「真实文件不替换」
+   仅保护 manifest 判定为 L4 用户技能的名字（同名归属由 manifest 裁决，与 SDK 消费层同源，规则 2）——
+   降级残留若不收敛，同沙箱后续农场会话将永久停留在陈旧私有副本（跨会话顺序复用是常态而非边角）。
+   收敛**不按每次触发**执行（原 H2「每次触发收敛」口径已修订，见 D-10）：与 tar 路径 P0-1 同源的稳态
+   短路——宿主指纹（包内源 stat + L4 revision，缺口④同源）+ sandboxId 代际记账（复用 scoped 指纹表，
+   记账值带投放模式分量，见 D-11），稳态 0 exec（原口径每次触发跑全量收敛 exec，单条 exec RTT 固定 ≈1s，
+   农场稳态反而劣于 tar 稳态 ≈35ms，与 §8 目标内在冲突）。收敛触发面 = 新沙箱代（池认领/降级重建/换代，
+   记账随新 sandboxId 清零，覆盖 §10.3-6 与 §10.3-11 的残留场景）、模式翻转（同代先降级 tar 物化后重判定
+   farm，或反向——D-11）、宿主内容变化（发布 → 包指纹；用户禁用/变更 → L4 revision bump；
+   全局禁用 = 新版本，store 内容移除使既有链悬空即生效）、收敛 exec 失败（不记账，CAS 复位下次重试）。
+   **显式接受盲点**：会话中途容器重启（同 sandboxId resume）后软链不重建——与投影指纹缓存已接受的
+   容器态盲点同一系统性姿态（同代内 tar 物化/记忆注入/L4 物化同样不重投，宿主内容未变即视为容器即最新）；
+   否决 per-call 容器侧标记兜底——任何容器态观测本身就是 1 次 exec RTT，与稳态目标互斥
 5. 用户技能（L4）走原 hydrate 路径物化真实文件（量级几十文件，现有稳态机制接管）
 
 ### 6.3 syncBack 符号链接跳过（防御性）
 
-`WorkspaceSyncService.syncUserSkills` 遍历时跳过 `Files.isSymbolicLink` 条目。
-核实现状：该遍历只覆盖 `/workspace/skills`（`WorkspaceSyncService.java:216`、`WorkspaceReader.SKILLS_DIR`），
+`WorkspaceSyncService` 遍历时按条目 type 跳过软链条目（execd files API 无 lstat 面，
+`Files.isSymbolicLink` 不可用）：顶层技能位（syncUserSkills）与技能内递归
+（collectSkillFiles / walkSkillManifest）两层同规则——不读内容也不递归进目标。
+核实现状：该遍历只覆盖 `/workspace/skills`（`WorkspaceReader.SKILLS_DIR`），
 **不遍历 `.skills-cache`**——因此当前「库内容被吸回 L4」的风险并不成立；跳链保留为防御性约束，
-确保未来遍历范围扩展时不引入吸回。files API 侧的软链透明性验收见 §10.3。
+确保未来遍历范围扩展时不引入吸回。
+
+跳链判据 = 条目 `type=symlink`（唯一可用判据：EntryInfo 无 inode、mode 仅权限位无类型位，
+元数据兜底不可行；读路径 readFile 对软链穿透——不跳链即吸回）。契约已按上游源码核实
+（alibaba/OpenSandbox execd `components/execd`：listDirectory 用 `os.ReadDir`+`DirEntry.Info()`
+=Lstat 语义、`fileType` 先判 `ModeSymlink`、对软链根拒绝穿透 400；deployed 镜像版本仍以
+§10.3-7 实测把关）：若实测标注失真（软链被标成 file/directory），补救 = syncUserSkills 对
+可疑条目补 exec `test -L` 探测——per-entry exec 常态化被 D-10 否决，仅在实测失真时启用，
+不做预防性实现。
 
 ### 6.4 回退与开关
 
@@ -358,7 +406,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 ### 7.1 时序保证
 
-- 发布新版 → agent-framework 端点版本指纹变更（即时，随发布事件失效进程内缓存）
+- 发布新版 → agent-framework 端点版本指纹变更（无发布事件失效，≤5s TTL（D-4）内旧值可见）
 - 沙箱侧最长 `2×INTERVAL` 内拉到（轮询 `INTERVAL` + 拉取退避 `INTERVAL`，D-7）→ `CURRENT` 原子切换，**下一次路径解析即见新版**（含运行中会话）；
   已打开的技能脚本/文件凭 inode 继续按旧内容执行完毕（Unix 语义），无中途截断
 - 与现行为对比：现 per-call 指纹在下一 call 换新版——本设计同为「切换即生效」语义，
@@ -402,8 +450,8 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 | 项 | 现状 | 本设计 |
 |---|---|---|
-| 换代/首触冷路径 | 4.9s（P0-1 前每 call 全量；现仅在换沙箱代或换 scope 时发生，被会话中首个触及技能的命令触发） | O(启用技能数) symlink，~10ms 级 |
-| 稳态 per-call | ≈0.08–0.1s（P0-1 优化后：指纹 35ms + revision 1ms + syncBack 24ms） | ~10ms（农场判定 + 硬校验） |
+| 换代/首触冷路径 | 4.9s（P0-1 前每 call 全量；现仅在换沙箱代或换 scope 时发生，被会话中首个触及技能的命令触发） | 判定（readlink exec + 端点版本指纹）+ 单条收敛 exec——建链毫秒级，端到端 ≈1 次 exec RTT（实测 exec 固定 ≈1s）；对比 tar 慢路径（P1-3 后）省 gz build+gzip 与全量 tar 传输，载荷降为 O(启用技能数) 链接命令 |
+| 稳态 per-call | ≈0.08–0.1s（P0-1 优化后：指纹 35ms + revision 1ms + syncBack 24ms） | 与现状同源持平（同一指纹稳态短路，0 exec；农场判定与硬校验仅会话首判一次，不进稳态路径——如实口径，非 ~10ms） |
 | 每用户复制 | scope staging N 份（66MB/用户量级） | 0（store 服务内共享 per-pod） |
 | 沙箱内磁盘 | 按需物化 ~66MB | 稳态 1 版 ≈ 66MB；切换瞬时峰值 ≈ 2 版 + tar.gz（~200MB），完成后回落 |
 | 网络 | 每次 hydrate 全量 tar（跨 exec 通道） | 每 pod 每版本一次 HTTP 拉取（version 轮询 <200B/1m） |
@@ -412,8 +460,10 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 节点维度：切换瞬时峰值（≈2 版 + tar.gz，~200MB/pod）经拉取退避（D-7）铺满 INTERVAL 后自然
 错峰，节点级同时切换 burst 不再叠加；服务端压缩风暴同理由 D-3 消解。
 
-收益主体排序（避免误读基线）：①换代冷路径 4.9s→~10ms；②每用户 66MB 级复制消除；③首触中段延迟消除；
-④稳态 per-call 35ms→~10ms（边际，不是主要收益）。
+收益主体排序（避免误读基线）：①换代冷路径全量 tar 物化 → 单条收敛 exec（省 build/gzip 与传输）；
+②每用户 66MB 级复制消除；③宿主内容变化后的重投放从 tar 慢路径降为单条收敛 exec；
+④稳态 per-call 与现状持平——同一指纹短路（0 exec），农场不引入稳态回退（修订原「35ms→~10ms」口径：
+农场收益在冷路径与复制消除，不在稳态）。
 
 ## 9. 安全设计
 
@@ -461,7 +511,11 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 - 端点：版本指纹稳定性（源只读）、bundle sha256 头正确、token 校验
 - 软链农场：会话级二值判定（store 就绪 + 硬校验）与判定记忆（会话键）/ 判定失败全会话降级不混排 /
-  manifest 禁用项不建链且既有链删除 / 全局禁用集变更触发版本指纹变化 / 悬空链重建 / 用户技能与软链共存
+  manifest 禁用项不建链且既有链删除 / 全局禁用集变更触发版本指纹变化 / 悬空链重建 / 用户技能与软链共存 /
+  稳态短路（D-10）：同沙箱代同指纹跳过收敛 exec（0 exec）/ 宿主内容变化（包源变更、用户禁用经
+  L4 revision bump）重收敛 / 收敛 exec 失败不记账、下次触发重试 /
+  模式翻转（D-11）：同沙箱代先降级（tar 物化并记账）后 gate 丢失重判定 farm → 必须重收敛建链；
+  反向 farm→降级 → 必须重物化（记账模式分量使翻转永不满足对方稳态）
 - syncBack：符号链接条目不回写
 
 ### 10.3 真实环境验收（kind 集群）
@@ -471,15 +525,20 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 3. 改包发新版 → ≤INTERVAL+会话粒度 内新会话用新版、旧会话不受扰动
 4. 容器重启（kill 1 Restart 回收路径）→ 守护自愈重拉
 5. `pkill skills-syncd` → 沙箱命令执行不受影响（fail-open 验证）
-6. **容器重启（kill 1 → 池化复用）**：守护自愈重拉 + 农场悬空链重建，技能可用（H2）
+6. **容器重启（kill 1 → 池化复用，新沙箱代认领）**：守护自愈重拉 + 农场链随新代首收敛重建，技能可用
+   （原 H2 口径已修订为 D-10 代际收敛）；会话中途容器重启（同 sandboxId resume）软链不重建——与投影
+   指纹缓存已接受的容器态盲点同一系统性姿态（§6.2-4），宿主内容下次变化或新沙箱代自愈
 7. **execd files API 软链透明性**：`read_file`/`listDirectory` 对 `/skills-store/CURRENT/<skill>`
-   实测——穿透则直读；不穿透则验证框架翻译层 exec 兜底读正确（§13-8 决议）
+   实测——穿透则直读；不穿透则验证框架翻译层 exec 兜底读正确（§13-8 决议）。同步断言跳链判据
+   （§6.3，跳链有效性前提）：farm 软链在所在目录的 listDirectory 条目中 `type=symlink`、
+   `listDirectory` 对软链路径本身拒绝穿透（不返回目标子树）、`read_file` 对软链的穿透行为记录在案；
+   若 type 被标成 file/directory → 按 §6.3 决策规则补 exec `test -L` 探测兜底
 8. L 组沙箱生命周期 e2e 全绿（回归门禁）
 9. **模板-镜像偏斜（D-1）**：旧镜像 pod + 开 `commandWrapper` 的新模板 → 守卫兜底，
    task-executor 正常启动（无守护、会话降级），不出现 crashloop
 10. **守护自愈（D-6）**：`kill -9 skills-syncd` → watchdog ≤30s 重启，版本继续跟进，会话不受扰动
-11. **降级残留收敛（D-2）**：同沙箱先降级会话（tar 物化真实文件）→ 后农场会话，包技能路径
-    收敛为软链（`ls -l` 断言）
+11. **降级残留收敛（D-2/D-11）**：同沙箱先降级会话（tar 物化真实文件）→ 后农场会话（含 gate 丢失后
+    同代重判定翻转：框架重启/漂副本/LRU 逐出），包技能路径收敛为软链（`ls -l` 断言）
 12. **判定打点（D-5）**：`/actuator/metrics/skills.farm.decision` 各 result 计数可读，
     降级判定伴随 WARN 日志
 
@@ -489,6 +548,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 |---|---|
 | 技能是旧版 | 沙箱内 `readlink /skills-store/CURRENT` + `cat /var/log/skills-syncd.log`（拉取失败/退避原因）；agent-framework 侧 `curl -H "Authorization: Bearer $TOKEN" $BASE_URL/internal/skills/version` 对账 |
 | 技能缺失/降级 | agent-framework 日志查 §7.2 ERROR（版本硬校验失败）与降级 WARN；确认 store 目录与 `CURRENT` 是否存在 |
+| 农场软链丢失（会话中途容器重启后技能不可用） | 已接受盲点（§6.2-4/D-10）：同 sandboxId 容器重启可写层清空而记账未失效 → 不重收敛；宿主内容下次变化或新会话（新 sandboxId）自愈；紧急恢复 = 重开会话 |
 | 跨服务技能污染 | 查 §5.2 池名是否被两服务共用；`CURRENT` 版本指纹 vs 本服务端点指纹必然不一致（§7.2 已拦截并降级） |
 | 拉取风暴 | 拉取退避已铺满 INTERVAL（D-7）+ 服务端磁盘缓存（D-3）后理论风暴 = 文件读；仍异常先查缓存命中，再考虑调大 `SKILLSYNC_INTERVAL` |
 | 守护未运行 | 沙箱内 `ps` 查 `skills-syncd`；确认 `SKILLSYNC_BASE_URL` env 是否注入（preset/手动通道） |
@@ -547,6 +607,8 @@ P0-1/P1-3 机制对用户技能维度继续生效。**PR-4b 之后的回滚语�
 | D-7 拉取退避 | bundle 拉取前 random(0,INTERVAL)，集群级铺满周期；新鲜度口径放宽为 ≤2×INTERVAL | §4.4/§7.1 |
 | D-8 token 轮换契约 | 轮换 = Secret 更新 + 池 rollout 重启（K8s env 变更自然语义）；否决双 token 重叠窗口——关闭原开放问题 1 | §9.1 |
 | D-9 多通道协议预留 | version 响应二期新增可选 `channels` 对象（通道独立 version/bundle），免 v2 路径迁移 | §4.3 |
+| D-10 农场稳态短路 | 农场收敛不按每次触发执行（否决原 H2 口径——每次触发全量收敛 exec ≈1 次 exec RTT，农场稳态反而劣于 tar 稳态 ≈35ms，与 §8 内在冲突）：采用与 tar 路径 P0-1 同源的稳态短路（宿主指纹 = 包内源 stat + L4 revision；sandboxId 代际记账复用 scoped 指纹表），收敛触发面 = 新沙箱代 / 指纹变化 / exec 失败重试；**否决 per-call 容器侧标记兜底**（任何容器态观测即 1 次 exec RTT，与稳态目标互斥）；会话中途容器重启（同 sandboxId resume）盲点显式接受，与投影指纹缓存 §3.3 系统性盲点同姿态 | §6.2-4/§8/§10.2 |
+| D-11 投放记账模式分量 | D-10 记账无模式分量的翻转漏判修补：sandboxId|scope 记账值（Pod 级 + Redis 共享层同构）改为 {@code mode|指纹}（tar/farm），稳态只认同模式记录——同沙箱代降级(tar)↔farm 互转（gate 丢失后重判定：框架重启/漂副本/LRU 逐出）永不满足对方稳态，翻转必走一次重收敛/重物化（tar 残留真实文件收敛为软链兑现 D-2；farm 软链会话降级重物化兑现 B-1）；无模式存量值（升级窗口）不匹配任何模式 = 未知走慢路径，自然失效无需迁移 | §6.2-4/§10.2/§10.3-11 |
 
 ### 开放（实施前/中定）
 

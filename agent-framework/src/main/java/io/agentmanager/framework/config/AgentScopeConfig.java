@@ -47,11 +47,13 @@ public class AgentScopeConfig {
         WorkspaceSyncService workspaceSyncService,
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.SkillManageService skillManageService,
+        io.agentmanager.framework.sandbox.opensandbox.SkillBundleService skillBundleService,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
         SessionUserStore sessionUserStore,
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
         org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider,
-        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager> lifecycleManagerProvider
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager> lifecycleManagerProvider,
+        org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> farmMeterRegistryProvider
     ) {
         if (!sandboxRuntime.enabled()) {
             log.info("Sandbox disabled (SandboxRuntime), using RemoteFilesystemSpec mode");
@@ -84,7 +86,10 @@ public class AgentScopeConfig {
             .workspaceSyncService(workspaceSyncService)
             .fileAssetStore(fileAssetStore)
             .fileStorage(fileStorage)
-            .isolationScope(IsolationScope.USER);
+            .isolationScope(IsolationScope.USER)
+            .skillsSharedStore(config.skillsSharedStore())
+            .skillBundleService(skillBundleService)
+            .farmMeterRegistry(farmMeterRegistryProvider.getIfAvailable());
         spec.setSessionKeyResolver(sessionKeyResolver);
         // 技能禁用投放过滤（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放前按
         // L2 禁用集 + L4 用户标记过滤候选目录并清理容器残留——堵「load_skill_through_path

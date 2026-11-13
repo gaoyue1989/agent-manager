@@ -1,0 +1,8 @@
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod main.go sync.go ./
+ARG BUILD_SHA=unknown
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.buildSHA=${BUILD_SHA}" -o /out/skills-syncd .
+
+FROM scratch
+COPY --from=build /out/skills-syncd /out/skills-syncd

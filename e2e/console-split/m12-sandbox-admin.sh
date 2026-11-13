@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # M12 · 沙箱管理面（sandbox-pool-opensandbox-design §9.4）：
 #   ① /settings 沙箱组模板断言（新 3 键 + SANDBOX_TIMEOUT_MINUTES placeholder 30）→ 配置落 platform_config；
-#   ② admin 代理八端点：summary 聚合 / 创建池（预设模板+容量，mock 载荷断言）/ 容量调整（PUT 仅 capacitySpec）/
-#      删除池 / 沙箱列表（state 过滤）/ 销毁；管理操作各产生一条审计记录；
+#   ② admin 代理八端点：summary 聚合 / 创建池（池名-服务绑定契约 {服务k8s名}-pool + 预设模板+容量，mock 载荷断言）/
+#      容量调整（PUT 仅 capacitySpec）/ 删除池 / 沙箱列表（state 过滤）/ 销毁；管理操作各产生一条审计记录；
 #   ③ console 只读端点：metadata.service ∈ ws 服务集合过滤（空集合滤空 + mysql 造服务行正向断言）+ 无操作端点；
 #   ④ 上游故障注入：mock 501 → 503（kubernetes runtime 文案）、401 → 502（指向 /settings）；
 #   ⑤ 未配置 URL（platform_config 行直删）→ 503 + /settings 引导文案；console 端点同态断言
@@ -23,23 +23,33 @@ if [ "$KUBE_OK" = "1" ] && ! kubectl -n agent-platform get svc mock-sandbox >/de
   say "⏭️ SKIP：集群内无 mock-sandbox svc（仅 CI overlay 部署）——本地先 kubectl apply -f manifests/ci/mock-sandbox.yaml"
   exit 2
 fi
+# 池名-服务绑定契约（skills-syncd §5.2 C-1/G1）：池名必须 {服务k8s名}-pool 且服务行存在，
+# 服务行经 kubectl mysql 轻量造数——无集群访问时整模块 SKIP（校验矩阵单测已覆盖本地口径）
+if [ "$KUBE_OK" != "1" ]; then
+  say "⏭️ SKIP：池名-服务绑定契约需 kubectl 预置服务行，无集群访问时整模块 SKIP"
+  exit 2
+fi
 
 WS=$(seed_ws "$TOKEN" "m12-ws-$TS")
-POOL="m12-pool-$TS"
+WS2=$(seed_ws "$TOKEN" "m12-ws2-$TS")
+[ -n "$WS2" ] || { say "❌ WS2 创建失败"; exit 1; }
 SVC="oaf-m12-svc-$TS"
+SVC2="oaf-m12-svc2-$TS"
+POOL="$SVC-pool"
+POOL2="$SVC2-pool"
 # 平台 backend 可达的 mock 地址（集群内 svc；本地/CI 同形）
 OPENSANDBOX_URL="${OPENSANDBOX_URL:-mock-sandbox.agent-platform.svc.cluster.local:8090}"
 OPENSANDBOX_KEY="${OPENSANDBOX_KEY:-m12-e2e-key}"
 
 cleanup_m12() {
   code DELETE /admin/sandboxes/pools/$POOL "" "$TOKEN" >/dev/null 2>&1
-  code DELETE /admin/sandboxes/pools/$POOL-2 "" "$TOKEN" >/dev/null 2>&1
+  code DELETE /admin/sandboxes/pools/$POOL2 "" "$TOKEN" >/dev/null 2>&1
   for id in $M12_SBIDS; do
     code DELETE /admin/sandboxes/$id "" "$TOKEN" >/dev/null 2>&1
   done
   if [ "$KUBE_OK" = "1" ]; then
     kubectl -n $KNS exec deploy/oaf-mysql -- mysql -h127.0.0.1 -uoaf -pOafPlatform2026 oaf_platform \
-      -e "DELETE FROM services WHERE k8s_name='$SVC'; DELETE FROM workspace_members WHERE workspace_id=$WS; DELETE FROM workspaces WHERE id=$WS;" >/dev/null 2>&1
+      -e "DELETE FROM services WHERE k8s_name IN ('$SVC','$SVC2'); DELETE FROM workspace_members WHERE workspace_id IN ($WS,$WS2); DELETE FROM workspaces WHERE id IN ($WS,$WS2);" >/dev/null 2>&1
   fi
   mock_node "POST /admin/fault" '{"reset":true}' >/dev/null 2>&1
 }
@@ -75,14 +85,26 @@ for g in d['data']['groups']:
 PC=$(code PUT /platform-config "{\"values\":{\"OPENSANDBOX_SERVER_URL\":\"$OPENSANDBOX_URL\",\"OPENSANDBOX_API_KEY\":\"$OPENSANDBOX_KEY\"}}" "" "$TOKEN")
 assert_eq "platform_config 写入沙箱 URL/APIKey" "$PC" "200"
 
+# 池契约前置：预置服务行（绑定独立 WS2，避免污染 ③ 的「空服务集合」断言；SVC 稍后 UPDATE 归入 WS）
+kubectl -n $KNS exec deploy/oaf-mysql -- mysql -h127.0.0.1 -uoaf -pOafPlatform2026 oaf_platform \
+  -e "INSERT INTO services (k8s_name, display_name, image, env_json, replicas, workspace_id, status, created_at, updated_at)
+      VALUES ('$SVC', 'M12 svc', 'img', '{}', 1, $WS2, 'running', NOW(), NOW());" >/dev/null 2>&1
+kubectl -n $KNS exec deploy/oaf-mysql -- mysql -h127.0.0.1 -uoaf -pOafPlatform2026 oaf_platform \
+  -e "INSERT INTO services (k8s_name, display_name, image, env_json, replicas, workspace_id, status, created_at, updated_at)
+      VALUES ('$SVC2', 'M12 svc2', 'img', '{}', 1, $WS2, 'running', NOW(), NOW());" >/dev/null 2>&1
+
 # ---- ② admin 代理：summary / 创建池（预设模板）/ 容量调整 / 沙箱列表 ----
 SUM=$(req GET /admin/sandboxes/summary "" "$TOKEN")
 assert_contains "summary 聚合可读（pools/warmAvailable/allocated/runningSandboxes）" "$SUM" '"runningSandboxes"'
 
 CR=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
 assert_eq "创建池 → 201（预设模板由后端生成）" "$CR" "201"
-CR2=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL-2\",\"image\":\"img-x:1\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
+CR2=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL2\",\"image\":\"img-x:1\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
 assert_eq "创建池（显式镜像）→ 201" "$CR2" "201"
+BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"m12-pool-$TS\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
+assert_eq "池名不符 {服务k8s名}-pool 契约 → 400（skills-syncd C-1）" "$BAD" "400"
+BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"oaf-m12-ghost-$TS-pool\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
+assert_eq "绑定服务不存在的池名 → 400（skills-syncd C-1）" "$BAD" "400"
 BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
 assert_eq "同名创建池 → 409 透传（容量合法，仅 name 重复；容量链破坏是另一条断言）" "$BAD" "409"
 BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"Bad_Name\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
@@ -136,8 +158,7 @@ N=$(echo "$CS" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d[
 assert_eq "空服务集合 → console 过滤为空（不泄露他服务实例）" "$N" "0"
 if [ "$KUBE_OK" = "1" ] && [ -n "$M12_SBIDS" ]; then
   kubectl -n $KNS exec deploy/oaf-mysql -- mysql -h127.0.0.1 -uoaf -pOafPlatform2026 oaf_platform \
-    -e "INSERT INTO services (k8s_name, display_name, image, env_json, replicas, workspace_id, status, created_at, updated_at)
-        VALUES ('$SVC', 'M12 svc', 'img', '{}', 1, $WS, 'running', NOW(), NOW());" >/dev/null 2>&1
+    -e "UPDATE services SET workspace_id=$WS, updated_at=NOW() WHERE k8s_name='$SVC';" >/dev/null 2>&1
   CS=$(req GET /console/workspaces/$WS/sandboxes "" "$TOKEN")
   N=$(echo "$CS" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d['data']))" 2>/dev/null)
   assert_eq "ws 服务行就位 → console 过滤出 2 条本服务实例" "$N" "2"
@@ -172,10 +193,10 @@ if [ "$KUBE_OK" = "1" ] && [ -n "$(echo $M12_SBIDS | tr -d ' ')" ]; then
 fi
 
 # ---- 池删除（确认对话为前端行为；API 层断言删除生效 + 审计）----
-DP=$(code DELETE /admin/sandboxes/pools/$POOL-2 "" "$TOKEN")
+DP=$(code DELETE /admin/sandboxes/pools/$POOL2 "" "$TOKEN")
 assert_eq "删除池 → 200（上游 204）" "$DP" "200"
 PL=$(req GET /admin/sandboxes/pools "" "$TOKEN")
-assert_not_contains "删除后列表不再含该池" "$PL" "$POOL-2"
+assert_not_contains "删除后列表不再含该池" "$PL" "$POOL2"
 AUD=$(req GET "/admin/audit-logs?page=1&size=50" "" "$TOKEN")
 assert_contains "审计含 sandbox.pool.delete" "$AUD" '"sandbox.pool.delete"'
 
