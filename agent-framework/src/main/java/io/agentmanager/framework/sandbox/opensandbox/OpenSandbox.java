@@ -1411,10 +1411,10 @@ public class OpenSandbox extends AbstractBaseSandbox
                 skillCacheRefreshed.set(false);
                 return;
             }
-            Path scopeDir = Path.of(sourceRoot, SkillCacheScope.CACHE_DIR, scope);
-            // 包技能仅 farm 一路：farm 未启用/判定降级 = 本 call 无包技能投放（返回 false
-            // 即止，无 tar 回落）；收敛 exec 失败原样上抛，由下方 catch 复位 CAS 重试
-            skillsFarm.tryHydrate(scope, scopeDir);
+            // 包技能仅 farm 一路（端点 manifest 制，宿主 stage 目录不再参与）：farm 未启用/
+            // 判定降级 = 本 call 无包技能投放（返回 false 即止，无 tar 回落）；收敛 exec 失败
+            // 原样上抛，由下方 catch 复位 CAS 重试
+            skillsFarm.tryHydrate(scope);
         } catch (Exception e) {
             skillCacheRefreshed.set(false);
             log.warn("[sandbox-open] scoped .skills-cache hydrate failed: {}", e.getMessage());
