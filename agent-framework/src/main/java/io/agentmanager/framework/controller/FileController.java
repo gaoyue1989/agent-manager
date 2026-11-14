@@ -301,7 +301,7 @@ public class FileController {
 
     /**
      * 文件名 sanitize（对齐 DeerFlow normalize_filename）：
-     * 取 basename、去反斜杠、UTF-8 ≤255 字节。
+     * 取 basename、去反斜杠、UTF-8 ≤255 字节、精准逆变客户端引号转义（%22 → "）。
      */
     static String sanitizeFileName(String name) {
         if (name == null || name.isBlank()) {
@@ -314,6 +314,12 @@ public class FileController {
         }
         // 去除控制字符与路径分隔残留
         base = base.replaceAll("[\\p{Cntrl}]", "_");
+        // 精准逆变客户端转义：浏览器/curl 按 WHATWG 规范把文件名中的 " 转义为 %22
+        // （Content-Disposition quoted-string 无法原样表示引号），此处还原真实名——
+        // 存储/提示/UI 附件卡与用户认知一致。仅解码 %22 一种序列：其它 %XX 一律不
+        // 解析（客户端本就不转义它们，原样即保真；且防 %2F 路径注入）。字面含 %22
+        // 的罕见名会被还原为引号——客户端转义时两种原名已同形不可区分，取高频侧正确
+        base = base.replace("%22", "\"");
         if (base.isBlank() || ".".equals(base) || "..".equals(base)) {
             return null;
         }

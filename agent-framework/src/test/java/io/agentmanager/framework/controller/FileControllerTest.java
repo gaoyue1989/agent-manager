@@ -284,6 +284,18 @@ public class FileControllerTest {
     }
 
     @Test
+    void sanitizeFileNameShouldRestoreClientEscapedQuote() {
+        // 浏览器/curl 按 WHATWG 规范把文件名中的 " 转义为 %22（Content-Disposition
+        // quoted-string 无法原样表示引号），服务端精准逆变还原真实名——存储/提示/UI
+        // 与用户认知一致。仅解码 %22 一种序列：其它 %XX 一律不解析（客户端本就不
+        // 转义它们，原样即保真；且防 %2F 路径注入）
+        assertEquals("report\"final\".txt", FileController.sanitizeFileName("report%22final%22.txt"));
+        assertEquals("it's-a-test.txt", FileController.sanitizeFileName("it's-a-test.txt"));
+        assertEquals("a%2Fb.txt", FileController.sanitizeFileName("a%2Fb.txt"));
+        assertEquals("a%2fb.txt", FileController.sanitizeFileName("a%2fb.txt"));
+    }
+
+    @Test
     void mimeAllowedShouldMatchWildcard() {
         assertTrue(FileController.mimeAllowed("image/png", "image/*,text/plain"));
         assertTrue(FileController.mimeAllowed("text/plain", "image/*,text/plain"));

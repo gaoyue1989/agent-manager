@@ -202,7 +202,8 @@ public class UploadWorkspaceInjector {
             blocks.add(io.agentscope.core.message.TextBlock.builder().text(
                 UPLOAD_SECTION_MARKER
                     + "用户上传了文件（工作区相对路径）：\n- " + String.join("\n- ", pathHints)
-                    + "\n请用 read_file / list_files 工具或沙箱脚本处理这些文件。")
+                    + "\n请用 read_file / list_files 工具或沙箱脚本处理这些文件；read_file 的路径可原样使用，"
+                    + "如用 shell，路径含空格、引号等特殊字符时务必用双引号包裹（裸引用含引号的路径必语法错误）。")
                 .build());
         }
         return blocks;
