@@ -16,9 +16,12 @@ import io.agentscope.core.message.TextBlock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -151,5 +154,40 @@ class UploadWorkspaceInjectorTest {
         var hint = ((TextBlock) blocks.get(1)).getText();
         assertTrue(hint.contains("双引号"), "提示须含 shell 双引号包裹指引: " + hint);
         assertTrue(hint.contains("read_file"), "提示须引导优先用 read_file");
+    }
+
+    // ---------- 沙箱模式路径预留（ensureWorkspacePath）：分配先行，保证提示路径=注入路径 ----------
+
+    @Test
+    void ensureWorkspacePathShouldAllocateAgainstHistoryAndPersist() {
+        var pending = new FileAssetStore.FileAsset("f1", "alice", "s1", null, "note.txt", null,
+            "text/plain", 1, "local", "upload/k/f1", "upload", "pending", LocalDateTime.now());
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(pending));
+        when(fileAssetStore.listWorkspacePaths("alice", "s1")).thenReturn(List.of("uploads/note.txt"));
+
+        var wsPath = injector.ensureWorkspacePath("f1", "alice", "s1");
+
+        assertEquals("uploads/note_1.txt", wsPath, "按历史注入路径撞名分配 _1 后缀");
+        verify(fileAssetStore).updateWorkspacePath("f1", "uploads/note_1.txt");
+    }
+
+    @Test
+    void ensureWorkspacePathShouldBeIdempotentWhenAlreadyReserved() {
+        var reserved = new FileAssetStore.FileAsset("f2", "alice", "s1", null, "note.txt", "uploads/note.txt",
+            "text/plain", 1, "local", "upload/k/f2", "upload", "pending", LocalDateTime.now());
+        when(fileAssetStore.get("f2")).thenReturn(Optional.of(reserved));
+
+        var wsPath = injector.ensureWorkspacePath("f2", "alice", "s1");
+
+        assertEquals("uploads/note.txt", wsPath, "已预留路径直接返回（幂等，不重分配）");
+        verify(fileAssetStore, never()).listWorkspacePaths(any(), any());
+        verify(fileAssetStore, never()).updateWorkspacePath(any(), any());
+    }
+
+    @Test
+    void ensureWorkspacePathShouldFailSoftForMissingAsset() {
+        when(fileAssetStore.get("gone")).thenReturn(Optional.empty());
+
+        assertNull(injector.ensureWorkspacePath("gone", "alice", "s1"));
     }
 }

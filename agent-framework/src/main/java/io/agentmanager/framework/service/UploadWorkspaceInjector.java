@@ -87,36 +87,68 @@ public class UploadWorkspaceInjector {
 
 
     /**
-     * 唯一化工作区文件名：同名文件追加 _1/_2（DeerFlow claim_unique_filename 同款）。
-     * 基于目录 ls 判断冲突（不覆盖，防静默覆盖历史上传）。
+     * 唯一化工作区相对路径（uploads/{name}，同名追加 _1/_2，DeerFlow claim_unique_filename
+     * 同款；上界 1000 兜底 UUID 防同名风暴死循环）。纯函数：撞名判定只看 taken 集合，
+     * 调用方负责组装集合来源（file_asset 历史注入路径 / 会话目录 ls / 本批次已分配）。
      */
-    private String uniqueWorkspacePath(java.nio.file.Path root, String fileName) {
+    public static String allocateWorkspacePath(java.util.Collection<String> taken, String fileName) {
         var base = "uploads/" + fileName;
-        if (!Files.isDirectory(root.resolve("uploads"))) {
+        if (!taken.contains(base)) {
             return base;
+        }
+        int dot = fileName.lastIndexOf('.');
+        var stem = dot > 0 ? fileName.substring(0, dot) : fileName;
+        var ext = dot > 0 ? fileName.substring(dot) : "";
+        for (int i = 1; i <= 1000; i++) {
+            var candidate = "uploads/" + stem + "_" + i + ext;
+            if (!taken.contains(candidate)) {
+                return candidate;
+            }
+        }
+        log.warn("inject: too many conflicting names for {}, using UUID fallback", fileName);
+        return "uploads/" + stem + "_" + java.util.UUID.randomUUID().toString().substring(0, 8) + ext;
+    }
+
+    /** 唯一化工作区文件名：基于会话目录 ls 判断冲突（不覆盖，防静默覆盖历史上传）。 */
+    private String uniqueWorkspacePath(java.nio.file.Path root, String fileName) {
+        if (!Files.isDirectory(root.resolve("uploads"))) {
+            return "uploads/" + fileName;
         }
         try (var stream = Files.list(root.resolve("uploads"))) {
             var existing = stream.map(p -> "uploads/" + p.getFileName().toString())
                 .collect(java.util.stream.Collectors.toSet());
-            if (!existing.contains(base)) {
-                return base;
-            }
-            int dot = fileName.lastIndexOf('.');
-            var stem = dot > 0 ? fileName.substring(0, dot) : fileName;
-            var ext = dot > 0 ? fileName.substring(dot) : "";
-            for (int i = 1; i <= 1000; i++) {
-                var candidate = "uploads/" + stem + "_" + i + ext;
-                if (!existing.contains(candidate)) {
-                    return candidate;
-                }
-            }
-            // 上界兜底：1000 个同名文件已存在，用 UUID 避免无限循环
-            log.warn("inject: too many conflicting names for {}, using UUID fallback", fileName);
-            return "uploads/" + stem + "_" + java.util.UUID.randomUUID().toString().substring(0, 8) + ext;
+            return allocateWorkspacePath(existing, fileName);
         } catch (IOException e) {
-            log.warn("inject: unique name probe failed, fallback {}", base);
-            return base;
+            log.warn("inject: unique name probe failed, fallback uploads/{}", fileName);
+            return "uploads/" + fileName;
         }
+    }
+
+    /**
+     * 沙箱模式工作区路径预留（chat 请求时、路径提示构造前调用）：file_asset 已有
+     * workspace_path 直接返回（幂等）；未分配则按 user 维度历史注入路径撞名分配并回写。
+     *
+     * <p>分配必须先行于提示构造：提示文本在请求时刻冻结，而沙箱注入发生在 acquire
+     * （晚于提示构造）——若把撞名改名留给注入时刻，提示路径与磁盘实际路径漂移，agent
+     * 按提示读文件必 file_not_found（2026-11-14 真机实测复现：同名二次上传/沙箱容器
+     * 重建重放即触发）。预留后注入对已分配路径原样写入（OpenSandbox.injectPendingUploads），
+     * 提示路径=注入路径由 workspace_path 单一真相源保证。
+     */
+    public String ensureWorkspacePath(String fileId, String userKey, String sessionId) {
+        var meta = fileAssetStore.get(fileId);
+        if (meta.isEmpty()) {
+            log.warn("reserve: file_asset {} not found", fileId);
+            return null;
+        }
+        var asset = meta.get();
+        if (asset.workspacePath() != null) {
+            return asset.workspacePath();
+        }
+        var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(userKey, sessionId));
+        var wsPath = allocateWorkspacePath(taken, asset.fileName());
+        fileAssetStore.updateWorkspacePath(fileId, wsPath);
+        log.info("reserve: uploaded {} → {}", asset.fileName(), wsPath);
+        return wsPath;
     }
 
     /**
