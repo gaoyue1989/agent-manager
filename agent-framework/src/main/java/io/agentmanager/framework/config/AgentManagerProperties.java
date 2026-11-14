@@ -58,6 +58,19 @@ public record AgentManagerProperties(
         return resolvedConfigDir();
     }
 
+    /**
+     * writeBounded spool 目录（s3 后端未知长度流先落盘计数再单 PUT，issue #345）：
+     * 显式配置优先，回落 {@code {workspaceBase}/tmp/file-transfer}。
+     * <b>不用 /tmp</b>——业务 Pod /tmp 不可写实测（Permission denied），workspace 卷可写。
+     */
+    public String resolvedSpoolDir() {
+        var configured = file().spoolDir();
+        if (configured != null && !configured.isBlank()) {
+            return configured;
+        }
+        return java.nio.file.Path.of(resolvedWorkspaceBaseDir(), "tmp", "file-transfer").toString();
+    }
+
     /** 解析后的配置目录：显式配置优先；未配置则按 OS 选默认值（Linux /config；Windows %LOCALAPPDATA%/agent-framework/config） */
     public String resolvedConfigDir() {
         if (configDir != null && !configDir.isBlank()) {
@@ -193,7 +206,12 @@ public record AgentManagerProperties(
     public record FileConfig(
         /** 上传端点开关（false 时 403） */
         @DefaultValue("true") boolean uploadEnabled,
-        /** 单文件大小上限（MB） */
+        /**
+         * 单文件大小上限（MB）。
+         * 守护不变量（issue #345）：必须保持 < presentMaxMb——非沙箱无 Shell（文件源只有
+         * ≤本上限的上传件与 write_file 的 LLM 输出），present 的 byte[] 整读才是安全的；
+         * 本上限反超 present 上限会让「再 present 大上传件」复现先读后拒的 OOM 路径。
+         */
         @DefaultValue("20") int uploadMaxMb,
         /** 每 user_key pending 未消费文件数上限（软限制） */
         @DefaultValue("20") int uploadMaxPending,
@@ -203,7 +221,11 @@ public record AgentManagerProperties(
         @DefaultValue("5") int imageMaxMb,
         /** 图片内联总字节预算（MB），多图叠加超限降级路径提示 */
         @DefaultValue("15") int imageInlineTotalMb,
-        /** present_file 工具产出文件大小上限（MB） */
+        /**
+         * present_file 工具产出文件大小上限（MB）。
+         * 守护不变量（issue #345）：必须保持 > uploadMaxMb（依据见 uploadMaxMb 注释）。
+         * 提顶仅需配置变更（writeBounded 已使交付通道堆占用恒定），另议。
+         */
         @DefaultValue("50") int presentMaxMb,
         /** 下载端点开关（false 时 403） */
         @DefaultValue("true") boolean downloadEnabled,
@@ -222,8 +244,38 @@ public record AgentManagerProperties(
         /** s3 后端 bucket */
         @DefaultValue("agent-files") String storageS3Bucket,
         /** present_url 外部交付物 URL 前缀白名单（逗号分隔，防 SSRF；空=禁用外部交付） */
-        @DefaultValue("") String externalUrlPrefixes
+        @DefaultValue("") String externalUrlPrefixes,
+        /** writeBounded spool 目录（s3 后端落盘计数用；空=回落 {workspaceBase}/tmp/file-transfer） */
+        @DefaultValue("") String spoolDir
     ) {
+
+        /**
+         * 显式绑定入口：FileConfig 出现两个构造器（下方兼容旧按位构造）后，Spring Boot 的
+         * Binder 要求以 {@code @ConstructorBinding} 指定绑定入口（与外层 record 同款处理），
+         * 缺注解会在绑定期 NoSuchElement（S3EnvBindingTest 锁住该链路）。
+         */
+        @ConstructorBinding
+        public FileConfig {
+        }
+
+        /**
+         * 兼容旧 16 参构造器（仅供既有测试按位置传参构造，与外层 AgentManagerProperties
+         * 9 参兼容构造器同源——「加组件波及全部按位构造测试」，HistoryConfig javadoc 记载）：
+         * spoolDir 缺省空（resolvedSpoolDir 回落 workspaceBase 默认）。
+         */
+        public FileConfig(
+            boolean uploadEnabled, int uploadMaxMb, int uploadMaxPending, String uploadAllowedMime,
+            int imageMaxMb, int imageInlineTotalMb, int presentMaxMb, boolean downloadEnabled,
+            int retentionDays, String storageType, String storageLocalDir,
+            String storageS3Endpoint, String storageS3AccessKey, String storageS3SecretKey,
+            String storageS3Bucket, String externalUrlPrefixes
+        ) {
+            this(uploadEnabled, uploadMaxMb, uploadMaxPending, uploadAllowedMime,
+                imageMaxMb, imageInlineTotalMb, presentMaxMb, downloadEnabled,
+                retentionDays, storageType, storageLocalDir,
+                storageS3Endpoint, storageS3AccessKey, storageS3SecretKey,
+                storageS3Bucket, externalUrlPrefixes, "");
+        }
 
         /** 解析外部交付 URL 白名单为列表（去空白、去尾斜杠、忽略空项） */
         public java.util.List<String> externalUrlPrefixList() {

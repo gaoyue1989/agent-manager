@@ -110,64 +110,96 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             return err("invalid path: " + filePath + " (must be inside workspace)");
         }
         var userKey = resolveUserKey(ctx);
-        // 2. 获取字节：显式 base64 仅非沙箱合法（KV 工作区可能没有 LLM 未落盘的内容）；
-        //    沙箱模式一律拒绝——LLM 复述大文件 base64 必超输出上限截断，file_ready 静默丢失
-        byte[] bytes = null;
+        long maxBytes = props.file().presentMaxMb() * 1024L * 1024L;
+        // 2. MIME 推断（扩展名兜底）与存储 key 前置（三分支共用）
+        var mime = guessMime(norm);
+        var id = UUID.randomUUID().toString();
+        var storageKey = "generated/" + java.time.LocalDate.now().format(
+            java.time.format.DateTimeFormatter.ofPattern("yyyyMM")) + "/" + id + "-" + basename(norm);
+        // 3. 交付通道（选型规则：源有界 → byte[]，源无界 → 流式，issue #345）
+        long size;
         if (fileContentBase64 != null && !fileContentBase64.isBlank()) {
+            // 显式 base64 仅非沙箱合法（KV 工作区可能没有 LLM 未落盘的内容）；沙箱模式一律
+            // 拒绝——LLM 复述大文件 base64 必超输出上限截断，file_ready 静默丢失。
+            // 源有界（LLM 输出上限）→ byte[] 整读安全
             if (sandboxRuntime.enabled()) {
                 return err("file_content_base64 is not supported in sandbox mode; "
                     + "the platform reads the file directly from the sandbox workspace via file_path");
             }
+            byte[] bytes;
             try {
                 bytes = Base64.getDecoder().decode(fileContentBase64);
             } catch (IllegalArgumentException e) {
                 return err("file_content_base64 is not valid base64");
             }
+            if (bytes.length > maxBytes) {
+                return err("file exceeds " + props.file().presentMaxMb() + "MB limit (" + bytes.length + " bytes)");
+            }
+            try {
+                fileStorage.write(storageKey, new java.io.ByteArrayInputStream(bytes), bytes.length, mime);
+            } catch (Exception e) {
+                log.warn("present_file: storage write failed: {}", e.getMessage());
+                return err("storage write failed: " + e.getMessage());
+            }
+            size = bytes.length;
         } else if (sandboxRuntime.enabled()) {
-            // 沙箱直读：取本 turn acquire 的沙箱（HarnessAgent 在 agent 调用前经
-            // SandboxLifecycleMiddleware.acquireForCall 预置 RuntimeContext，失败路径置 null）。
+            // 沙箱直读（源无界：shell 可生成任意大文件）→ stat 前置快速拒绝 + 流式拷贝上限
+            // 中止，堆占用恒为缓冲区级。取本 turn acquire 的沙箱（HarnessAgent 在 agent 调用前
+            // 经 SandboxLifecycleMiddleware.acquireForCall 预置 RuntimeContext，失败路径置 null）。
             // 归属 userKey 校验保留作纵深防御；禁止回退进程级「最近沙箱」指针——多用户并发下
             // 指针会被其他用户的 create/resume 覆盖，指向他人沙箱 → 归属校验误拒、file_ready 丢失
             var acquire = ctx != null ? ctx.get(SandboxAcquireResult.class) : null;
             var sandbox = acquire != null && acquire.getSandbox() instanceof OpenSandbox osb ? osb : null;
             var boundKey = sandbox != null ? sandbox.getUserKey() : null;
-            if (sandbox != null && (boundKey == null || boundKey.isBlank() || boundKey.equals(userKey))) {
-                bytes = sandbox.readWorkspaceFile(norm);
-            }
-            if (bytes == null) {
+            if (sandbox == null || boundKey == null || boundKey.isBlank() || !boundKey.equals(userKey)) {
                 return err("sandbox mode: file not readable in sandbox workspace: " + norm
                     + " (make sure the file exists under /workspace; check the path with list_files)");
             }
+            // stat 前置：超限不发起传输（快速拒绝）；-1 降级跳过，由 writeBounded 兜底正确性
+            long statSize = sandbox.statWorkspaceFile(norm);
+            if (statSize >= 0 && statSize > maxBytes) {
+                return err("file exceeds " + props.file().presentMaxMb() + "MB limit (stat " + statSize + " bytes)");
+            }
+            java.io.InputStream in;
+            try {
+                in = sandbox.openWorkspaceStream(norm);
+            } catch (Exception e) {
+                return err("sandbox mode: file not readable in sandbox workspace: " + norm
+                    + " (make sure the file exists under /workspace; check the path with list_files)");
+            }
+            try (in) {
+                size = fileStorage.writeBounded(storageKey, in, maxBytes, mime);
+            } catch (io.agentmanager.framework.service.storage.StorageOverflowException e) {
+                log.info("present_file: bounded write aborted ({}): {}", norm, e.getMessage());
+                return err("file exceeds " + props.file().presentMaxMb() + "MB limit ("
+                    + e.actualBytes() + "+ bytes)");
+            } catch (Exception e) {
+                log.warn("present_file: storage write failed: {}", e.getMessage());
+                return err("storage write failed: " + e.getMessage());
+            }
         } else {
-            bytes = readFromWorkspace(ctx, norm);
+            byte[] bytes = readFromWorkspace(ctx, norm);
             if (bytes == null) {
                 return err("file not readable in workspace: " + norm);
             }
+            if (bytes.length > maxBytes) {
+                return err("file exceeds " + props.file().presentMaxMb() + "MB limit (" + bytes.length + " bytes)");
+            }
+            try {
+                fileStorage.write(storageKey, new java.io.ByteArrayInputStream(bytes), bytes.length, mime);
+            } catch (Exception e) {
+                log.warn("present_file: storage write failed: {}", e.getMessage());
+                return err("storage write failed: " + e.getMessage());
+            }
+            size = bytes.length;
         }
-        // 3. 大小限制（FILE_PRESENT_MAX_MB）
-        long maxBytes = props.file().presentMaxMb() * 1024L * 1024L;
-        if (bytes.length > maxBytes) {
-            return err("file exceeds " + props.file().presentMaxMb() + "MB limit ("
-                + bytes.length + " bytes)");
-        }
-        // 4. MIME 推断（扩展名兜底）
-        var mime = guessMime(norm);
-        // 5. 存储后端写入（key 按 §4.2，origin=generated）→ 落元数据 → 失败回滚
-        var id = UUID.randomUUID().toString();
-        var storageKey = "generated/" + java.time.LocalDate.now().format(
-            java.time.format.DateTimeFormatter.ofPattern("yyyyMM")) + "/" + id + "-" + basename(norm);
-        try {
-            fileStorage.write(storageKey, new java.io.ByteArrayInputStream(bytes), bytes.length, mime);
-        } catch (Exception e) {
-            log.warn("present_file: storage write failed: {}", e.getMessage());
-            return err("storage write failed: " + e.getMessage());
-        }
+        // 4. 落元数据 → 失败回滚（key 按 §4.2，origin=generated）
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
                 id, userKey,
                 null,  // sessionId: 工具层不写，由控制器层 emitFileReadyViaEventBus 回写业务 peer
                 null,  // replyId: 工具层无此信息，由控制器层 file_ready 合成时回写
-                basename(norm), norm, mime, bytes.length,
+                basename(norm), norm, mime, size,
                 props.file().storageType(), storageKey, "generated", "injected",
                 java.time.LocalDateTime.now()));
         } catch (Exception e) {
@@ -178,10 +210,10 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             }
             return err("metadata write failed: " + e.getMessage());
         }
-        log.info("present_file: registered {} ({} bytes, mime={})", norm, bytes.length, mime);
-        // 6. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）
+        log.info("present_file: registered {} ({} bytes, mime={})", norm, size, mime);
+        // 5. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）
         return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + basename(norm)
-            + "\",\"mime_type\":\"" + mime + "\",\"size\":" + bytes.length + "}";
+            + "\",\"mime_type\":\"" + mime + "\",\"size\":" + size + "}";
     }
 
     /**

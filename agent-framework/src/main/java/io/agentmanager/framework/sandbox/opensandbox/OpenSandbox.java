@@ -1515,29 +1515,55 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * 经 execd files API 读取沙箱工作区文件字节（供 present_file 等工具在
-     * 沙箱模式下直读文件，避免 Agent 复述大段 base64）。
+     * stat 工作区文件大小（present_file 交付前置的快速拒绝，issue #345）：经 execd
+     * directories/list 列父目录、按 basename 定位 EntryInfo.size（结构化元数据，无 shell
+     * 依赖；mock 白名单无关）。-1 = 不可知（父目录列取失败/入口缺失/端点异常），调用方
+     * 降级跳过——正确性由 {@link #openWorkspaceStream} + FileStorage.writeBounded 兜底。
      *
-     * <p>路径语义与注入一致：无前导斜杠 → 相对 /workspace；带前导斜杠 → 容器绝对路径。
-     * 统一按相对路径处理（file_path 已由调用方 normalize）。
-     *
-     * @param relPath 工作区相对路径（如 outputs/xxx.zip）
-     * @return 文件字节；文件不存在或读取失败返回 null
+     * <p>路径语义与注入一致：相对 /workspace（file_path 已由调用方 normalize）。
      */
-    public byte[] readWorkspaceFile(String relPath) {
+    public long statWorkspaceFile(String relPath) {
         if (relPath == null || relPath.isBlank()) {
-            return null;
+            return -1;
         }
-        // scoped 投放延迟触发：技能资源读取路径命中 .skills-cache 时同步投放（CAS 每 call 一次）
+        // scoped 投放延迟触发：技能资源路径命中 .skills-cache 时同步投放（与 doExec 同口径，
+        // 否则 stat/读流命中未投放目录恒失败）
         if (relPath.contains(SkillCacheScope.CACHE_DIR)) {
             hydrateScopedSkillCache();
         }
+        int slash = relPath.lastIndexOf('/');
+        var dir = slash >= 0 ? relPath.substring(0, slash) : "";
+        var name = slash >= 0 ? relPath.substring(slash + 1) : relPath;
         try {
-            return osbSandbox.files().readByteArray(relPath);
+            for (var entry : osbSandbox.files().listDirectory(dir)) {
+                var p = entry.getPath();
+                var entryName = p != null && p.lastIndexOf('/') >= 0 ? p.substring(p.lastIndexOf('/') + 1) : p;
+                if (name.equals(entryName)) {
+                    return entry.getSize();
+                }
+            }
+            return -1;
         } catch (Exception e) {
-            log.debug("[sandbox-open] read workspace file failed ({}): {}", relPath, e.getMessage());
-            return null;
+            log.debug("[sandbox-open] stat workspace file failed ({}): {}", relPath, e.getMessage());
+            return -1;
         }
+    }
+
+    /**
+     * 打开沙箱工作区文件的读取流（GET /files/download octet-stream 全量流，issue #345）：
+     * 供 present_file 等工具经 FileStorage.writeBounded 流式交付，堆占用恒为缓冲区级。
+     * 调用方负责关闭流。文件不存在/端点异常抛 SDK 异常（调用方转为工具错误应答）。
+     *
+     * <p>路径语义与注入一致：相对 /workspace（file_path 已由调用方 normalize）。
+     */
+    public java.io.InputStream openWorkspaceStream(String relPath) {
+        if (relPath == null || relPath.isBlank()) {
+            throw new IllegalArgumentException("relPath is blank");
+        }
+        if (relPath.contains(SkillCacheScope.CACHE_DIR)) {
+            hydrateScopedSkillCache();
+        }
+        return osbSandbox.files().readStream(relPath);
     }
 
     public OpenSandboxState getOsbState() {

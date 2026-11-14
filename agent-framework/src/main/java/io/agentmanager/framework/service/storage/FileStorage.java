@@ -24,6 +24,19 @@ public interface FileStorage {
      */
     void write(String key, InputStream in, long size, String contentType) throws IOException;
 
+    /**
+     * 有界写入：流式拷贝，超过 maxBytes 立即中止并抛 {@link StorageOverflowException}，
+     * 不留下任何目标对象（读方永不可见半成品）；成功返回落盘字节数。堆占用恒为
+     * 缓冲区级——源无界（沙箱 shell 生成文件）时的交付通道，正确性不依赖任何前置
+     * stat（issue #345；二期 fetch_file 按需拉取反向复用同一通道）。
+     *
+     * @param key         存储 key
+     * @param in          内容流（本方法负责关闭；成功/越限均关闭）
+     * @param maxBytes    字节上限
+     * @param contentType MIME 类型
+     */
+    long writeBounded(String key, InputStream in, long maxBytes, String contentType) throws IOException;
+
     /** 流式读取（s3=getObject 流；local=FileInputStream） */
     InputStream read(String key) throws IOException;
 
