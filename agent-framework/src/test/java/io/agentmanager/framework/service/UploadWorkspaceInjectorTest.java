@@ -142,6 +142,20 @@ class UploadWorkspaceInjectorTest {
         assertEquals("", UploadWorkspaceInjector.stripUploadHints(null));
     }
 
+    @Test
+    void pathHintCarriesShellQuotingGuidance() {
+        // 平台给所有模型的默认指引：read_file 路径原样可用（免 shell 转义）；
+        // shell 引用含特殊字符的路径须双引号包裹（含引号/空格的文件名 shell 裸引用必语法错）
+        when(fileAssetStore.get("doc-1")).thenReturn(Optional.of(
+            new FileAssetStore.FileAsset("doc-1", "alice", "s1", null, "it's-a-test.txt", "uploads/it's-a-test.txt",
+                "application/msword", 2048, "local", "upload/k/doc-1", "upload", "injected", LocalDateTime.now())));
+        var blocks = injector.buildContentBlocks(List.of("doc-1"), "go", "alice");
+
+        var hint = ((TextBlock) blocks.get(1)).getText();
+        assertTrue(hint.contains("双引号"), "提示须含 shell 双引号包裹指引: " + hint);
+        assertTrue(hint.contains("read_file"), "提示须引导优先用 read_file");
+    }
+
     // ---------- 沙箱模式路径预留（ensureWorkspacePath）：分配先行，保证提示路径=注入路径 ----------
 
     @Test
