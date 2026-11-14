@@ -90,6 +90,10 @@ public class AgentScopeConfig {
             .skillsSharedStore(config.skillsSharedStore())
             .skillBundleService(skillBundleService)
             .farmMeterRegistry(farmMeterRegistryProvider.getIfAvailable());
+        // 遮蔽生效自检（sdk-stager-shadow-design C-3）：SHADOW_MARKER 仅存在于遮蔽类——
+        // 若 jar 原版被加载（遮蔽失效=宿主写盘静默回归），本字段链接失败即启动 fail-fast
+        log.info("SDK MarketplaceStager shadow active (marker={})",
+            io.agentscope.harness.agent.skill.runtime.MarketplaceStager.SHADOW_MARKER);
         spec.setSessionKeyResolver(sessionKeyResolver);
         // 技能禁用投放过滤（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放前按
         // L2 禁用集 + L4 用户标记过滤候选目录并清理容器残留——堵「load_skill_through_path

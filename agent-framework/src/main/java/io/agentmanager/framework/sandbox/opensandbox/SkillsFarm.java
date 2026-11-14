@@ -1,6 +1,5 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -20,8 +19,10 @@ import io.agentscope.harness.agent.sandbox.SandboxException;
 /**
  * 软链农场子系统（skills-syncd §6.2：会话级二值判定 + 软链农场收敛），OpenSandbox 的
  * 内聚协作者：判定（store/端点探测、版本硬校验、D-5 打点、会话级记忆）+ 收敛（候选链、
- * 单条 exec 幂等建链、稳态短路记账）+ 投放过滤原语（禁用解析/清理命令/shell 安全路径——
- * PR-4b 起 tar 投放路径已退役，本类是这些原语的唯一消费方）。唯一入口 {@link #tryHydrate}：
+ * 单条 exec 幂等建链、稳态短路记账、孤儿差集清理）+ 投放过滤原语（禁用解析/清理命令/
+ * shell 安全路径——PR-4b 起 tar 投放路径已退役，本类是这些原语的唯一消费方）。
+ * 候选 manifest = 端点 version 响应 skills 名单（SDK stager 已由 classpath 遮蔽类停写宿主，
+ * 见 docs/design/sdk-stager-shadow-design-261114.md）。唯一入口 {@link #tryHydrate}：
  * 农场未启用或判定降级返回 false——PR-4b 后包技能仅 farm 一路，调用方<b>不回落 tar</b>
  * （降级会话 = 无包技能投放，回滚语义 = 回滚整个 release），命中则完成收敛并返回 true。
  */
@@ -64,7 +65,7 @@ final class SkillsFarm {
      * 判定降级返回 false（PR-4b 后调用方不再回落 tar——本会话无包技能投放）。收敛 exec
      * 失败原样上抛（上层 CAS 复位，下次触发重试），判定不变。
      */
-    boolean tryHydrate(String scope, Path scopeDir) throws Exception {
+    boolean tryHydrate(String scope) throws Exception {
         if (!enabled()) {
             return false;
         }
@@ -74,7 +75,7 @@ final class SkillsFarm {
         if (gate == null || !acquireMode(gate, uid)) {
             return false;
         }
-        hydrate(scope, scopeDir, gate);
+        hydrate(scope, gate);
         return true;
     }
 
@@ -213,46 +214,47 @@ final class SkillsFarm {
         }
     }
 
+    /** 包技能在 .skills-cache 两层布局中的固定 ns 层（FileSystemSkillRepository 注册 source，HarnessAgentFactory） */
+    private static final String SKILL_NS = "oaf-package";
+
     /**
-     * 农场链候选（相对 scopeDir 的 ns/name，排序稳定）：宿主 scope 目录即 SDK stage manifest，
-     * 其内全部为包技能（workspace-native L4 不进 .skills-cache）。禁用名（{@link
-     * #disabledSkillDirs} 同源）与 L4 同名（规则 1 真实文件保护）不建链；含单引号/空白/{@code ..}
-     * 的相对路径跳过并 WARN 留痕——tar 物化已退役，farm 侧静默缺失即会话内真实缺失，
-     * 必须留痕可观测。
+     * 农场链候选（相对 scope 的 ns/name，排序稳定；端点 manifest 制）：候选名单来自端点
+     * version 响应 {@code skills}（与 bundle 打包同源枚举——包技能移除/新增经版本变化传导）。
+     * 禁用名（{@link #disabledSkillNames} 同源）与 L4 同名（规则 1 真实文件保护）不建链；
+     * 含单引号/空白/{@code ..} 的相对路径跳过并 WARN 留痕——tar 物化已退役，farm 侧静默缺失
+     * 即会话内真实缺失，必须留痕可观测。
      */
-    private List<String> linkCandidates(Path scopeDir, Set<Path> disabledDirs,
-                                        Set<String> l4Names) throws Exception {
-        if (!Files.isDirectory(scopeDir)) {
-            return List.of();
-        }
+    private List<String> linkCandidates(List<String> endpointSkills, Set<String> disabledNames,
+                                        Set<String> l4Names) {
         var candidates = new java.util.TreeSet<String>();
-        try (var nsStream = Files.list(scopeDir)) {
-            for (var ns : nsStream.filter(Files::isDirectory).sorted().toList()) {
-                try (var skillStream = Files.list(ns)) {
-                    for (var skillDir : skillStream.filter(Files::isDirectory).sorted().toList()) {
-                        var rel = scopeDir.relativize(skillDir).toString().replace('\\', '/');
-                        if (!isShellSafeRelPath(rel)) {
-                            log.warn("[sandbox-open] skills farm link candidate skipped, rel not shell-safe (rel={})",
-                                rel);
-                            continue;
-                        }
-                        if (disabledDirs.contains(scopeDir.relativize(skillDir))
-                                || l4Names.contains(skillDir.getFileName().toString())) {
-                            continue;
-                        }
-                        candidates.add(rel);
-                    }
-                }
+        for (var name : endpointSkills) {
+            var rel = SKILL_NS + "/" + name;
+            if (!isShellSafeRelPath(rel)) {
+                log.warn("[sandbox-open] skills farm link candidate skipped, rel not shell-safe (rel={})", rel);
+                continue;
             }
+            if (disabledNames.contains(name) || l4Names.contains(name)) {
+                continue;
+            }
+            candidates.add(rel);
         }
         return List.copyOf(candidates);
+    }
+
+    /** 端点 enabled 技能名单（D-4 缓存内；异常上抛由 {@link #hydrate} 归为指纹未知走收敛，候选为空仅清理） */
+    private List<String> endpointSkillNames() {
+        var svc = options != null ? options.getSkillBundleService() : null;
+        if (svc == null) {
+            throw new IllegalStateException("skill bundle service unwired");
+        }
+        return svc.currentVersion().skills();
     }
 
     /**
      * 软链农场投放（规则 1-5，单条 exec 幂等收敛）：对 manifest 内的包技能路径有全权——
      * 目标态为软链 {@code <store>/CURRENT/<skill>}（B-4 间接寻址不钉版本目录），路径现存任何物
      * （缺失 / 悬空 / 降级会话残留真实文件）统一 rm 后重建（D-2）。禁用判定复用
-     * {@link #disabledSkillDirs}：禁用名不建链且随 exec 清理既有软链（B-2，会话中途禁用生效——
+     * {@link #disabledSkillNames}：禁用名不建链且随 exec 清理既有软链（B-2，会话中途禁用生效——
      * 用户级禁用经 L4 revision bump 进指纹；全局禁用进端点版本，版本变化触发重收敛主动清理）；
      * prune 与禁用清理复用容器内清理语义。exec 失败上抛（CAS 复位，下次触发重试），判定不变。
      *
@@ -266,7 +268,7 @@ final class SkillsFarm {
      * （同 sandboxId resume）软链不重建为已接受盲点——与投影指纹缓存 §3.3 系统性盲点同姿态；
      * per-call 容器侧标记兜底被否决（观测容器态本身即 1 次 exec RTT）。
      */
-    private void hydrate(String scope, Path scopeDir, SkillSyncGate gate) throws Exception {
+    private void hydrate(String scope, SkillSyncGate gate) throws Exception {
         String fingerprint;
         try {
             fingerprint = farmFingerprint(userKey.get());
@@ -287,13 +289,13 @@ final class SkillsFarm {
             log.debug("[sandbox-open] skills farm fingerprint unchanged ({}), skipping converge", scope);
             return;
         }
-        var disabledDirs = disabledSkillDirs(
-            options.getSkillDisabledChecker(), userKey.get(), scopeDir);
+        var disabledNames = disabledSkillNames(
+            options.getSkillDisabledChecker(), userKey.get(), endpointSkillNames());
         Set<String> l4Names = gate != null && gate.skillFarmState() != null
             ? gate.skillFarmState().l4Names()
             : Set.of();
         var linkCmd = new StringBuilder();
-        var candidates = linkCandidates(scopeDir, disabledDirs, l4Names);
+        var candidates = linkCandidates(endpointSkillNames(), disabledNames, l4Names);
         for (var rel : candidates) {
             if (linkCmd.length() > 0) {
                 linkCmd.append(" && ");
@@ -307,7 +309,7 @@ final class SkillsFarm {
         }
         String pruneCmd = "find " + options.getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR
             + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
-        String rmCmd = disabledRmCmd(scope, disabledDirs, options.getWorkspaceRoot());
+        String rmCmd = disabledRmCmd(scope, disabledNames, options.getWorkspaceRoot());
         String orphanCmd = orphanDiffCmd(scope, candidates, options.getWorkspaceRoot());
         String cleanup = pruneCmd;
         if (!rmCmd.isEmpty()) {
@@ -377,49 +379,34 @@ final class SkillsFarm {
     }
 
     /**
-     * 禁用技能目录解析（oa-1110-repro-fixes-design §2.1a）：包级禁用名 + 用户级禁用，
-     * 返回相对 scopeDir 的路径集。checker 缺失/目录缺失返回空集；用户级判定异常按
+     * 禁用技能名解析（oa-1110-repro-fixes-design §2.1a；端点 manifest 制后按名单逐名判定）：
+     * 包级禁用名 + 用户级禁用，返回禁用名集。checker 缺失返回空集；用户级判定异常按
      * 未禁用处理（fail-soft，不中断投放）。
      */
-    private static Set<Path> disabledSkillDirs(SkillDisabledChecker checker, String uid, Path scopeDir) {
-        if (checker == null || !Files.isDirectory(scopeDir)) {
+    private static Set<String> disabledSkillNames(SkillDisabledChecker checker, String uid,
+                                                  List<String> endpointSkills) {
+        if (checker == null) {
             return Set.of();
         }
-        var disabled = new LinkedHashSet<Path>();
+        var disabled = new LinkedHashSet<String>();
         Set<String> pkgDisabled;
         try {
             pkgDisabled = checker.packageDisabled();
         } catch (Exception e) {
             pkgDisabled = Set.of();
         }
-        try (var nsStream = Files.list(scopeDir)) {
-            for (var ns : nsStream.toList()) {
-                if (!Files.isDirectory(ns)) {
-                    continue;
-                }
-                try (var skillStream = Files.list(ns)) {
-                    for (var skillDir : skillStream.toList()) {
-                        if (!Files.isDirectory(skillDir)) {
-                            continue;
-                        }
-                        String name = skillDir.getFileName().toString();
-                        if (pkgDisabled.contains(name)) {
-                            disabled.add(scopeDir.relativize(skillDir));
-                            continue;
-                        }
-                        try {
-                            if (checker.isUserDisabled(uid, name)) {
-                                disabled.add(scopeDir.relativize(skillDir));
-                            }
-                        } catch (Exception e) {
-                            log.warn("[sandbox-open] disabled-check failed for {}: {}", name, e.getMessage());
-                        }
-                    }
-                }
+        for (String name : endpointSkills) {
+            if (pkgDisabled.contains(name)) {
+                disabled.add(name);
+                continue;
             }
-        } catch (Exception e) {
-            log.warn("[sandbox-open] resolve disabled skill dirs failed: {}", e.getMessage());
-            return Set.of();
+            try {
+                if (checker.isUserDisabled(uid, name)) {
+                    disabled.add(name);
+                }
+            } catch (Exception e) {
+                log.warn("[sandbox-open] disabled-check failed for {}: {}", name, e.getMessage());
+            }
         }
         return disabled;
     }
@@ -428,14 +415,14 @@ final class SkillsFarm {
      * 容器内禁用技能目录的清理命令段（当前 scope 内；空集返回空串）。路径单引号包裹，
      * 含单引号/控制字符/{@code ..} 的相对路径直接跳过（防御性：技能名来自 SDK stage 落盘）。
      */
-    private static String disabledRmCmd(String scope, Set<Path> disabledDirs, String workspaceRoot) {
-        if (disabledDirs.isEmpty()) {
+    private static String disabledRmCmd(String scope, Set<String> disabledNames, String workspaceRoot) {
+        if (disabledNames.isEmpty()) {
             return "";
         }
         var sb = new StringBuilder();
         String scopeRoot = workspaceRoot + "/" + SkillCacheScope.CACHE_DIR + "/" + scope;
-        for (var rel : disabledDirs) {
-            String joined = rel.toString().replace('\\', '/');
+        for (var name : disabledNames) {
+            String joined = SKILL_NS + "/" + name;
             if (!isShellSafeRelPath(joined)) {
                 continue;
             }

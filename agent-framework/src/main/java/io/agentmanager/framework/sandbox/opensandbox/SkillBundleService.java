@@ -72,7 +72,16 @@ public class SkillBundleService {
         this.clock = clock;
     }
 
-    public record SkillVersion(String version, int skillCount, long sizeBytes) {
+    /**
+     * 版本指纹 + bundle 概览。{@code skills} 为与 bundle 打包同源的 enabled 技能名有序清单
+     * （skills-syncd 端点 manifest：farm 建链候选来自它，宿主 stage 目录遍历退役；
+     * version 响应加字段对守护透明，D-9 可选字段预留）。
+     */
+    public record SkillVersion(String version, int skillCount, long sizeBytes, List<String> skills) {
+
+        public SkillVersion(String version, int skillCount, long sizeBytes) {
+            this(version, skillCount, sizeBytes, List.of());
+        }
     }
 
     public record BundlePayload(long size, String sha256, BundleStream stream) {
@@ -156,10 +165,15 @@ public class SkillBundleService {
             for (var f : files) {
                 total += f.size();
             }
-            return new SkillVersion(version, files.size(), total);
+            var skills = files.stream()
+                .map(f -> f.rel().split("/")[0])
+                .distinct()
+                .sorted()
+                .toList();
+            return new SkillVersion(version, files.size(), total, skills);
         } catch (Exception e) {
             log.warn("[skills-bundle] version fingerprint failed: {}", e.getMessage());
-            return new SkillVersion(ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0);
+            return new SkillVersion(ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, List.of());
         }
     }
 

@@ -109,6 +109,20 @@ class SkillBundleServiceTest {
     }
 
     @Test
+    void versionShouldExposeEnabledSkillNamesForFarmManifest() throws Exception {
+        // PR-4b 端点 manifest：farm 候选名单来自 version 响应（与 bundle 打包同源枚举，
+        // 服务级禁用不进名单）
+        var service = service(Duration.ZERO);
+        skill("demo-a", "# demo a\n", "scripts/run.py", "print(1)\n");
+        skill("demo-b", "# demo b\n");
+        manageService().toggleSkill("demo-b");
+
+        var version = service.currentVersion();
+
+        assertEquals(List.of("demo-a"), version.skills());
+    }
+
+    @Test
     void bundleShouldProduceIdenticalBytesForSameVersion() throws Exception {
         var service = service(Duration.ZERO);
         skill("demo-a", "# demo a\n", "scripts/run.py", "print(1)\n");
