@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.agentmanager.framework.service.FileAssetStore;
+import io.agentmanager.framework.service.UploadWorkspaceInjector;
 import io.agentmanager.framework.service.WorkspaceReader;
 import io.agentmanager.framework.service.storage.FileStorage;
 import io.agentscope.core.agent.RuntimeContext;
@@ -1196,7 +1197,14 @@ public class OpenSandbox extends AbstractBaseSandbox
                 // 沙箱容器可能在远端主机，无法像非沙箱路径那样 ls 本地目录
                 var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(userId, userId));
                 for (var f : pending) {
-                    var wsPath = uniqueWorkspacePath(taken, f.fileName());
+                    // workspace_path 是路径单一真相源：chat 请求时已预留（UploadWorkspaceInjector
+                    // #ensureWorkspacePath，先行于提示构造），此处按预留路径原样写入——提示路径
+                    // =注入路径，撞名不得在注入时刻改名（提示文本请求时已冻结，改名即漂移，
+                    // agent 按提示读文件必 file_not_found）。null 仅为遗留行兜底（上传后从未
+                    // 发起对话，无提示引用，此时分配无漂移风险）
+                    var wsPath = f.workspacePath() != null
+                        ? f.workspacePath()
+                        : UploadWorkspaceInjector.allocateWorkspacePath(taken, f.fileName());
                     try (var in = fileStorage.read(f.storageKey())) {
                         osbSandbox.files().write(List.of(
                             com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
@@ -1209,7 +1217,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                                 .mode(644)
                                 .build()));
                     }
-                    // 注入成功后才回写 workspace_path（保证路径与沙箱内实际一致）
+                    // 注入成功后才回写 workspace_path（预留/兜底分配同值幂等，保证路径与沙箱内实际一致）
                     fileAssetStore.updateWorkspacePath(f.id(), wsPath);
                     taken.add(wsPath);
                     injectedIds.add(f.id());
@@ -1222,29 +1230,6 @@ public class OpenSandbox extends AbstractBaseSandbox
                 log.warn("[sandbox-open] failed to inject pending uploads: {}", e.getMessage());
             }
         }
-    }
-
-    /**
-     * 唯一化工作区路径（uploads/{name}，同名追加 _1/_2，与 UploadWorkspaceInjector 同款语义）。
-     * 冲突判定基于 taken 集合（file_asset 历史注入路径 + 本批次已分配），命中即从集合剔除后返回；
-     * 上界 1000 兜底 UUID（防极端同名风暴无限循环）。
-     */
-    private static String uniqueWorkspacePath(java.util.Set<String> taken, String fileName) {
-        var base = "uploads/" + fileName;
-        if (!taken.contains(base)) {
-            return base;
-        }
-        int dot = fileName.lastIndexOf('.');
-        var stem = dot > 0 ? fileName.substring(0, dot) : fileName;
-        var ext = dot > 0 ? fileName.substring(dot) : "";
-        for (int i = 1; i <= 1000; i++) {
-            var candidate = "uploads/" + stem + "_" + i + ext;
-            if (!taken.contains(candidate)) {
-                return candidate;
-            }
-        }
-        log.warn("[sandbox-open] too many conflicting names for {}, using UUID fallback", fileName);
-        return "uploads/" + stem + "_" + java.util.UUID.randomUUID().toString().substring(0, 8) + ext;
     }
 
     /**

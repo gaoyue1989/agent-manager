@@ -333,12 +333,15 @@ class OpenSandboxTest {
     }
 
     @Test
-    void injectUploadsShouldDeduplicateSameNameAcrossTurns() throws Exception {
-        // 回归钉子：同名上传注入同一路径会静默覆盖（file_asset 多行 workspace_path 相同）。
-        // 第二 turn 注入第二个同名文件时，须按历史注入记录追加 _1 后缀
+    void injectUploadsShouldHonorReservedWorkspacePath() throws Exception {
+        // 回归钉子（2026-11-14 真机实测复现）：路径预留先行于提示构造（chat 请求时
+        // ensureWorkspacePath），注入必须按已预留 workspace_path 原样写入——即便历史集合
+        // 含同值路径也不得改名。旧实现注入时按历史撞名重命名 → 提示路径（请求时冻结）与
+        // 磁盘实际路径漂移，agent 按提示读文件必 file_not_found（同名二次上传/容器重建
+        // 重放即触发）。
         var store = mockAssetStore();
         when(store.listWorkspacePaths("u2", "u2")).thenReturn(List.of("uploads/report.docx"));
-        when(store.listPending("u2", "u2")).thenReturn(List.of(asset("f2", "report.docx")));
+        when(store.listPending("u2", "u2")).thenReturn(List.of(reserved("f2", "report.docx", "uploads/report.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u2");
@@ -348,19 +351,41 @@ class OpenSandboxTest {
         var captor = ArgumentCaptor.forClass(java.util.List.class);
         verify(osb.files()).write(captor.capture());
         var entry = (WriteEntry) captor.getValue().get(0);
-        assertEquals("uploads/report_1.docx", entry.getPath(), "同名须唯一化为 _1 后缀，防覆盖历史文件");
+        assertEquals("uploads/report.docx", entry.getPath(), "注入必须按预留路径原样写入，保证提示路径=磁盘路径");
+        verify(store).updateWorkspacePath("f2", "uploads/report.docx");
+        verify(store).markInjected(List.of("f2"));
+    }
+
+    @Test
+    void injectUploadsShouldAllocateAndPersistForLegacyRowsWithoutPath() throws Exception {
+        // 无预留路径的遗留 pending 行（上传后从未发起对话）：注入时按历史撞名分配并回写，
+        // 保证后续轮次提示路径与磁盘一致
+        var store = mockAssetStore();
+        when(store.listWorkspacePaths("u3", "u3")).thenReturn(List.of("uploads/plan.docx"));
+        when(store.listPending("u3", "u3")).thenReturn(List.of(asset("f3", "plan.docx")));
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setUserKey("u3");
+
+        sandbox.injectPendingUploads();
+
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files()).write(captor.capture());
+        var entry = (WriteEntry) captor.getValue().get(0);
+        assertEquals("uploads/plan_1.docx", entry.getPath());
+        verify(store).updateWorkspacePath("f3", "uploads/plan_1.docx");
     }
 
     @Test
     void injectUploadsShouldDeduplicateWithinSameBatch() throws Exception {
-        // 同一批次两份同名文件：第二份也得避开第一份刚分配的路径
+        // 同一批次两份无预留的同名文件：第二份也得避开第一份刚分配的路径
         var store = mockAssetStore();
-        when(store.listWorkspacePaths("u3", "u3")).thenReturn(List.of());
-        when(store.listPending("u3", "u3")).thenReturn(List.of(
+        when(store.listWorkspacePaths("u4", "u4")).thenReturn(List.of());
+        when(store.listPending("u4", "u4")).thenReturn(List.of(
             asset("a", "plan.docx"), asset("b", "plan.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
-        sandbox.setUserKey("u3");
+        sandbox.setUserKey("u4");
 
         sandbox.injectPendingUploads();
 
@@ -369,10 +394,17 @@ class OpenSandboxTest {
         var paths = captor.getAllValues().stream()
             .map(l -> ((WriteEntry) l.get(0)).getPath()).toList();
         assertEquals(List.of("uploads/plan.docx", "uploads/plan_1.docx"), paths);
+        verify(store).updateWorkspacePath("a", "uploads/plan.docx");
+        verify(store).updateWorkspacePath("b", "uploads/plan_1.docx");
     }
 
     private static FileAssetStore.FileAsset asset(String id, String fileName) {
         return new FileAssetStore.FileAsset(id, "u", null, null, fileName, null,
+            "application/octet-stream", 1, "local", "upload/x/" + id, "upload", "pending", null);
+    }
+
+    private static FileAssetStore.FileAsset reserved(String id, String fileName, String wsPath) {
+        return new FileAssetStore.FileAsset(id, "u2", null, null, fileName, wsPath,
             "application/octet-stream", 1, "local", "upload/x/" + id, "upload", "pending", null);
     }
 
