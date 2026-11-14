@@ -293,7 +293,8 @@ final class SkillsFarm {
             ? gate.skillFarmState().l4Names()
             : Set.of();
         var linkCmd = new StringBuilder();
-        for (var rel : linkCandidates(scopeDir, disabledDirs, l4Names)) {
+        var candidates = linkCandidates(scopeDir, disabledDirs, l4Names);
+        for (var rel : candidates) {
             if (linkCmd.length() > 0) {
                 linkCmd.append(" && ");
             }
@@ -307,7 +308,14 @@ final class SkillsFarm {
         String pruneCmd = "find " + options.getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR
             + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
         String rmCmd = disabledRmCmd(scope, disabledDirs, options.getWorkspaceRoot());
-        String cleanup = rmCmd.isEmpty() ? pruneCmd : pruneCmd + "; " + rmCmd;
+        String orphanCmd = orphanDiffCmd(scope, candidates, options.getWorkspaceRoot());
+        String cleanup = pruneCmd;
+        if (!rmCmd.isEmpty()) {
+            cleanup += "; " + rmCmd;
+        }
+        if (!orphanCmd.isEmpty()) {
+            cleanup += "; " + orphanCmd;
+        }
         String command = linkCmd.length() == 0 ? "{ " + cleanup + "; }" : linkCmd + " && { " + cleanup + "; }";
         var execution = osbSandbox.commands().run(command);
         if (execution.getExitCode() != null && execution.getExitCode() != 0) {
@@ -319,6 +327,26 @@ final class SkillsFarm {
         filesystemSpec.recordScopedSkillCacheFingerprint(id, scope,
             OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, fingerprint);
         filesystemSpec.markHydratedScopedScope(id, scope);
+    }
+
+    /**
+     * 孤儿软链差集清理（§6.2-3：manifest 已禁用/移除的既有软链删除）：容器内当前 scope 的
+     * 软链不在本次候选集内即为孤儿（包技能移除/改名后的残留），悬空滞留会让 load 撞已删内容
+     * ——随收敛 exec 在 shell 内枚举+差集删除（不增加 exec 数，D-10 稳态 0 exec 不受影响）。
+     * 禁用目录由 {@link #disabledRmCmd} 负责（B-2 同语义，候选集外差集与其自然重合、双删无害）。
+     * 真实场景实测（kind 三路径验收）揪出 PR-4a 起的缺口：包技能移除后守护 GC 正确、容器孤儿链
+     * 永久滞留。候选名已过 {@link #isShellSafeRelPath}（无引号/空白/glob 元字符风险由 quoted
+     * case 模式兜底），`${__rel}` 展开在 case 模式的带引号段内按字面匹配。
+     */
+    private String orphanDiffCmd(String scope, List<String> candidates, String workspaceRoot) {
+        String scopeAll = workspaceRoot + "/" + SkillCacheScope.CACHE_DIR + "/" + scope;
+        var pipeList = new StringBuilder("|");
+        for (var c : candidates) {
+            pipeList.append(c).append('|');
+        }
+        return "find '" + scopeAll + "' -type l 2>/dev/null | while IFS= read -r __f; do"
+            + " __rel=${__f#'" + scopeAll + "/'};"
+            + " case '" + pipeList + "' in *\"|$__rel|\"*) ;; *) rm -rf \"$__f\" ;; esac; done; true";
     }
 
     /**

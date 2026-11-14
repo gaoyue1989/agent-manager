@@ -1810,6 +1810,48 @@ class OpenSandboxTest {
     }
 
     @Test
+    void farmOrphanLinkShouldBeRemovedWhenRemovedFromManifest() throws Exception {
+        // §6.2-3「农场触发时对 manifest 已禁用/移除的既有软链执行删除」：宿主 stage 已无 demo-b
+        // （包版本移除后端点版本变化 → 指纹变化 → 重收敛），容器内旧 demo-b 软链为孤儿——
+        // 不在 linkCandidates 内，必须被收敛 exec 清理（否则悬空链永久滞留，load 撞已删内容）。
+        // demo-a 照常建链。真实场景实测（kind 三路径验收）揪出：PR-4a 起孤儿链即不清理。
+        var host = java.nio.file.Files.createTempDirectory("farm-orphan");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-orphan-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        String scopeAll = "/workspace/.skills-cache/sess-A";
+        String scopeRoot = scopeAll + "/oaf-package";
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                return mockExecution(0, "v-" + version, "");
+            }
+            return mockExecution(0, "", "");
+        });
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-orphan"), osb,
+            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var cmd = farmConvergeCommands(osb).get(0);
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a' '" + scopeRoot + "/demo-a'"),
+            "候选内技能照常建链：" + cmd);
+        // 差集清理段：枚举容器软链，与候选字面集（仅 demo-a）比对——集外（demo-b 孤儿）rm
+        assertTrue(cmd.contains("find '" + scopeAll + "' -type l"), "收敛 exec 内嵌孤儿枚举：" + cmd);
+        assertTrue(cmd.contains("case '|oaf-package/demo-a|' in"), "候选字面集不含已移除的 demo-b：" + cmd);
+        assertTrue(cmd.contains("*) rm -rf \"$__f\" ;; esac"), "集外软链差集删除：" + cmd);
+        assertFalse(cmd.contains("|oaf-package/demo-b|"), "已移除技能不得进入候选字面集：" + cmd);
+    }
+
+    @Test
     void farmConvergeShouldRebuildRealFileAndDanglingLink() throws Exception {
         // D-2/§10.2「悬空链重建 + 降级会话 tar 物化残留真实文件统一收敛为软链」：农场对 manifest
         // 内包技能路径有全权，路径现存任何物目标态一律 rm -rf + ln -s 重建为软链，不得因「已存在」
