@@ -636,7 +636,15 @@ public class ChatStreamController {
                 var processedMessage = skillInjectionService.injectSkillReferences(
                     message, finalUserId, body.skills());
 
-                if (body.fileIds() != null && !(sandboxConfig != null && sandboxConfig.enabled())) {
+                // 上传文件准备（均须先行于 buildContentBlocks 的路径提示构造，保证提示路径
+                // 与磁盘实际一致）：沙箱模式注入发生在 acquire（晚于提示构造），只能先预留
+                // workspace_path（分配即回写，见 UploadWorkspaceInjector#ensureWorkspacePath）；
+                // 非沙箱模式注入即写盘，提示取注入后的 workspace_path
+                if (body.fileIds() != null && sandboxConfig != null && sandboxConfig.enabled()) {
+                    for (var fileId : body.fileIds()) {
+                        workspaceInjector.ensureWorkspacePath(fileId, finalUserId, finalSessionId);
+                    }
+                } else if (body.fileIds() != null) {
                     for (var fileId : body.fileIds()) {
                         workspaceInjector.injectToWorkspace(fileId, finalSessionId);
                     }
