@@ -12,6 +12,7 @@ import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.FileSystemSkillRepository;
 import io.agentscope.harness.agent.skill.WorkspaceSkillRepository;
 import io.agentscope.harness.agent.skill.runtime.MarketplaceStager;
+import io.agentscope.harness.agent.skill.runtime.ShellPathPolicy;
 import io.agentscope.harness.agent.skill.runtime.MarketplaceStager.RepoBound;
 import io.agentscope.harness.agent.skill.runtime.MarketplaceStager.StageResult;
 import io.agentscope.harness.agent.skill.runtime.MarketplaceStager.StageResult.Cached;
@@ -144,6 +145,17 @@ class MarketplaceStagerShadowTest {
 
         assertEquals("_global", out.get(anonymous), "source 空 = _global（原 effectiveSource 语义）");
         assertTrue(MarketplaceStager.resolveSourceNamespaces(null).isEmpty());
+    }
+
+    @Test
+    void shellPathRenderingMustMatchFarmContainerPathVerbatim() {
+        // 设计 §3.3 C-1：合成 Cached 经 ShellPathPolicy 渲染的路径必须与 farm 建链路径逐字一致
+        // （farm: workspaceRoot + "/.skills-cache/" + scope + "/oaf-package/" + skill）
+        var policy = ShellPathPolicy.sandbox("/workspace");
+        var rendered = policy.resolve("demo-a", new StageResult.Cached("user-1", "oaf-package", "demo-a"));
+
+        var farmPath = "/workspace/.skills-cache/user-1/oaf-package/demo-a";
+        assertEquals(farmPath, rendered);
     }
 
     @Test
