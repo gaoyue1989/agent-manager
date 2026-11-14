@@ -45,6 +45,11 @@ public class UploadWorkspaceInjector {
     /**
      * 非沙箱模式下将文件注入会话工作区 uploads/ 目录（本地磁盘）。
      *
+     * <p>路径取 {@link #assignWorkspacePaths} 预分配的 workspace_path（同一分配真相源）；
+     * 状态机 injected 幂等跳过（同 fileId 重复引用不重写）。pending 行目标已在磁盘存在时
+     * （agent 手写同名防覆盖），按 DB 行集 ∪ 目录现状重分配并回写——本调用先行于提示构造，
+     * 改名对提示可见，不产生路径漂移。
+     *
      * @param workspaceKey SDK 隔离 key（Channel 链路 = sessionId，实测文件根 {root}/{sessionId}/）
      * @return 实际工作区路径（含唯一化后缀）；文件不存在/读取失败返回 null（调用方降级）
      */
@@ -55,6 +60,9 @@ public class UploadWorkspaceInjector {
             return null;
         }
         var asset = meta.get();
+        if ("injected".equals(asset.status())) {
+            return asset.workspacePath();
+        }
         byte[] bytes;
         try (var in = fileStorage.read(asset.storageKey())) {
             bytes = in.readAllBytes();
@@ -63,13 +71,27 @@ public class UploadWorkspaceInjector {
             return null;
         }
         var root = workspaceRoot(workspaceKey);
-        var wsPath = uniqueWorkspacePath(root, asset.fileName());
+        var wsPath = asset.workspacePath() != null ? asset.workspacePath()
+            : allocateWorkspacePath(new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(workspaceKey)),
+                asset.fileName());
+        var target = root.resolve(wsPath);
+        if (Files.exists(target)) {
+            var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(workspaceKey));
+            try (var stream = Files.list(root.resolve("uploads"))) {
+                stream.map(p -> "uploads/" + p.getFileName().toString()).forEach(taken::add);
+            } catch (IOException e) {
+                log.warn("inject: uploads dir probe failed ({}), rename against DB set only", e.getMessage());
+            }
+            wsPath = allocateWorkspacePath(taken, asset.fileName());
+            target = root.resolve(wsPath);
+        }
         try {
-            var target = root.resolve(wsPath);
             Files.createDirectories(target.getParent());
             Files.write(target, bytes);
-            // 注入成功后才回写 workspace_path（保证路径与工作区内实际一致）
-            fileAssetStore.updateWorkspacePath(fileId, wsPath);
+            if (!wsPath.equals(asset.workspacePath())) {
+                fileAssetStore.updateWorkspacePath(fileId, wsPath);
+            }
+            fileAssetStore.markInjected(java.util.List.of(fileId));
             log.info("inject: uploaded {} → {}", asset.fileName(), wsPath);
             return wsPath;
         } catch (Exception e) {
@@ -109,46 +131,61 @@ public class UploadWorkspaceInjector {
         return "uploads/" + stem + "_" + java.util.UUID.randomUUID().toString().substring(0, 8) + ext;
     }
 
-    /** 唯一化工作区文件名：基于会话目录 ls 判断冲突（不覆盖，防静默覆盖历史上传）。 */
-    private String uniqueWorkspacePath(java.nio.file.Path root, String fileName) {
-        if (!Files.isDirectory(root.resolve("uploads"))) {
-            return "uploads/" + fileName;
-        }
-        try (var stream = Files.list(root.resolve("uploads"))) {
-            var existing = stream.map(p -> "uploads/" + p.getFileName().toString())
-                .collect(java.util.stream.Collectors.toSet());
-            return allocateWorkspacePath(existing, fileName);
-        } catch (IOException e) {
-            log.warn("inject: unique name probe failed, fallback uploads/{}", fileName);
-            return "uploads/" + fileName;
-        }
-    }
-
     /**
-     * 沙箱模式工作区路径预留（chat 请求时、路径提示构造前调用）：file_asset 已有
-     * workspace_path 直接返回（幂等）；未分配则按 user 维度历史注入路径撞名分配并回写。
+     * 上传文件绑定 + 路径预分配（chat 请求路径、提示构造之前的 SSOT 入口，issue #345）：
+     * <ol>
+     *   <li>归属校验：上传记录 userKey 与当前 chat 用户不一致 → 跳过+warn（他人文件不可引用）</li>
+     *   <li>bind-at-use：session_id 为 NULL 的行（上传后从未被引用）首次引用即绑定本会话；
+     *       已绑定异 session → 跳过+warn（所有权=首引用会话，前端附件芯片随会话切换清空，
+     *       仅 API 直传可触发）</li>
+     *   <li>路径分配：workspace_path 为 NULL 的行按占用集合（同 session 的 DB 行集 +
+     *       本批次已分配）唯一化分配并立即回写（分配即预留）</li>
+     * </ol>
      *
      * <p>分配必须先行于提示构造：提示文本在请求时刻冻结，而沙箱注入发生在 acquire
      * （晚于提示构造）——若把撞名改名留给注入时刻，提示路径与磁盘实际路径漂移，agent
-     * 按提示读文件必 file_not_found（2026-11-14 真机实测复现：同名二次上传/沙箱容器
-     * 重建重放即触发）。预留后注入对已分配路径原样写入（OpenSandbox.injectPendingUploads），
-     * 提示路径=注入路径由 workspace_path 单一真相源保证。
+     * 按提示读文件必 file_not_found（2026-11-14 真机实测复现）。预留后注入对已分配路径
+     * 原样写入（OpenSandbox.injectPendingUploads），提示路径=注入路径由 workspace_path
+     * 单一真相源保证。同 session turn 由 TurnLeaseGuard 串行，并发分配天然无竞态。
+     *
+     * @return 本会话可注入的 fileId 列表（跳过项不出现，调用方据此注入/构造提示）
      */
-    public String ensureWorkspacePath(String fileId, String userKey, String sessionId) {
-        var meta = fileAssetStore.get(fileId);
-        if (meta.isEmpty()) {
-            log.warn("reserve: file_asset {} not found", fileId);
-            return null;
+    public java.util.List<String> assignWorkspacePaths(java.util.List<String> fileIds,
+                                                       String userKey, String sessionId) {
+        var bound = new java.util.ArrayList<String>();
+        if (fileIds == null || fileIds.isEmpty()) {
+            return bound;
         }
-        var asset = meta.get();
-        if (asset.workspacePath() != null) {
-            return asset.workspacePath();
+        var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(sessionId));
+        for (var fileId : fileIds) {
+            var meta = fileAssetStore.get(fileId);
+            if (meta.isEmpty()) {
+                log.warn("assign: file_asset {} not found, skip", fileId);
+                continue;
+            }
+            var asset = meta.get();
+            if (userKey == null || userKey.isBlank() || !userKey.equals(asset.userKey())) {
+                log.warn("assign: file {} owner {} != chat user {}, skip", fileId, asset.userKey(), userKey);
+                continue;
+            }
+            if (asset.sessionId() != null && !asset.sessionId().equals(sessionId)) {
+                log.warn("assign: file {} bound to session {} != chat session {}, skip (first-reference ownership)",
+                    fileId, asset.sessionId(), sessionId);
+                continue;
+            }
+            if (asset.sessionId() == null && !fileAssetStore.bindSession(fileId, sessionId)) {
+                log.warn("assign: file {} lost bind race (bound to another session), skip", fileId);
+                continue;
+            }
+            if (asset.workspacePath() == null) {
+                var wsPath = allocateWorkspacePath(taken, asset.fileName());
+                fileAssetStore.updateWorkspacePath(fileId, wsPath);
+                taken.add(wsPath);
+                log.info("assign: uploaded {} → {} (session {})", asset.fileName(), wsPath, sessionId);
+            }
+            bound.add(fileId);
         }
-        var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(userKey, sessionId));
-        var wsPath = allocateWorkspacePath(taken, asset.fileName());
-        fileAssetStore.updateWorkspacePath(fileId, wsPath);
-        log.info("reserve: uploaded {} → {}", asset.fileName(), wsPath);
-        return wsPath;
+        return bound;
     }
 
     /**

@@ -94,7 +94,7 @@ class FileAssetStoreTest {
     }
 
     @Test
-    void listPendingShouldFilterByUserAndStatus() throws Exception {
+    void listPendingShouldFilterBySessionOnly() throws Exception {
         var conn = dataSource.getConnection();
         var ps = mock(PreparedStatement.class);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
@@ -114,8 +114,23 @@ class FileAssetStoreTest {
         when(rs.getString("status")).thenReturn("pending");
         when(rs.getTimestamp("created_at")).thenReturn(java.sql.Timestamp.valueOf(LocalDateTime.now()));
 
-        assertEquals(2, store.listPending("alice", null).size());
-        verify(ps).setString(1, "alice");
+        assertEquals(2, store.listPending("s1").size());
+        // session 单条件（issue #345）：user 维度 OR 命中是跨 session 泄漏根源，SQL 必须只含 session_id
+        verify(ps).setString(1, "s1");
+    }
+
+    @Test
+    void bindSessionShouldWriteOnlyWhenUnbound() throws Exception {
+        var conn = dataSource.getConnection();
+        var ps = mock(PreparedStatement.class);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeUpdate()).thenReturn(1).thenReturn(0);
+
+        // 行未绑定（affected=1）→ 绑定成功；已被他 session 抢绑（affected=0）→ 失败
+        assertTrue(store.bindSession("id-1", "s1"));
+        verify(ps).setString(1, "s1");
+        verify(ps).setString(2, "id-1");
+        assertTrue(!store.bindSession("id-1", "s2"));
     }
 
     @Test
@@ -132,14 +147,14 @@ class FileAssetStoreTest {
     }
 
     @Test
-    void resetInjectedToPendingShouldUpdateByUser() throws Exception {
+    void resetInjectedToPendingShouldUpdateBySessionOnly() throws Exception {
         var conn = dataSource.getConnection();
         var ps = mock(PreparedStatement.class);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeUpdate()).thenReturn(2);
 
-        store.resetInjectedToPending("alice");
-        verify(ps).setString(1, "alice");
+        store.resetInjectedToPending("s1");
+        verify(ps).setString(1, "s1");
         verify(ps).executeUpdate();
     }
 
