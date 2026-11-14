@@ -436,6 +436,136 @@ test('X17 同名上传唯一化注入（_1 后缀，两份内容互不覆盖）'
   expect(Buffer.from(await second.arrayBuffer()).equals(bytesB), '第二份内容不等于其上传字节').toBe(true);
 });
 
+// ---------- X21-X23：上传会话隔离 / 换代幂等重放 / present 交付通道加固（issue #345） ----------
+
+/** mock 沙箱直写文件（绕过上传注入：构造 present 源 / 预置工作区内容） */
+async function putIntoSandbox(sandboxId: string, path: string, bytes: Buffer): Promise<number> {
+  const fd = new FormData();
+  fd.append('metadata', new Blob([JSON.stringify({ path })], { type: 'application/json' }));
+  fd.append('file', new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' }));
+  const res = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${sandboxId}/proxy/44772/files/upload`, { method: 'POST', body: fd });
+  return res.status;
+}
+
+const downloadOpsFor = async (namePart: string) =>
+  (await sandboxStats()).fileOps.filter(o => (o as Record<string, unknown>).op === 'download'
+    && String((o as Record<string, unknown>).path).includes(namePart));
+
+test('X21 会话隔离：上传件 bind-at-use，不跨 session 重放（issue #345）', async () => {
+  const uid = U();
+  const name = `isolated-${uniq()}.txt`;
+  const bytes = textBytes('x19-payload');
+  // 上传（不带 sessionId）→ 仅引用它的 session A 获得注入（首引用绑定所有权）
+  const up = await upload(BASE, bytes, name, 'text/plain', { userId: uid });
+  expect(up.status).toBe(200);
+  const fileId = (up.body as UploadResult).file_id;
+  const path = `/workspace/uploads/${name}`;
+
+  const createsBeforeA = (await sandboxStats()).creates.length;
+  const sidA = sessionIdFor(`x19a-${uniq()}`);
+  const streamA = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sidA, fileIds: [fileId] });
+  await waitTerminal(streamA);
+  expect(streamA.terminal?.type).toBe('done');
+  const idsA = (await sandboxStats()).creates.slice(createsBeforeA).map(c => c.id);
+  const hitA = await probeAcrossGenerations(idsA, [path]);
+  expect(hitA, '引用 session 应注入上传件').toBeTruthy();
+  expect(Buffer.from(await hitA!.res[0].arrayBuffer()).equals(bytes), '注入内容与上传一致').toBe(true);
+
+  // 同 uid 新 session B（不引用该文件）：旧 session 上传件不得重放进 B 的沙箱
+  const createsBeforeB = (await sandboxStats()).creates.length;
+  const sidB = sessionIdFor(`x19b-${uniq()}`);
+  const streamB = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sidB });
+  await waitTerminal(streamB);
+  expect(streamB.terminal?.type).toBe('done');
+  const idsB = (await sandboxStats()).creates.slice(createsBeforeB).map(c => c.id);
+  expect(idsB.length, '新会话首 turn 应新建沙箱').toBeGreaterThan(0);
+  for (const id of idsB) {
+    const probe = await downloadFromSandbox(id, path);
+    expect(probe.status, `session B 沙箱 ${id} 不得含旧 session 上传件`).toBe(404);
+  }
+});
+
+test('X22 容器换代幂等重放：同路径重注入，无 _N 漂移（issue #345）', async () => {
+  const uid = U();
+  const name = `replay-${uniq()}.txt`;
+  const bytes = textBytes('x20-payload');
+  const up = await upload(BASE, bytes, name, 'text/plain', { userId: uid });
+  expect(up.status).toBe(200);
+  const fileId = (up.body as UploadResult).file_id;
+  const path = `/workspace/uploads/${name}`;
+  const sid = sessionIdFor(`x20-${uniq()}`);
+
+  const createsBefore = (await sandboxStats()).creates.length;
+  const s1 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid, fileIds: [fileId] });
+  await waitTerminal(s1);
+  const gen1 = (await sandboxStats()).creates.slice(createsBefore).map(c => c.id);
+  const hit1 = await probeAcrossGenerations(gen1, [path]);
+  expect(hit1, '首 turn 应注入上传件').toBeTruthy();
+
+  // 杀掉绑定沙箱（容器换代）→ 下一 turn 重建并按预留路径原样重注入
+  const destroy = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${hit1!.sandboxId}`, { method: 'DELETE' });
+  expect([200, 204]).toContain(destroy.status);
+
+  const createsBefore2 = (await sandboxStats()).creates.length;
+  const s2 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid });
+  await waitTerminal(s2);
+  expect(s2.terminal?.type).toBe('done');
+  const gen2 = (await sandboxStats()).creates.slice(createsBefore2).map(c => c.id);
+  expect(gen2.length, '换代应新建沙箱').toBeGreaterThan(0);
+  const hit2 = await probeAcrossGenerations(gen2, [path]);
+  expect(hit2, '换代后应按同一路径重注入').toBeTruthy();
+  expect(Buffer.from(await hit2!.res[0].arrayBuffer()).equals(bytes), '重注入内容一致').toBe(true);
+  const stem = name.slice(0, -'.txt'.length);
+  const dup = await downloadFromSandbox(hit2!.sandboxId, `/workspace/uploads/${stem}_1.txt`);
+  expect(dup.status, '幂等重放不得产生 _N 漂移副本（提示路径=磁盘路径不变量）').toBe(404);
+});
+
+test('X23 present 交付通道：>50MB stat 快速拒绝无传输，≤50MB 流式交付全链路（issue #345）', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`x21-${uniq()}`);
+  // 开沙箱（plain turn 拿本轮沙箱 id）
+  const createsBefore = (await sandboxStats()).creates.length;
+  const s0 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid });
+  await waitTerminal(s0);
+  expect(s0.terminal?.type).toBe('done');
+  const ids = (await sandboxStats()).creates.slice(createsBefore).map(c => c.id);
+  expect(ids.length).toBeGreaterThan(0);
+  const sbx = ids[ids.length - 1];
+
+  // mock 直写 51MB（> FILE_PRESENT_MAX_MB=50）与 40MB（≤cap）源文件（源无界场景：shell 产物）
+  const oversizePath = `/workspace/outputs/huge-${uniq()}.bin`;
+  const okPath = `/workspace/outputs/ok-${uniq()}.bin`;
+  expect(await putIntoSandbox(sbx, oversizePath, Buffer.alloc(51 * 1024 * 1024, 0x61))).toBe(200);
+  const okBytes = Buffer.alloc(40 * 1024 * 1024, 0x62);
+  expect(await putIntoSandbox(sbx, okPath, okBytes)).toBe(200);
+
+  // >50MB present：stat 前置快速拒绝——不发起 /files/download 传输（旧实现先整读进堆后拒 → OOM）
+  const hugeName = oversizePath.split('/').pop()!;
+  const s1 = chat({ message: `[E2E:file:present](${oversizePath})`, userId: uid, sessionId: sid });
+  await waitTerminal(s1);
+  expect(s1.terminal?.type).toBe('done');
+  expect(toolOutputOf(s1.frames), '超限应被 stat 快速拒绝').toContain('exceeds');
+  expect(await downloadOpsFor(hugeName), '快速拒绝不得发起文件传输').toHaveLength(0);
+  const rejectedReady = s1.frames.find(f => f.type === 'file_ready');
+  expect(rejectedReady, '超限不得产出 file_ready 卡片').toBeUndefined();
+
+  // ≤50MB present：stat 通过 → readStream → writeBounded 流式交付 → file_ready → 下载全链路
+  const okName = okPath.split('/').pop()!;
+  const s2 = chat({ message: `[E2E:file:present](${okPath})`, userId: uid, sessionId: sid });
+  await waitTerminal(s2);
+  expect(s2.terminal?.type).toBe('done');
+  const ready = s2.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
+  expect(ready, '≤cap 应产出 file_ready 帧').toBeTruthy();
+  expect(ready!.file_name).toBe(okName);
+  expect(Number(ready!.size)).toBe(okBytes.length);
+  const dl = await fetch(`${BASE}${ready!.download_url}`);
+  expect(dl.status).toBe(200);
+  const got = Buffer.from(await dl.arrayBuffer());
+  expect(got.length).toBe(okBytes.length, '交付字节长度一致');
+  expect(got.equals(okBytes), '交付字节内容一致');
+  expect(await downloadOpsFor(okName).then(ops => ops.length), '流式传输应恰好发起一次 download').toBe(1);
+});
+
 // ---------- X18：工作区投影新鲜度（stage 晚于 start 的技能目录补水合，E-SKILL-4） ----------
 // 回归背景：技能目录（.skills-cache/{scope}/oaf-package/...）由 HarnessSkillMiddleware 在
 // 每轮推理 onSystemPrompt 时物化到平台本地工作区，而 SDK 的投影 hydrate 只在 sandbox start

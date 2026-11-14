@@ -29,10 +29,13 @@ public class S3FileStorage implements FileStorage {
 
     private final MinioClient client;
     private final String bucket;
+    /** 有界写 spool 目录（未知长度流先落盘计数再单 PUT；issue #345） */
+    private final java.nio.file.Path spoolDir;
 
     public S3FileStorage(io.agentmanager.framework.config.AgentManagerProperties props) {
         var c = props.file();
         this.bucket = c.storageS3Bucket();
+        this.spoolDir = java.nio.file.Path.of(props.resolvedSpoolDir());
         this.client = MinioClient.builder()
             .endpoint(c.storageS3Endpoint())
             .credentials(c.storageS3AccessKey(), c.storageS3SecretKey())
@@ -45,7 +48,7 @@ public class S3FileStorage implements FileStorage {
         } catch (Exception e) {
             throw new IllegalStateException("S3 storage init failed: " + e.getMessage(), e);
         }
-        log.info("S3FileStorage bucket: {}", bucket);
+        log.info("S3FileStorage bucket: {}, spoolDir: {}", bucket, spoolDir);
     }
 
     @Override
@@ -59,6 +62,50 @@ public class S3FileStorage implements FileStorage {
                 .build());
         } catch (Exception e) {
             throw new IOException("S3 putObject failed: " + key + ": " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public long writeBounded(String key, InputStream in, long maxBytes, String contentType) throws IOException {
+        // 未知长度流无法直接 putObject（MinIO 契约要求已知 size 或 multipart）：先 spool 到
+        // 本地文件计数拷贝——越限即中止删 spool、无 PUT 产生（堆占用恒为缓冲区级，正确性
+        // 不依赖任何前置 stat）；成功后按精确 size 单 PUT（≤cap，远小于 multipart 门槛）
+        var spool = spoolDir.resolve(key.replace('/', '_') + "."
+            + java.util.UUID.randomUUID().toString().substring(0, 8) + ".spool");
+        long written = 0;
+        try (in) {
+            java.nio.file.Files.createDirectories(spool.getParent());
+            try (var out = java.nio.file.Files.newOutputStream(spool)) {
+                byte[] buf = new byte[64 * 1024];
+                int r;
+                while ((r = in.read(buf)) != -1) {
+                    written += r;
+                    if (written > maxBytes) {
+                        throw new StorageOverflowException(maxBytes, written);
+                    }
+                    out.write(buf, 0, r);
+                }
+            }
+            try (var spooled = java.nio.file.Files.newInputStream(spool)) {
+                client.putObject(PutObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(key)
+                    .stream(spooled, written, -1)
+                    .contentType(contentType != null ? contentType : "application/octet-stream")
+                    .build());
+            }
+            return written;
+        } catch (StorageOverflowException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("S3 writeBounded failed: " + key + ": " + e.getMessage(), e);
+        } finally {
+            // spool 无论成败即删（越限/IO 失败/成功后均不留残留）
+            try {
+                java.nio.file.Files.deleteIfExists(spool);
+            } catch (Exception cleanup) {
+                log.warn("S3 writeBounded spool cleanup failed ({}): {}", spool, cleanup.getMessage());
+            }
         }
     }
 

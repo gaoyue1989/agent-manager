@@ -16,7 +16,6 @@ import io.agentscope.core.message.TextBlock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -156,38 +155,120 @@ class UploadWorkspaceInjectorTest {
         assertTrue(hint.contains("read_file"), "提示须引导优先用 read_file");
     }
 
-    // ---------- 沙箱模式路径预留（ensureWorkspacePath）：分配先行，保证提示路径=注入路径 ----------
+    // ---------- bind-at-use 绑定 + 路径预分配（assignWorkspacePaths，issue #345） ----------
 
-    @Test
-    void ensureWorkspacePathShouldAllocateAgainstHistoryAndPersist() {
-        var pending = new FileAssetStore.FileAsset("f1", "alice", "s1", null, "note.txt", null,
-            "text/plain", 1, "local", "upload/k/f1", "upload", "pending", LocalDateTime.now());
-        when(fileAssetStore.get("f1")).thenReturn(Optional.of(pending));
-        when(fileAssetStore.listWorkspacePaths("alice", "s1")).thenReturn(List.of("uploads/note.txt"));
-
-        var wsPath = injector.ensureWorkspacePath("f1", "alice", "s1");
-
-        assertEquals("uploads/note_1.txt", wsPath, "按历史注入路径撞名分配 _1 后缀");
-        verify(fileAssetStore).updateWorkspacePath("f1", "uploads/note_1.txt");
+    /** 上传行工厂：userKey/sessionId/workspacePath/status 可变 */
+    private FileAssetStore.FileAsset uploadRow(String id, String userKey, String sessionId,
+                                               String wsPath, String status) {
+        return new FileAssetStore.FileAsset(id, userKey, sessionId, null, "note.txt", wsPath,
+            "text/plain", 1, "local", "upload/k/" + id, "upload", status, LocalDateTime.now());
     }
 
     @Test
-    void ensureWorkspacePathShouldBeIdempotentWhenAlreadyReserved() {
-        var reserved = new FileAssetStore.FileAsset("f2", "alice", "s1", null, "note.txt", "uploads/note.txt",
-            "text/plain", 1, "local", "upload/k/f2", "upload", "pending", LocalDateTime.now());
-        when(fileAssetStore.get("f2")).thenReturn(Optional.of(reserved));
+    void assignShouldBindUnboundRowsAndAllocateAgainstTaken() {
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(uploadRow("f1", "alice", null, null, "pending")));
+        when(fileAssetStore.get("f2")).thenReturn(Optional.of(uploadRow("f2", "alice", null, null, "pending")));
+        when(fileAssetStore.listWorkspacePaths("s1")).thenReturn(List.of("uploads/other.txt"));
+        when(fileAssetStore.bindSession(any(), any())).thenReturn(true);
 
-        var wsPath = injector.ensureWorkspacePath("f2", "alice", "s1");
+        var bound = injector.assignWorkspacePaths(List.of("f1", "f2"), "alice", "s1");
 
-        assertEquals("uploads/note.txt", wsPath, "已预留路径直接返回（幂等，不重分配）");
-        verify(fileAssetStore, never()).listWorkspacePaths(any(), any());
+        assertEquals(List.of("f1", "f2"), bound);
+        verify(fileAssetStore).bindSession("f1", "s1");
+        verify(fileAssetStore).bindSession("f2", "s1");
+        verify(fileAssetStore).updateWorkspacePath("f1", "uploads/note.txt");
+        verify(fileAssetStore).updateWorkspacePath("f2", "uploads/note_1.txt");
+    }
+
+    @Test
+    void assignShouldBeIdempotentForAlreadyAssignedRows() {
+        when(fileAssetStore.get("f2")).thenReturn(Optional.of(
+            uploadRow("f2", "alice", "s1", "uploads/note.txt", "pending")));
+
+        var bound = injector.assignWorkspacePaths(List.of("f2"), "alice", "s1");
+
+        assertEquals(List.of("f2"), bound);
+        verify(fileAssetStore, never()).bindSession(any(), any());
         verify(fileAssetStore, never()).updateWorkspacePath(any(), any());
     }
 
     @Test
-    void ensureWorkspacePathShouldFailSoftForMissingAsset() {
+    void assignShouldSkipForeignSessionRow() {
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(
+            uploadRow("f1", "alice", "s-other", "uploads/note.txt", "pending")));
+
+        var bound = injector.assignWorkspacePaths(List.of("f1"), "alice", "s1");
+
+        assertTrue(bound.isEmpty(), "已绑定异 session 的行跳过（所有权=首引用会话）");
+        verify(fileAssetStore, never()).bindSession(any(), any());
+        verify(fileAssetStore, never()).updateWorkspacePath(any(), any());
+    }
+
+    @Test
+    void assignShouldSkipForeignUserRow() {
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(uploadRow("f1", "bob", null, null, "pending")));
+
+        var bound = injector.assignWorkspacePaths(List.of("f1"), "alice", "s1");
+
+        assertTrue(bound.isEmpty(), "他人上传文件不可引用注入");
+        verify(fileAssetStore, never()).bindSession(any(), any());
+    }
+
+    @Test
+    void assignShouldSkipWhenBindRaceLost() {
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(uploadRow("f1", "alice", null, null, "pending")));
+        when(fileAssetStore.bindSession("f1", "s1")).thenReturn(false);
+
+        var bound = injector.assignWorkspacePaths(List.of("f1"), "alice", "s1");
+
+        assertTrue(bound.isEmpty(), "并发抢绑失败（他 session 先绑定）→ 跳过，不分配路径");
+        verify(fileAssetStore, never()).updateWorkspacePath(any(), any());
+    }
+
+    @Test
+    void assignShouldFailSoftForMissingAsset() {
         when(fileAssetStore.get("gone")).thenReturn(Optional.empty());
 
-        assertNull(injector.ensureWorkspacePath("gone", "alice", "s1"));
+        assertTrue(injector.assignWorkspacePaths(List.of("gone"), "alice", "s1").isEmpty());
+    }
+
+    // ---------- 非沙箱注入（injectToWorkspace）：injected 幂等跳过 + 磁盘撞名重分配 ----------
+
+    @Test
+    void injectToWorkspaceShouldSkipAlreadyInjectedRow() throws Exception {
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(
+            uploadRow("f1", "alice", "s1", "uploads/note.txt", "injected")));
+
+        assertEquals("uploads/note.txt", injector.injectToWorkspace("f1", "s1"));
+        verify(fileStorage, never()).read(any());
+    }
+
+    @Test
+    void injectToWorkspaceShouldRenameWhenTargetExistsOnDisk(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        // 工作区基目录用 @TempDir（testProps 默认 /config，跨运行残留会让撞名断言漂移）
+        var base = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var props = new AgentManagerProperties(base.llm(), base.server(), base.checkpoint(),
+            "/config", tmp.toString(), base.cleanup(), base.file(), base.sse(), base.harness());
+        var localInjector = new UploadWorkspaceInjector(fileStorage, fileAssetStore, props);
+        var row = uploadRow("f1", "alice", "s1", "uploads/note.txt", "pending");
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(row));
+        when(fileStorage.read("upload/k/f1")).thenReturn(
+            new java.io.ByteArrayInputStream("content".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        when(fileAssetStore.listWorkspacePaths("s1")).thenReturn(List.of("uploads/note.txt"));
+        // 预留路径已被 agent 手写同名文件占用（防静默覆盖）
+        java.nio.file.Files.createDirectories(localInjector.workspaceRoot("s1").resolve("uploads"));
+        java.nio.file.Files.writeString(localInjector.workspaceRoot("s1").resolve("uploads/note.txt"), "agent wrote");
+
+        var wsPath = localInjector.injectToWorkspace("f1", "s1");
+
+        assertEquals("uploads/note_1.txt", wsPath, "目标已被占用 → 重分配 _1（改名可见于后续提示构造）");
+        verify(fileAssetStore).updateWorkspacePath("f1", "uploads/note_1.txt");
+        verify(fileAssetStore).markInjected(List.of("f1"));
+        assertEquals("content",
+            java.nio.file.Files.readString(localInjector.workspaceRoot("s1").resolve("uploads/note_1.txt")));
+        assertEquals("agent wrote",
+            java.nio.file.Files.readString(localInjector.workspaceRoot("s1").resolve("uploads/note.txt")),
+            "agent 手写文件不被覆盖");
     }
 }

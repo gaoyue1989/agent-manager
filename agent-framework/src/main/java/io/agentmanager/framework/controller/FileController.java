@@ -25,7 +25,6 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
-import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.storage.FileStorage;
 
@@ -54,14 +53,12 @@ public class FileController {
     private final FileStorage fileStorage;
     private final FileAssetStore fileAssetStore;
     private final AgentManagerProperties props;
-    private final SandboxRuntime sandboxRuntime;
 
     public FileController(FileStorage fileStorage, FileAssetStore fileAssetStore,
-                          AgentManagerProperties props, SandboxRuntime sandboxRuntime) {
+                          AgentManagerProperties props) {
         this.fileStorage = fileStorage;
         this.fileAssetStore = fileAssetStore;
         this.props = props;
-        this.sandboxRuntime = sandboxRuntime;
     }
 
     /**
@@ -124,12 +121,14 @@ public class FileController {
             log.warn("upload storage write failed ({}): {}", fileName, e.getMessage());
             return err(HttpStatus.INTERNAL_SERVER_ERROR, "storage_write_failed", e.getMessage());
         }
-        // 非沙箱模式无注入对象 → 直接 injected；沙箱模式 pending 挂账待首 exec 注入（§6.2）
-        var status = isSandboxMode() ? "pending" : "injected";
+        // 状态机统一（issue #345）：两种模式 upload 一律 pending——实际交付时才置 injected
+        // （沙箱=acquire 注入后，非沙箱=chat 写盘后 UploadWorkspaceInjector#injectToWorkspace）。
+        // 旧「非沙箱上传即 injected」在文件尚未落盘时就宣告交付，状态失真且使 pending 超期
+        // 清理永远漏掉未发送的上传件
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
                 id, key, sessionId, null, fileName, null, mime, file.getSize(),
-                props.file().storageType(), storageKey, "upload", status,
+                props.file().storageType(), storageKey, "upload", "pending",
                 java.time.LocalDateTime.now()));
         } catch (Exception e) {
             // 落库失败 → best-effort 回滚存储对象（孤儿清扫兜底，P2）
@@ -284,11 +283,6 @@ public class FileController {
             }
         };
         return ResponseEntity.ok().headers(headers).body(stream);
-    }
-
-    /** 沙箱模式判断（agent.sandbox.enabled）：上传文件 pending 挂账待沙箱注入 */
-    private boolean isSandboxMode() {
-        return sandboxRuntime.enabled();
     }
 
     /** userId 规范化：网关 Header 优先，空值降级 "debug-user"（与 chat 一致） */

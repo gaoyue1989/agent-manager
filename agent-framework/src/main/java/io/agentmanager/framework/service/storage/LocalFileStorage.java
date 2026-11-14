@@ -49,13 +49,33 @@ public class LocalFileStorage implements FileStorage {
 
     @Override
     public void write(String key, InputStream in, long size, String contentType) throws IOException {
+        // size 参数仅为 s3 Content-Length 契约服务，local 流式写到 EOF（既有行为）
+        writeBounded(key, in, Long.MAX_VALUE, contentType);
+    }
+
+    @Override
+    public long writeBounded(String key, InputStream in, long maxBytes, String contentType) throws IOException {
         var target = resolve(key);
         Files.createDirectories(target.getParent());
-        // tmp 名带随机后缀：并发写同 key 时各线程 tmp 互不冲突（原子 move 保证最终一致性）
+        // tmp 名带随机后缀：并发写同 key 时各线程 tmp 互不冲突（原子 move 保证最终一致性）；
+        // spool 即目标同目录兄弟文件（同文件系统 → 原子 move 可用，无跨设备问题）
         var tmp = target.resolveSibling(target.getFileName() + "."
             + java.util.UUID.randomUUID().toString().substring(0, 8) + ".tmp");
-        try (in) {
-            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+        long written = 0;
+        try (in; var out = Files.newOutputStream(tmp)) {
+            byte[] buf = new byte[64 * 1024];
+            int r;
+            while ((r = in.read(buf)) != -1) {
+                written += r;
+                if (written > maxBytes) {
+                    // 越限中止：tmp 在 catch 中删除，目标对象从未产生（读方永不可见半成品）
+                    throw new StorageOverflowException(maxBytes, written);
+                }
+                out.write(buf, 0, r);
+            }
+        } catch (IOException e) {
+            Files.deleteIfExists(tmp);
+            throw e;
         }
         try {
             Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE);
@@ -65,6 +85,7 @@ public class LocalFileStorage implements FileStorage {
                 tmp, target, e.getMessage());
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
         }
+        return written;
     }
 
     @Override

@@ -119,7 +119,8 @@ public class SessionCleanupService {
         int userMappingCleaned = sessionUserStore.deleteBefore(cutoff);
 
         // 4. 清理过期上传文件（file-upload-download-plan §15-7）：
-        //    超保留期（默认 7 天）且非 pending 状态的 upload 行 → 删行 + 删存储对象
+        //    超保留期（默认 7 天）的 upload 行（含 pending——上传后从未发送的文件也占额，
+        //    issue #345）→ 删行 + 删存储对象
         cleanupExpiredUploads();
 
         // 5. Agent Protocol 终态 TaskRecord 保留期扫描（协议关闭时为 no-op）
@@ -160,10 +161,12 @@ public class SessionCleanupService {
         try {
             var cutoff = java.time.LocalDateTime.now().minusDays(props.file().retentionDays());
             List<String> keys = new java.util.ArrayList<>();
+            // 不再豁免 pending（issue #345）：上传后从未被 chat 引用的行此前永不清、占满
+            // user 配额；session 化后未绑定行也不注入——统一按保留期回收（与 injected 同口径）
             try (var conn = dataSource.getConnection();
                  var ps = conn.prepareStatement(
                      "SELECT id, storage_key FROM file_asset WHERE origin = 'upload' "
-                         + "AND status != 'pending' AND created_at < ?")) {
+                         + "AND created_at < ?")) {
                 ps.setTimestamp(1, java.sql.Timestamp.valueOf(cutoff));
                 try (var rs = ps.executeQuery()) {
                     while (rs.next()) {

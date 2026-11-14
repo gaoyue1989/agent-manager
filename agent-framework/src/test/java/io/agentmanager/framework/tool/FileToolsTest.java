@@ -16,9 +16,11 @@ import io.agentscope.core.agent.RuntimeContext;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -216,8 +218,7 @@ class FileToolsTest {
         when(sandboxRuntime.enabled()).thenReturn(true);
         var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
         when(sandbox.getUserKey()).thenReturn("alice");
-        when(sandbox.readWorkspaceFile("outputs/big.pptx")).thenReturn(
-            new byte[2 * 1024 * 1024]);
+        stubSandboxStream(sandbox, "outputs/big.pptx", 2 * 1024 * 1024);
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
         var t = new FileTools.SandboxAwareFileTools(fileAssetStore, fileStorage, props,
             sandboxRuntime, mock(WorkspaceReader.class), null);
@@ -225,7 +226,9 @@ class FileToolsTest {
         var result = t.presentFile(turnCtx(sandbox), "/workspace/outputs/big.pptx");
         assertTrue(result.contains("\"file_id\""), "沙箱直读应登记成功: " + result);
         assertTrue(result.contains("\"size\":2097152"), "2MB 文件应完整登记: " + result);
-        verify(sandbox).readWorkspaceFile("outputs/big.pptx");
+        verify(sandbox).statWorkspaceFile("outputs/big.pptx");
+        verify(sandbox).openWorkspaceStream("outputs/big.pptx");
+        verify(fileStorage).writeBounded(anyString(), any(), anyLong(), anyString());
     }
 
     @Test
@@ -265,15 +268,70 @@ class FileToolsTest {
         when(sandboxRuntime.enabled()).thenReturn(true);
         var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
         when(sandbox.getUserKey()).thenReturn("alice");
-        when(sandbox.readWorkspaceFile("outputs/pkg.zip")).thenReturn(
-            "PK\u0003\u0004fake-zip".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
+        stubSandboxStream(sandbox, "outputs/pkg.zip", "PK\u0003\u0004fake-zip".getBytes(
+            java.nio.charset.StandardCharsets.ISO_8859_1).length);
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
         var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
             mock(WorkspaceReader.class));
 
         var result = t.presentFile(turnCtx(sandbox), "/workspace/outputs/pkg.zip", null);
         assertTrue(result.contains("\"file_id\""), "沙箱直读应登记成功: " + result);
-        verify(sandbox).readWorkspaceFile("outputs/pkg.zip");
+        // 流式通道（issue #345）：stat 前置 + readStream → writeBounded，不经 readByteArray 整读
+        verify(sandbox).statWorkspaceFile("outputs/pkg.zip");
+        verify(sandbox).openWorkspaceStream("outputs/pkg.zip");
+        verify(fileStorage).writeBounded(anyString(), any(), anyLong(), anyString());
+    }
+
+    /** 沙箱流式 seam 打桩：stat 给出精确 size，readStream 给出对应长度内容，writeBounded 消费并返回长度 */
+    private void stubSandboxStream(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox sandbox,
+                                   String relPath, long size) throws Exception {
+        when(sandbox.statWorkspaceFile(relPath)).thenReturn(size);
+        var data = new byte[(int) size];
+        when(sandbox.openWorkspaceStream(relPath)).thenReturn(
+            new java.io.ByteArrayInputStream(data));
+        when(fileStorage.writeBounded(anyString(), any(), anyLong(), anyString()))
+            .thenAnswer(inv -> ((java.io.InputStream) inv.getArgument(1)).transferTo(
+                java.io.OutputStream.nullOutputStream()));
+    }
+
+    @Test
+    void presentFileSandboxShouldFastRejectOnStatOversize() throws Exception {
+        // stat 前置（issue #345）：超限快速拒绝，不发起任何传输（旧实现先 readByteArray
+        // 整读进堆后才拒 → 单请求 OOM 路径）
+        when(sandboxRuntime.enabled()).thenReturn(true);
+        var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
+        when(sandbox.getUserKey()).thenReturn("alice");
+        when(sandbox.statWorkspaceFile("outputs/huge.bin")).thenReturn(60L * 1024 * 1024);
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
+            mock(WorkspaceReader.class));
+
+        var result = t.presentFile(turnCtx(sandbox), "outputs/huge.bin", null);
+        assertTrue(result.contains("exceeds"), "stat 超限应快速拒绝: " + result);
+        verify(sandbox, never()).openWorkspaceStream(anyString());
+        verify(fileStorage, never()).writeBounded(anyString(), any(), anyLong(), anyString());
+        verify(fileAssetStore, never()).insert(any(FileAssetStore.FileAsset.class));
+    }
+
+    @Test
+    void presentFileSandboxShouldRejectOnBoundedWriteOverflow() throws Exception {
+        // stat 不可知（-1 降级）时由 writeBounded 兜底正确性：越限中止拒绝，无元数据落库
+        when(sandboxRuntime.enabled()).thenReturn(true);
+        var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
+        when(sandbox.getUserKey()).thenReturn("alice");
+        when(sandbox.statWorkspaceFile("outputs/late.bin")).thenReturn(-1L);
+        when(sandbox.openWorkspaceStream("outputs/late.bin")).thenReturn(
+            new java.io.ByteArrayInputStream(new byte[1024]));
+        when(fileStorage.writeBounded(anyString(), any(), anyLong(), anyString()))
+            .thenThrow(new io.agentmanager.framework.service.storage.StorageOverflowException(
+                50L * 1024 * 1024, 50L * 1024 * 1024 + 1));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
+            mock(WorkspaceReader.class));
+
+        var result = t.presentFile(turnCtx(sandbox), "outputs/late.bin", null);
+        assertTrue(result.contains("exceeds"), "writeBounded 越限应拒绝: " + result);
+        verify(fileAssetStore, never()).insert(any(FileAssetStore.FileAsset.class));
     }
 
     @Test
@@ -288,7 +346,8 @@ class FileToolsTest {
 
         var result = t.presentFile(turnCtx(sandbox), "outputs/x.txt", null);
         assertTrue(result.contains("not readable"), "userKey 不匹配应拒绝读取: " + result);
-        verify(sandbox, org.mockito.Mockito.never()).readWorkspaceFile(anyString());
+        verify(sandbox, org.mockito.Mockito.never()).statWorkspaceFile(anyString());
+        verify(sandbox, org.mockito.Mockito.never()).openWorkspaceStream(anyString());
     }
 
     @Test

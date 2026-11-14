@@ -17,8 +17,8 @@ import org.springframework.stereotype.Service;
  * 文件资产元数据存储（file_asset 表，file-upload-download-plan §4.3）。
  *
  * <p>DB 只存元数据（storage_type + storage_key + 状态），字节在 FileStorage 后端。
- * status 状态机（仅沙箱模式使用）：pending（待注入沙箱）→ injected（已注入当前沙箱代）；
- * 非沙箱模式上传即置 injected。origin=upload（用户上传）/ generated（Agent 产出）。
+ * status 状态机统一（issue #345）：两种模式 upload 一律 pending（实际交付时置 injected——
+ * 沙箱=acquire 注入后，非沙箱=chat 写盘后）；origin=upload（用户上传）/ generated（Agent 产出）。
  */
 @Service
 public class FileAssetStore {
@@ -165,53 +165,76 @@ public class FileAssetStore {
         }
     }
 
-    /** 该 user_key 或 session 下 status=pending 的文件（沙箱注入批次；兼容上传时未绑定会话） */
-    public List<FileAsset> listPending(String userKey, String sessionId) {
+    /**
+     * 该 session 下 status=pending 的文件（沙箱注入批次）。
+     *
+     * <p>严格按 session 单条件过滤（上传作用域 session 化，issue #345）：user 维度的
+     * OR 命中是历史缺陷——旧 session 文件对新 session 是无引用路径的纯噪音。
+     * 未绑定会话的行（session_id IS NULL，上传后从未被 chat 引用）永不注入，
+     * bind-at-use 在 chat 首次引用时绑定（UploadWorkspaceInjector#assignWorkspacePaths）。
+     */
+    public List<FileAsset> listPending(String sessionId) {
         var result = new ArrayList<FileAsset>();
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT * FROM file_asset
-                 WHERE status = 'pending' AND (user_key = ? OR (session_id IS NOT NULL AND session_id = ?))
+                 WHERE status = 'pending' AND session_id = ?
                  ORDER BY created_at
                  """)) {
-            stmt.setString(1, userKey);
-            stmt.setString(2, sessionId != null ? sessionId : "");
+            stmt.setString(1, sessionId != null ? sessionId : "");
             try (var rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(map(rs));
                 }
             }
         } catch (Exception e) {
-            log.warn("FileAssetStore: listPending {} failed: {}", userKey, e.getMessage());
+            log.warn("FileAssetStore: listPending {} failed: {}", sessionId, e.getMessage());
         }
         return result;
     }
 
     /**
-     * 该 user_key（或 session）下已占用的工作区路径（沙箱注入同名唯一化用）。
+     * 该 session 下已占用的工作区路径（同名唯一化的占用集合，DB 单一真相源）。
      *
      * <p>沙箱容器可能在远端主机，无法像非沙箱路径那样 ls 本地 uploads/ 目录——
-     * 冲突判定以 file_asset 历史注入记录（workspace_path 已回写）为准。
+     * 冲突判定以 file_asset 行集（workspace_path 已回写）为准。
      */
-    public List<String> listWorkspacePaths(String userKey, String sessionId) {
+    public List<String> listWorkspacePaths(String sessionId) {
         var result = new ArrayList<String>();
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT DISTINCT workspace_path FROM file_asset
-                 WHERE workspace_path IS NOT NULL
-                   AND (user_key = ? OR (session_id IS NOT NULL AND session_id = ?))
+                 WHERE workspace_path IS NOT NULL AND session_id = ?
                  """)) {
-            stmt.setString(1, userKey);
-            stmt.setString(2, sessionId != null ? sessionId : "");
+            stmt.setString(1, sessionId != null ? sessionId : "");
             try (var rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(rs.getString(1));
                 }
             }
         } catch (Exception e) {
-            log.warn("FileAssetStore: listWorkspacePaths {} failed: {}", userKey, e.getMessage());
+            log.warn("FileAssetStore: listWorkspacePaths {} failed: {}", sessionId, e.getMessage());
         }
         return result;
+    }
+
+    /**
+     * bind-at-use 首次引用绑定（issue #345）：仅当行尚未绑定会话时写入，返回是否绑定成功。
+     *
+     * <p>条件写（WHERE session_id IS NULL）防跨 session 并发抢绑：两个 session 同时首引用
+     * 同一文件时仅一个成功，失败方按「已绑定异 session」跳过注入（所有权=首引用会话）。
+     */
+    public boolean bindSession(String id, String sessionId) {
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "UPDATE file_asset SET session_id = ? WHERE id = ? AND session_id IS NULL")) {
+            stmt.setString(1, sessionId);
+            stmt.setString(2, id);
+            return stmt.executeUpdate() > 0;
+        } catch (Exception e) {
+            log.warn("FileAssetStore: bindSession {} failed: {}", id, e.getMessage());
+            return false;
+        }
     }
 
     /** 该 user_key 下 pending 文件数（上传限流软校验） */
@@ -261,29 +284,25 @@ public class FileAssetStore {
     }
 
     /**
-     * 沙箱容器销毁/新建时回滚注入状态（§6.2.4 双保险）：
-     * 该 user_key 或 session 下 origin=upload 且 status=injected 的行 → pending，新容器重新注入。
+     * 沙箱容器销毁/新建时回滚注入状态（§6.2.4 双保险）：该 session 下 origin=upload 且
+     * status=injected 的行 → pending，新容器重新注入。
+     *
+     * <p>session 单条件（与 {@link #listPending} 同口径）：容器按会话绑定，回滚也只回滚
+     * 本会话的行；session 未知时调用方必须跳过（user 维度回滚会波及他 session 行）。
      */
-    public void resetInjectedToPending(String userKey) {
-        resetInjectedToPending(userKey, userKey);
-    }
-
-    /** 双维度回滚（user_key 与 session_id 都覆盖——上传记录 user_key 为请求 userId，沙箱隔离键为 sessionId） */
-    public void resetInjectedToPending(String userKey, String sessionId) {
+    public void resetInjectedToPending(String sessionId) {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  UPDATE file_asset SET status = 'pending'
-                 WHERE origin = 'upload' AND status = 'injected'
-                   AND (user_key = ? OR (session_id IS NOT NULL AND session_id = ?))
+                 WHERE origin = 'upload' AND status = 'injected' AND session_id = ?
                  """)) {
-            stmt.setString(1, userKey);
-            stmt.setString(2, sessionId != null ? sessionId : "");
+            stmt.setString(1, sessionId != null ? sessionId : "");
             var n = stmt.executeUpdate();
             if (n > 0) {
-                log.info("FileAssetStore: reset {} file(s) injected→pending for user {}", n, userKey);
+                log.info("FileAssetStore: reset {} file(s) injected→pending for session {}", n, sessionId);
             }
         } catch (Exception e) {
-            log.warn("FileAssetStore: resetInjectedToPending {} failed: {}", userKey, e.getMessage());
+            log.warn("FileAssetStore: resetInjectedToPending {} failed: {}", sessionId, e.getMessage());
         }
     }
 

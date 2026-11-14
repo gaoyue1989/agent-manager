@@ -14,6 +14,7 @@
  *   MOCK_LLM_ALLOW_SYNTH=1（仅本地排障：缺夹具时回落合成响应并打标 synthesized）
  */
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +28,8 @@ const ALLOW_SYNTH = process.env.MOCK_LLM_ALLOW_SYNTH === '1';
 const MARKER_MAP = {
   'plain': 'plain', 'remember': 'remember', 'recall': 'recall',
   'tool:echo': 'tool-echo', 'tool:time': 'tool-time', 'tool:write': 'tool-write', 'tool:read': 'tool-read',
-  'file:deliver': 'file-deliver', 'oaf:package': 'oaf-package', 'tool:mcp_echo': 'tool-mcp-echo',
+  'file:deliver': 'file-deliver', 'file:present': 'file-present',
+  'oaf:package': 'oaf-package', 'tool:mcp_echo': 'tool-mcp-echo',
   'hitl:submit': 'hitl-submit', 'mcpapp:form': 'mcpapp-form',
   'execute': 'execute', 'execute:fail': 'execute-fail',
   'execute:sleep': 'execute-sleep',   // 并发探针（X20）：execute 真实 sleep {{secs}} 秒
@@ -43,6 +45,8 @@ const MARKER_MAP = {
 const ARGS_OVERRIDE = {
   'hitl-submit': '{"application_id": "{{appId}}"}',
   'mcpapp-form': '{"application_id": "{{appId}}"}',
+  // X21（issue #345）：present_file 目标路径运行时注入——同一录制件 present 任意沙箱路径
+  'file-present': '{"file_path": "{{appId}}"}',
 };
 
 const cache = new Map(); // name → { mtime, fx }
@@ -244,7 +248,14 @@ const server = http.createServer((req, res) => {
         .map(c => (placeholders.length ? substitute(c, placeholders, argValue) : c))
         .map(c => c.split('{{BENCH_MCP_BASE}}').join(BENCH_MCP_BASE));
       const overrideJson = ARGS_OVERRIDE[name];
-      if (overrideJson) chunks = applyArgsOverride(chunks, overrideJson.replace('{{appId}}', argValue));
+      if (overrideJson) {
+        chunks = applyArgsOverride(chunks, overrideJson.replace('{{appId}}', argValue));
+        // 录制件冻结的 tool_call id 在同会话多次回放时与历史重复——SDK 对重复 id 的
+        // tool_use 短路复用既有 tool_result（工具不再执行，X23 实测钉死）。运行时参数
+        // 场景每次请求换新 id（OpenAI 增量协议下 assistant 消息 id 本就要求唯一）。
+        chunks = chunks.map(ch => ch.replace(/"id":"(call_[0-9a-zA-Z]+)"/g,
+          (m, id) => '"id":"' + 'call_replay' + crypto.randomBytes(6).toString('hex') + '"'));
+      }
       if (reqBody.stream === false) {
         const body = JSON.stringify(call.body ?? {});
         res.writeHead(200, { 'content-type': 'application/json' });

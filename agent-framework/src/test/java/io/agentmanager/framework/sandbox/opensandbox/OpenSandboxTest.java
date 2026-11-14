@@ -293,7 +293,7 @@ class OpenSandboxTest {
 
     private static FileAssetStore mockAssetStore() {
         var store = mock(FileAssetStore.class);
-        when(store.listWorkspacePaths(anyString(), anyString())).thenReturn(List.of());
+        when(store.listWorkspacePaths(anyString())).thenReturn(List.of());
         return store;
     }
 
@@ -318,10 +318,11 @@ class OpenSandboxTest {
         // 不做 base64 解码——旧实现传 base64 字符串，沙箱内二进制文件全部损坏
         var raw = new byte[]{0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, (byte) 0xFF, 0x10}; // zip magic + 二进制
         var store = mockAssetStore();
-        when(store.listPending("u1", "u1")).thenReturn(List.of(asset("f1", "sample.docx")));
+        when(store.listPending("u1")).thenReturn(List.of(asset("f1", "sample.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(raw));
         sandbox.setUserKey("u1");
+        sandbox.setSessionId("u1");
 
         sandbox.injectPendingUploads();
 
@@ -334,17 +335,18 @@ class OpenSandboxTest {
 
     @Test
     void injectUploadsShouldHonorReservedWorkspacePath() throws Exception {
-        // 回归钉子（2026-11-14 真机实测复现）：路径预留先行于提示构造（chat 请求时
-        // ensureWorkspacePath），注入必须按已预留 workspace_path 原样写入——即便历史集合
+        // 回归钉子（2026-11-14 真机实测复现）：路径分配先行于提示构造（chat 请求时
+        // assignWorkspacePaths），注入必须按已预留 workspace_path 原样写入——即便历史集合
         // 含同值路径也不得改名。旧实现注入时按历史撞名重命名 → 提示路径（请求时冻结）与
         // 磁盘实际路径漂移，agent 按提示读文件必 file_not_found（同名二次上传/容器重建
         // 重放即触发）。
         var store = mockAssetStore();
-        when(store.listWorkspacePaths("u2", "u2")).thenReturn(List.of("uploads/report.docx"));
-        when(store.listPending("u2", "u2")).thenReturn(List.of(reserved("f2", "report.docx", "uploads/report.docx")));
+        when(store.listWorkspacePaths("u2")).thenReturn(List.of("uploads/report.docx"));
+        when(store.listPending("u2")).thenReturn(List.of(reserved("f2", "report.docx", "uploads/report.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u2");
+        sandbox.setSessionId("u2");
 
         sandbox.injectPendingUploads();
 
@@ -361,11 +363,12 @@ class OpenSandboxTest {
         // 无预留路径的遗留 pending 行（上传后从未发起对话）：注入时按历史撞名分配并回写，
         // 保证后续轮次提示路径与磁盘一致
         var store = mockAssetStore();
-        when(store.listWorkspacePaths("u3", "u3")).thenReturn(List.of("uploads/plan.docx"));
-        when(store.listPending("u3", "u3")).thenReturn(List.of(asset("f3", "plan.docx")));
+        when(store.listWorkspacePaths("u3")).thenReturn(List.of("uploads/plan.docx"));
+        when(store.listPending("u3")).thenReturn(List.of(asset("f3", "plan.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u3");
+        sandbox.setSessionId("u3");
 
         sandbox.injectPendingUploads();
 
@@ -380,12 +383,13 @@ class OpenSandboxTest {
     void injectUploadsShouldDeduplicateWithinSameBatch() throws Exception {
         // 同一批次两份无预留的同名文件：第二份也得避开第一份刚分配的路径
         var store = mockAssetStore();
-        when(store.listWorkspacePaths("u4", "u4")).thenReturn(List.of());
-        when(store.listPending("u4", "u4")).thenReturn(List.of(
+        when(store.listWorkspacePaths("u4")).thenReturn(List.of());
+        when(store.listPending("u4")).thenReturn(List.of(
             asset("a", "plan.docx"), asset("b", "plan.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u4");
+        sandbox.setSessionId("u4");
 
         sandbox.injectPendingUploads();
 
@@ -396,6 +400,38 @@ class OpenSandboxTest {
         assertEquals(List.of("uploads/plan.docx", "uploads/plan_1.docx"), paths);
         verify(store).updateWorkspacePath("a", "uploads/plan.docx");
         verify(store).updateWorkspacePath("b", "uploads/plan_1.docx");
+    }
+
+    @Test
+    void injectUploadsShouldSkipWhenNoSessionBound() throws Exception {
+        // session 单条件过滤（issue #345）：无会话键时跳过注入（user 维度兜底是跨 session
+        // 泄漏根源）——行保持 pending，下 turn 身份齐备再注入
+        var store = mockAssetStore();
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setUserKey("u1");
+
+        sandbox.injectPendingUploads();
+
+        verify(store, never()).listPending(anyString());
+        verify(osb.files(), never()).write(anyList());
+    }
+
+    @Test
+    void injectUploadsShouldFallBackToSpecPendingSessionId() throws Exception {
+        // 实例未绑定（acquire 先于 bindUserKey 的窗口）→ spec ThreadLocal 兜底
+        var store = mockAssetStore();
+        when(store.listPending("sess-9")).thenReturn(List.of(asset("f9", "a.txt")));
+        var spec = new OpenSandboxFilesystemSpec();
+        spec.setPendingSessionId("sess-9");
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, spec, store, mockStorage(new byte[]{1}));
+        sandbox.setUserKey("u1");
+
+        sandbox.injectPendingUploads();
+
+        verify(store).listPending("sess-9");
+        verify(store).markInjected(List.of("f9"));
     }
 
     private static FileAssetStore.FileAsset asset(String id, String fileName) {

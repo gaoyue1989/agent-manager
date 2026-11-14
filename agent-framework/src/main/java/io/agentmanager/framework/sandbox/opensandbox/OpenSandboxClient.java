@@ -152,7 +152,7 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
                 return lifecycle.acquire(identity.sessionId(), identity.userKey(),
                     this::probeAlive,
                     () -> createNew(workspaceSpec, options, identity.sessionId()),
-                    (handle, sandboxId) -> wrapReused(handle, sandboxId, workspaceSpec));
+                    (handle, sandboxId) -> wrapReused(handle, sandboxId, workspaceSpec, identity.sessionId()));
             } catch (UserQuotaExhaustedException e) {
                 throw e;   // §4.6：SSE error 帧载荷（错误回调检测类型，§6.3）
             } catch (SandboxException e) {
@@ -234,10 +234,12 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService,
             filesystemSpec, fileAssetStore, fileStorage);
         bindUserKey(sandbox);
-        // 被动兜底（§6.2.4 双保险）：新容器启动时，该用户 injected 上传文件回滚 pending
+        sandbox.setSessionId(sid);
+        // 被动兜底（§6.2.4 双保险）：新容器启动时，本会话 injected 上传文件回滚 pending
         // → 本 turn 注入。防 delete 崩溃导致状态 stuck 在新容器漏注入。
-        if (sandbox.getUserKey() != null && fileAssetStore != null) {
-            fileAssetStore.resetInjectedToPending(sandbox.getUserKey());
+        // session 单条件（issue #345）：sid 缺失则跳过——user 维度回滚会波及他 session 行
+        if (sid != null && !sid.isBlank() && fileAssetStore != null) {
+            fileAssetStore.resetInjectedToPending(sid);
         }
         // 上传文件注入：沙箱就绪后立即执行（沙箱文件操作走 execd 原生 API，不保证经 doExec）
         sandbox.injectPendingUploads();
@@ -264,7 +266,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
 
     /** ①/⑤c 复用包装：连接的 SDK 句柄 → OpenSandbox（resume 语义：不 start，同 client.resume） */
     private OpenSandbox wrapReused(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
-                                   String sandboxId, WorkspaceSpec workspaceSpec) throws Exception {
+                                   String sandboxId, WorkspaceSpec workspaceSpec,
+                                   String sessionId) throws Exception {
         OpenSandboxState state = new OpenSandboxState();
         state.setSandboxId(sandboxId);
         try {
@@ -278,6 +281,7 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader,
             workspaceSyncService, filesystemSpec, fileAssetStore, fileStorage);
         bindUserKey(sandbox);
+        sandbox.setSessionId(sessionId);
         sandbox.injectPendingUploads();
         return sandbox;
     }
@@ -385,9 +389,9 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         // 续期前」的 grace 空窗（A2A 闲置重入的互踩窗口）。affected=0 → 无行/已改绑他
         // 会话/slot↔binding 漂移 → close 句柄 + 抛降级异常 → harness 降级 create →
         // OpenSandboxClient.create 路由本决策重新记账/决策。
+        // 捕获的记账会话键在此一次消费（实例绑定上传注入也用它，issue #345）
+        String sid = filesystemSpec != null ? filesystemSpec.takePendingSessionId() : null;
         if (lifecycle != null) {
-            // 捕获的记账会话键在此一次消费：先校验+占位，通过后 call 引用计数 +1
-            String sid = filesystemSpec != null ? filesystemSpec.takePendingSessionId() : null;
             if (sid != null && !sid.isBlank()) {
                 try {
                     boolean owned = lifecycle.bindingStore().occupyWrite(osbState.getSandboxId(), List.of(sid));
@@ -426,6 +430,7 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService,
             filesystemSpec, fileAssetStore, fileStorage);
         bindUserKey(sandbox);
+        sandbox.setSessionId(sid);
         // 上传文件注入：恢复会话后立即执行（同 create）
         sandbox.injectPendingUploads();
         return sandbox;
@@ -435,16 +440,17 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
     @Override
     public void delete(Sandbox sandbox) {
         OpenSandbox osb = (OpenSandbox) sandbox;
-        // 主动回滚（§6.2.4 双保险 ①）：容器销毁前将该用户 injected 上传文件回滚 pending，
+        // 主动回滚（§6.2.4 双保险 ①）：容器销毁前将本会话 injected 上传文件回滚 pending，
         // 新容器首 exec 重新注入（防容器 GC 后文件丢失）。
-        // userKey 兜底：delete 可能在 acquire/middleware 时序外调用，
-        // 实例 userKey 可能为 null（acquire 先于 middleware）→ 从 spec ThreadLocal 补充。
-        String key = osb.getUserKey();
-        if ((key == null || key.isBlank()) && filesystemSpec != null) {
-            key = filesystemSpec.peekPendingUserKey();
+        // session 取数（issue #345，替换旧 user 冒充 session 写法）：实例绑定（create/wrapReused/
+        // resume 捕获）优先，acquire/middleware 时序外调用时从 spec ThreadLocal 兜底；均缺失
+        // 则跳过（createNew 的被动兜底会在 sid 齐备的下一 turn 回滚，不丢注入）
+        String sid = osb.getSessionId();
+        if ((sid == null || sid.isBlank()) && filesystemSpec != null) {
+            sid = filesystemSpec.peekPendingSessionId();
         }
-        if (key != null && !key.isBlank() && fileAssetStore != null) {
-            fileAssetStore.resetInjectedToPending(key, key);
+        if (sid != null && !sid.isBlank() && fileAssetStore != null) {
+            fileAssetStore.resetInjectedToPending(sid);
         }
         try {
             osb.getOsbSandbox().kill();

@@ -164,6 +164,9 @@ agent:
     storage-s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
     storage-s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
     storage-s3-bucket: ${FILE_STORAGE_S3_BUCKET:agent-files}
+    # writeBounded spool 目录（s3 后端；空=回落 {workspaceBase}/tmp/file-transfer——
+    # 业务 Pod /tmp 不可写实测，故默认不落 /tmp）
+    spool-dir: ${FILE_SPOOL_DIR:}
   # durable-sse-plan §3.3：SSE 可靠传输配置
   sse:
     heartbeat-seconds: ${AGENT_SSE_HEARTBEAT_SECONDS:20}
