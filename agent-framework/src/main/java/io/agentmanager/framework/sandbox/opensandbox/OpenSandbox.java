@@ -22,9 +22,7 @@ import io.agentscope.harness.agent.sandbox.AbstractBaseSandbox;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
-import io.agentscope.harness.agent.sandbox.WorkspaceProjectionApplier;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
-import io.agentscope.harness.agent.sandbox.layout.WorkspaceEntry;
 import io.agentscope.harness.agent.sandbox.layout.WorkspaceProjectionEntry;
 
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
@@ -111,14 +109,6 @@ public class OpenSandbox extends AbstractBaseSandbox
     private volatile String skillCacheScope;
     /** 每 call 一次 scoped .skills-cache 投放（stop 复位，下轮首 exec 重查） */
     private final AtomicBoolean skillCacheRefreshed = new AtomicBoolean(false);
-    /**
-     * 实例局部 scoped 投放指纹（P0-1 兜底层，跨 call 保留；生产主层在 spec 的 Pod 级表——
-     * 实例每 call 重建，实例层只服务无 spec 的测试构造）。
-     */
-    private final java.util.concurrent.atomic.AtomicReference<String> lastSkillCacheFingerprint =
-        new java.util.concurrent.atomic.AtomicReference<>();
-    /** 实例局部：本实例最近一次投放进容器的 scope（与 Pod 级 hydratedScopedScopes 同语义的兜底层） */
-    private volatile String lastHydratedScope;
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
     private final FileStorage fileStorage;
@@ -1385,7 +1375,7 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * scoped 技能缓存投放（方案 1，每 call 一次）：
+     * scoped 技能缓存投放（每 call 一次，PR-4b 起仅软链农场一路）：
      *
      * <p>背景：SDK 默认投影根含整棵 {@code .skills-cache}，其中按 scope 分片
      * （{@code .skills-cache/<scopeSegment>/<source-ns>/<skill>/}，scope = IsolationScope.USER 档
@@ -1397,23 +1387,10 @@ public class OpenSandbox extends AbstractBaseSandbox
      * <p>投放内容仅供 shell 执行技能脚本使用（{@code load_skill_through_path} 走内存资源/
      * lazy 仓储，不读容器），因此 doExec（首个命令前）投放即可覆盖消费路径。
      *
-     * <p><b>稳态短路（P0-1，tar 与 farm 两路共用同一指纹与记账）</b>：宿主指纹
-     * （{@link ScopedSkillCacheSupport#contentFingerprint}，包内源 stat + L4 revision，不读内容）在 Pod 级
-     * 缓存比对（{@link OpenSandboxFilesystemSpec#scopedSkillCacheFingerprint}）。指纹未变
-     * 且本沙箱代已投放过当前 scope → 容器内容即最新 → 跳过 build、prune 与 hydrate
-     * （66MB/2000f 实测从每 call ≈4.9s 降到 ≈35ms）。原实现把比对 hash 记在实例字段上，
-     * 而 OpenSandbox 包装实例每次 acquire 重建 → 短路条件每 call 失忆 → 每轮全量重投。
-     * 软链农场路径（{@link SkillsFarm}）共用同一记账表（skills-syncd D-10），但记账值
-     * 带<b>投放模式分量</b>（{@link OpenSandboxFilesystemSpec#HYDRATE_MODE_TAR}）——同沙箱代
-     * 降级↔farm 翻转（gate 丢失后重判定）永不满足对方稳态，翻转必走一次重收敛/重物化。
-     * 稳态同样 0 exec。正确性边界与投影指纹缓存一致：容器内文件被模型删除而宿主未变时漏补投，
-     * 宿主内容下次变化点自愈（设计 §3.3 已接受的盲点，不损坏数据）。
-     *
-     * <p>慢路径（换沙箱代/换 scope/内容变更）：优先复用 Pod 级载荷缓存里的 gz（P1-3，省
-     * build+gzip ≈1.8s），且把 prune 与解包合并进<b>单条 exec</b>（exec 固定 ≈1s，省一次）。
-     * 换 scope 必走慢路径：prune 清掉同代容器内其它 scope 残留（池化借出复用时的跨用户防护）。
-     *
-     * <p>fail-soft：失败仅告警并复位标志，下次 exec 重试。
+     * <p><b>farm 语义（PR-4b：tar 物化路径已退役）</b>：农场未启用（{@code
+     * SANDBOX_SKILLS_SHARED_STORE} 空）或本会话判定降级 → 本 call <b>无包技能投放</b>，
+     * 不再回落 tar（回滚 = 回滚整个 release）；判定/收敛/稳态记账见 {@link SkillsFarm}
+     * （D-10 稳态短路 + D-11 模式分量）。收敛 exec 失败经 CAS 复位，下次触发重试。
      *
      * <p>包级可见（非 private）：供测试 spy 验证 D6 补投开关行为。
      */
@@ -1435,194 +1412,12 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return;
             }
             Path scopeDir = Path.of(sourceRoot, SkillCacheScope.CACHE_DIR, scope);
-            if (skillsFarm.tryHydrate(scope, scopeDir)) {
-                return;
-            }
-            String fingerprint = ScopedSkillCacheSupport.contentFingerprint(
-                filesystemSpec, workspaceReader, userKey, scopeDir);
-            String sandboxId = state.getSandboxId();
-            // 稳态判定（双层：Pod 级为主、实例级为无 spec 构造兜底）：指纹未变 且 本沙箱代已
-            // 投放过当前 scope → 容器内容即最新；记账带 tar 模式分量——本代 farm 收敛的记账
-            // 不满足降级稳态（farm→degraded 翻转必须重物化，B-1）
-            String podFp = filesystemSpec != null
-                ? filesystemSpec.scopedSkillCacheFingerprint(sandboxId, scope,
-                    OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR) : null;
-            String podScope = filesystemSpec != null
-                ? filesystemSpec.hydratedScopedScope(sandboxId) : null;
-            boolean steady = (podFp != null && podFp.equals(fingerprint) && scope.equals(podScope))
-                || (fingerprint.equals(lastSkillCacheFingerprint.get()) && scope.equals(lastHydratedScope));
-            if (steady) {
-                log.debug("[sandbox-open] .skills-cache scoped fingerprint unchanged ({}), skipping re-hydrate", scope);
-                return;
-            }
-            // 慢路径：gz 载荷（缓存命中或现算）+ 单 exec 投放
-            // 禁用过滤（oa-1110-repro-fixes-design §2.1a）：候选目录命中 L2/L4 禁用 → 不进
-            // 载荷，且随投放 exec 清理容器内残留（堵 read_file/execute 直读旁路）
-            var disabledDirs = ScopedSkillCacheSupport.disabledSkillDirs(
-                options != null ? options.getSkillDisabledChecker() : null, userKey, scopeDir);
-            byte[] gz = scopedPayloadGz(sourceRoot, scope, scopeDir, spec, fingerprint, disabledDirs);
-            hydrateScopedArchive(gz, scope, disabledDirs);
-            lastSkillCacheFingerprint.set(fingerprint);
-            lastHydratedScope = scope;
-            if (filesystemSpec != null) {
-                filesystemSpec.recordScopedSkillCacheFingerprint(sandboxId, scope,
-                    OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR, fingerprint);
-                filesystemSpec.markHydratedScopedScope(sandboxId, scope);
-            }
-            log.info("[sandbox-open] .skills-cache scoped to {} ({} payload)",
-                scope, gz != null ? (gz.length / 1024) + "KB gz" : "empty");
+            // 包技能仅 farm 一路：farm 未启用/判定降级 = 本 call 无包技能投放（返回 false
+            // 即止，无 tar 回落）；收敛 exec 失败原样上抛，由下方 catch 复位 CAS 重试
+            skillsFarm.tryHydrate(scope, scopeDir);
         } catch (Exception e) {
             skillCacheRefreshed.set(false);
             log.warn("[sandbox-open] scoped .skills-cache hydrate failed: {}", e.getMessage());
-        }
-    }
-
-    /** 用当前 scope 构造投影 spec（includeRoots 只含 {@code .skills-cache/<scope>}）。 */
-    private WorkspaceSpec scopedSkillCacheSpec(WorkspaceSpec baseSpec, String sourceRoot, String scope) {
-        var ws = new WorkspaceSpec();
-        ws.setRoot(baseSpec != null ? baseSpec.getRoot() : getWorkspaceRoot());
-        var entry = new WorkspaceProjectionEntry();
-        entry.setSourceRoot(sourceRoot);
-        entry.setIncludeRoots(List.of(SkillCacheScope.CACHE_DIR + "/" + scope));
-        Map<String, WorkspaceEntry> entries = new java.util.LinkedHashMap<>();
-        entries.put("__scoped_skill_cache__", entry);
-        ws.setEntries(entries);
-        return ws;
-    }
-
-    /**
-     * 慢路径的 gz 载荷（P1-3）：Pod 级载荷缓存命中（指纹一致）直接复用；未命中现算
-     * （自建 tar + gzip，成功后回填缓存，容量上界由 spec 侧保证，超限自动不缓存）。
-     * scope 目录缺失/空返回 null（只 prune 不投放）。
-     *
-     * <p>不使用 {@link WorkspaceProjectionApplier#build}：它为比对语义附带全量 sha256 与
-     * tar 双份遍历（66MB/2000f 实测 ≈1.03s），而 scoped 通道的变更检测已由 stat 指纹承担
-     * （P0-1），这里只需 tar 字节；gzip 取最快级别（传输量略增、CPU 减半以上）。
-     */
-    private byte[] scopedPayloadGz(String sourceRoot, String scope, Path scopeDir,
-                                   WorkspaceSpec spec, String fingerprint,
-                                   java.util.Set<Path> disabledDirs) throws Exception {
-        if (!Files.isDirectory(scopeDir)) {
-            return null;
-        }
-        if (filesystemSpec != null) {
-            var cached = filesystemSpec.scopedPayloadCache(sourceRoot, scope);
-            if (cached != null && cached.statFingerprint().equals(fingerprint)) {
-                return cached.gzPayload();
-            }
-        }
-        byte[] tar = tarScopeDir(Path.of(sourceRoot).toAbsolutePath().normalize(), scopeDir, disabledDirs);
-        if (tar.length == 0) {
-            return null;
-        }
-        byte[] gz = gzipFast(tar);
-        if (filesystemSpec != null) {
-            filesystemSpec.recordScopedPayloadCache(sourceRoot, scope, fingerprint, gz);
-        }
-        return gz;
-    }
-
-    /**
-     * 自建 scoped 投影 tar（条目 = 工作区根相对路径，含隐藏文件，不跟随软链），
-     * 语义对齐 WorkspaceProjectionApplier 的归档形态，但不做 sha256（无比对用途）。
-     * {@code disabledDirs}（相对 scopeDir 的禁用技能目录，oa-1110-repro-fixes-design §2.1a）
-     * 下的文件整体跳过。全被排除时返回空数组（上层退化为 prune-only）。
-     */
-    private static byte[] tarScopeDir(Path wsRoot, Path scopeDir,
-                                      java.util.Set<Path> disabledDirs) throws Exception {
-        List<Path> files;
-        try (var walk = Files.walk(scopeDir)) {
-            files = walk.filter(Files::isRegularFile)
-                .filter(f -> !isUnderDisabledDir(scopeDir, f, disabledDirs))
-                .sorted().toList();
-        }
-        if (files.isEmpty()) {
-            return new byte[0];
-        }
-        var bos = new java.io.ByteArrayOutputStream(1 << 20);
-        try (var tos = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos, 1 << 20)) {
-            tos.setLongFileMode(org.apache.commons.compress.archivers.tar.TarArchiveOutputStream.LONGFILE_POSIX);
-            for (Path f : files) {
-                var entry = new org.apache.commons.compress.archivers.tar.TarArchiveEntry(
-                    wsRoot.relativize(f).toString().replace('\\', '/'));
-                entry.setSize(Files.size(f));
-                entry.setMode(0644);
-                tos.putArchiveEntry(entry);
-                try (var in = Files.newInputStream(f)) {
-                    in.transferTo(tos);
-                }
-                tos.closeArchiveEntry();
-            }
-            tos.finish();
-        }
-        return bos.toByteArray();
-    }
-
-    /** gzip 最快级别（{@link java.util.zip.Deflater#BEST_SPEED}）：scoped 载荷构建热点，传输量换 CPU */
-    private static byte[] gzipFast(byte[] data) throws Exception {
-        var bos = new java.io.ByteArrayOutputStream(Math.max(64, data.length / 2));
-        var deflater = new java.util.zip.Deflater(java.util.zip.Deflater.BEST_SPEED, true);
-        try (var gz = new java.util.zip.GZIPOutputStream(bos, 1 << 16) {
-            {
-                def = deflater;
-            }
-        }) {
-            gz.write(data);
-        }
-        return bos.toByteArray();
-    }
-
-    /**
-     * 收集 scope 目录内被禁用的技能目录（相对 scopeDir 的路径，如 {@code oaf-package/demo-b}）：
-     * L2 包级禁用集 ∪ L4 用户级标记（oa-1110-repro-fixes-design §2.1a）。checker 未装配、
-     * 目录缺失或枚举失败返回空集（fail-soft：不扩大禁用面、不中断投放）。
-     */
-    /** 文件是否位于任一禁用目录之下（相对 scopeDir 判定，空集时零开销直通） */
-    private static boolean isUnderDisabledDir(Path scopeDir, Path file, java.util.Set<Path> disabledDirs) {
-        if (disabledDirs.isEmpty()) {
-            return false;
-        }
-        var rel = scopeDir.relativize(file);
-        for (var dir : disabledDirs) {
-            if (rel.startsWith(dir)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * scoped 载荷投放 + 其它 scope 清理合并为<b>单条 exec</b>（P1-3）：exec 固定 ≈1s，
-     * 原 prune 与 untar 分开两次即 ≈2s 起步。gz 为 null 时只跑 prune（目录缺失分支）。
-     * {@code disabledDirs} 非空时追加容器内禁用目录清理（oa-1110-repro-fixes-design §2.1a）。
-     * 命令尾部的 {@code ; true} 吞掉 prune/rm 段退出码——残留清理失败不判定投放失败
-     * （untar 段失败仍按失败上报，下轮重试）。
-     */
-    private void hydrateScopedArchive(byte[] gz, String scope, java.util.Set<Path> disabledDirs) throws Exception {
-        String wsRoot = getWorkspaceRoot();
-        String pruneCmd = "find " + wsRoot + "/" + SkillCacheScope.CACHE_DIR
-            + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
-        String rmCmd = ScopedSkillCacheSupport.disabledRmCmd(scope, disabledDirs, getWorkspaceRoot());
-        String cleanup = rmCmd.isEmpty() ? pruneCmd : pruneCmd + "; " + rmCmd;
-        String command;
-        String tmpPath = null;
-        if (gz != null) {
-            tmpPath = "/tmp/workspace." + UUID.randomUUID() + ".tar.gz";
-            osbSandbox.files().write(List.of(
-                com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
-                    .path(tmpPath)
-                    .data(Base64.getEncoder().encodeToString(gz))
-                    .mode(644)
-                    .build()));
-            command = "base64 -d " + tmpPath + " | tar xzf - -C " + wsRoot
-                + " && rm -f " + tmpPath + " && { " + cleanup + "; }";
-        } else {
-            command = "{ " + cleanup + "; }";
-        }
-        var execution = osbSandbox.commands().run(command);
-        if (execution.getExitCode() != null && execution.getExitCode() != 0) {
-            throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
-                "hydrateScopedArchive", "scoped hydrate failed with exit " + execution.getExitCode(), null);
         }
     }
 
@@ -1638,20 +1433,6 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         return null;
-    }
-
-    /** 删除容器 {@code /workspace/.skills-cache} 下非当前 scope 的目录（保留 keepScope）。 */
-    private void pruneContainerSkillCache(String keepScope) {
-        try {
-            String root = getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR;
-            String cmd = "if [ -d " + root + " ]; then find " + root
-                + " -mindepth 1 -maxdepth 1 -type d ! -name '" + keepScope
-                + "' -exec rm -rf {} +; fi";
-            osbSandbox.commands().run(cmd);
-        } catch (Exception e) {
-            // 清理失败不阻塞（残留仅占空间，不影响当前 scope 执行）
-            log.debug("[sandbox-open] prune .skills-cache failed: {}", e.getMessage());
-        }
     }
 
     @Override

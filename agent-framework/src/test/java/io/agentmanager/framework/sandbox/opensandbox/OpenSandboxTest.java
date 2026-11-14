@@ -398,31 +398,6 @@ class OpenSandboxTest {
     }
 
     @Test
-    void scopedSkillCacheHydratesOnlyCurrentScope() throws Exception {
-        // 宿主 .skills-cache 含两个 scope；投放 tar 只应有当前 scope，其它 scope 目录被清理命令删掉
-        var host = java.nio.file.Files.createTempDirectory("scoped-skill-cache");
-        writeHostSkill(host, "sess-A", "demo-a");
-        writeHostSkill(host, "sess-B", "demo-b");
-
-        var osb = mockOsb(mockExecution(0, "", ""));
-        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, options(), null, null);
-        sandbox.setSkillCacheScope("sess-A");
-
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
-        // 投放延迟语义（first-llm-latency）：exec 命令不含 .skills-cache 时投放推迟到 stop 收尾
-        sandbox.stop();
-
-        var entries = capturedHydrateTarEntries(osb);
-        assertTrue(entries.contains(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"), entries.toString());
-        assertTrue(entries.stream().noneMatch(e -> e.contains("sess-B")),
-            "其它 scope 不得进入容器：" + entries);
-
-        // 容器内非当前 scope 残留被清理
-        verify(osb.commands()).run(contains("find /workspace/.skills-cache"));
-        verify(osb.commands()).run(contains("! -name 'sess-A'"));
-    }
-
-    @Test
     void scopedSkillCacheSkipsWhenScopeUnknown() throws Exception {
         // 身份未知（ctx null 且未绑定 scope）：不投放、不清理（下次 exec 重试）
         var host = java.nio.file.Files.createTempDirectory("scoped-unknown");
@@ -434,104 +409,6 @@ class OpenSandboxTest {
         sandbox.hydrateForCall(null);
 
         verify(osb.commands(), never()).run(contains(".skills-cache"));
-    }
-
-    @Test
-    void scopedSkillCacheUnchangedSkipsRehydrate() throws Exception {
-        // 同 scope 内容未变：第二次 call 不应重复投放 tar（跨 call hash 命中）
-        var host = java.nio.file.Files.createTempDirectory("scoped-same");
-        writeHostSkill(host, "sess-A", "demo-a");
-        var osb = mockOsb(mockExecution(0, "", ""));
-        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, options(), null, null);
-        sandbox.setSkillCacheScope("sess-A");
-
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
-        sandbox.stop();
-        int after1 = countHydrateTarWrites(osb);
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
-        sandbox.stop();
-        int after2 = countHydrateTarWrites(osb);
-
-        assertEquals(after1, after2, "内容未变时第二次 call 不应重复投放");
-    }
-
-    @Test
-    void scopedSkillCacheExcludesDisabledSkills() throws Exception {
-        // oa-1110-repro-fixes-design §2.1a：禁用技能（L2 包级 demo-b / L4 用户级 demo-c）
-        // 不得进入投放载荷，且容器内残留目录随投放 exec 一并清理——堵 read_file/execute 直读旁路
-        var host = java.nio.file.Files.createTempDirectory("scoped-disabled");
-        writeHostSkill(host, "sess-A", "demo-a");
-        writeHostSkill(host, "sess-A", "demo-b");
-        writeHostSkill(host, "sess-A", "demo-c");
-
-        var osb = mockOsb(mockExecution(0, "", ""));
-        var opts = options().skillDisabledChecker(new SkillDisabledChecker() {
-            @Override
-            public java.util.Set<String> packageDisabled() {
-                return java.util.Set.of("demo-b");
-            }
-
-            @Override
-            public boolean isUserDisabled(String userId, String name) {
-                return "demo-c".equals(name);
-            }
-        });
-        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, opts, null, null);
-        sandbox.setSkillCacheScope("sess-A");
-
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
-        sandbox.stop();
-
-        var entries = capturedHydrateTarEntries(osb);
-        assertTrue(entries.contains(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"), entries.toString());
-        assertTrue(entries.stream().noneMatch(e -> e.contains("demo-b")),
-            "L2 包级禁用技能不得进入容器：" + entries);
-        assertTrue(entries.stream().noneMatch(e -> e.contains("demo-c")),
-            "L4 用户级禁用技能不得进入容器：" + entries);
-
-        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-b'"));
-        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-c'"));
-    }
-
-    @Test
-    void scopedSkillCacheAllDisabledSkipsPayloadButPrunes() throws Exception {
-        // 全部技能被禁用：无 tar 投放（gz=null 分支），但仍执行禁用目录清理
-        var host = java.nio.file.Files.createTempDirectory("scoped-all-disabled");
-        writeHostSkill(host, "sess-A", "demo-b");
-
-        var osb = mockOsb(mockExecution(0, "", ""));
-        var opts = options().skillDisabledChecker(new SkillDisabledChecker() {
-            @Override
-            public java.util.Set<String> packageDisabled() {
-                return java.util.Set.of("demo-b");
-            }
-
-            @Override
-            public boolean isUserDisabled(String userId, String name) {
-                return false;
-            }
-        });
-        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, opts, null, null);
-        sandbox.setSkillCacheScope("sess-A");
-
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
-        sandbox.stop();
-
-        verify(osb.files(), never()).write(anyList());
-        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-b'"));
-    }
-
-    /** 从 files().write 捕获中定位 hydrate 的临时 tar（/tmp/workspace.*），解出 tar 条目名。 */
-    private static List<String> capturedHydrateTarEntries(Sandbox osb) throws Exception {
-        var captor = ArgumentCaptor.forClass(List.class);
-        verify(osb.files(), atLeastOnce()).write(captor.capture());
-        for (var call : captor.getAllValues()) {
-            var w = (WriteEntry) call.get(0);
-            if (w.getPath() != null && w.getPath().startsWith("/tmp/workspace.")) {
-                return readTarEntryNames((String) w.getData());
-            }
-        }
-        throw new AssertionError("未捕获到 hydrate tar 写入");
     }
 
     // ---------- exec 数据面故障感知（oa-1110-repro-fixes-design §2.3d） ----------
@@ -591,31 +468,7 @@ class OpenSandboxTest {
             "恢复后计数应清零，单次失败不触发改写：" + fresh.getMessage());
     }
 
-    private static int countHydrateTarWrites(Sandbox osb) throws Exception {
-        var captor = ArgumentCaptor.forClass(List.class);
-        verify(osb.files(), atLeastOnce()).write(captor.capture());
-        int n = 0;
-        for (var call : captor.getAllValues()) {
-            var w = (WriteEntry) call.get(0);
-            if (w.getPath() != null && w.getPath().startsWith("/tmp/workspace.")) {
-                n++;
-            }
-        }
-        return n;
-    }
 
-    private static List<String> readTarEntryNames(String base64Gz) throws Exception {
-        var names = new java.util.ArrayList<String>();
-        byte[] gz = Base64.getDecoder().decode(base64Gz);
-        try (var in = new java.util.zip.GZIPInputStream(new ByteArrayInputStream(gz));
-             var tar = new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(in)) {
-            org.apache.commons.compress.archivers.tar.TarArchiveEntry e;
-            while ((e = tar.getNextEntry()) != null) {
-                names.add(e.getName());
-            }
-        }
-        return names;
-    }
 
     // ---------- SandboxFileTransfer 单文件直传（替代「单文件写入 → 全量 hydrate」退化） ----------
 
@@ -792,125 +645,97 @@ class OpenSandboxTest {
         verify(sync2).syncBack(eq("user-bob"), eq(osb), isNull());
     }
 
-    // ---------- P0-1：scoped 投放指纹 Pod 级短路（跨实例） ----------
+    // ---------- 稳态记账 Pod 级短路（跨实例） ----------
 
     /**
-     * 生产 acquire 语义：每 call 新建 OpenSandbox 包装实例。P0-1 把 scoped 指纹/已投放
-     * scope 记在 spec（Pod 级）后，<b>新实例</b>在同容器代、同 scope、宿主内容未变时
-     * 必须命中短路（零 build/prune/hydrate）——历史实现 hash 记在实例字段上，短路条件
-     * 每 call 失忆，66MB/2000f 下每轮重付 ≈4.9s（基准实证）。
+     * 生产 acquire 语义：每 call 新建 OpenSandbox 包装实例。稳态记账记在 spec（Pod 级）后，
+     * <b>新实例</b>在同容器代、同 scope、端点版本未变时必须命中稳态短路（零收敛 exec）。
      */
     @Test
-    void scopedSkillCacheSkipSurvivesInstanceRecreation() throws Exception {
-        var host = java.nio.file.Files.createTempDirectory("scoped-pod-cache");
+    void farmSteadySkipSurvivesInstanceRecreation() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("farm-pod-cache");
         writeHostSkill(host, "sess-A", "demo-a");
-        var osb = mockOsb(mockExecution(0, "", ""));
+        var cfg = java.nio.file.Files.createTempDirectory("farm-pod-cache-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var osb = farmOsbTracking(svc);
         var spec = new OpenSandboxFilesystemSpec();
         var st1 = projectedStateNoSkillCache(host);
-        st1.setSandboxId("sbx-pod-1");
-        var call1 = new OpenSandbox(st1, osb, options(), null, null, spec);
-        call1.setSkillCacheScope("sess-A");
+        st1.setSandboxId("sbx-farm-pod-1");
+        var call1 = new OpenSandbox(st1, osb, farmOptions(svc, null, null), null, null, spec);
+        bindFarmSession(call1, "sess-A");
         call1.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
         call1.stop();
-        int afterCall1 = countHydrateTarWrites(osb);
-        assertTrue(afterCall1 >= 1, "首轮应实际投放");
+        assertEquals(1, farmConvergeCommands(osb).size(), "首轮收敛");
 
         // 新包装实例（同 sandboxId=同容器代，模拟生产 resume）：
         var st2 = projectedStateNoSkillCache(host);
-        st2.setSandboxId("sbx-pod-1");
-        var call2 = new OpenSandbox(st2, osb, options(), null, null, spec);
-        call2.setSkillCacheScope("sess-A");
+        st2.setSandboxId("sbx-farm-pod-1");
+        var call2 = new OpenSandbox(st2, osb, farmOptions(svc, null, null), null, null, spec);
+        bindFarmSession(call2, "sess-A");
         call2.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
         call2.stop();
-        assertEquals(afterCall1, countHydrateTarWrites(osb),
-            "指纹未变 + 本代已投放同 scope → 新实例不得重投（P0-1）");
+        assertEquals(1, farmConvergeCommands(osb).size(),
+            "指纹未变 + 本代已收敛同 scope → 新实例不得重收敛（稳态 0 exec）");
     }
 
-    /** 同容器代换 scope（池化借出复用/同用户双会话）：必须走慢路径 prune 旧 scope 并投放新 scope */
+    /** 同容器代换 scope（池化借出复用/同用户双会话）：换 scope 必收敛新 scope 并清理容器内旧 scope */
     @Test
-    void scopedSkillCacheScopeSwitchOnSameGenerationRehydrates() throws Exception {
-        var host = java.nio.file.Files.createTempDirectory("scoped-scope-switch");
+    void farmScopeSwitchOnSameGenerationShouldReconvergeNewScope() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("farm-scope-switch");
         writeHostSkill(host, "sess-A", "demo-a");
         writeHostSkill(host, "sess-B", "demo-b");
-        var osb = mockOsb(mockExecution(0, "", ""));
+        var cfg = java.nio.file.Files.createTempDirectory("farm-scope-switch-cfg");
+        bundleSkill(cfg, "demo-a");
+        bundleSkill(cfg, "demo-b");
+        var svc = bundleService(cfg);
+        var osb = farmOsbTracking(svc);
         var spec = new OpenSandboxFilesystemSpec();
         var st1 = projectedStateNoSkillCache(host);
-        st1.setSandboxId("sbx-switch-1");
-        var callA = new OpenSandbox(st1, osb, options(), null, null, spec);
-        callA.setSkillCacheScope("sess-A");
+        st1.setSandboxId("sbx-farm-switch-1");
+        var callA = new OpenSandbox(st1, osb, farmOptions(svc, null, null), null, null, spec);
+        bindFarmSession(callA, "sess-A");
         callA.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
         callA.stop();
 
-        // 同 sandboxId 换 scope：A→B 不得命中短路
+        // 同 sandboxId 换 scope：sess-B 不得命中稳态（已收敛 scope 表按代记单 scope）
         var st2 = projectedStateNoSkillCache(host);
-        st2.setSandboxId("sbx-switch-1");
-        var callB = new OpenSandbox(st2, osb, options(), null, null, spec);
-        callB.setSkillCacheScope("sess-B");
+        st2.setSandboxId("sbx-farm-switch-1");
+        var callB = new OpenSandbox(st2, osb, farmOptions(svc, null, null), null, null, spec);
+        bindFarmSession(callB, "sess-B");
         callB.exec(RuntimeContext.builder().userId("sess-B").build(), "echo 2", 30);
         callB.stop();
 
-        // 两次投放 tar 都在捕获里，任一包含 sess-B 即代表新 scope 走了慢路径投放
-        var captor = ArgumentCaptor.forClass(List.class);
-        verify(osb.files(), atLeastOnce()).write(captor.capture());
-        boolean sessBTarSeen = false;
-        for (var call : captor.getAllValues()) {
-            var w = (WriteEntry) call.get(0);
-            if (w.getPath() != null && w.getPath().startsWith("/tmp/workspace.")) {
-                if (readTarEntryNames((String) w.getData()).stream().anyMatch(e -> e.contains("sess-B"))) {
-                    sessBTarSeen = true;
-                }
-            }
-        }
-        assertTrue(sessBTarSeen, "同代换 scope 必须重新投放新 scope（不得命中 P0-1 短路）");
-        // prune 在合并 exec 中执行且按当前 scope 保留
+        var converges = farmConvergeCommands(osb);
+        assertEquals(2, converges.size(), "同代换 scope 必须收敛新 scope");
+        assertTrue(converges.get(1).contains("ln -s '" + FARM_STORE + "/CURRENT/demo-b' '"
+            + "/workspace/.skills-cache/sess-B/oaf-package/demo-b'"), converges.get(1));
+        // prune 在收敛 exec 中执行且按当前 scope 保留
         verify(osb.commands(), atLeastOnce()).run(contains("! -name 'sess-B'"));
     }
 
-    /** 缺口①：downloadFile（SDK SandboxFileTransfer 下载）路径命中 .skills-cache 时触发延迟投放 */
+    /** 缺口①：downloadFile（SDK SandboxFileTransfer 下载）路径命中 .skills-cache 时触发延迟收敛 */
     @Test
-    void downloadFileReferencingSkillsCacheTriggersDeferredHydration() throws Exception {
-        var host = java.nio.file.Files.createTempDirectory("scoped-dl");
+    void downloadFileReferencingSkillsCacheTriggersDeferredFarmConverge() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("farm-dl");
         writeHostSkill(host, "sess-A", "demo-a");
-        var osb = mockOsb(mockExecution(0, "", ""));
+        var cfg = java.nio.file.Files.createTempDirectory("farm-dl-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var osb = farmOsbTracking(svc);
         var st = projectedStateNoSkillCache(host);
-        st.setSandboxId("sbx-dl-1");
-        var sandbox = new OpenSandbox(st, osb, options(), null, null, new OpenSandboxFilesystemSpec());
-        sandbox.setSkillCacheScope("sess-A");
+        st.setSandboxId("sbx-farm-dl-1");
+        var sandbox = new OpenSandbox(st, osb, farmOptions(svc, null, null), null, null,
+            new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
 
-        // 先 download 非 .skills-cache 路径：不投放（write 零调用）
+        // 先 download 非 .skills-cache 路径：不触发判定/收敛
         sandbox.downloadFile("outputs/plain.txt");
-        verify(osb.files(), never()).write(anyList());
+        verify(osb.commands(), never()).run(anyString());
 
-        // 再 download .skills-cache 路径：投放（延迟语义）后才读
+        // 再 download .skills-cache 路径：延迟语义触发判定 + 收敛后才读
         sandbox.downloadFile(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md");
-        assertTrue(countHydrateTarWrites(osb) >= 1, ".skills-cache 下载必须先投放再读");
-    }
-
-    /** P1-3：scoped 慢路径把 prune 与解包合并为单条 exec（不再先单独跑一次 prune） */
-    @Test
-    void scopedSkillCacheSlowPathFoldsPruneIntoSingleExec() throws Exception {
-        var host = java.nio.file.Files.createTempDirectory("scoped-single-exec");
-        writeHostSkill(host, "sess-A", "demo-a");
-        writeHostSkill(host, "sess-B", "demo-b");
-        var osb = mockOsb(mockExecution(0, "", ""));
-        var st = projectedStateNoSkillCache(host);
-        st.setSandboxId("sbx-single-1");
-        var sandbox = new OpenSandbox(st, osb, options(), null, null, new OpenSandboxFilesystemSpec());
-        sandbox.setSkillCacheScope("sess-A");
-
-        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
-        sandbox.stop();
-
-        // 单条 exec 同时含解包与按 scope 清理；不存在独立的 prune-only exec
-        var captor = ArgumentCaptor.forClass(String.class);
-        verify(osb.commands(), atLeastOnce()).run(captor.capture());
-        var hydrateCmds = captor.getAllValues().stream()
-            .filter(c -> c.contains("tar xzf -") && c.contains("find ")).toList();
-        assertEquals(1, hydrateCmds.size(), "解包与 prune 应合并进同一条 exec（P1-3）");
-        assertTrue(hydrateCmds.get(0).contains("! -name 'sess-A'"));
-        assertEquals(0, captor.getAllValues().stream()
-            .filter(c -> c.contains("find ") && !c.contains("tar xzf -")).count(),
-            "不得存在 prune-only 的独立 exec");
+        assertEquals(1, farmConvergeCommands(osb).size(), ".skills-cache 下载必须先收敛再读");
     }
 
     // ---------- exec→execd 翻译异常分型（issue #296）：仅 execd files API 404 = 缺失哨兵，
@@ -1328,17 +1153,15 @@ class OpenSandboxTest {
     }
 
     @Test
-    void scopedSkillCacheFingerprintShouldUsePackageSourceNotStageStat() throws Exception {
-        // 回归钉子（9d77505 缺口④①）：stage 副本目录的 mtime 各副本不同（各自 staging 时刻），
-        // 若指纹退化回 stage 目录 stat，跨副本指纹永不等、共享层永不命中、每副本重复付 4-6s 慢路径。
-        // 正确指纹源 = 包内源目录 stat（PVC 同挂载跨副本一致）+ L4 revision（KV 共享）。
-        var pkg = java.nio.file.Files.createTempDirectory("scoped-fp-pkg");
-        java.nio.file.Files.writeString(pkg.resolve("SKILL.md"), "---\nname: pkg\n---\n");
-
+    void farmFingerprintShouldUseEndpointVersionNotStageStat() throws Exception {
+        // 回归钉子（9d77505 缺口④①，PR-4b 拆分后口径）：稳态指纹 = 端点版本 + L4 revision，
+        // 与宿主 stage 目录 stat 无关——stage 副本 mtime 各副本不同，若指纹退化回宿主目录
+        // stat，跨副本指纹永不等、共享层永不命中、每副本重复付收敛 exec。
+        // 端点版本 = SkillBundleService.computeVersion（包内源 stat + 禁用 overlay，跨副本一致）。
         // 两个 mtime 不同的 stage 目录（显式拉开，模拟不同副本各自 staging）
-        var hostA = java.nio.file.Files.createTempDirectory("scoped-fp-a");
+        var hostA = java.nio.file.Files.createTempDirectory("farm-fp-a");
         writeHostSkill(hostA, "sess-A", "demo-a");
-        var hostB = java.nio.file.Files.createTempDirectory("scoped-fp-b");
+        var hostB = java.nio.file.Files.createTempDirectory("farm-fp-b");
         writeHostSkill(hostB, "sess-A", "demo-a");
         java.nio.file.Files.setLastModifiedTime(
             hostA.resolve(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"),
@@ -1347,76 +1170,77 @@ class OpenSandboxTest {
             hostB.resolve(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"),
             java.nio.file.attribute.FileTime.fromMillis(1777777777777L));
 
+        var cfg = java.nio.file.Files.createTempDirectory("farm-fp-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
         var data = new java.util.HashMap<String, String>();
         var store = new ScopedFingerprintStore(fakeScopedFpFacade(data));
-        var osb = mockOsb(mockExecution(0, "", ""));
+        var osb = farmOsbTracking(svc);
 
-        // 副本1：全新 spec（Pod 级表空）→ 慢路径投放 → 指纹经共享层 setex 落地
-        var spec1 = new OpenSandboxFilesystemSpec();
-        spec1.packageSkillsDir(pkg);
-        spec1.sharedFingerprintStore(store);
+        // 副本1：全新 spec（Pod 级表空）→ 收敛 → 指纹经共享层 setex 落地
+        var spec1 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
         var st1 = projectedStateNoSkillCache(hostA);
         st1.setSandboxId("sbx-fp-1");
-        var call1 = new OpenSandbox(st1, osb, options(), null, null, spec1);
-        call1.setSkillCacheScope("sess-A");
+        var call1 = new OpenSandbox(st1, osb, farmOptions(svc, null, null), null, null, spec1);
+        bindFarmSession(call1, "sess-A");
         call1.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
         call1.stop();
-        int afterCall1 = countHydrateTarWrites(osb);
-        assertTrue(afterCall1 >= 1, "副本1 首轮应实际投放");
-        assertFalse(data.isEmpty(), "投放成功后指纹必须写入共享层（recordScopedSkillCacheFingerprint 双写）");
+        assertEquals(1, farmConvergeCommands(osb).size(), "副本1 首轮收敛");
+        assertFalse(data.isEmpty(), "收敛成功后指纹必须写入共享层（recordScopedSkillCacheFingerprint 双写）");
 
         // 副本2：全新 spec（Pod 级表空 → 强制走共享层读回）+ mtime 不同的 stage 目录
-        // → 指纹仍一致（源自包内源而非 stage stat）→ 命中稳态短路，不重投
-        var spec2 = new OpenSandboxFilesystemSpec();
-        spec2.packageSkillsDir(pkg);
-        spec2.sharedFingerprintStore(store);
+        // → 指纹仍一致（源自端点版本而非 stage stat）→ 命中稳态短路，不重收敛
+        var spec2 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
         var st2 = projectedStateNoSkillCache(hostB);
         st2.setSandboxId("sbx-fp-1");
-        var call2 = new OpenSandbox(st2, osb, options(), null, null, spec2);
-        call2.setSkillCacheScope("sess-A");
+        var call2 = new OpenSandbox(st2, osb, farmOptions(svc, null, null), null, null, spec2);
+        bindFarmSession(call2, "sess-A");
         call2.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
         call2.stop();
-        assertEquals(afterCall1, countHydrateTarWrites(osb),
-            "同包源+同 revision（stage mtime 不同）→ 共享层指纹命中 → 副本2 不得重投（重投即指纹源退化为 stage stat）");
+        assertEquals(1, farmConvergeCommands(osb).size(),
+            "同端点版本+同 revision（stage mtime 不同）→ 共享层指纹命中 → 副本2 不得重收敛（重收敛即指纹源退化为 stage stat）");
     }
 
     @Test
-    void scopedSkillCacheShouldRehydrateWhenRevisionChanges() throws Exception {
-        // 回归钉子（9d77505 缺口④②）：指纹必须含 L4 revision 段——revision 是 KV 共享的用户级
-        // 技能差异信号，变化后同容器代同 scope 的下一 call 必须重新投放（缺失该段=陈旧技能=正确性）
-        var host = java.nio.file.Files.createTempDirectory("scoped-rev");
+    void farmShouldReconvergeWhenRevisionChanges() throws Exception {
+        // 回归钉子（9d77505 缺口④②，PR-4b 口径）：指纹必须含 L4 revision 段——revision 是
+        // KV 共享的用户级技能差异信号，变化后同容器代同 scope 的下一 call 必须重收敛
+        // （缺失该段=陈旧软链=正确性）
+        var host = java.nio.file.Files.createTempDirectory("farm-rev");
         writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-rev-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
         var reader = mock(WorkspaceReader.class);
         var rev = new java.util.concurrent.atomic.AtomicReference<>("rev-1");
         when(reader.readUserSkillRevision(anyString())).thenAnswer(inv -> rev.get());
 
-        var osb = mockOsb(mockExecution(0, "", ""));
+        var osb = farmOsbTracking(svc);
         var spec = new OpenSandboxFilesystemSpec();
 
-        // call1（实例1，生产 acquire 语义）：rev-1 → 投放并记录指纹
+        // call1（实例1，生产 acquire 语义）：rev-1 → 收敛并记录指纹
         var st1 = projectedStateNoSkillCache(host);
         st1.setSandboxId("sbx-rev-1");
-        var call1 = new OpenSandbox(st1, osb, options(), reader, null, spec);
+        var call1 = new OpenSandbox(st1, osb, farmOptions(svc, null, null), reader, null, spec);
         call1.setUserKey("alice");
         call1.setSkillCacheScope("sess-A");
         call1.exec(RuntimeContext.builder().userId("alice").build(), "echo 1", 30);
         call1.stop();
-        int afterCall1 = countHydrateTarWrites(osb);
-        assertTrue(afterCall1 >= 1, "首轮应实际投放");
+        assertEquals(1, farmConvergeCommands(osb).size(), "首轮收敛");
 
         // 用户技能变更：KV revision rev-1 → rev-2（跨实例可见，生产=任意副本）
         rev.set("rev-2");
 
-        // call2（实例2，同容器代同 scope）：revision 变化 → 指纹变化 → 必须重新投放
+        // call2（实例2，同容器代同 scope）：revision 变化 → 指纹变化 → 必须重收敛
         var st2 = projectedStateNoSkillCache(host);
         st2.setSandboxId("sbx-rev-1");
-        var call2 = new OpenSandbox(st2, osb, options(), reader, null, spec);
+        var call2 = new OpenSandbox(st2, osb, farmOptions(svc, null, null), reader, null, spec);
         call2.setUserKey("alice");
         call2.setSkillCacheScope("sess-A");
         call2.exec(RuntimeContext.builder().userId("alice").build(), "echo 2", 30);
         call2.stop();
-        assertTrue(countHydrateTarWrites(osb) > afterCall1,
-            "revision rev-1→rev-2 后第二次 call 必须重新投放（不重投即指纹缺 revision 段，技能陈旧）");
+        assertEquals(2, farmConvergeCommands(osb).size(),
+            "revision rev-1→rev-2 后第二次 call 必须重收敛（不收敛即指纹缺 revision 段，软链陈旧）");
     }
 
     // ---------- first-reasoning：D1 混合读穿 / D4 探针直供 / D5 探测修正 / D6 补投开关 ----------
@@ -1731,6 +1555,31 @@ class OpenSandboxTest {
         return farmOsb(storeVersion, storeVersion != null);
     }
 
+    /** store 探测应答动态跟踪端点版本（版本切换/内容变更场景）：readlink 应答 v-&lt;当前版本&gt; */
+    private static Sandbox farmOsbTracking(SkillBundleService svc) {
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                return mockExecution(0, "v-" + svc.currentVersion().version(), "");
+            }
+            return mockExecution(0, "", "");
+        });
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        return osb;
+    }
+
+    /** 零 TTL 版本服务：内容变更立即可见（D-4 TTL 缓存会吞掉测试内的包源变更） */
+    private static SkillBundleService bundleServiceLive(Path configDir) {
+        var props = new AgentManagerProperties(null, null, null, configDir.toString(),
+            null, null, null, null, null);
+        return new SkillBundleService(new SkillManageService(props),
+            configDir.resolve("bundle-cache"), java.time.Duration.ZERO,
+            java.time.Clock.systemUTC());
+    }
+
     /** 捕获农场收敛 exec（含引号容器路径段的命令；tar 物化/readlink/用户命令均不含该形态） */
     private static List<String> farmConvergeCommands(Sandbox osb) throws Exception {
         var captor = ArgumentCaptor.forClass(String.class);
@@ -1758,7 +1607,8 @@ class OpenSandboxTest {
     }
 
     @Test
-    void farmSwitchOffShouldKeepCurrentTarBehavior() throws Exception {
+    void farmSwitchOffShouldDeliverNoPackageSkills() throws Exception {
+        // PR-4b：开关（store 路径）为空 = 总闸关闭 = 包技能不投放（无 tar 回落，回滚 = 回滚整个 release）
         var host = java.nio.file.Files.createTempDirectory("farm-off");
         writeHostSkill(host, "sess-A", "demo-a");
         var osb = farmOsb("v-anything");
@@ -1768,7 +1618,8 @@ class OpenSandboxTest {
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
         assertEquals(0, farmReadlinkCount(osb), "开关（store 路径）为空不得探测 store");
-        assertTrue(countHydrateTarWrites(osb) >= 1, "开关关闭走现行为（tar 物化）");
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "开关关闭不得收敛建链");
+        verify(osb.files(), never()).write(anyList());
     }
 
     @Test
@@ -1807,7 +1658,7 @@ class OpenSandboxTest {
     }
 
     @Test
-    void farmStoreMissingShouldDegradeWholeSessionToTar() throws Exception {
+    void farmStoreMissingShouldDegradeSessionWithNoPackageSkills() throws Exception {
         var host = java.nio.file.Files.createTempDirectory("farm-missing");
         writeHostSkill(host, "sess-A", "demo-a");
         var cfg = java.nio.file.Files.createTempDirectory("farm-missing-cfg");
@@ -1824,8 +1675,9 @@ class OpenSandboxTest {
 
         assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_store_missing")
             .counter().count(), "D-5：store 缺失降级打点");
-        assertTrue(countHydrateTarWrites(osb) >= 1, "降级会话整体走 tar 物化");
         assertTrue(farmConvergeCommands(osb).isEmpty(), "降级会话不得建软链");
+        // 降级会话无 tar 回落（PR-4b）
+        verify(osb.files(), never()).write(anyList());
 
         var sandbox2 = new OpenSandbox(farmState(host, "sbx-farm-2"), osb,
             farmOptions(svc, registry, null), null, null, spec);
@@ -1857,8 +1709,8 @@ class OpenSandboxTest {
 
         assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_endpoint_down")
             .counter().count(), "D-5：守护活着但同步失败 = 端点链路不可达降级");
-        assertTrue(countHydrateTarWrites(osb) >= 1, "降级会话整体走 tar 物化（fail-open 不变）");
         assertTrue(farmConvergeCommands(osb).isEmpty(), "降级会话不得建软链");
+        verify(osb.files(), never()).write(anyList());
     }
 
     @Test
@@ -1880,12 +1732,12 @@ class OpenSandboxTest {
 
         assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_endpoint_down")
             .counter().count(), "D-5：指纹计算失败 = 端点不可用降级");
-        assertTrue(countHydrateTarWrites(osb) >= 1, "降级会话整体走 tar 物化");
         assertTrue(farmConvergeCommands(osb).isEmpty(), "降级会话不得建软链");
+        verify(osb.files(), never()).write(anyList());
     }
 
     @Test
-    void farmVersionMismatchShouldDegradeToTar() throws Exception {
+    void farmVersionMismatchShouldDegradeSessionWithNoPackageSkills() throws Exception {
         var host = java.nio.file.Files.createTempDirectory("farm-mismatch");
         writeHostSkill(host, "sess-A", "demo-a");
         var cfg = java.nio.file.Files.createTempDirectory("farm-mismatch-cfg");
@@ -1901,12 +1753,12 @@ class OpenSandboxTest {
 
         assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_version_mismatch")
             .counter().count(), "D-5：版本硬校验失败降级打点");
-        assertTrue(countHydrateTarWrites(osb) >= 1, "硬校验失败 = store 不可用，本会话 tar 物化");
-        assertTrue(farmConvergeCommands(osb).isEmpty());
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "硬校验失败 = store 不可用，本会话无包技能投放");
+        verify(osb.files(), never()).write(anyList());
     }
 
     @Test
-    void farmEndpointUnwiredShouldDegradeToTar() throws Exception {
+    void farmEndpointUnwiredShouldDegradeSessionWithNoPackageSkills() throws Exception {
         var host = java.nio.file.Files.createTempDirectory("farm-endpoint");
         writeHostSkill(host, "sess-A", "demo-a");
         var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
@@ -1920,7 +1772,8 @@ class OpenSandboxTest {
 
         assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_endpoint_down")
             .counter().count(), "D-5：端点不可达降级打点");
-        assertTrue(countHydrateTarWrites(osb) >= 1);
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "端点不可达 = 无包技能投放（PR-4b）");
+        verify(osb.files(), never()).write(anyList());
     }
 
     @Test
@@ -1954,6 +1807,48 @@ class OpenSandboxTest {
         assertEquals(2, farmConvergeCommands(osb).size(),
             "稳态短路（D-10）：call2 同沙箱代同指纹跳过收敛 exec，call1/call3（新代）各收敛一次");
         assertEquals(2.0, registry.get("skills.farm.decision").tag("result", "farm").counter().count());
+    }
+
+    @Test
+    void farmOrphanLinkShouldBeRemovedWhenRemovedFromManifest() throws Exception {
+        // §6.2-3「农场触发时对 manifest 已禁用/移除的既有软链执行删除」：宿主 stage 已无 demo-b
+        // （包版本移除后端点版本变化 → 指纹变化 → 重收敛），容器内旧 demo-b 软链为孤儿——
+        // 不在 linkCandidates 内，必须被收敛 exec 清理（否则悬空链永久滞留，load 撞已删内容）。
+        // demo-a 照常建链。真实场景实测（kind 三路径验收）揪出：PR-4a 起孤儿链即不清理。
+        var host = java.nio.file.Files.createTempDirectory("farm-orphan");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-orphan-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        String scopeAll = "/workspace/.skills-cache/sess-A";
+        String scopeRoot = scopeAll + "/oaf-package";
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                return mockExecution(0, "v-" + version, "");
+            }
+            return mockExecution(0, "", "");
+        });
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-orphan"), osb,
+            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var cmd = farmConvergeCommands(osb).get(0);
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a' '" + scopeRoot + "/demo-a'"),
+            "候选内技能照常建链：" + cmd);
+        // 差集清理段：枚举容器软链，与候选字面集（仅 demo-a）比对——集外（demo-b 孤儿）rm
+        assertTrue(cmd.contains("find '" + scopeAll + "' -type l"), "收敛 exec 内嵌孤儿枚举：" + cmd);
+        assertTrue(cmd.contains("case '|oaf-package/demo-a|' in"), "候选字面集不含已移除的 demo-b：" + cmd);
+        assertTrue(cmd.contains("*) rm -rf \"$__f\" ;; esac"), "集外软链差集删除：" + cmd);
+        assertFalse(cmd.contains("|oaf-package/demo-b|"), "已移除技能不得进入候选字面集：" + cmd);
     }
 
     @Test
@@ -2062,18 +1957,18 @@ class OpenSandboxTest {
     }
 
     @Test
-    void farmSteadyShouldSkipConvergeExecUntilHostChanges() throws Exception {
-        // D-10：农场稳态 = 与 tar 路径 P0-1 同源的指纹短路——同沙箱代同指纹 0 exec（稳态不劣于
-        // 关闭农场时的指纹开销）；宿主内容变化（包源变更 → 包指纹变化）才重收敛。同代内不再收敛
-        // 同时是「会话中途容器重启（同 sandboxId resume）软链不重建」盲点的代码事实（§6.2-4 已接受）。
+    void farmSteadyShouldSkipConvergeExecUntilEndpointVersionChanges() throws Exception {
+        // D-10（PR-4b 口径）：稳态指纹 = 端点版本 + L4 revision——同沙箱代同指纹 0 exec；
+        // 端点版本变化（包内容/全局禁用变更 → 发布语义）才重收敛。同代内不再收敛同时是
+        // 「会话中途容器重启（同 sandboxId resume）软链不重建」盲点的代码事实（§6.2-4 已接受）。
         var host = java.nio.file.Files.createTempDirectory("farm-steady");
         writeHostSkill(host, "sess-A", "demo-a");
         var cfg = java.nio.file.Files.createTempDirectory("farm-steady-cfg");
         bundleSkill(cfg, "demo-a");
-        var svc = bundleService(cfg);
+        var svc = bundleServiceLive(cfg);
         var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
-        var osb = farmOsb("v-" + svc.currentVersion().version());
-        var spec = new OpenSandboxFilesystemSpec().packageSkillsDir(cfg.resolve("skills"));
+        var osb = farmOsbTracking(svc);
+        var spec = new OpenSandboxFilesystemSpec();
 
         var call1 = new OpenSandbox(farmState(host, "sbx-farm-steady"), osb,
             farmOptions(svc, registry, null), null, null, spec);
@@ -2089,7 +1984,7 @@ class OpenSandboxTest {
         assertEquals(1, farmReadlinkCount(osb), "判定记忆：稳态不重复判定");
         verify(osb.files(), never()).write(anyList());
 
-        // 宿主包源变更（发布语义）→ 包指纹变化 → 重收敛
+        // 端点版本变更（包源内容变更 → 发布语义）→ 指纹变化 → 重收敛
         java.nio.file.Files.writeString(cfg.resolve("skills/demo-a/SKILL.md"), "---\nname: demo-a\n---\nchanged");
         java.nio.file.Files.setLastModifiedTime(cfg.resolve("skills/demo-a/SKILL.md"),
             java.nio.file.attribute.FileTime.fromMillis(1777777777777L));
@@ -2098,14 +1993,14 @@ class OpenSandboxTest {
         bindFarmSession(call3, "sess-A");
         call3.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
-        assertEquals(2, farmConvergeCommands(osb).size(), "宿主指纹变化必须重收敛（否则新内容不进链）");
+        assertEquals(2, farmConvergeCommands(osb).size(), "端点版本变化必须重收敛（否则新内容不进链）");
     }
 
     @Test
-    void farmFlipFromDegradedTarToFarmShouldConvergeWithinSameGeneration() throws Exception {
-        // D-11：同沙箱代先降级（tar 物化并记账）→ gate 丢失（框架重启/漂副本/LRU 逐出，Pod 级
-        // 指纹记账与 Redis 共享层存续）→ 守护就绪重判定 farm——farm 稳态不得命中 tar 记账跳过
-        // 收敛，否则降级残留的真实文件副本永久滞留（D-2 失效，发布换版对该会话不可见）
+    void farmRecoverToFarmAfterDegradedSessionShouldConverge() throws Exception {
+        // 同沙箱代降级 → gate 丢失（框架重启/漂副本/LRU 逐出）→ 守护就绪重判定 farm。
+        // PR-4b：降级会话零动作（无 tar 物化记账），farm 记账本就不存在 → 正常收敛建链；
+        // 记账 mode|指纹 分量保留为升级窗口/未来模式的防陈旧护栏（D-11 机制不删）
         var host = java.nio.file.Files.createTempDirectory("farm-flip-f");
         writeHostSkill(host, "sess-A", "demo-a");
         var cfg = java.nio.file.Files.createTempDirectory("farm-flip-f-cfg");
@@ -2135,8 +2030,8 @@ class OpenSandboxTest {
         bindFarmSession(call1, "sess-A");
         call1.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
-        assertTrue(countHydrateTarWrites(osb) >= 1, "降级会话走 tar 物化并记账");
         assertTrue(farmConvergeCommands(osb).isEmpty(), "降级会话不得建软链");
+        verify(osb.files(), never()).write(anyList());
 
         // gate 丢失而指纹记账存续：移除会话 gate（同 sandboxId），翻转 store 探测为 farm
         spec.removeSkillSyncGate("sess-A", "sbx-flip-f");
@@ -2153,9 +2048,10 @@ class OpenSandboxTest {
     }
 
     @Test
-    void farmFlipFromFarmToDegradedTarShouldMaterializeWithinSameGeneration() throws Exception {
-        // D-11 反向：farm 会话记账后 gate 丢失、重判定降级——降级会话必须走 tar 物化拿新内容
-        // （B-1），farm 记账不得满足降级稳态（否则零动作保留旧版 store 软链，降级语义被架空）
+    void farmDegradedWithinSameGenerationShouldKeepFarmSteady() throws Exception {
+        // 同代 farm 收敛记账后 gate 丢失、重判定降级——PR-4b 降级会话零动作（不建链不物化），
+        // 容器链接保持原样；再次 farm 且指纹未变 → 稳态跳过（B-1 的 tar 重物化分支已随 tar
+        // 退役消失，farm 记账即容器事实）
         var host = java.nio.file.Files.createTempDirectory("farm-flip-t");
         writeHostSkill(host, "sess-A", "demo-a");
         var cfg = java.nio.file.Files.createTempDirectory("farm-flip-t-cfg");
@@ -2195,16 +2091,18 @@ class OpenSandboxTest {
         call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
         assertEquals(1, farmConvergeCommands(osb).size(), "降级会话不得建软链（不再追加收敛 exec）");
-        long tarWrites = org.mockito.Mockito.mockingDetails(osb.files()).getInvocations().stream()
-            .filter(inv -> inv.getMethod().getName().equals("write"))
-            .filter(inv -> {
-                var arg = inv.getArgument(0);
-                return arg instanceof java.util.List<?> list && !list.isEmpty()
-                    && ((WriteEntry) list.get(0)).getPath() != null
-                    && ((WriteEntry) list.get(0)).getPath().startsWith("/tmp/workspace.");
-            }).count();
-        assertTrue(tarWrites >= 1,
-            "同代 farm→降级翻转：farm 记账不得满足降级稳态，必须重物化拿新内容（B-1）");
+        verify(osb.files(), never()).write(anyList());
+
+        // 同代恢复 farm（gate 再丢 + store 探测恢复）：指纹未变 + farm 记账存续 → 稳态跳过
+        spec.removeSkillSyncGate("sess-A", "sbx-flip-t");
+        current.set("v-" + version);
+        var call3 = new OpenSandbox(farmState(host, "sbx-flip-t"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call3, "sess-A");
+        call3.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1, farmConvergeCommands(osb).size(),
+            "降级零动作 + farm 记账存续 → 稳态命中不重收敛（容器链接即最新）");
     }
 
     @Test
@@ -2233,7 +2131,7 @@ class OpenSandboxTest {
             }
             return mockExecution(0, "", "");
         });
-        var spec = new OpenSandboxFilesystemSpec().packageSkillsDir(cfg.resolve("skills"));
+        var spec = new OpenSandboxFilesystemSpec();
 
         for (int i = 0; i < 3; i++) {
             var call = new OpenSandbox(farmState(host, "sbx-farm-retry"), osb,

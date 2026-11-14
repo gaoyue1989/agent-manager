@@ -88,20 +88,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     /** 指纹跨副本共享层（Redis，fail-open；NOOP=未装配，行为回到纯 Pod 级） */
     private volatile ScopedFingerprintStore sharedFingerprintStore = ScopedFingerprintStore.NOOP;
 
-    /** 包内技能源目录（configDir/skills，生产=PVC 只读同挂载；跨副本指纹一致性的来源，缺口④） */
-    private volatile java.nio.file.Path packageSkillsDir;
-
-    /** 注入包内技能源目录（scoped 指纹源；null=未装配，指纹退化为仅 L4 revision） */
-    public OpenSandboxFilesystemSpec packageSkillsDir(java.nio.file.Path dir) {
-        this.packageSkillsDir = dir;
-        return this;
-    }
-
-    /** 包内技能源目录（可空） */
-    public java.nio.file.Path packageSkillsDir() {
-        return packageSkillsDir;
-    }
-
     /** 注入跨副本指纹共享层（AgentScopeConfig 装配时调用；null 归一 NOOP） */
     public OpenSandboxFilesystemSpec sharedFingerprintStore(ScopedFingerprintStore store) {
         this.sharedFingerprintStore = store != null ? store : ScopedFingerprintStore.NOOP;
@@ -113,18 +99,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
      * 双会话）时指纹命中但 scope 不同，必须走慢路径 prune 旧 scope（跨用户残留防护）再投放。
      */
     private final Map<String, String> hydratedScopedScopes = lruMap(256);
-
-    /**
-     * scoped 投放载荷缓存（pod 本地，P1-3）：sourceRoot|scope → {指纹, gz 字节}。
-     * 慢路径（换沙箱代/换 scope）复用同内容 gz，省宿主 build+gzip（实测 66MB/2000f ≈1.8s）。
-     * 字节有界：单载荷 ≤32MB 且总量 ≤64MB，超限不缓存（回落每次现算，正确性不变）。
-     */
-    private final Map<String, ScopedPayload> scopedPayloadCache = lruMap(8);
-    private static final int MAX_SCOPED_PAYLOAD_BYTES = 32 * 1024 * 1024;
-    private static final long MAX_SCOPED_PAYLOAD_TOTAL_BYTES = 64L * 1024 * 1024;
-
-    /** scoped 载荷缓存条目 */
-    record ScopedPayload(String statFingerprint, byte[] gzPayload) {}
 
     /** LRU 有界 map（accessOrder，超限逐条淘汰最久未访问项） */
     private static <K, V> Map<K, V> lruMap(int maxSize) {
@@ -159,18 +133,15 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         }
     }
 
-    /** 投放模式分量（记账值 = {@code mode|指纹}）：tar 物化路径 */
-    public static final String HYDRATE_MODE_TAR = "tar";
-    /** 投放模式分量：软链农场收敛路径（OpenSandbox hydrateSkillsFarm，D-10 稳态短路） */
+    /** 投放模式分量（记账值 = {@code mode|指纹}）：软链农场收敛路径（D-10 稳态短路）。PR-4b 起 tar 模式已退役——存量 {@code tar|} 记账值经模式比对不匹配自然淘汰，无需迁移 */
     public static final String HYDRATE_MODE_FARM = "farm";
 
     /**
-     * scoped 缓存指纹读取（P0-1 短路比对值）：Pod 级 miss 时查跨副本共享层（缺口④），均无返回
-     * null=走慢路径。记账值含投放模式分量（{@code mode|指纹}）且只返回同模式记录——同沙箱代
-     * tar↔farm 互转（降级/恢复翻转后 gate 丢失重判定）永不满足对方稳态，翻转后代际必走一次
-     * 重收敛/重物化（否则降级残留真实文件被 farm 稳态误跳过、farm 软链被降级稳态误跳过）。
-     * 模式不符的共享层命中仍回填 Pod 级两表：值即「该沙箱代另一模式已投放」的真实事实，
-     * 稳态正确性由模式比对承担。
+     * scoped 缓存指纹读取（稳态短路比对值）：Pod 级 miss 时查跨副本共享层（缺口④），均无返回
+     * null=走收敛。记账值含投放模式分量（{@code mode|指纹}）且只返回同模式记录——升级窗口的
+     * 存量无模式/旧模式值（含已退役的 {@code tar|}）永不满足稳态，触发一次重收敛后自然被
+     * farm 值覆盖（D-11 同姿态，无需迁移）。模式不符的共享层命中仍回填 Pod 级两表：
+     * 值即「该沙箱代曾投放」的真实事实，稳态正确性由模式比对承担。
      */
     public String scopedSkillCacheFingerprint(String sandboxId, String scope, String mode) {
         if (sandboxId == null || sandboxId.isBlank() || scope == null || scope.isBlank()
@@ -212,36 +183,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     public void markHydratedScopedScope(String sandboxId, String scope) {
         if (sandboxId != null && scope != null) {
             hydratedScopedScopes.put(sandboxId, scope);
-        }
-    }
-
-    /** scoped 载荷缓存读取（P1-3；指纹一致才可复用，由调用方比对） */
-    public ScopedPayload scopedPayloadCache(String sourceRoot, String scope) {
-        if (sourceRoot == null || sourceRoot.isBlank() || scope == null || scope.isBlank()) {
-            return null;
-        }
-        return scopedPayloadCache.get(sourceRoot + "|" + scope);
-    }
-
-    /**
-     * scoped 载荷回填（构建成功后调用）：单载荷超 {@link #MAX_SCOPED_PAYLOAD_BYTES} 或
-     * 总量超 {@link #MAX_SCOPED_PAYLOAD_TOTAL_BYTES} 时不缓存（LRU 淘汰保证总量上界）。
-     */
-    public void recordScopedPayloadCache(String sourceRoot, String scope, String statFingerprint, byte[] gzPayload) {
-        if (sourceRoot == null || sourceRoot.isBlank() || scope == null || scope.isBlank()
-                || statFingerprint == null || gzPayload == null
-                || gzPayload.length > MAX_SCOPED_PAYLOAD_BYTES) {
-            return;
-        }
-        synchronized (scopedPayloadCache) {
-            long total = scopedPayloadCache.values().stream()
-                .mapToLong(p -> p.gzPayload().length).sum();
-            while (!scopedPayloadCache.isEmpty()
-                    && total + gzPayload.length > MAX_SCOPED_PAYLOAD_TOTAL_BYTES) {
-                var eldest = scopedPayloadCache.keySet().iterator().next();
-                total -= scopedPayloadCache.remove(eldest).gzPayload().length;
-            }
-            scopedPayloadCache.put(sourceRoot + "|" + scope, new ScopedPayload(statFingerprint, gzPayload));
         }
     }
 

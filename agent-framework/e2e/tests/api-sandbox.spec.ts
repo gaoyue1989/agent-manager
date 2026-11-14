@@ -444,7 +444,7 @@ test('X17 同名上传唯一化注入（_1 后缀，两份内容互不覆盖）'
 // 修复：doExec 首次命令前重算投影 hash，变化即补水合（OpenSandbox.refreshProjectionIfStale）。
 // 观测通道同 X10：mock 沙箱真实 bash 执行 tar/base64 管道（白名单内），files/download 探针直证。
 
-test('X18 投影新鲜度：start 后新增的技能目录在下一 turn 补水合进容器（E-SKILL-4）', async () => {
+test('X18 投影新鲜度（PR-4b）：farm 关闭 = 包技能不投放，tar 回落已退役（E-SKILL-4）', async () => {
   const uid = U();
   const sid = sessionIdFor(`x18-${uniq()}`);
   const marker = `PROJ-${uniq()}`;
@@ -466,22 +466,24 @@ test('X18 投影新鲜度：start 后新增的技能目录在下一 turn 补水�
   const sbxId = stats1.creates[stats1.creates.length - 1].id;
 
   // turn 间隙：模拟 onSystemPrompt staging——往宿主 .skills-cache 写入新技能目录
-  // （与 MarketplaceStager 同位同构；测试进程直写 = 不依赖 LLM 回放层模拟 stage 时序）
+  // （tar 时代的合成投放源；PR-4b 起该路径不再进容器）
   fs.mkdirSync(hostSkillDir, { recursive: true });
   fs.writeFileSync(hostSkillFile, `---\nname: probe-skill\ndescription: x18 projection probe\n---\n\n${marker}\n`);
 
   try {
-    // turn2：同会话 resume + 首次 exec 触发 refreshProjectionIfStale → 补水合进容器
+    // turn2：同会话 resume + 首次 exec 触发投放判定
     const stream2 = chat({ message: `[E2E:execute]`, userId: uid, sessionId: sid });
     await waitTerminal(stream2);
     expect(stream2.terminal?.type).toBe('done');
 
-    // 探针：容器内 /workspace/.skills-cache/{scope}/oaf-package/{skill}/SKILL.md 可读且内容一致
+    // 探针：farm 关闭（CI mock 无 skills-syncd 守护与 /skills-store）= 包技能不投放，
+    // 宿主 stage 注入不得进容器——钉住「tar 回落已退役」（PR-4b 回滚 = 回滚整个 release）。
+    // farm 在位时的新鲜度（包源变更 → 端点版本 → 重收敛）由单测
+    // farmSteadyShouldSkipConvergeExecUntilEndpointVersionChanges 与 kind 真实验收覆盖。
     const containerPath = `/workspace/${path.relative(
       process.env.E2E_AGENT_WS_ROOT ?? '.runtime/agent-config/.agentscope/workspace', hostSkillFile)}`;
     const probe = await downloadFromSandbox(sbxId, containerPath);
-    expect(probe.status, `容器内 ${containerPath} 不可读（start 后新增技能目录未补水合）`).toBe(200);
-    expect(await probe.text()).toContain(marker);
+    expect(probe.status, `farm 关闭下宿主 stage 注入不应进容器（tar 回落已退役）: ${containerPath}`).toBe(404);
   } finally {
     fs.rmSync(path.join(hostSkillDir), { recursive: true, force: true }); // 清场：不留宿主脏目录
   }
