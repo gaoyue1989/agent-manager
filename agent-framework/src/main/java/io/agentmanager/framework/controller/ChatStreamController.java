@@ -637,19 +637,21 @@ public class ChatStreamController {
                     message, finalUserId, body.skills());
 
                 // 上传文件准备（均须先行于 buildContentBlocks 的路径提示构造，保证提示路径
-                // 与磁盘实际一致）：沙箱模式注入发生在 acquire（晚于提示构造），只能先预留
-                // workspace_path（分配即回写，见 UploadWorkspaceInjector#ensureWorkspacePath）；
-                // 非沙箱模式注入即写盘，提示取注入后的 workspace_path
-                if (body.fileIds() != null && sandboxConfig != null && sandboxConfig.enabled()) {
-                    for (var fileId : body.fileIds()) {
-                        workspaceInjector.ensureWorkspacePath(fileId, finalUserId, finalSessionId);
-                    }
-                } else if (body.fileIds() != null) {
-                    for (var fileId : body.fileIds()) {
-                        workspaceInjector.injectToWorkspace(fileId, finalSessionId);
+                // 与磁盘实际一致）：bind-at-use 绑定 + workspace_path 预分配一体
+                // （UploadWorkspaceInjector#assignWorkspacePaths，issue #345——首引用即所有权、
+                // 异 session/user 跳过）。沙箱模式注入发生在 acquire（晚于提示构造），此处仅预留；
+                // 非沙箱模式立即写盘交付并置 injected，提示取注入后的 workspace_path
+                java.util.List<String> injectableFileIds = null;
+                if (body.fileIds() != null && !body.fileIds().isEmpty()) {
+                    injectableFileIds = workspaceInjector.assignWorkspacePaths(
+                        body.fileIds(), finalUserId, finalSessionId);
+                    if (!(sandboxConfig != null && sandboxConfig.enabled())) {
+                        for (var fileId : injectableFileIds) {
+                            workspaceInjector.injectToWorkspace(fileId, finalSessionId);
+                        }
                     }
                 }
-                var blocks = workspaceInjector.buildContentBlocks(body.fileIds(), processedMessage, finalUserId);
+                var blocks = workspaceInjector.buildContentBlocks(injectableFileIds, processedMessage, finalUserId);
                 // 记录本轮上传文件 id（随消息持久化），history 读取时据此把上传卡片挂回本用户消息
                 var msgMeta = new java.util.HashMap<String, Object>();
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, finalSessionId);

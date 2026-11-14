@@ -46,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -377,6 +378,9 @@ class ChatStreamControllerTest {
         // 续租线程不看本段是否还活着，漏放租约 = 该 session 被永久锁死。
         var sessionId = "test-user-s4";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-4");
+        // bind-at-use 分配成功后注入写盘抛异常（如 fileId 失效导致工作区注入失败）
+        when(workspaceInjector.assignWorkspacePaths(anyList(), anyString(), anyString()))
+            .thenReturn(List.of("f-missing"));
         when(workspaceInjector.injectToWorkspace(anyString(), anyString()))
             .thenThrow(new IllegalStateException("file not found"));
         // lifecycle 注入（4a34a41 回滚回归钉子）：onTurnStart 已在准备段注册（租约到手后），

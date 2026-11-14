@@ -54,9 +54,11 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
             // 沙箱生命周期记账会话键（sandbox-pool-opensandbox-design §4.2，尽力兜底）：
             // 主注入点在守卫 tryEnter 同线程（覆盖写，acquire 必经）；此处 Channel 链路
             // ctx.userId=网关 peer（=前端 sid，=turn_lease 键）、A2A 链路=真实用户，
-            // 与守卫注入同值——守卫失效组合下的兜底窗口
-            spec.setPendingSessionId(ctx.getUserId() != null && !ctx.getUserId().isBlank()
-                ? ctx.getUserId() : ctx.getSessionId());
+            // 与守卫注入同值——守卫失效组合下的兜底窗口。同一值也是上传注入的会话过滤键
+            // （issue #345：与 file_asset.session_id 的 bind-at-use 绑定值同命名空间）
+            var pendingSessionId = ctx.getUserId() != null && !ctx.getUserId().isBlank()
+                ? ctx.getUserId() : ctx.getSessionId();
+            spec.setPendingSessionId(pendingSessionId);
             // SDK 技能缓存 scope（.skills-cache/<scope>）：与 HarnessSkillMiddleware.scopeKeyFor 同源，
             // 用于沙箱投影只投放当前会话的 scope 目录（否则整棵 .skills-cache 历史 scope 全灌进容器）
             var skillScope = SkillCacheScope.scopeSegment(ctx);
@@ -76,16 +78,21 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
                 if (userKey != null && !userKey.isBlank()) {
                     sandbox.setUserKey(userKey);
                 }
+                if (pendingSessionId != null && !pendingSessionId.isBlank()) {
+                    sandbox.setSessionId(pendingSessionId);
+                }
                 if (skillScope != null) {
                     sandbox.setSkillCacheScope(skillScope);
                 }
                 var store = spec.getFileAssetStore();
                 var sandboxId = sandbox.getOsbState().getSandboxId();
-                if (store != null && userKey != null && !userKey.isBlank()) {
+                if (store != null && userKey != null && !userKey.isBlank()
+                        && pendingSessionId != null && !pendingSessionId.isBlank()) {
                     // reset 仅在新沙箱代执行（每次 create 即换代）：旧容器注入状态回滚 pending →
-                    // 本 turn 重新注入。同沙箱代重复 onAgent（多实例竞争）不再 reset，防循环。
+                    // 本 turn 重新注入；按会话单条件回滚（issue #345，user 维度会波及他 session 行）。
+                    // 同沙箱代重复 onAgent（多实例竞争）不再 reset，防循环。
                     if (!spec.isInjectedOnSandbox(userKey, sandboxId)) {
-                        store.resetInjectedToPending(userKey);
+                        store.resetInjectedToPending(pendingSessionId);
                         spec.markInjectedOnSandbox(userKey, sandboxId);
                     }
                 }

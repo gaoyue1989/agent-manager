@@ -101,6 +101,8 @@ public class OpenSandbox extends AbstractBaseSandbox
     private static final boolean EXEC_TRACE_ENABLED =
         !"false".equalsIgnoreCase(System.getenv("SANDBOX_EXEC_TRACE"));
     private volatile String userKey;
+    /** 本沙箱代绑定的会话键（chat=前端 sid；上传注入按它过滤 pending，见 setSessionId） */
+    private volatile String sessionId;
     /**
      * 本 call 生效的技能缓存 scope 目录名（.skills-cache/&lt;scope&gt;，对齐 SDK
      * HarnessSkillMiddleware.scopeKeyFor + MarketplaceStager.scopeSegment）。由
@@ -208,6 +210,20 @@ public class OpenSandbox extends AbstractBaseSandbox
     public void setUserKey(String userKey) {
         this.userKey = userKey;
         log.info("[sandbox-open] userKey bound: {}", userKey);
+    }
+
+    /**
+     * 绑定会话键（OpenSandboxClient create/wrapReused/resume 捕获，middleware 兜底）：
+     * chat 链路 = 前端 sid（与 file_asset.session_id 的 bind-at-use 绑定值同命名空间），
+     * 上传注入按它单条件过滤 pending（issue #345）；A2A/invoke 链路 = 真实用户
+     * （无上传绑定，注入自然为空集）。
+     */
+    public void setSessionId(String sessionId) {
+        this.sessionId = sessionId;
+    }
+
+    public String getSessionId() {
+        return sessionId;
     }
 
     /** 绑定技能缓存 scope（SandboxUserKeyMiddleware 经 OpenSandboxClient 注入；见 {@link SkillCacheScope}） */
@@ -1150,8 +1166,8 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * 上传文件注入（file-upload-download-plan §6.2.3）：
-     * 将 userKey 名下 status=pending 的上传文件经 execd files API 写入沙箱
+     * 上传文件注入（file-upload-download-plan §6.2.3 + issue #345 session 化）：
+     * 将本会话（session_id 绑定）名下 status=pending 的上传文件经 execd files API 写入沙箱
      * /workspace/uploads/{workspace_path}，成功后置 injected。
      *
      * <p>调用时机：OpenSandboxClient.create()/resume() 后立即执行（沙箱文件操作
@@ -1169,13 +1185,16 @@ public class OpenSandbox extends AbstractBaseSandbox
         if (pendingEmptyChecked.get()) {
             return;
         }
-        var userId = userKey;
-        if ((userId == null || userId.isBlank()) && filesystemSpec != null) {
-            // acquire 先于 middleware（实测）：实例未绑定 userKey 时从 spec ThreadLocal 兜底
-            // （middleware.onAgent 已设置但 bindUserKey 过早消费/未执行）
-            userId = filesystemSpec.peekPendingUserKey();
+        // 注入批次按会话过滤（issue #345）：session 键 = 实例绑定（create/wrapReused/resume
+        // 捕获）→ spec ThreadLocal 兜底（middleware.onAgent 已设置但实例绑定未及执行的窗口）。
+        // 均缺失时跳过注入（行保持 pending，下 turn 身份齐备再注入）——user 维度兜底是跨
+        // session 泄漏的根源，绝不回退
+        var sessionId = this.sessionId;
+        if ((sessionId == null || sessionId.isBlank()) && filesystemSpec != null) {
+            sessionId = filesystemSpec.peekPendingSessionId();
         }
-        if (userId == null || userId.isBlank()) {
+        if (sessionId == null || sessionId.isBlank()) {
+            log.debug("[sandbox-open] no session bound, skip pending upload injection");
             return;
         }
         synchronized (uploadsInjected) {
@@ -1183,25 +1202,23 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return;
             }
             try {
-                // userKey 绑定的即会话隔离键（Channel peer = sessionId）：同值查 user_key 与 session_id 双维度
-                var pending = fileAssetStore.listPending(userId, userId);
+                var pending = fileAssetStore.listPending(sessionId);
                 if (pending.isEmpty()) {
                     // 不设 uploadsInjected=true（上传可能尚未完成）；但本 call 内置「已查无 pending」
                     // 短路，同 call 后续 doExec 不再查——下一 call 新实例自然重查
                     pendingEmptyChecked.set(true);
-                    log.debug("[sandbox-open] no pending uploads yet for user {}", userId);
+                    log.debug("[sandbox-open] no pending uploads yet for session {}", sessionId);
                     return;
                 }
                 var injectedIds = new java.util.ArrayList<String>();
-                // 已占用的工作区路径（防同名覆盖）：来自 file_asset 历史注入记录，
+                // 已占用的工作区路径（防同名覆盖）：同 session 的 file_asset 行集（DB 单一真相源），
                 // 沙箱容器可能在远端主机，无法像非沙箱路径那样 ls 本地目录
-                var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(userId, userId));
+                var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(sessionId));
                 for (var f : pending) {
-                    // workspace_path 是路径单一真相源：chat 请求时已预留（UploadWorkspaceInjector
-                    // #ensureWorkspacePath，先行于提示构造），此处按预留路径原样写入——提示路径
+                    // workspace_path 是路径单一真相源：chat 请求时已分配（UploadWorkspaceInjector
+                    // #assignWorkspacePaths，先行于提示构造），此处按预留路径原样写入——提示路径
                     // =注入路径，撞名不得在注入时刻改名（提示文本请求时已冻结，改名即漂移，
-                    // agent 按提示读文件必 file_not_found）。null 仅为遗留行兜底（上传后从未
-                    // 发起对话，无提示引用，此时分配无漂移风险）
+                    // agent 按提示读文件必 file_not_found）。null 仅为遗留行兜底（分配无漂移风险）
                     var wsPath = f.workspacePath() != null
                         ? f.workspacePath()
                         : UploadWorkspaceInjector.allocateWorkspacePath(taken, f.fileName());
@@ -1224,7 +1241,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 }
                 fileAssetStore.markInjected(injectedIds);
                 uploadsInjected.set(true);
-                log.info("[sandbox-open] injected {} pending upload(s) for user {}", injectedIds.size(), userId);
+                log.info("[sandbox-open] injected {} pending upload(s) for session {}", injectedIds.size(), sessionId);
             } catch (Exception e) {
                 // fail-soft：注入失败不阻塞；状态保持 pending，下 turn 重试
                 log.warn("[sandbox-open] failed to inject pending uploads: {}", e.getMessage());
@@ -1498,29 +1515,55 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * 经 execd files API 读取沙箱工作区文件字节（供 present_file 等工具在
-     * 沙箱模式下直读文件，避免 Agent 复述大段 base64）。
+     * stat 工作区文件大小（present_file 交付前置的快速拒绝，issue #345）：经 execd
+     * directories/list 列父目录、按 basename 定位 EntryInfo.size（结构化元数据，无 shell
+     * 依赖；mock 白名单无关）。-1 = 不可知（父目录列取失败/入口缺失/端点异常），调用方
+     * 降级跳过——正确性由 {@link #openWorkspaceStream} + FileStorage.writeBounded 兜底。
      *
-     * <p>路径语义与注入一致：无前导斜杠 → 相对 /workspace；带前导斜杠 → 容器绝对路径。
-     * 统一按相对路径处理（file_path 已由调用方 normalize）。
-     *
-     * @param relPath 工作区相对路径（如 outputs/xxx.zip）
-     * @return 文件字节；文件不存在或读取失败返回 null
+     * <p>路径语义与注入一致：相对 /workspace（file_path 已由调用方 normalize）。
      */
-    public byte[] readWorkspaceFile(String relPath) {
+    public long statWorkspaceFile(String relPath) {
         if (relPath == null || relPath.isBlank()) {
-            return null;
+            return -1;
         }
-        // scoped 投放延迟触发：技能资源读取路径命中 .skills-cache 时同步投放（CAS 每 call 一次）
+        // scoped 投放延迟触发：技能资源路径命中 .skills-cache 时同步投放（与 doExec 同口径，
+        // 否则 stat/读流命中未投放目录恒失败）
         if (relPath.contains(SkillCacheScope.CACHE_DIR)) {
             hydrateScopedSkillCache();
         }
+        int slash = relPath.lastIndexOf('/');
+        var dir = slash >= 0 ? relPath.substring(0, slash) : "";
+        var name = slash >= 0 ? relPath.substring(slash + 1) : relPath;
         try {
-            return osbSandbox.files().readByteArray(relPath);
+            for (var entry : osbSandbox.files().listDirectory(dir)) {
+                var p = entry.getPath();
+                var entryName = p != null && p.lastIndexOf('/') >= 0 ? p.substring(p.lastIndexOf('/') + 1) : p;
+                if (name.equals(entryName)) {
+                    return entry.getSize();
+                }
+            }
+            return -1;
         } catch (Exception e) {
-            log.debug("[sandbox-open] read workspace file failed ({}): {}", relPath, e.getMessage());
-            return null;
+            log.debug("[sandbox-open] stat workspace file failed ({}): {}", relPath, e.getMessage());
+            return -1;
         }
+    }
+
+    /**
+     * 打开沙箱工作区文件的读取流（GET /files/download octet-stream 全量流，issue #345）：
+     * 供 present_file 等工具经 FileStorage.writeBounded 流式交付，堆占用恒为缓冲区级。
+     * 调用方负责关闭流。文件不存在/端点异常抛 SDK 异常（调用方转为工具错误应答）。
+     *
+     * <p>路径语义与注入一致：相对 /workspace（file_path 已由调用方 normalize）。
+     */
+    public java.io.InputStream openWorkspaceStream(String relPath) {
+        if (relPath == null || relPath.isBlank()) {
+            throw new IllegalArgumentException("relPath is blank");
+        }
+        if (relPath.contains(SkillCacheScope.CACHE_DIR)) {
+            hydrateScopedSkillCache();
+        }
+        return osbSandbox.files().readStream(relPath);
     }
 
     public OpenSandboxState getOsbState() {

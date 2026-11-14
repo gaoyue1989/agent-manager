@@ -460,9 +460,14 @@ const server = http.createServer((req, res) => {
         if (route === '/directories/list' && req.method === 'GET') {
           const target = sandboxPath(id, u.searchParams.get('path') ?? '');
           if (!target || !fs.existsSync(target) || !fs.statSync(target).isDirectory()) { res.writeHead(404); return res.end(); }
+          // 字段对齐真实 execd FileInfo 契约（sandbox-api 1.0.18：modified_at/created_at 为
+          // OffsetDateTime 必填、mode 必填；mock 旧字段 mod_time/permission 会 SDK 反序列化
+          // 失败 → X21 stat 降级，2026-11-14 实测钉死）
           const entries = fs.readdirSync(target).map(name => {
             const st = fs.statSync(path.join(target, name));
-            return { path: '/' + name, is_dir: st.isDirectory(), size: st.isFile() ? st.size : 0, mod_time: Math.floor(st.mtimeMs / 1000), permission: st.isDirectory() ? 755 : 644, owner: 'root', group: 'root' };
+            return { path: '/' + name, is_dir: st.isDirectory(), size: st.isFile() ? st.size : 0,
+              modified_at: new Date(st.mtimeMs).toISOString(), created_at: new Date(st.birthtimeMs || st.mtimeMs).toISOString(),
+              mode: st.isDirectory() ? 755 : 644, owner: 'root', group: 'root' };
           });
           return json(200, entries);
         }

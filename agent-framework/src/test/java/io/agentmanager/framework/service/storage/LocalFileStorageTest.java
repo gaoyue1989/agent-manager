@@ -125,4 +125,52 @@ class LocalFileStorageTest {
         var s = storage();
         assertThrows(IOException.class, () -> s.write("  ", new ByteArrayInputStream(new byte[1]), 1, "text/plain"));
     }
+
+    // ---------- writeBounded（issue #345）：流式有界写，越限中止不留对象 ----------
+
+    @Test
+    void writeBoundedShouldReturnWrittenBytesAndBeReadable() throws IOException {
+        var s = storage();
+        var content = "bounded-content".getBytes(StandardCharsets.UTF_8);
+        long n = s.writeBounded("generated/x.bin", new ByteArrayInputStream(content), 1024, "application/octet-stream");
+
+        assertEquals(content.length, n, "返回落盘字节数");
+        assertArrayEquals(content, Files.readAllBytes(tempDir.resolve("generated/x.bin")));
+        try (var dir = Files.list(tempDir.resolve("generated"))) {
+            assertEquals(1, dir.count(), "无 tmp 残留（原子 move 完成）");
+        }
+    }
+
+    @Test
+    void writeBoundedShouldAbortWithoutTargetOnOverflow() throws IOException {
+        var s = storage();
+        var content = new byte[2048];
+        java.util.Arrays.fill(content, (byte) 7);
+        assertThrows(StorageOverflowException.class,
+            () -> s.writeBounded("generated/over.bin", new ByteArrayInputStream(content), 1024, null),
+            "越限抛 StorageOverflowException");
+        assertFalse(s.exists("generated/over.bin"), "越限不产生目标对象");
+        // 无 tmp 残留（越限即中止清理；读方永不可见半成品）
+        try (var stream = Files.list(tempDir.resolve("generated"))) {
+            assertEquals(0, stream.count(), "无 tmp/spool 残留");
+        }
+        // 越限后同 key 重写小内容仍可用（中止不影响后续写）
+        var ok = "ok".getBytes(StandardCharsets.UTF_8);
+        assertEquals(2, s.writeBounded("generated/over.bin", new ByteArrayInputStream(ok), 1024, null));
+        assertArrayEquals(ok, Files.readAllBytes(tempDir.resolve("generated/over.bin")));
+    }
+
+    @Test
+    void writeBoundedShouldCloseSourceStream() throws IOException {
+        var s = storage();
+        var closed = new java.util.concurrent.atomic.AtomicBoolean(false);
+        var stream = new java.io.ByteArrayInputStream("x".getBytes(StandardCharsets.UTF_8)) {
+            @Override
+            public void close() {
+                closed.set(true);
+            }
+        };
+        assertEquals(1, s.writeBounded("generated/close.bin", stream, 10, null));
+        assertTrue(closed.get(), "writeBounded 负责关闭源流（接口契约）");
+    }
 }
