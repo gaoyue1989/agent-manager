@@ -158,6 +158,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             // stat 前置：超限不发起传输（快速拒绝）；-1 降级跳过，由 writeBounded 兜底正确性
             long statSize = sandbox.statWorkspaceFile(norm);
             if (statSize >= 0 && statSize > maxBytes) {
+                log.info("present_file: stat fast-reject ({}, stat {} bytes, cap {} bytes)", norm, statSize, maxBytes);
                 return err("file exceeds " + props.file().presentMaxMb() + "MB limit (stat " + statSize + " bytes)");
             }
             java.io.InputStream in;
