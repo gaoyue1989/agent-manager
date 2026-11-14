@@ -139,6 +139,7 @@ agent-framework/
 - **Toolkit**: 自定义工具 (BusinessTools) + MCP 工具 (McpToolRegistrar)
 - **WorkspaceInitializer**: OAF → Workspace 转换
 - **Skill L2 市场仓库**: `/config/skills` 注册为 `FileSystemSkillRepository(writeable=false, source="oaf-package")`——HarnessSkillMiddleware 每轮推理重扫，PVC 上技能目录运行中原位变化（新增/修改/删除）无需重启即在下轮生效；目录缺失时跳过（包未携带 skills）
+- **SDK MarketplaceStager 遮蔽（受控分叉，skills-syncd PR-4b 终态）**：`src/main/java/io/agentscope/harness/agent/skill/runtime/MarketplaceStager.java` 同 FQCN 遮蔽 SDK 原类（Spring Boot classes 优先于 lib）——`stage` 零宿主写盘、纯数据合成 StageResult，farm manifest 来自端点 version 响应 skills 名单；**分叉面冻结为仅此类（含嵌套类型），SDK 版本升级必须重 derive（常量/签名断言见 `MarketplaceStagerShadowTest`，遮蔽失效由 `SHADOW_MARKER` 启动自检 fail-fast）；设计/维护协议/回滚见 [../docs/design/sdk-stager-shadow-design-261114.md](../docs/design/sdk-stager-shadow-design-261114.md)**
 
 ### 2. AgentRuntimeService — 运行时封装
 
