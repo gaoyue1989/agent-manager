@@ -315,6 +315,13 @@ spec:
             # Hub，离线/内网环境构建必失败——清单固定指向本地 registry 的 busybox（预置步骤见
             # docs/deployment.md §二），手工 kubectl set env 后重新 apply 不再丢失
             - { name: EXPORT_BASE_IMAGE, value: "172.20.0.1:5001/busybox:1.36" }
+            # OpenViking 记忆供给（openviking-memory-integration-design §11.1）：默认关——
+            # 发布链路完全不感知；启用需先部署 manifests/openviking.yaml 并就位 Secret
+            # oaf-openviking-secret，OPENVIKING_ROOT_API_KEY 经 kubectl set env 注入（敏感值
+            # 不落清单，apply 不覆盖已有 env）。启用后新发布默认 provider=openviking
+            # （服务可显式 AGENT_MEMORY_PROVIDER=local 退出）
+            - { name: OPENVIKING_ENABLED, value: "false" }
+            - { name: OPENVIKING_BASE_URL, value: "http://openviking-svc.agent-platform.svc.cluster.local:1933" }
           volumeMounts:
             - { name: data, mountPath: /data }
           readinessProbe:
