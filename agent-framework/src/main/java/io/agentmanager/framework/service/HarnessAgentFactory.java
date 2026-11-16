@@ -468,10 +468,7 @@ public class HarnessAgentFactory {
             }
             var synthetic = new io.agentmanager.framework.model.OafConfig.McpServerConfig(
                 "openviking", "openviking", "1.0.0", "", false);
-            var registered = mcpToolRegistrar.registerBuiltClient(toolkit,
-                new io.agentmanager.framework.mcp.UserScopedMcpClientWrapper(
-                    wrapper, io.agentmanager.framework.mcp.UserHeaderRule.EMPTY),
-                synthetic);
+            var registered = mcpToolRegistrar.registerSyntheticClient(toolkit, synthetic, wrapper);
             log.info("[viking] shared-context MCP server registered: {} (tools={})",
                 registered, registered != null ? "account-shared find/search/read/..." : "none");
         } catch (Exception e) {
