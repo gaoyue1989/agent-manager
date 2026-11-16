@@ -729,6 +729,35 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 	// userId 固定为当前登录人的业务面身份 u-{uid}（与数据面 X-User-Id 同源），签发即
 	// 本人记忆空间的 Studio 访问凭证，无法签发他人——故 member 亦可自助（不走
 	// requireWsRole 写裁决），服务归属校验在 ConsoleIssueMemoryKey 内。
+	// 记忆供给聚合总览（与 sandbox 平级，只读）
+	cg.GET("/workspaces/:ws/memory-supply", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out, err := core.ConsoleMemorySupply(wsID, c.Query("keyword"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, out)
+	})
+	// 记忆浏览只读代理（viking://~/ 本人空间；action=list|read）
+	cg.GET("/workspaces/:ws/agents/:id/memory-files", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out, err := core.ConsoleMemoryBrowse(wsID, parseUint(c.Param("id")), c.GetUint("uid"),
+			c.DefaultQuery("action", "list"), c.Query("uri"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, out)
+	})
 	cg.POST("/workspaces/:ws/agents/:id/memory-keys", func(c *gin.Context) {
 		wsID, _, err := wsCtx(c)
 		if err != nil {

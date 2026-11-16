@@ -83,6 +83,13 @@ export interface UserView { id: number; username: string; displayName: string; e
 export interface WorkspaceBrief { id: number; slug: string; name: string; role: string; }
 export interface MeResponse { user: UserView; workspaces: WorkspaceBrief[]; }
 export interface LoginResponse { token: string; user: UserView; workspaces: WorkspaceBrief[]; }
+export interface MemorySupplyItem {
+  serviceId: number; displayName: string; k8sName: string; status: string;
+  provider: "openviking" | "local" | string;
+  sessionCommit: boolean; knowledgeImport: boolean; sharedSkills: boolean; mcpSharedCtx: boolean;
+  provisioned: boolean; openVikingUrl?: string;
+}
+export interface VikingFsEntry { uri: string; size: number; isDir: boolean; modTime?: string; abstract?: string; }
 export interface WorkspaceAdminView {
   id: number; slug: string; name: string; description?: string; status: string;
   owner?: UserView | null; memberCount: number; agentCount: number;
@@ -373,6 +380,11 @@ export const api = {
     issueMemoryKey: (ws: number | string, sid: number) =>
       request<{ userKey: string; openVikingUrl: string; userId: string }>(
         `/console/workspaces/${ws}/agents/${sid}/memory-keys`, { method: "POST" }),
+    // 记忆供给聚合总览 + 记忆浏览只读代理（viking://~/ 本人空间）
+    memorySupply: (ws: number | string, keyword = "") =>
+      request<MemorySupplyItem[]>(`/console/workspaces/${ws}/memory-supply${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ""}`),
+    memoryFiles: (ws: number | string, sid: number, action: "list" | "read", uri: string) =>
+      request<unknown>(`/console/workspaces/${ws}/agents/${sid}/memory-files?action=${action}&uri=${encodeURIComponent(uri)}`),
     members: {
       list: (ws: number | string) => request<MemberView[]>(`/console/workspaces/${ws}/members`),
       invite: (ws: number | string, userId: number, role: string) =>
@@ -516,6 +528,9 @@ export const api = {
     issueMemoryKey: (sid: number, userId: string) =>
       request<{ userKey: string }>(`/admin/services/${sid}/memory-keys`,
         { method: "POST", body: JSON.stringify({ userId }) }),
+    // 记忆供给聚合总览（全平台）
+    memorySupply: (keyword = "") =>
+      request<MemorySupplyItem[]>(`/admin/memory-supply${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ""}`),
     // ---- 沙箱管理面（§6.1；错误映射：未配置 503 / 501→503 / 401→502 / 429、5xx 透传）----
     sandboxes: {
       summary: () => request<SandboxSummary>(`/admin/sandboxes/summary`),

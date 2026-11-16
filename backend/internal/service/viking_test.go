@@ -424,3 +424,54 @@ func mustRead(t *testing.T, c *Core, id uint, col string) string {
 		return rec.EnvJSON
 	}
 }
+
+// 记忆供给聚合(Console/Admin 共用映射)+ 浏览代理(归属/前缀白名单/provider 校验)。
+func TestMemorySupplyAndBrowse(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, baseURL := newVikingTestCore(t, fake.handler(true))
+	pkg := uploadTestPkg(t, core, "")
+	ov, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc-ov", WorkspaceID: 7})
+	if err != nil {
+		t.Fatalf("publish ov: %v", err)
+	}
+	local, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc-local", WorkspaceID: 7, Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish local: %v", err)
+	}
+
+	rows, err := core.ConsoleMemorySupply(7, "")
+	if err != nil {
+		t.Fatalf("supply: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("supply rows = %d, want 2", len(rows))
+	}
+	byName := map[string]MemorySupplyItem{}
+	for _, r := range rows {
+		byName[r.K8sName] = r
+	}
+	if byName["oaf-svc-ov"].Provider != MemoryProviderOpenViking || !byName["oaf-svc-ov"].Provisioned ||
+		byName["oaf-svc-ov"].OpenVikingURL != baseURL {
+		t.Fatalf("ov row wrong: %+v", byName["oaf-svc-ov"])
+	}
+	if byName["oaf-svc-local"].Provider != MemoryProviderLocal || byName["oaf-svc-local"].Provisioned {
+		t.Fatalf("local row wrong: %+v", byName["oaf-svc-local"])
+	}
+	if adminRows, err := core.AdminMemorySupply(""); err != nil || len(adminRows) < 2 {
+		t.Fatalf("admin supply: %v %d", err, len(adminRows))
+	}
+
+	// 浏览代理:uri 白名单(仅 viking://~/)+ provider 校验 + fake 数据面透传
+	if _, err := core.ConsoleMemoryBrowse(7, ov.ID, 1001, "list", "viking://user/u-1001/memories"); err == nil {
+		t.Fatalf("non-home uri must be rejected")
+	}
+	if _, err := core.ConsoleMemoryBrowse(7, local.ID, 1001, "list", "viking://~/memories"); err == nil {
+		t.Fatalf("local provider must be rejected")
+	}
+	// 归属外服务 404
+	if _, err := core.ConsoleMemoryBrowse(999, ov.ID, 1001, "list", "viking://~/memories"); err == nil {
+		t.Fatalf("cross-workspace browse must fail")
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"path"
 	"regexp"
 	"strings"
@@ -346,6 +347,153 @@ func (c *Core) issueMemoryKeyFor(serviceID uint, userID string) (string, string,
 	}
 	return DeriveVikingUserKey(account, userID, seed), plain[OpenVikingURLEnv], nil
 }
+
+// ---- 记忆供给聚合总览（与 ConsoleSandbox 平级，用户侧/运维侧共用）----
+
+// MemorySupplyItem 记忆供给总览条目：每 Agent 的供给模式 + 能力开关 + 接入地址。
+type MemorySupplyItem struct {
+	ServiceID   uint   `json:"serviceId"`
+	DisplayName string `json:"displayName"`
+	K8sName     string `json:"k8sName"`
+	Status      string `json:"status"`
+	// Provider 生效供给："openviking" | "local"（env 缺省 = local）
+	Provider string `json:"provider"`
+	// SessionCommit / KnowledgeImport / SharedSkills / MCPSharedContext 能力开关（env 事实）
+	SessionCommit   bool `json:"sessionCommit"`
+	KnowledgeImport bool `json:"knowledgeImport"`
+	SharedSkills    bool `json:"sharedSkills"`
+	MCPSharedCtx    bool `json:"mcpSharedCtx"`
+	// Provisioned 是否已完成 OpenViking 供给（Secret 含 ADMIN key + seed）
+	Provisioned bool `json:"provisioned"`
+	// OpenVikingURL 数据面地址（provider=openviking 时非空；供前端拼 Studio 指引）
+	OpenVikingURL string `json:"openVikingUrl,omitempty"`
+}
+
+func memorySupplyFromRow(r *store.ServiceEntity) MemorySupplyItem {
+	env := map[string]string{}
+	_ = json.Unmarshal([]byte(r.EnvJSON), &env)
+	secret := map[string]string{}
+	_ = json.Unmarshal([]byte(r.EnvSecretJSON), &secret)
+	provider := env[AgentMemoryProviderEnv]
+	if provider == "" {
+		provider = MemoryProviderLocal
+	}
+	return MemorySupplyItem{
+		ServiceID: r.ID, DisplayName: r.DisplayName, K8sName: r.K8sName, Status: r.Status,
+		Provider:        provider,
+		SessionCommit:   env[OvkSessionCommitEnv] == "true",
+		KnowledgeImport: env[OvkKnowledgeImportEnv] == "true",
+		SharedSkills:    env[OvkSharedSkillsEnv] == "true",
+		MCPSharedCtx:    env[OvkMCPSharedCtxEnv] == "true",
+		Provisioned:     secret[OvkAdminKeyEnv] != "" && secret[OvkUserSeedEnv] != "",
+		OpenVikingURL:   env[OpenVikingURLEnv],
+	}
+}
+
+// ConsoleMemorySupply 空间内 Agent 记忆供给总览（只读；切换入口在服务 env 编辑）。
+func (c *Core) ConsoleMemorySupply(workspaceID uint, keyword string) ([]MemorySupplyItem, error) {
+	q := c.DB.Model(&store.ServiceEntity{}).Where("workspace_id = ?", workspaceID)
+	if keyword != "" {
+		q = q.Where("display_name LIKE ? OR k8s_name LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	var rows []store.ServiceEntity
+	if err := q.Order("id DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]MemorySupplyItem, 0, len(rows))
+	for i := range rows {
+		out = append(out, memorySupplyFromRow(&rows[i]))
+	}
+	return out, nil
+}
+
+// AdminMemorySupply 全平台 Agent 记忆供给总览（运维治理页；只读）。
+func (c *Core) AdminMemorySupply(keyword string) ([]MemorySupplyItem, error) {
+	q := c.DB.Model(&store.ServiceEntity{})
+	if keyword != "" {
+		q = q.Where("display_name LIKE ? OR k8s_name LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	var rows []store.ServiceEntity
+	if err := q.Order("id DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]MemorySupplyItem, 0, len(rows))
+	for i := range rows {
+		out = append(out, memorySupplyFromRow(&rows[i]))
+	}
+	return out, nil
+}
+
+// ---- 记忆浏览只读代理（用户侧资产页；backend 以推导 key 访问外部 OpenViking）----
+
+// ConsoleMemoryBrowse 只读代理当前登录人的 OpenViking 记忆空间：
+//   - action=list → GET /api/v1/fs/ls（目录列表）
+//   - action=read → GET /api/v1/content/read（文件内容，限 .md/.txt 文本）
+//
+// 身份：userId = u-{uid}（与数据面 X-User-Id 同源），key 本地推导；uri 强制
+// viking://~/ 前缀（服务端按 key 解析身份，~ 即本人空间根，无法越权他人）。
+// 外部服务不可用/失败原样返回错误（fail-soft 由前端呈现空态）。
+func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri string) (json.RawMessage, error) {
+	if _, err := c.ConsoleAgentDetail(workspaceID, serviceID); err != nil {
+		return nil, err
+	}
+	if action != "list" && action != "read" {
+		return nil, fmt.Errorf("%w: unsupported browse action %q", ErrInvalidForm, action)
+	}
+	const prefix = "viking://~/"
+	if !strings.HasPrefix(uri, prefix) {
+		return nil, fmt.Errorf("%w: uri must start with %s (own space only)", ErrInvalidForm, prefix)
+	}
+	ovURL, key, err := c.memoryBrowseClient(workspaceID, serviceID, fmt.Sprintf("u-%d", uid))
+	if err != nil {
+		return nil, err
+	}
+	apiPath := "/api/v1/fs/ls?uri=" + url.QueryEscape(uri)
+	if action == "read" {
+		apiPath = "/api/v1/content/read?uri=" + url.QueryEscape(uri)
+	}
+	req, err := http.NewRequest(http.MethodGet, ovURL+apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-API-Key", key)
+	resp, err := VikingHTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("openviking browse: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("openviking %s: HTTP %d: %.200s", action, resp.StatusCode, raw)
+	}
+	return json.RawMessage(raw), nil
+}
+
+// memoryBrowseClient 校验供给并返回 (数据面地址, 本人推导 key)。
+func (c *Core) memoryBrowseClient(workspaceID, serviceID uint, userID string) (string, string, error) {
+	var secret, plain map[string]string
+	var rec store.ServiceEntity
+	if err := c.DB.First(&rec, serviceID).Error; err != nil {
+		return "", "", ErrNotFound
+	}
+	_ = json.Unmarshal([]byte(rec.EnvSecretJSON), &secret)
+	_ = json.Unmarshal([]byte(rec.EnvJSON), &plain)
+	if plain[AgentMemoryProviderEnv] != MemoryProviderOpenViking || secret[OvkUserSeedEnv] == "" {
+		return "", "", fmt.Errorf("%w: service %d is not on OpenViking memory supply", ErrInvalidForm, serviceID)
+	}
+	_ = workspaceID // 归属已由调用方 ConsoleAgentDetail 校验
+	key := DeriveVikingUserKey(VikingAccountID(rec.K8sName), userID, secret[OvkUserSeedEnv])
+	if plain[OpenVikingURLEnv] == "" {
+		return "", "", fmt.Errorf("%w: service %d missing %s", ErrInvalidForm, serviceID, OpenVikingURLEnv)
+	}
+	return plain[OpenVikingURLEnv], key, nil
+}
+
+// VikingHTTP 数据面只读代理共用 HTTP 客户端（browse；低频管理面调用，默认超时即可）。
+var VikingHTTP = &http.Client{Timeout: 20 * time.Second}
 
 // ---- 包内知识/技能导入（OVK_KNOWLEDGE_IMPORT / OVK_SHARED_SKILLS，发布期一次性）----
 
