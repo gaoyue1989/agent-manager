@@ -11,6 +11,7 @@ import io.agentmanager.framework.config.AgentManagerProperties.CleanupConfig;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * CleanupConfig 绑定入口回归（g1：删除 D16 字段时 {@code @ConstructorBinding} 一并丢失）：
@@ -45,5 +46,59 @@ class AgentManagerPropertiesBindingTest {
         assertFalse(bound.skillCacheGcEnabled());
         assertEquals(5, bound.skillCacheRetentionDays());
         assertEquals(3, bound.sandboxBindingRetentionDays());
+    }
+
+    /**
+     * FileConfig 三键（issue #345 P3 新增的 spool-dir + 交付护栏 upload/present 上限）绑定回归：
+     * 键改名/字段误删时静默回落默认值（20/50/空），此处直接驱动 Binder 锁住绑定链路。
+     */
+    @Test
+    void fileBindsUploadPresentSpoolKeys() {
+        var source = new MapConfigurationPropertySource(Map.of(
+            "agent.file.upload-max-mb", "33",
+            "agent.file.present-max-mb", "64",
+            "agent.file.spool-dir", "/var/spool/file-transfer"));
+        AgentManagerProperties.FileConfig bound = new Binder(source)
+            .bind("agent.file", Bindable.of(AgentManagerProperties.FileConfig.class))
+            .get();
+
+        assertEquals(33, bound.uploadMaxMb());
+        assertEquals(64, bound.presentMaxMb());
+        assertEquals("/var/spool/file-transfer", bound.spoolDir());
+        // 交付通道守护不变量（issue #345）：upload 上限必须 < present 上限（否则 present
+        // 大上传件复现先读后拒的 OOM 路径）
+        assertTrue(bound.uploadMaxMb() < bound.presentMaxMb());
+    }
+
+    /**
+     * resolvedSpoolDir 回落链路（issue #345 P3）：显式配置优先；未配置回落
+     * {workspaceBase}/tmp/file-transfer——业务 Pod /tmp 不可写实测（Permission denied），
+     * s3 后端该回落错了只有生产暴露（spool 全部落盘失败）。
+     */
+    @Test
+    void resolvedSpoolDirShouldFallBackToWorkspaceTmp() {
+        // 显式配置优先
+        assertEquals("/var/spool/custom", props("", "/var/spool/custom").resolvedSpoolDir());
+        // spoolDir 未配置：回落 {workspaceDir}/tmp/file-transfer
+        assertEquals("/data/ws/tmp/file-transfer", props("/data/ws", "").resolvedSpoolDir());
+        // 空白串视同未配置（isBlank 判据）
+        assertEquals("/data/ws/tmp/file-transfer", props("/data/ws", " ").resolvedSpoolDir());
+        // workspaceDir 也未配置：workspaceBase 回落 configDir
+        assertEquals("/config/tmp/file-transfer", props("", "").resolvedSpoolDir());
+    }
+
+    private static AgentManagerProperties props(String workspaceDir, String spoolDir) {
+        return new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1",
+                "openai", 0.7, 4096, 120, true, 0, "", null),
+            new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
+            new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
+            "/config",
+            workspaceDir,
+            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
+            new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain", 5, 15, 50, true, 7,
+                "s3", "/data/files", "", "", "", "agent-files", "", spoolDir),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+            AgentManagerProperties.HarnessConfig.defaults());
     }
 }
