@@ -73,6 +73,13 @@ type Config struct {
 	// 经 backend 进程 env 注入（设计 §12.3），不进任何导出产物。
 	ExportRegistryUsername string
 	ExportRegistryPassword string
+
+	// ---- OpenViking 记忆供给（openviking-memory-integration-design §11.1）----
+	// Enabled=false（默认）发布链路完全不感知 OpenViking；BaseURL/RootKey 任一为空即使
+	// Enabled=true 也视为未配置（VikingAdmin 为 nil，行为等同关闭）
+	OpenVikingEnabled bool
+	OpenVikingBaseURL string
+	OpenVikingRootKey string
 }
 
 func Load() (*Config, error) {
@@ -105,6 +112,10 @@ func Load() (*Config, error) {
 		ExportBaseImage:        envStr("EXPORT_BASE_IMAGE", "busybox:1.36"),
 		ExportRegistryUsername: envStr("EXPORT_REGISTRY_USERNAME", ""),
 		ExportRegistryPassword: envStr("EXPORT_REGISTRY_PASSWORD", ""),
+		// OpenViking 记忆供给：root key 仅控制面持有（建/删 account、per-user key 签发）
+		OpenVikingEnabled: envStr("OPENVIKING_ENABLED", "") == "true",
+		OpenVikingBaseURL: envStr("OPENVIKING_BASE_URL", ""),
+		OpenVikingRootKey: envStr("OPENVIKING_ROOT_API_KEY", ""),
 	}
 	if c.MySQLDSN == "" {
 		return nil, errors.New("MYSQL_DSN is required")
