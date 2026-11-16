@@ -134,6 +134,16 @@ print(b(acct.encode()) + "." + b(u.encode()) + "." + b(d))')
 MEM=$(curl -s "$OV_BASE/api/v1/fs/ls?uri=viking%3A%2F%2F~%2Fmemories" -H "X-API-Key: $UKEY")
 case "$MEM" in *entities*|*preferences*|*.md*) ok "memories landed for $U";; *) bad "memories ls: $(echo $MEM | head -c 200)";; esac
 
+# 等待新记忆可检索(提取写文件后向量化异步 ~1-2min,phase2 同款教训)
+REC_READY=""
+for i in $(seq 1 15); do
+  SH=$(curl -s -X POST "$OV_BASE/api/v1/search/search" -H "X-API-Key: $UKEY" -H 'Content-Type: application/json' \
+    -d '{"query":"最喜欢的编程语言 Rust","mode":"list","limit":3}')
+  case "$SH" in *Rust*) REC_READY=1; break;; esac
+  sleep 10
+done
+[ -n "$REC_READY" ] && ok "memory vectorized and searchable" || bad "memory search wait timeout: $(echo $SH | head -c 150)"
+
 S2="vm2-$U"
 chat "$S2" "$U" "我最喜欢什么编程语言?只回答语言名,不要解释。" > /dev/null
 R2=$(grep -o '"delta":"[^"]*"' "/tmp/ov-e2e-$S2.sse" | sed 's/"delta":"//;s/"$//' | tr -d '\n')
@@ -152,9 +162,14 @@ case "$KEY" in *.*.*) ok "per-user key issued (${KEY%%.*}.…)";; *) bad "memory
 
 say "P9 删除服务 → account 回收"
 api DELETE "/services/$SVC_ID" >/dev/null
-sleep 5
-ACC_AFTER=$(ov GET /api/v1/admin/accounts | python3 -c "import json,sys;print(any(a['account_id']=='$K8S_NAME' for a in (json.load(sys.stdin).get('result') or [])))")
-[ "$ACC_AFTER" == "False" ] && ok "account deleted with service" || bad "account $K8S_NAME still exists"
+# OpenViking 删 account 是异步任务(deleting + task_id):轮询直至消失
+ACC_AFTER="True"
+for i in $(seq 1 12); do
+  sleep 5
+  ACC_AFTER=$(ov GET /api/v1/admin/accounts | python3 -c "import json,sys;print(any(a['account_id']=='$K8S_NAME' for a in (json.load(sys.stdin).get('result') or [])))")
+  [ "$ACC_AFTER" == "False" ] && break
+done
+[ "$ACC_AFTER" == "False" ] && ok "account deleted with service (async recycle polled)" || bad "account $K8S_NAME still exists"
 
 say "结果: PASS=$PASS FAIL=$FAIL"
 [ $FAIL -gt 0 ] && printf '  failed: %s\n' "${FAILED_CASES[@]}"
