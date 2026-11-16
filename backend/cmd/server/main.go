@@ -82,10 +82,15 @@ func main() {
 		DeployBuilder:       depBuilder,
 		IngressBuilder:      ingBuilder,
 		PackageDownloadBase: cfg.PackageDownloadBase,
+		OpenVikingEnabled:   cfg.OpenVikingEnabled,
+		OpenVikingBaseURL:   cfg.OpenVikingBaseURL,
 	})
 	// 身份与模型下发装配：introspect JWT 校验密钥 + running 后模型连接异步下发（M5）
 	core.JWTSecret = cfg.JWTSecret
 	core.OnServiceRunning = core.DeliverPendingForService
+	// OpenViking 记忆供给（openviking-memory-integration-design §5/§11.1）：root key 仅
+	// 控制面持有；BaseURL/RootKey 缺任一即 nil（平台未配置，发布链路零接触）
+	core.Viking = service.NewVikingAdmin(cfg.OpenVikingBaseURL, cfg.OpenVikingRootKey)
 	// 跨集群导出装配（契约 §2.2）：OAF 配置镜像直推构建器（基底/凭证经 env 注入，
 	// 设计 §12.3）；未配置 EXPORT_BASE_IMAGE 时 config.Load 已兜底 busybox:1.36
 	core.Images = imagebuilder.NewRemoteBuilder(cfg.ExportBaseImage, cfg.ExportRegistryUsername, cfg.ExportRegistryPassword)

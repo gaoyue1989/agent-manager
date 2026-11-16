@@ -386,22 +386,51 @@ public class AgentScopeConfig {
      * Flyway 会因 schema 非空走 baseline-on-migrate 路径直接基线收场——V1..V5 全部跳过，
      * session_user/turn_lease 等表缺失，对话链路静默瘫痪（2026-09-28 CI E2E 四 job 全红根因）。
      */
+    /**
+     * OpenViking 记忆客户端（openviking-memory-integration-design；provider!=openviking
+     * 或配置不完整返回 null——NullBean，注入点 ObjectProvider 落空，记忆供给按 local 处理）。
+     */
+    @Bean
+    public io.agentmanager.framework.service.VikingMemoryClient vikingMemoryClient(
+            org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.config.VikingConfig> cfgProvider) {
+        var cfg = cfgProvider.getIfAvailable();
+        if (cfg == null || !cfg.enabled()) {
+            log.info("OpenViking memory supply disabled (provider={} url/account/keys configured={})",
+                cfg == null ? "unset" : cfg.memoryProvider(), cfg != null && cfg.enabled());
+            return null;
+        }
+        log.info("OpenViking memory supply enabled (account={}, sessionCommit={}, mcpSharedContext={})",
+            cfg.account(), cfg.sessionCommit(), cfg.mcpSharedContext());
+        return new io.agentmanager.framework.service.VikingMemoryClient(cfg);
+    }
+
     @Bean
     @org.springframework.context.annotation.DependsOn("flywayInitializer")
     public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props,
             io.agentmanager.framework.service.SessionMessageStore sessionMessageStore,
-            io.agentmanager.framework.config.HistoryConfig historyConfig) {
+            io.agentmanager.framework.config.HistoryConfig historyConfig,
+            org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient> vikingClientProvider,
+            org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.config.VikingConfig> vikingCfgProvider) {
         var dbName = props.checkpoint().resolvedDbName();
         // AgentStateStore 装饰链（自内向外，顺序不可换）：
         //   ① MysqlAgentStateStore —— 真实 MySQL 存储（官方校验仅拒空/超长，
         //      沙箱 slot ID sandbox/user/{agentId}/{userId} 含 / 天然放行）
-        //   ② SessionMessageArchiveStateStore —— 会话消息轨 write-through 归档（压缩后历史可查，
+        //   ② VikingSessionCommitStateStore —— OpenViking 会话归档 append（OVK_SESSION_COMMIT，
+        //      openviking-memory-integration-design §11.1；不启用则不存在此层）
+        //   ③ SessionMessageArchiveStateStore —— 会话消息轨 write-through 归档（压缩后历史可查，
         //      docs/session-history-archive-design.md）；须在 Backfill 之内才拿得到回填后形态
-        //   ③ AskingContentBackfillStateStore —— 持久化前把 ASKING tool_use 块 content 回填为
+        //   ④ AskingContentBackfillStateStore —— 持久化前把 ASKING tool_use 块 content 回填为
         //      input 的 JSON 字符串——修复 HITL 恢复时 ToolValidator 抛 'argument "content" is null'
         io.agentscope.core.state.AgentStateStore agentStateStore =
             new io.agentscope.extensions.mysql.state.MysqlAgentStateStore(
                 dataSource, dbName, "agent_state", true);
+        var vikingCfg = vikingCfgProvider.getIfAvailable();
+        var vikingClient = vikingClientProvider.getIfAvailable();
+        if (vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit()) {
+            agentStateStore = new io.agentmanager.framework.service.VikingSessionCommitStateStore(
+                agentStateStore, vikingClient,
+                new io.agentmanager.framework.service.SessionUserStore(dataSource));
+        }
         if (historyConfig == null || historyConfig.archiveEnabled()) {
             agentStateStore = new io.agentmanager.framework.service.SessionMessageArchiveStateStore(
                 agentStateStore, sessionMessageStore);
@@ -414,8 +443,9 @@ public class AgentScopeConfig {
                 .initializeSchema(true)
                 .build())
             .build();
-        log.info("DistributedStore initialized ({} . agent_state + agent_fs, historyArchive={})",
-            dbName, historyConfig == null || historyConfig.archiveEnabled());
+        log.info("DistributedStore initialized ({} . agent_state + agent_fs, historyArchive={}, vikingSessionCommit={})",
+            dbName, historyConfig == null || historyConfig.archiveEnabled(),
+            vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit());
         return store;
     }
 

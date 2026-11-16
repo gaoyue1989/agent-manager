@@ -21,6 +21,12 @@ export default function ServiceDetailPage() {
   const [msg, setMsg] = useState("");
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [envDirty, setEnvDirty] = useState(false);
+  // OpenViking 记忆供给（env 只读快照 + per-user key 代签发）
+  const [supplyEnv, setSupplyEnv] = useState<Record<string, string>>({});
+  const [mkUserId, setMkUserId] = useState("");
+  const [mkMsg, setMkMsg] = useState("");
+  const [mkKey, setMkKey] = useState("");
+  const [issuingMk, setIssuingMk] = useState(false);
   // 敏感变量：value 仅承载新输入（空且未标记删除 = 保持不变，不上送）；del = 显式删除（回落平台默认）
   const [secretRows, setSecretRows] = useState<{ key: string; value: string; del: boolean }[]>([]);
   const [secretDirty, setSecretDirty] = useState(false);
@@ -39,6 +45,7 @@ export default function ServiceDetailPage() {
         // 敏感键（含存量未迁移键）从普通区剔除，归入敏感区掩码显示
         const secretNames = new Set((d.envSecretKeys || []).map((k) => k.key));
         setEnvRows(Object.entries(env).filter(([key]) => !secretNames.has(key)).map(([key, value]) => ({ key, value })));
+        setSupplyEnv(env);
       }
       if (!secretDirty) {
         setSecretRows((d.envSecretKeys || []).map((k) => ({ key: k.key, value: "", del: false })));
@@ -96,7 +103,16 @@ export default function ServiceDetailPage() {
     }
   };
 
-  const saveEnv = async () => {
+    const issueMemoryKey = async () => {
+    setIssuingMk(true); setMkMsg(""); setMkKey("");
+    try {
+      const out = await api.admin.issueMemoryKey(id, mkUserId.trim());
+      setMkKey(out.userKey);
+    } catch (e: any) { setMkMsg(e.message); }
+    setIssuingMk(false);
+  };
+
+const saveEnv = async () => {
     const env: Record<string, string> = {};
     const secretKeys: string[] = [];
     for (const r of envRows) if (r.key.trim()) env[r.key.trim()] = r.value;
@@ -266,6 +282,46 @@ export default function ServiceDetailPage() {
               ))}
             </tbody>
           </table>
+        )}
+      </section>
+
+      {/* OpenViking 记忆供给（状态 + per-user key 代签发；openviking-memory-integration-design §11.1） */}
+      <section className="bg-white border rounded p-4" data-testid="memory-supply-section">
+        <h2 className="font-medium mb-2">记忆供给（OpenViking）</h2>
+        <p className="text-xs text-gray-400 mb-2">
+          供给模式：<span className="font-medium text-gray-700">
+            {supplyEnv.AGENT_MEMORY_PROVIDER === "openviking" ? "OpenViking 托管" : supplyEnv.AGENT_MEMORY_PROVIDER || "本地文件记忆"}
+          </span>
+          {supplyEnv.AGENT_MEMORY_PROVIDER === "openviking" && (
+            <span className="ml-3">会话归档：{supplyEnv.OVK_SESSION_COMMIT === "true" ? "开启" : "逐轮提取"}
+              <span className="ml-3">知识导入：{supplyEnv.OVK_KNOWLEDGE_IMPORT === "true" ? "已导入" : "未导入"}</span></span>
+          )}
+          {supplyEnv.AGENT_MEMORY_PROVIDER !== "openviking" && (
+            <span className="ml-3">切换 = 在上方环境变量中设置 AGENT_MEMORY_PROVIDER=openviking 并滚动重启</span>
+          )}
+        </p>
+        {supplyEnv.AGENT_MEMORY_PROVIDER === "openviking" && (
+          <div className="flex items-end gap-2" data-testid="memory-issue-row">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">平台用户 ID（如 u-1001）</label>
+              <input value={mkUserId} onChange={(e) => setMkUserId(e.target.value)}
+                placeholder="u-1001" data-testid="memory-user-id"
+                className="w-56 rounded border border-gray-300 px-2 py-1.5 text-sm font-mono" />
+            </div>
+            <button onClick={issueMemoryKey} disabled={issuingMk || !mkUserId.trim()} data-testid="memory-issue-btn"
+              className="px-3 py-1.5 bg-blue-600 disabled:opacity-50 text-white rounded text-sm hover:bg-blue-700">
+              {issuingMk ? "签发中…" : "签发记忆访问 Key"}
+            </button>
+          </div>
+        )}
+        {mkMsg && <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{mkMsg}</div>}
+        {mkKey && (
+          <div className="mt-2 rounded border p-3 bg-gray-50" data-testid="memory-key-result">
+            <div className="break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{mkKey}</div>
+            <p className="mt-1 text-xs text-amber-600">明文仅此一次展示；同一 (服务， 用户) 重复签发得到相同 Key。</p>
+            <button onClick={() => navigator.clipboard?.writeText(mkKey)}
+              className="mt-1.5 text-xs px-2 py-1 border rounded hover:bg-gray-100">复制 Key</button>
+          </div>
         )}
       </section>
 
