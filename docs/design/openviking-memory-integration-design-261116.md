@@ -64,7 +64,7 @@ platform-router(introspect)→ X-User-Id → agent-framework Pod
                                   {user_id, seed: OV_USER_SEED} → 重试(幂等)
     服务身份操作(共享 resources/skills/MCP 连接)→ X-API-Key: ADMIN key(svc-system)
                                                     ↓
-                                       openviking-svc:1933(集群内 Service,不经 Ingress)
+                                       外部 OpenViking 服务(网络可达,不经 backend/Ingress)
 ```
 
 - **自动化创建:可以,且全部 lazy 化**——发布时 backend 只建 account(1 次 Admin 调用);用户 key 由业务面在首次对话时按需开户(幂等),平台无需预建用户、无需同步 workspace 成员、无 key 存储表;新用户开户仅发生在该用户真的与该服务对话时
@@ -166,20 +166,16 @@ platform-router(introspect)→ X-User-Id → agent-framework Pod
 
 MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permissions.tools` 控制(ask 走 HITL 确认流,与现有体系兼容);`read_only` 不适用于会短路 ask 流的服务(同 release-agent 约束)。
 
-## 8. 部署方案(kind 集群)
+## 8. 部署形态(裁决 261116:OpenViking 由外部提供服务,平台不部署)
 
-```yaml
-# manifests/openviking.yaml(概要)
-Deployment openviking(单副本,镜像 ghcr.io/volcengine/openviking:latest,走代理拉取)
-  env: OPENVIKING 配置(模型 provider 指向平台模型配置:embedding + VLM)
-       server.auth_mode=trusted / root_api_key(自 .env.secrets)
-  volumeMounts: PVC platform-data subPath openviking/(复用共享 PVC)
-Service openviking-svc:1933(集群内 only,不建 Ingress)
-```
+平台是接入方,与外部 MySQL/Redis 同一模式。接入契约(四项):
 
-- 模型依赖(embedding/VLM/rerank)属 OpenViking 自身部署配置,不在本文档范围;其对首推理延迟的影响由集成侧超时 + fail-soft 吸收(§4.6)
-- AGPLv3 红线:仅官方镜像部署 + API/MCP 集成,**禁止修改 OpenViking 源码**(修改并对外提供服务触发 AGPL 开源义务,且项目额外条款禁止重写再开源)
-- 单副本 + PVC 与平台单副本设计(backend)同水位;OpenViking 的 one-shot token/索引自述倾向单 worker,扩多副本前必须上游解决(记入风险)
+1. 服务可达:OPENVIKING_BASE_URL 指向外部地址,业务 Pod 网络可直连(不经 backend)
+2. 认证:server.auth_mode="api_key",root key 交 backend(OPENVIKING_ROOT_API_KEY),与外部运维约定后仅控制面持有
+3. 模型供给:VLM/embedding(检索热路径)由外部运维保障——平台侧仅以 2s 超时 + fail-soft(含 stats.retrieval_error 判据)兜底
+4. 集群内部署清单不进平台交付(曾起草 manifests/openviking.yaml,真机部署验证后按本裁决移除;验证期以集群内实例充当外部服务替身完成全链路)
+
+验证环境注记(261116):kind 集群内曾按清单部署 OpenViking v0.5.5 完成 16/0 全链路验证;真机抓出并修正清单机制错误(OPENVIKING_CONF_CONTENT 为真实配置机制、维度变更须清向量存储、卷内 conf 已存在时跳过重写)——经验保留在本节备查,清单文件随裁决移除。
 
 ## 9. 存量迁移
 
@@ -209,7 +205,7 @@ Service openviking-svc:1933(集群内 only,不建 Ingress)
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `OPENVIKING_ENABLED` | `false` | 平台级总开关;false 时发布链路完全不感知 OpenViking(现状) |
-| `OPENVIKING_BASE_URL` | — | OpenViking 地址(集群内 `http://openviking-svc.agent-platform:1933`;开发可指宿主 docker) |
+| `OPENVIKING_BASE_URL` | — | 外部 OpenViking 服务地址 |
 | `OPENVIKING_ROOT_API_KEY` | — | root key,仅控制面(建/删 account、per-user key 签发),来源 `.env.secrets` |
 
 **服务层(publish 时 backend 注入,固化于服务 env,业务面不依赖 backend)**:
@@ -233,7 +229,7 @@ Service openviking-svc:1933(集群内 only,不建 Ingress)
 
 1. **backend**:VikingAdminClient(建/删户、注册用户、知识/技能导入)+ 发布/删除生命周期挂钩(OPENVIKING_ENABLED 门控)+ 服务 env/Secret 注入 + per-user key 签发端点
 2. **agent-framework**:VikingMemoryClient(HTTP,seed 推导,lazy 开户,超时+fail-soft 含 retrieval_error 判据)+ AGENT_MEMORY_PROVIDER 分叉装配 + memory_search/get/save 工具桥接 + 首推理 search(context) 注入 + session commit 链路 + 合成 MCP server 注入
-3. **manifests**:openviking.yaml(Deployment+PVC+Service,集群内)+ platform.yaml 平台开关 env
+3. **manifests**:platform.yaml 平台开关 env(OpenViking 本体外部提供,平台不部署)
 4. **e2e**:记忆链路用例(双 provider、切换、隔离、fail-soft)+ 双副本门禁保持
 5. **文档**:设计文档归档 docs/design + deployment.md 运维备忘(切换操作、per-user key 签发、导出用 ov CLI/snapshot API 手工操作不进代码)
 
