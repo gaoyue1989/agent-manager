@@ -725,6 +725,23 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 		}
 		OK(c, detail)
 	})
+	// OpenViking 记忆访问凭证自助签发（openviking-memory-integration-design §11.1）：
+	// userId 固定为当前登录人的业务面身份 u-{uid}（与数据面 X-User-Id 同源），签发即
+	// 本人记忆空间的 Studio 访问凭证，无法签发他人——故 member 亦可自助（不走
+	// requireWsRole 写裁决），服务归属校验在 ConsoleIssueMemoryKey 内。
+	cg.POST("/workspaces/:ws/agents/:id/memory-keys", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out, err := core.ConsoleIssueMemoryKey(wsID, parseUint(c.Param("id")), c.GetUint("uid"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, out)
+	})
 	action := func(name string, fn func(*service.Core, uint) (interface{}, error)) {
 		cg.POST("/workspaces/:ws/agents/:id/"+name, func(c *gin.Context) {
 			if !requireWsRole(c) {

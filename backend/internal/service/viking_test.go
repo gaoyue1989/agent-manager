@@ -366,3 +366,61 @@ func TestUpdateEnvSwitchProviderWithReservedEcho(t *testing.T) {
 		t.Fatalf("switch back must not re-provision (sticky secret)")
 	}
 }
+
+// 用户侧自助签发:userId 固定 u-{uid},workspace 归属校验(他人空间 404 语义),签发
+// key 与推导公式一致且可重复。
+func TestConsoleIssueMemoryKey(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, baseURL := newVikingTestCore(t, fake.handler(true))
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", WorkspaceID: 7})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+
+	out, err := core.ConsoleIssueMemoryKey(7, svc.ID, 1001)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if out["userId"] != "u-1001" {
+		t.Fatalf("userId must be business identity u-{uid}, got %q", out["userId"])
+	}
+	if out["openVikingUrl"] != baseURL {
+		t.Fatalf("studio url mismatch: %q", out["openVikingUrl"])
+	}
+	var secret map[string]string
+	core.DB.First(&store.ServiceEntity{}, svc.ID)
+	_ = json.Unmarshal([]byte(mustRead(t, core, svc.ID, "env_secret_json")), &secret)
+	if out["userKey"] != DeriveVikingUserKey("oaf-svc", "u-1001", secret[OvkUserSeedEnv]) {
+		t.Fatalf("issued key mismatch derivation")
+	}
+	// 跨 workspace 访问他人服务:404 语义(不暴露存在性)
+	if _, err := core.ConsoleIssueMemoryKey(999, svc.ID, 1001); err == nil {
+		t.Fatalf("cross-workspace issue must fail")
+	}
+	// 未供给服务拒绝
+	noprov, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc-local", WorkspaceID: 7, Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish local: %v", err)
+	}
+	if _, err := core.ConsoleIssueMemoryKey(7, noprov.ID, 1001); err == nil {
+		t.Fatalf("non-provisioned service must reject")
+	}
+}
+
+func mustRead(t *testing.T, c *Core, id uint, col string) string {
+	t.Helper()
+	var rec store.ServiceEntity
+	if err := c.DB.First(&rec, id).Error; err != nil {
+		t.Fatal(err)
+	}
+	switch col {
+	case "env_secret_json":
+		return rec.EnvSecretJSON
+	default:
+		return rec.EnvJSON
+	}
+}

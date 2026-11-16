@@ -369,6 +369,10 @@ export const api = {
         requestRaw<{ id: number; name: string; keyPrefix: string; plaintext: string }>(`/console/workspaces/${ws}/api-keys`, { method: "POST", body: JSON.stringify(body) }),
       revoke: (ws: number | string, id: number) => request(`/console/workspaces/${ws}/api-keys/${id}`, { method: "DELETE" }),
     },
+    // OpenViking 记忆访问凭证自助签发（userId 固定当前登录人，无法签发他人）
+    issueMemoryKey: (ws: number | string, sid: number) =>
+      request<{ userKey: string; openVikingUrl: string; userId: string }>(
+        `/console/workspaces/${ws}/agents/${sid}/memory-keys`, { method: "POST" }),
     members: {
       list: (ws: number | string) => request<MemberView[]>(`/console/workspaces/${ws}/members`),
       invite: (ws: number | string, userId: number, role: string) =>
@@ -508,6 +512,10 @@ export const api = {
       request<UserView>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
     auditLogs: (page = 1, size = 50) =>
       request<{ items: AuditItem[]; total: number }>(`/admin/audit-logs?page=${page}&size=${size}`),
+    // OpenViking 记忆访问凭证代签发（为任意平台用户；明文一次性返回）
+    issueMemoryKey: (sid: number, userId: string) =>
+      request<{ userKey: string }>(`/admin/services/${sid}/memory-keys`,
+        { method: "POST", body: JSON.stringify({ userId }) }),
     // ---- 沙箱管理面（§6.1；错误映射：未配置 503 / 501→503 / 401→502 / 429、5xx 透传）----
     sandboxes: {
       summary: () => request<SandboxSummary>(`/admin/sandboxes/summary`),

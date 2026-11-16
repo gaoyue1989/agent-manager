@@ -299,30 +299,52 @@ var vikingUserIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]*$`)
 // seed 本地推导，明文一次性返回；同 (account,user,seed) 重复签发得到相同 key，
 // 轮换 seed 即作废全部旧 key）。用于 OpenViking Studio / 外部 MCP 凭证访问场景。
 func (c *Core) IssueMemoryKey(serviceID uint, userID string) (string, error) {
-	if c.Viking == nil {
-		return "", fmt.Errorf("%w: OpenViking not enabled on platform", ErrInvalidForm)
-	}
-	if !vikingUserIDRe.MatchString(userID) || userID == "." || userID == ".." {
+	if !vikingUserIDRe.MatchString(userID) {
 		return "", fmt.Errorf("%w: illegal user id %q (must match OpenViking user_id rules)", ErrInvalidForm, userID)
+	}
+	key, _, err := c.issueMemoryKeyFor(serviceID, userID)
+	return key, err
+}
+
+// ConsoleIssueMemoryKey 用户侧自助签发（console 前端「记忆」Tab）：userId 固定为当前
+// 登录用户的业务面身份 `u-{uid}`——与数据面 X-User-Id 注入同源，签发即本人记忆空间
+// 的 OpenViking Studio 访问凭证（服务端隔离保证只能看自己的记忆，无法签发他人）。
+// 返回 key + Studio 地址（服务 env 中的 OPENVIKING_URL）。
+func (c *Core) ConsoleIssueMemoryKey(workspaceID, serviceID, uid uint) (map[string]string, error) {
+	if _, err := c.ConsoleAgentDetail(workspaceID, serviceID); err != nil {
+		return nil, err // 归属校验（不暴露存在性）
+	}
+	key, ovURL, err := c.issueMemoryKeyFor(serviceID, fmt.Sprintf("u-%d", uid))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"userKey": key, "openVikingUrl": ovURL, "userId": fmt.Sprintf("u-%d", uid)}, nil
+}
+
+// issueMemoryKeyFor 签发共用实现：返回 (user key, OPENVIKING_URL)。
+func (c *Core) issueMemoryKeyFor(serviceID uint, userID string) (string, string, error) {
+	if c.Viking == nil {
+		return "", "", fmt.Errorf("%w: OpenViking not enabled on platform", ErrInvalidForm)
 	}
 	svc, err := c.Get(serviceID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	var secret map[string]string
+	var secret, plain map[string]string
 	if err := json.Unmarshal([]byte(svc.EnvSecretJSON), &secret); err != nil {
-		return "", fmt.Errorf("corrupt env secret json: %w", err)
+		return "", "", fmt.Errorf("corrupt env secret json: %w", err)
 	}
+	_ = json.Unmarshal([]byte(svc.EnvJSON), &plain)
 	seed := secret[OvkUserSeedEnv]
 	if seed == "" || secret[OvkAdminKeyEnv] == "" {
-		return "", fmt.Errorf("%w: service %d has no OpenViking provisioning (publish with %s=%s first)",
+		return "", "", fmt.Errorf("%w: service %d has no OpenViking provisioning (publish with %s=%s first)",
 			ErrInvalidForm, serviceID, AgentMemoryProviderEnv, MemoryProviderOpenViking)
 	}
 	account := VikingAccountID(svc.K8sName)
 	if err := c.Viking.RegisterUser(account, userID, seed); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return DeriveVikingUserKey(account, userID, seed), nil
+	return DeriveVikingUserKey(account, userID, seed), plain[OpenVikingURLEnv], nil
 }
 
 // ---- 包内知识/技能导入（OVK_KNOWLEDGE_IMPORT / OVK_SHARED_SKILLS，发布期一次性）----
