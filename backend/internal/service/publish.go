@@ -172,6 +172,7 @@ func (c *Core) validateSpec(spec string) error {
 
 // Publish 创建全套 K8s 资源并异步等待就绪+注册。
 func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
+	req.Env, req.SecretKeys = dropPlatformInjectedEnv(req.Env, req.SecretKeys)
 	if err := ValidateEnv(req.Env); err != nil {
 		return nil, err
 	}
@@ -412,6 +413,7 @@ func (c *Core) asyncWaitAndRegister(id uint) {
 // 兜底保证空值不落 CM/env_json/Secret（设计 §3.3）。
 // 旧 env_json 中的存量敏感键自动迁入服务 Secret（设计 §3.6 防丢失规则）。
 func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*store.ServiceEntity, error) {
+	env, secretKeys = dropPlatformInjectedEnv(env, secretKeys)
 	if err := ValidateEnv(env); err != nil {
 		return nil, err
 	}
@@ -504,6 +506,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	env := oldPlain
 	var secretKeys []string
 	if opt.Env != nil {
+		opt.Env, opt.SecretKeys = dropPlatformInjectedEnv(opt.Env, opt.SecretKeys)
 		if err := ValidateEnv(opt.Env); err != nil {
 			return nil, err
 		}

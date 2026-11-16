@@ -428,7 +428,8 @@ public class AgentScopeConfig {
         var vikingClient = vikingClientProvider.getIfAvailable();
         if (vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit()) {
             agentStateStore = new io.agentmanager.framework.service.VikingSessionCommitStateStore(
-                agentStateStore, vikingClient);
+                agentStateStore, vikingClient,
+                new io.agentmanager.framework.service.SessionUserStore(dataSource));
         }
         if (historyConfig == null || historyConfig.archiveEnabled()) {
             agentStateStore = new io.agentmanager.framework.service.SessionMessageArchiveStateStore(

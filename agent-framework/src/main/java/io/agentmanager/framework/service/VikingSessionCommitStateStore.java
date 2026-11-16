@@ -32,10 +32,17 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
 
     private final AgentStateStore delegate;
     private final VikingMemoryClient client;
+    /** slot 键 → 真实用户反查（Channel 链路 slot.userId=前端 sessionId=session_user.session_id） */
+    private final SessionUserStore sessionUserStore;
+    /** Pod 本地去重集（slotKey → msg ids）；容量护栏超限整体清空（宁可重复不可丢消息）。
+     *  实例字段：装饰器每 Pod 单实例，static 会把去重态泄漏到不同装配世代（reload/测试）。 */
+    private final Map<String, Set<String>> seenBySlot = new ConcurrentHashMap<>();
 
-    public VikingSessionCommitStateStore(AgentStateStore delegate, VikingMemoryClient client) {
+    public VikingSessionCommitStateStore(AgentStateStore delegate, VikingMemoryClient client,
+                                         SessionUserStore sessionUserStore) {
         this.delegate = delegate;
         this.client = client;
+        this.sessionUserStore = sessionUserStore;
     }
 
     @Override
@@ -99,8 +106,6 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
 
     // ---- 内部 ----
 
-    private static final Map<String, java.util.Collection<String>> SEEN = new ConcurrentHashMap<>();
-
     /** 把 context 新增消息 append 到 OpenViking session（fail-soft：任何异常只告警） */
     private void commit(String userId, String sessionId, String stateKey, State state) {
         try {
@@ -114,7 +119,7 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
                 return;
             }
             var slot = SessionMessageArchiveStateStore.slotKey(userId, sessionId);
-            var ids = SEEN.computeIfAbsent(slot, k -> ConcurrentHashMap.newKeySet());
+            var ids = seenBySlot.computeIfAbsent(slot, k -> ConcurrentHashMap.newKeySet());
             if (ids.size() > 2000) {
                 ids.clear(); // 容量护栏：长会话超限清空后重放 append（提取器按内容合并，可接受）
             }
@@ -127,7 +132,20 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
                 if (text == null || text.isBlank()) {
                     continue;
                 }
-                client.appendSessionMessage(userId, sessionId, role, text);
+                // 存储层 slot 键到业务身份的翻译（issue #44 同源语义）：
+                //   Channel 链路 slot.userId = 网关 peer = 前端 sessionId（session_user.session_id
+                //   同值）→ 按它反查真实用户；A2A 直连链路 slot.userId 已是真实用户（按
+                //   sessionId 反查命中行即得）；两查皆空保持原值（fail-soft）
+                String realUser = sessionUserStore.findUserIdBySession(userId);
+                if (realUser == null || realUser.isBlank()) {
+                    realUser = sessionUserStore.findUserIdBySession(sessionId);
+                }
+                if (realUser == null || realUser.isBlank()) {
+                    realUser = userId;
+                }
+                // OV session 映射键用 slot.userId（Channel=前端 sid 唯一；A2A=会话 id 唯一），
+                // 不用共享 gw-hash 作 sessionId
+                client.appendSessionMessage(realUser, userId, role, text);
             }
         } catch (Exception e) {
             log.warn("[viking] session commit append failed (user={}, session={}): {}",

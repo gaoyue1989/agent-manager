@@ -46,6 +46,34 @@ const (
 	MemoryProviderLocal      = "local"
 )
 
+// platformInjectedEnvKeys 平台注入类保留键（applyOpenVikingEnv 派生）。写路径在
+// ValidateEnv 之前从用户 env 中剥离：UpdateEnv 全量覆盖语义会把 CM 现值原样回传，
+// 保留键校验会把正常回显拒绝成死锁（真机验证发现——provider=openviking 的服务从此
+// 无法更新任何 env）；剥离后值由 applyOpenVikingEnv 按当前 provider 重建，注入面不
+// 开放（用户显式设置的恶意值同样被静默忽略而非报错，键属平台管理面）。
+var platformInjectedEnvKeys = []string{OpenVikingURLEnv, OpenVikingAccountEnv, OvkAdminKeyEnv, OvkUserSeedEnv}
+
+// dropPlatformInjectedEnv 就地剥离平台注入键（env 与 secretKeys 双侧，写路径共用）。
+func dropPlatformInjectedEnv(env map[string]string, secretKeys []string) (map[string]string, []string) {
+	for _, k := range platformInjectedEnvKeys {
+		delete(env, k)
+	}
+	out := secretKeys[:0]
+	for _, k := range secretKeys {
+		skip := false
+		for _, p := range platformInjectedEnvKeys {
+			if k == p {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, k)
+		}
+	}
+	return env, out
+}
+
 // VikingAdmin OpenViking Admin API 客户端（root key 身份）。nil = 平台未启用 OpenViking。
 type VikingAdmin struct {
 	baseURL string
@@ -224,6 +252,9 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 	}
 	switch provider {
 	case MemoryProviderLocal:
+		// 显式退出：清掉可能残留的派生键（切换语义干净，provider=local 不消费这些值）
+		delete(plain, OpenVikingURLEnv)
+		delete(plain, OpenVikingAccountEnv)
 		return nil
 	case MemoryProviderOpenViking:
 	default:

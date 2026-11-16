@@ -140,6 +140,7 @@ func TestPublishWithOpenVikingProvision(t *testing.T) {
 	zip := buildTestZip(map[string]string{
 		"AGENTS.md":          testAgentsMD,
 		"knowledge/guide.md": "# 指南\n平台发布流程说明",
+		"skills/greet/SKILL.md": "---\nname: greet\ndescription: 打招呼技能\n---\n\n说你好。",
 	})
 	pkg, err := core.Packages.Upload("demo.zip", bytesReader(zip))
 	if err != nil {
@@ -147,7 +148,7 @@ func TestPublishWithOpenVikingProvision(t *testing.T) {
 	}
 
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest", Name: "svc",
-		Env: map[string]string{OvkKnowledgeImportEnv: "true"}})
+		Env: map[string]string{OvkKnowledgeImportEnv: "true", OvkSharedSkillsEnv: "true"}})
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
@@ -171,8 +172,10 @@ func TestPublishWithOpenVikingProvision(t *testing.T) {
 	}
 	seed := secret[OvkUserSeedEnv]
 	wantURI := "viking://resources/" + pkg.Slug + "/guide.md"
-	if uris := fake.uris(); len(uris) != 1 || uris[0] != wantURI {
-		t.Fatalf("knowledge import URIs = %v, want [%s]", uris, wantURI)
+	wantSkill := "viking://agent/skills/" + pkg.Slug + "/greet/SKILL.md"
+	uris := fake.uris()
+	if len(uris) != 2 || uris[0] != wantURI || uris[1] != wantSkill {
+		t.Fatalf("import URIs = %v, want [%s %s]", uris, wantURI, wantSkill)
 	}
 
 	waitForVikingTerminal(t, core, svc.ID)
@@ -304,3 +307,62 @@ type atomicCounter struct {
 
 func (c *atomicCounter) add(_ int) { c.mu.Lock(); c.n++; c.mu.Unlock() }
 func (c *atomicCounter) load() int { c.mu.Lock(); defer c.mu.Unlock(); return c.n }
+
+// UpdateEnv 全量覆盖回显含保留键不再死锁（真机验证发现的实现缺陷）：剥离后 provider
+// 切换成功、派生键重建；平台未启用时显式设置注入键仍被拒绝（恶意值进不来）。
+func TestUpdateEnvSwitchProviderWithReservedEcho(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, baseURL := newVikingTestCore(t, fake.handler(true))
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest", Name: "svc"})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+
+	// 回显场景:现有 env + 保留键原样带上（前端全量覆盖 UX）+ 切 local
+	var plain, secret map[string]string
+	var rec store.ServiceEntity
+	core.DB.First(&rec, svc.ID)
+	_ = json.Unmarshal([]byte(rec.EnvJSON), &plain)
+	_ = json.Unmarshal([]byte(rec.EnvSecretJSON), &secret)
+	echo := map[string]string{}
+	for k, v := range plain {
+		echo[k] = v
+	}
+	echo[OpenVikingAccountEnv] = "oaf-svc" // 回显保留键
+	echo[AgentMemoryProviderEnv] = MemoryProviderLocal
+	up, err := core.UpdateEnv(svc.ID, echo, nil)
+	if err != nil {
+		t.Fatalf("update env with reserved echo must not deadlock: %v", err)
+	}
+	var upPlain map[string]string
+	_ = json.Unmarshal([]byte(up.EnvJSON), &upPlain)
+	if upPlain[AgentMemoryProviderEnv] != MemoryProviderLocal {
+		t.Fatalf("provider must switch to local, got %q", upPlain[AgentMemoryProviderEnv])
+	}
+	if _, ok := upPlain[OpenVikingAccountEnv]; ok {
+		t.Fatalf("local opt-out must clear stale account key")
+	}
+
+	// 切回 openviking:幂等补装（Secret sticky,不重建 account）
+	waitForVikingTerminal(t, core, svc.ID)
+	createsBefore := fake.createCount()
+	echo2 := map[string]string{}
+	for k, v := range upPlain {
+		echo2[k] = v
+	}
+	echo2[AgentMemoryProviderEnv] = MemoryProviderOpenViking
+	up2, err := core.UpdateEnv(svc.ID, echo2, []string{OvkAdminKeyEnv}) // 保留键走 secretKeys 侧同样被剥离
+	if err != nil {
+		t.Fatalf("switch back: %v", err)
+	}
+	var up2Plain map[string]string
+	_ = json.Unmarshal([]byte(up2.EnvJSON), &up2Plain)
+	if up2Plain[OpenVikingAccountEnv] != "oaf-svc" || up2Plain[OpenVikingURLEnv] != baseURL {
+		t.Fatalf("derived keys must be re-derived: %v", up2Plain)
+	}
+	if fake.createCount() != createsBefore {
+		t.Fatalf("switch back must not re-provision (sticky secret)")
+	}
+}
