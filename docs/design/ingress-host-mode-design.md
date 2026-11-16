@@ -24,7 +24,7 @@ ingress 入口 IP，靠 `/agent/{short}` 前缀区分路由。部分环境（独
 | `INGRESS_HOST_SUFFIX` | 模式 | 内置形态 |
 |---|---|---|
 | 空（默认） | path | 无 host；path `/agent/{short}(/|$)(.*)`、pathType ImplementationSpecific；rewrite-target=`/$2`、use-regex=true、x-forwarded-prefix=`/agent/{short}` |
-| 非空（`.region-c86-test.test-kzx1.cncb`） | host | host=`{K8sName}{suffix}`、path `/`、pathType Prefix；**仅** ssl-redirect=false + proxy-read/send-timeout=3600，无 rewrite 注解 |
+| 非空（`.region-c86-test.test-kzx1.cncb`） | host | host=`{K8sName}{suffix}`、path `/`、pathType Prefix；**仅** ssl-redirect=false + proxy-read/send-timeout=3600，无 rewrite 注解；2026-11-13 起内置构造另附内部路径排除表 /internal、/actuator（无尾斜杠 Prefix，backend 恒 platform-router-svc:80，router location / 恒 404——sandbox-skills-syncd-design-261112.md §6.1 补记，见 docs/deployment.md §七之二） |
 
 **模式判定一律按配置**（`ObjectParams.IngressHostSuffix != ""`），`Ingress()` 构造、
 `validateIngress` 校验与 `IngressEndpoint` 派生共用同一依据——不从 path 尾缀嗅探
@@ -77,7 +77,7 @@ ingress 入口 IP，靠 `/agent/{short}` 前缀区分路由。部分环境（独
 
 ## 6. 测试口径
 
-- host 模式内置构造（host/path/pathType/backend/注解恰为三条且无 rewrite 相关）
+- host 模式内置构造（host/path/pathType/backend/注解恰为三条且无 rewrite 相关；2026-11-13 起另断言排除表三段齐全：/internal、/actuator → platform-router-svc:80）
 - path 模式逐字符回归锁（`testParams()` 不设 suffix，既有断言与 `String()` 比对零改动）
 - host 模式 overlay 改 annotations 仍守住 host/path/backend 不变量；rewrite 三项空串放行、非空拒绝
 - 违规 overlay 表（改 host / 空 host / 改 backend / 丢 timeout / 丢 pathType / 加

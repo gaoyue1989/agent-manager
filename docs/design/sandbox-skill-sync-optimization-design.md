@@ -1,6 +1,6 @@
 # 沙箱技能同步链路优化设计（指纹短路 / 快照差分 / revision 门控 / 水合协调器）
 
-> 状态：**已实施（2026-10-15 同日落地）**。收益数据来自本机真实环境基准（§2）；实施记录与偏差见附录 B，
+> 状态：**已实施（2026-10-15 同日落地）**。（2026-11-14 补记：① 的包技能 scoped 投影链（WorkspaceProjectionApplier tar 物化/指纹缓存 ProjectionFingerprintCache/P1-3 载荷缓存）已随 skills-syncd PR-4b（PR #339，0daa141）退役为 farm-only；②③④ L4/回写链路延续，包技能指纹 SSOT 移交内部端点版本——见 sandbox-skills-syncd-design-261112 §6.2/D-10）。收益数据来自本机真实环境基准（§2）；实施记录与偏差见附录 B，
 > 验证证据（单测 1503 / e2e 沙箱组 13 断言 / 真实 OpenSandbox 冒烟）见附录 C。
 > 前置阅读：[user-skill-admin-design.md](user-skill-admin-design.md)（L4 语义与回写栅栏）、`agent-framework/docs/e2e-ci-plan.md` X18（投影新鲜度）。
 

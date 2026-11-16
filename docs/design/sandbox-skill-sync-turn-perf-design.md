@@ -1,6 +1,6 @@
 # 沙箱技能同步每 turn 性能优化（scoped 投放短路 / 快照键前缀 / 基线跳过 / 单次枚举）
 
-> 状态：**已实施 + 基准验证 + 部署验证（2026-11-09）**。动机：66MB/2000 文件技能目录实测，session 首轮物化 ≈10~68s、第 2/3 轮稳态每 call ≈5.35s（远超 3s 目标）；本轮落地后稳态 ≈0.09s/call、新用户首轮 ≈2.86s。基准方法与原始成本模型见 [sandbox-skill-sync-optimization-design.md](sandbox-skill-sync-optimization-design.md)（上一轮稳态优化的前置：指纹缓存/revision 门控/快照差分，本轮不改动其语义）。
+> 状态：**已实施 + 基准验证 + 部署验证（2026-11-09）**。（2026-11-14 补记：包技能 scoped 投放 tar 路径与 scoped 载荷 gz 缓存（§2.1 scopedPayloadCache、§2.3 P1-3）已随 skills-syncd PR-4b（PR #339，0daa141）退役——包技能仅软链农场一路（hydrateScopedSkillCache 收缩为 farm-only、无 tar 回落），本文相关小节为历史机制记录；指纹基础设施由 SkillsFarm D-10/D-11 以「端点版本 + L4 revision」口径延续（Pod 级记账两表与 ScopedFingerprintStore 共享层保留）。另：§2.1 引用的 ProjectionFingerprintCache 与 §2.7 create 时投影指纹预热已于更早的 PR #328「投影新鲜度换官方路径」（5212c5d，2026-11-12）移除，同属历史记录。）动机：66MB/2000 文件技能目录实测，session 首轮物化 ≈10~68s、第 2/3 轮稳态每 call ≈5.35s（远超 3s 目标）；本轮落地后稳态 ≈0.09s/call、新用户首轮 ≈2.86s。基准方法与原始成本模型见 [sandbox-skill-sync-optimization-design.md](sandbox-skill-sync-optimization-design.md)（上一轮稳态优化的前置：指纹缓存/revision 门控/快照差分，本轮不改动其语义）。
 
 > **后续演进（2026-11-09，PR #285~#287，first-llm-latency）**——本文 §2.1 P0-1 描述的机制在同日后续 PR 中有三点实质演进（下文 §2.1/§3 为演进前时点表述）：
 > ① **指纹源改为「包内技能源目录 stat 指纹 + L4 revision」组合**：stage 副本不参与指纹（stage 是 SDK 对包内源 + L4 的确定性物化，跨副本 mtime 不同会使共享层永不命中）；包内源生产为同 PVC 只读挂载、跨副本指纹天然一致，L4 revision 覆盖用户级差异——这也是跨副本共享层生效的前提（`OpenSandbox.java` 指纹注释，`OpenSandboxFilesystemSpec.java:83` packageSkillsDir 注入、装配点 `AgentScopeConfig.java:109`）。

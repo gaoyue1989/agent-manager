@@ -115,7 +115,7 @@ M0 ──▶ M1 ─┐
 > （登录/用户侧全页群/详情六 Tab/模型连接抽屉/运维侧治理页），与各模块文档「demo 对照」锚点一一对应。
 >
 > **2026-10-17 按功能 e2e 套件（e2e/console-split/，初版九模块全 PASS；2026-10-20 起扩至 11 模块、2026-11-04 起扩至 12 模块、2026-11-08 起扩至 13 模块）**：
-> lib.sh 公共断言库 + m0-auth～m8-workspace-assets 八个模块脚本（2026-10-20 0f59d51 起新增 m9-skill-center、m10-sandbox，共 11 模块；2026-11-04 0cb6287 起新增 m11-workspace-config，共 12 模块；2026-11-08 起新增 m12-sandbox-admin（沙箱管理面，sandbox-pool-opensandbox-design §9.4；引入提交 9257aea 2026-11-07，经 PR #279 于 2026-11-08 合入 master），共 13 模块）+ run-all.sh 聚合 runner，180+ 断言，
+> lib.sh 公共断言库 + m0-auth～m8-workspace-assets 八个模块脚本（2026-10-20 0f59d51 起新增 m9-skill-center、m10-sandbox，共 11 模块；2026-11-04 0cb6287 起新增 m11-workspace-config，共 12 模块；2026-11-08 起新增 m12-sandbox-admin（沙箱管理面，sandbox-pool-opensandbox-design §9.4；引入提交 9257aea 2026-11-07，经 PR #279 于 2026-11-08 合入 master），共 13 模块）+ run-all.sh 聚合 runner（断言总数以 docs/blackbox-testing.md §7 日期化静态清点为准，2026-11-17 口径 507 处），
 > 覆盖实施文档各模块「测试要点」的可自动化部分（登录三分支/路由分层矩阵/治理全链/resolveWorkspace
 > 矩阵/创建编辑全链含包契约与 SSE 热生效/生命周期状态机/模型连接 CRUD-测试-下发-usage-会话切换/
 > MCP 连接器 verify 三分支与注入断言/集成探测与引用保护/API Key 与成员矩阵）。kind 集群实跑
