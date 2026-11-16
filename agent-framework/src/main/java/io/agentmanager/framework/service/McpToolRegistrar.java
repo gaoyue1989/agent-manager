@@ -192,6 +192,46 @@ public class McpToolRegistrar {
      *
      * @return 本次注册的 server 名（构建失败返回 null）
      */
+    /**
+     * 合成 MCP server 注册（openviking-memory-integration-design §7：OVK_MCP_SHARED_CONTEXT
+     * 的唯一调用方是 HarnessAgentFactory）。与 registerOne 的差异仅在连接来源——声明式
+     * config.yaml vs 程序化构建的 wrapper（OpenViking /mcp + 服务身份 Bearer，外部服务
+     * 地址由平台注入 env 提供，无法走文件声明）；其余语义完全对齐 registerOne：
+     * 句柄进共享缓存（reload evict 统一管理生命周期）、server 级缓存按"无声明"缺省装载、
+     * 标准路径注册（mcp__openviking__ 前缀）、fail-soft（失败仅告警返回 null）。
+     *
+     * @return 注册的 server 名（失败返回 null）
+     */
+    public String registerSyntheticClient(Toolkit toolkit, OafConfig.McpServerConfig mcp,
+                                          McpClientWrapper wrapper) {
+        uiMappings.put(mcp.server(), UiMapping.empty());
+        toolPermissions.put(mcp.server(), Map.of());
+        userHeaderRules.put(mcp.server(), UserHeaderRule.EMPTY);
+        readOnlyServers.put(mcp.server(), false);
+        startupRequired.put(mcp.server(), false);
+        var prev = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
+        if (prev != null) {
+            log.info("[MCP] synthetic server '{}' already has a shared handle, reusing", mcp.server());
+            wrapper = prev;
+        }
+        try {
+            registerStandard(toolkit, wrapper, mcp.server());
+            recordRegisteredTools(wrapper, mcp.server());
+            registeredWrappers.put(mcp.server(), wrapper);
+            log.info("[MCP] synthetic client registered: {} ({})", mcp.server(), wrapper);
+            return mcp.server();
+        } catch (Exception e) {
+            var evicted = sharedWrappers.remove(mcp.server(), wrapper);
+            if (evicted) {
+                log.warn("[MCP] synthetic server '{}' registration failed, evicted shared handle: {}",
+                    mcp.server(), e.getMessage());
+            }
+            log.warn("[MCP] synthetic server '{}' registration failed, skipped (fail-soft): {}",
+                mcp.server(), e.getMessage());
+            return null;
+        }
+    }
+
     public String registerOne(Toolkit toolkit, OafConfig.McpServerConfig mcp) {
         var uiMapping = loadUiMapping(mcp);
         uiMappings.put(mcp.server(), uiMapping);

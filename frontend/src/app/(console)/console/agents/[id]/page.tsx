@@ -3,7 +3,7 @@
 // 概览（kv + Pod 实时表 + 事件时间线）/ 调试（ChatPane 复用，agentBase 直连业务运行时）/
 // 会话（threads 前端直取，按 userId 隔离）/ 技能（包级只读 + L4）/ 版本（copy-on-write 链 + 升级）/
 // 调用凭证（API Key 作用域过滤 + curl 示例）。tab 经 URL query 同步（刷新保位）。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { api, type ApiKeyView, type ServiceDetail, type PackageRec } from "@/lib/api";
@@ -18,6 +18,7 @@ const TABS = [
   { id: "skills", label: "技能" },
   { id: "versions", label: "版本" },
   { id: "credentials", label: "调用凭证" },
+  { id: "memory", label: "记忆" },
 ];
 
 export default function AgentDetailPage() {
@@ -120,6 +121,7 @@ export default function AgentDetailPage() {
       {tab === "skills" && <SkillsTab detail={detail} shortName={detail.shortName || ""} />}
       {tab === "versions" && <VersionsTab ws={ws} sid={sid} detail={detail} writable={writable} onReload={load} />}
       {tab === "credentials" && <CredentialsTab ws={ws} sid={sid} detail={detail} writable={writable} />}
+      {tab === "memory" && <MemoryTab ws={ws} sid={sid} detail={detail} />}
     </div>
   );
 }
@@ -472,6 +474,89 @@ function CredentialsTab({ ws, sid, detail, writable }: { ws: number; sid: number
             <div className="flex justify-end gap-2">
               <Btn onClick={() => navigator.clipboard?.writeText(plaintext)}>复制</Btn>
               <Btn kind="pri" onClick={() => setPlaintext("")}>我已保存，关闭</Btn>
+            </div>
+          </Card>
+        </div>
+      )}
+    </>
+  );
+}
+
+// OpenViking 记忆供给 Tab（openviking-memory-integration-design §11.1）：供给状态只读
+// 展示 + 当前登录人自助签发个人访问凭证（userId 固定 u-{uid}，与数据面身份同源）。
+// provider 切换属平台管理键，走运维侧服务详情的 env 编辑，此处不提供。
+function MemoryTab({ ws, sid, detail }: { ws: number; sid: number; detail: ServiceDetail }) {
+  const { me } = useMe();
+  const env = useMemo(() => {
+    try { return JSON.parse(detail.envJson || "{}") as Record<string, string>; } catch { return {}; }
+  }, [detail.envJson]);
+  const provider = env.AGENT_MEMORY_PROVIDER || "local";
+  const enabled = provider === "openviking";
+  const [issuing, setIssuing] = useState(false);
+  const [issued, setIssued] = useState<{ userKey: string; openVikingUrl: string } | null>(null);
+  const [msg, setMsg] = useState("");
+
+  const issue = async () => {
+    try {
+      const out = await api.console.issueMemoryKey(ws, sid);
+      setIssued({ userKey: out.userKey, openVikingUrl: out.openVikingUrl });
+      setIssuing(false);
+    } catch (e: any) { setMsg(e.message); setIssuing(false); }
+  };
+
+  if (!enabled) {
+    return (
+      <>
+        <Note tone="info">当前记忆供给为「本地文件记忆」（AGENT_MEMORY_PROVIDER={provider || "local"}）。
+        切换为 OpenViking 托管需管理员在运维侧修改服务环境变量后滚动重启；切换前产生的记忆不迁移。</Note>
+        {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      </>
+    );
+  }
+
+  const flags: [string, string][] = [
+    ["记忆供给", "OpenViking 托管"],
+    ["会话归档+自动提取", env.OVK_SESSION_COMMIT === "true" ? "开启" : "逐轮提取"],
+    ["包内知识导入（发布期）", env.OVK_KNOWLEDGE_IMPORT === "true" ? "已导入" : "未导入"],
+    ["服务级共享检索（MCP）", env.OVK_MCP_SHARED_CONTEXT === "true" ? "已注入" : "未注入"],
+  ];
+  return (
+    <>
+      {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      <div className="mb-4 overflow-hidden rounded-lg border border-gray-200 bg-white" data-testid="memory-status">
+        <table className="w-full text-sm"><tbody>
+          {flags.map(([k, v]) => (
+            <tr key={k} className="border-b last:border-0">
+              <td className="w-64 p-2.5 text-xs text-gray-500">{k}</td>
+              <td className="p-2.5 font-medium">{v}</td>
+            </tr>
+          ))}
+        </tbody></table>
+      </div>
+      <Card title="我的记忆访问凭证" className="mb-4">
+        <Note tone="info">签发个人 OpenViking 访问 Key（身份 = 你在对话中的身份 u-{me?.user.id ?? 0}），用于登录
+        OpenViking Studio 或外部 MCP 客户端查看/管理自己的长期记忆。Key 明文仅签发时展示一次；
+        同一身份重复签发得到相同 Key，管理员轮换后旧 Key 即失效。</Note>
+        <Btn kind="pri" data-testid="memory-issue-btn" disabled={issuing}
+          onClick={() => { setIssuing(true); issue(); }}>
+          {issuing ? "签发中…" : "签发我的记忆访问 Key"}
+        </Btn>
+      </Card>
+      <Card title="OpenViking Studio 使用指引">
+        <ol className="list-decimal space-y-1 pl-5 text-xs leading-6 text-gray-600">
+          <li>打开 OpenViking Studio（地址：<code className="rounded bg-gray-100 px-1 font-mono">{env.OPENVIKING_URL || "（由管理员提供）"}</code>）</li>
+          <li>选择自托管服务地址并粘贴签发的 Key 登录</li>
+          <li>浏览 <code className="rounded bg-gray-100 px-1 font-mono">viking://~/memories</code> 查看与管理自己的长期记忆</li>
+        </ol>
+      </Card>
+      {issued && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" data-testid="memory-key-dialog">
+          <Card title="记忆访问 Key 已签发 · 明文仅此一次展示" className="w-[520px]">
+            <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{issued.userKey}</div>
+            <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
+            <div className="flex justify-end gap-2">
+              <Btn onClick={() => navigator.clipboard?.writeText(issued.userKey)}>复制</Btn>
+              <Btn kind="pri" onClick={() => setIssued(null)}>我已保存，关闭</Btn>
             </div>
           </Card>
         </div>

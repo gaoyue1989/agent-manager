@@ -4,7 +4,7 @@
 // 编辑模式：无方式卡片、名称锁定、标题/按钮换「保存」、提交 PUT（copy-on-write 新版本 + republish）。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type SandboxFormPayload, type SkillRefPayload, type SkillRec } from "@/lib/api";
+import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type MemoryFormPayload, SandboxFormPayload, type SkillRefPayload, type SkillRec } from "@/lib/api";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import { PERM_STYLE } from "@/lib/status";
 
@@ -17,6 +17,7 @@ export interface AgentFormState {
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
   sandbox: SandboxFormPayload;
+  memory: MemoryFormPayload;
   spec: string; replicas: number; publicEndpoint: boolean;
   importPackageId?: number; adoptServiceId?: number;
 }
@@ -72,6 +73,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     prompt: initial?.prompt ?? "", skills: initial?.skills ?? [], subAgents: initial?.subAgents ?? [],
     mcpServers: initial?.mcpServers ?? [],
     sandbox: initial?.sandbox ?? { enabled: null, image: "", timeoutMinutes: 0, memoryMb: 0, cpuCount: 0 },
+    memory: initial?.memory ?? { provider: "", sessionCommit: false, knowledgeImport: false, sharedSkills: false, mcpSharedContext: false },
     spec: initial?.spec || "small",
     replicas: initial?.replicas || 1, publicEndpoint: initial?.publicEndpoint ?? true,
   });
@@ -348,7 +350,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
 
           <Section n={3} title="Agent 资产配置">
             <div className="mb-3 rounded-md bg-gray-100 px-3 py-1.5 text-xs text-gray-600" data-testid="asset-count">
-              已选资产：Skill {selectedCount.skill} · SubAgent {selectedCount.sub} · 工具 / MCP {selectedCount.mcp} · 记忆 默认 · 凭证 0 · 知识库 0
+              已选资产：Skill {selectedCount.skill} · SubAgent {selectedCount.sub} · 工具 / MCP {selectedCount.mcp} · 记忆 {state.memory.provider === "openviking" ? "OpenViking" : state.memory.provider === "local" ? "本地" : "默认"} · 凭证 0 · 知识库 0
             </div>
             <Note>勾选的资产将写入生成的 OAF 包（frontmatter skills / agents / mcpServers + mcp-configs/）：MCP 配置取自「工具管理」、远程 SubAgent 端点取自「集成 Agent」；运行时三层裁决不变。</Note>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -547,6 +549,46 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
             <div className="mt-1 text-[11.5px] text-gray-400">
               开关写入生成包 frontmatter config.sandbox.enabled（随包版本走）；镜像 / 超时 / 内存 / CPU 作为发布 env（SANDBOX_*）注入。
               已发布 Agent 的沙箱总览见「资产管理 → 沙箱配置」（只读）。
+            </div>
+          </Section>
+
+          <Section n={5.5} title="记忆配置（OpenViking）">
+            <div className="flex flex-wrap items-center gap-2 py-1" data-testid="memory-provider-group">
+              {([
+                { v: "", label: "跟随平台默认", desc: "平台启用 OpenViking 即托管（推荐）；未启用即本地文件记忆" },
+                { v: "local", label: "本地文件记忆", desc: "显式退出——记忆存服务 checkpoint 库（agent_fs KV），不依赖 OpenViking" },
+                { v: "openviking", label: "OpenViking 托管", desc: "显式接管——长期记忆/知识/技能存外部 OpenViking 上下文数据库（平台未启用时发布会报错提示）" },
+              ] as const).map((opt) => (
+                <button key={opt.v} type="button" data-testid={`memory-provider-${opt.v || "default"}`}
+                  onClick={() => setState((s) => ({ ...s, memory: { ...s.memory, provider: opt.v } }))}
+                  className={`rounded-md border px-3 py-1.5 text-left text-[12px] transition ${state.memory.provider === opt.v
+                    ? "border-blue-600 bg-blue-50 text-blue-700" : "border-gray-300 bg-white text-gray-600 hover:bg-gray-50"}`}>
+                  <b className="block text-[12.5px] font-medium">{opt.label}</b>
+                  <span className="text-[11px] text-gray-400">{opt.desc}</span>
+                </button>
+              ))}
+            </div>
+            {state.memory.provider === "openviking" && (
+              <div className="mt-1.5 space-y-2 rounded-md border border-blue-200 bg-blue-50/40 p-3" data-testid="memory-openviking-config">
+                {([
+                  { k: "sessionCommit" as const, label: "会话归档 + 自动提取", desc: "开启 = 建 OpenViking 会话逐轮归档，由服务端策略自动调度记忆提取；关闭 = 每轮对话后立即提交 remember 提取" },
+                  { k: "knowledgeImport" as const, label: "包内知识导入", desc: "发布时把本包 knowledge/ 目录文本文件导入 viking://resources（Account 共享，可检索）" },
+                  { k: "sharedSkills" as const, label: "包内技能共享", desc: "发布时把本包 skills/ 导入 viking://agent/skills（Account 共享）" },
+                  { k: "mcpSharedContext" as const, label: "服务级共享检索（MCP）", desc: "向 Agent 注入 openviking MCP 工具（find/search/read），可检索 Account 共享资源" },
+                ]).map((sw) => (
+                  <label key={sw.k} className="flex cursor-pointer items-start gap-2.5">
+                    <input type="checkbox" checked={state.memory[sw.k]} data-testid={`memory-${sw.k}`}
+                      onChange={(e) => setState((s) => ({ ...s, memory: { ...s.memory, [sw.k]: e.target.checked } }))}
+                      className="mt-0.5 size-4 accent-blue-600" />
+                    <span className="text-[12.5px]"><b className="font-medium">{sw.label}</b><br />
+                      <small className="text-gray-400">{sw.desc}</small></span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="mt-1 text-[11.5px] text-gray-400">
+              供给状态总览 / 访问 Key 签发 / 记忆浏览见「资产管理 → 记忆管理」与 Agent 详情「记忆」页签；
+              记忆访问身份 = 对话用户 ID（u-&#123;uid&#125;），按用户隔离。
             </div>
           </Section>
 
