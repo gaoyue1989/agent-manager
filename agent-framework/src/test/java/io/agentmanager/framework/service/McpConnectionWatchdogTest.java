@@ -1,6 +1,8 @@
 package io.agentmanager.framework.service;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -22,9 +24,9 @@ import io.agentscope.harness.agent.HarnessAgent;
 import reactor.core.publisher.Mono;
 
 /**
- * MCP 连接看门狗单测（PR #62 遗留 P0-1）：探活健康不重建、失联按 swap-on-success
- * 重建（build→clear→evict→register）、build 失败保留旧注册、注册失败关闭新连接、
- * reload 进行中让位、配置缺失跳过、禁用语义。
+ * MCP 连接看门狗单测（issue #348 对齐共享句柄架构）：探活健康不重建、失联对共享句柄
+ * 原地换芯（不再对 toolkit 做 clearServer/registerBuiltClient 手术）、换芯成功联动资源
+ * 代理缓存失效、缓存无句柄 compensate 复用 registerOne、reload 进行中让位、禁用语义。
  */
 class McpConnectionWatchdogTest {
 
@@ -35,10 +37,12 @@ class McpConnectionWatchdogTest {
     private OafReloadService oafReloadService;
     private HarnessAgent agent;
     private Toolkit toolkit;
-    private McpClientWrapper wrapper;
-    private McpClientWrapper newWrapper;
+    private McpClientWrapper handle;
 
     private McpConnectionWatchdog watchdog;
+
+    private static final OafConfig.McpServerConfig MCP =
+        new OafConfig.McpServerConfig("vendor", "biz-mcp", "1.0.0", "biz-mcp", false);
 
     @BeforeEach
     void setUp() {
@@ -49,15 +53,10 @@ class McpConnectionWatchdogTest {
         oafReloadService = mock(OafReloadService.class);
         agent = mock(HarnessAgent.class);
         toolkit = mock(Toolkit.class);
-        wrapper = mock(McpClientWrapper.class);
-        newWrapper = mock(McpClientWrapper.class);
+        handle = mock(McpClientWrapper.class);
 
         when(oafReloadService.isReloadInProgress()).thenReturn(false);
-        when(agentRuntimeService.getAgent()).thenReturn(agent);
-        when(agent.getToolkit()).thenReturn(toolkit);
-        when(wrapper.getName()).thenReturn("biz-mcp");
-        when(registrar.getRegisteredServerNames()).thenReturn(java.util.Set.of("biz-mcp"));
-        when(registrar.getRegisteredWrapper("biz-mcp")).thenReturn(wrapper);
+        when(handle.getName()).thenReturn("biz-mcp");
         when(oafConfigHolder.get()).thenReturn(oafWithServer("biz-mcp"));
 
         watchdog = new McpConnectionWatchdog(registrar, resourceProxy, agentRuntimeService,
@@ -80,77 +79,75 @@ class McpConnectionWatchdogTest {
     }
 
     @Test
-    void healthyWrapperShouldNotRebuild() {
-        when(wrapper.listTools()).thenReturn(Mono.just(java.util.List.<io.modelcontextprotocol.spec.McpSchema.Tool>of()));
+    void healthyHandleShouldNotRebuild() {
+        when(registrar.sharedWrapper("biz-mcp")).thenReturn(handle);
+        when(handle.listTools()).thenReturn(Mono.just(java.util.List.<io.modelcontextprotocol.spec.McpSchema.Tool>of()));
 
-        watchdog.probeOne("biz-mcp");
+        watchdog.probeOne(MCP);
 
-        verify(registrar, never()).buildClientForReload(any());
+        verify(registrar, never()).rebuildSharedWrapper(anyString(), any());
         verify(registrar, never()).clearServer(any(), anyString());
+        verify(resourceProxy, never()).evictClient(anyString());
         assertEquals(1, watchdog.stats()[0]);
         assertEquals(0, watchdog.stats()[1]);
     }
 
     @Test
-    void deadConnectionShouldRebuildViaSwapSequence() {
-        when(wrapper.listTools()).thenReturn(Mono.error(new java.net.ConnectException("conn refused")));
-        when(registrar.buildClientForReload(any())).thenReturn(newWrapper);
+    void deadHandleShouldRebuildInPlaceAndEvictResourceProxy() {
+        when(registrar.sharedWrapper("biz-mcp")).thenReturn(handle);
+        when(handle.listTools()).thenReturn(Mono.error(new java.net.ConnectException("conn refused")));
+        when(registrar.rebuildSharedWrapper(eq("biz-mcp"), eq(MCP))).thenReturn(true);
 
-        watchdog.probeOne("biz-mcp");
+        watchdog.probeOne(MCP);
 
-        var mcp = new OafConfig.McpServerConfig("vendor", "biz-mcp", "1.0.0", "biz-mcp", false);
-        verify(registrar).buildClientForReload(mcp);
-        verify(registrar).clearServer(toolkit, "biz-mcp");
+        verify(registrar).rebuildSharedWrapper("biz-mcp", MCP);
         verify(resourceProxy).evictClient("biz-mcp");
-        verify(registrar).registerBuiltClient(toolkit, newWrapper, mcp);
-        verify(registrar, never()).closeWrapperQuietly(any());
+        // 换芯自愈不再做 toolkit 手术：不摘注册、不重注册、不动单例 agent
+        verify(registrar, never()).clearServer(any(), anyString());
+        verify(registrar, never()).registerOne(any(), any());
+        verify(agentRuntimeService, never()).getAgent();
         assertEquals(1, watchdog.stats()[1]);
     }
 
     @Test
-    void buildFailureShouldKeepOldRegistration() {
-        when(wrapper.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));
-        when(registrar.buildClientForReload(any())).thenReturn(null);
+    void rebuildFailureShouldNotEvictResourceProxy() {
+        when(registrar.sharedWrapper("biz-mcp")).thenReturn(handle);
+        when(handle.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));
+        when(registrar.rebuildSharedWrapper(eq("biz-mcp"), eq(MCP))).thenReturn(false);
 
-        watchdog.probeOne("biz-mcp");
+        watchdog.probeOne(MCP);
 
+        verify(registrar).rebuildSharedWrapper("biz-mcp", MCP);
+        verify(resourceProxy, never()).evictClient(anyString());
         verify(registrar, never()).clearServer(any(), anyString());
-        verify(registrar, never()).registerBuiltClient(any(), any(), any());
     }
 
-    /** registerBuiltClient fail-soft 返回 null（自关闭）：不抛异常、不误报重建成功、不重复关闭 */
+    /** compensate：缓存无句柄 + 单例 agent 存在 → registerOne 补建（完整注册语义，含 P0 驱逐） */
     @Test
-    void registerNullReturnShouldNotCloseNorReportRebuilt() {
-        when(wrapper.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));
-        when(registrar.buildClientForReload(any())).thenReturn(newWrapper);
-        when(registrar.registerBuiltClient(any(), any(), any())).thenReturn(null);
+    void missingHandleWithLiveAgentShouldCompensateViaRegisterOne() {
+        when(registrar.sharedWrapper("biz-mcp")).thenReturn(null);
+        when(agentRuntimeService.getAgent()).thenReturn(agent);
+        when(agent.getToolkit()).thenReturn(toolkit);
 
-        watchdog.probeOne("biz-mcp");
+        watchdog.probeOne(MCP);
 
-        verify(registrar, never()).closeWrapperQuietly(any());
+        verify(registrar).registerOne(toolkit, MCP);
+        verify(registrar, never()).rebuildSharedWrapper(anyString(), any());
+        assertEquals(0, watchdog.stats()[0]); // 无句柄不探测
+        assertEquals(1, watchdog.stats()[1]);
     }
 
+    /** compensate：无单例 agent（纯会话隔离模式）→ 仅装缓存，新会话自然取用 */
     @Test
-    void registerFailureShouldCloseNewWrapper() {
-        when(wrapper.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));
-        when(registrar.buildClientForReload(any())).thenReturn(newWrapper);
-        when(registrar.registerBuiltClient(any(), any(), any()))
-            .thenThrow(new RuntimeException("register failed"));
+    void missingHandleWithoutAgentShouldCacheClientOnly() {
+        when(registrar.sharedWrapper("biz-mcp")).thenReturn(null);
+        when(agentRuntimeService.getAgent()).thenReturn(null);
 
-        watchdog.probeOne("biz-mcp");
+        watchdog.probeOne(MCP);
 
-        verify(registrar).clearServer(toolkit, "biz-mcp");
-        verify(registrar).closeWrapperQuietly(newWrapper);
-    }
-
-    @Test
-    void missingServerConfigShouldSkipRebuild() {
-        when(wrapper.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));
-        when(oafConfigHolder.get()).thenReturn(oafWithServer("other-server"));
-
-        watchdog.probeOne("biz-mcp");
-
-        verify(registrar, never()).buildClientForReload(any());
+        verify(registrar).sharedClient(MCP);
+        verify(registrar, never()).registerOne(any(), any());
+        assertEquals(1, watchdog.stats()[1]);
     }
 
     @Test
@@ -159,35 +156,18 @@ class McpConnectionWatchdogTest {
 
         watchdog.probeAll();
 
-        verify(registrar, never()).getRegisteredWrapper(anyString());
+        verify(registrar, never()).sharedWrapper(anyString());
+        verify(registrar, never()).registerOne(any(), any());
         assertEquals(0, watchdog.stats()[0]);
     }
 
-    /** 补偿自愈口（修 #66 确认缺陷）：「有配置但未注册」的 server 每周期重建重试 */
     @Test
-    void configuredButUnregisteredServerShouldBeCompensated() {
-        // 模拟 rebuild register 失败后的现场：声明还在、注册集合里没有
-        when(registrar.getRegisteredServerNames()).thenReturn(java.util.Set.of());
-        when(registrar.buildClientForReload(any())).thenReturn(newWrapper);
+    void missingOafConfigShouldSkipCycle() {
+        when(oafConfigHolder.get()).thenReturn(null);
 
         watchdog.probeAll();
 
-        var mcp = new OafConfig.McpServerConfig("vendor", "biz-mcp", "1.0.0", "biz-mcp", false);
-        verify(registrar).buildClientForReload(mcp);
-        verify(registrar).clearServer(toolkit, "biz-mcp");
-        verify(registrar).registerBuiltClient(toolkit, newWrapper, mcp);
-        assertEquals(1, watchdog.stats()[1]);
-    }
-
-    /** 已注册 server 只走探测，补偿路径不得重复重建 */
-    @Test
-    void registeredServerShouldNotBeCompensated() {
-        when(wrapper.listTools()).thenReturn(Mono.just(java.util.List.<io.modelcontextprotocol.spec.McpSchema.Tool>of()));
-
-        watchdog.probeAll();
-
-        verify(registrar, never()).clearServer(any(), anyString());
-        assertEquals(0, watchdog.stats()[1]);
+        verify(registrar, never()).sharedWrapper(anyString());
     }
 
     @Test
@@ -197,7 +177,7 @@ class McpConnectionWatchdogTest {
 
         disabled.probeAll();
 
-        verify(registrar, never()).getRegisteredWrapper(anyString());
+        verify(registrar, never()).sharedWrapper(anyString());
         // 禁用语义下调度兜底周期为 1h（不产生 0/negative 的调度异常）
         var timing = new McpHealthTiming(0, 5);
         assertEquals(3_600_000L, timing.probeFixedDelayMs());
