@@ -3,7 +3,10 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -805,9 +808,9 @@ func TestConsoleSandboxOverview(t *testing.T) {
 		return svc
 	}
 	on := true
-	mk("pkg-on-agent", &SandboxForm{Enabled: &on})           // 包声明开
-	mk("env-off-agent", &SandboxForm{Enabled: &on})          // 后面把 env 改成显式关（env 优先）
-	mk("default-agent", nil)                                  // 未声明
+	mk("pkg-on-agent", &SandboxForm{Enabled: &on})  // 包声明开
+	mk("env-off-agent", &SandboxForm{Enabled: &on}) // 后面把 env 改成显式关（env 优先）
+	mk("default-agent", nil)                        // 未声明
 
 	// env 显式关（直接改库模拟存量部署 env）
 	var envSvc store.ServiceEntity
@@ -844,5 +847,85 @@ func TestConsoleSandboxOverview(t *testing.T) {
 	kl, err := c.ConsoleSandbox(ws.ID, "default")
 	if err != nil || len(kl) != 1 {
 		t.Fatalf("keyword filter: %+v err=%v", kl, err)
+	}
+}
+
+// 记忆配置表单:Create 注入三态 + OVK 开关;Update 默认态清除显式键(切回平台派生)。
+func TestAgentMemoryFormLifecycle(t *testing.T) {
+	core, _, cleanup := newTestCore(t)
+	defer cleanup()
+	core.Cfg.OpenVikingEnabled = true
+	ovSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/admin/accounts":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
+				"result": map[string]string{"user_key": "ak-test"}})
+		case strings.HasSuffix(r.URL.Path, "/users"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
+				"result": map[string]string{"user_key": "x"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ovSrv.Close()
+	core.Viking = NewVikingAdmin(ovSrv.URL, "root")
+	ws := seedWs(t, core, "ws-mem", "记忆空间")
+	if err := core.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: 1, Role: "owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := seedVerifiedConn(t, core, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+
+	svc, _, err := core.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "mem-agent", Description: "d", Prompt: "p", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Memory:           &MemoryForm{Provider: MemoryProviderOpenViking, SessionCommit: true, KnowledgeImport: true},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	env := map[string]string{}
+	_ = json.Unmarshal([]byte(svc.EnvJSON), &env)
+	if env[AgentMemoryProviderEnv] != MemoryProviderOpenViking ||
+		env[OvkSessionCommitEnv] != "true" || env[OvkKnowledgeImportEnv] != "true" {
+		t.Fatalf("memory env not injected: %v", env)
+	}
+	var secret map[string]string
+	_ = json.Unmarshal([]byte(svc.EnvSecretJSON), &secret)
+	seed := secret[OvkUserSeedEnv]
+	if seed == "" {
+		t.Fatalf("provisioning missing after create with provider=openviking")
+	}
+
+	// 编辑:provider=local 显式退出 → OVK 键清除
+	up, _, err := core.UpdateAgent(ws.ID, 1, svc.ID, &AgentForm{
+		Name: "mem-agent", Description: "d", Prompt: "p", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Memory:           &MemoryForm{Provider: MemoryProviderLocal},
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	env2 := map[string]string{}
+	_ = json.Unmarshal([]byte(up.EnvJSON), &env2)
+	if env2[AgentMemoryProviderEnv] != MemoryProviderLocal ||
+		env2[OvkSessionCommitEnv] != "" || env2[OvkKnowledgeImportEnv] != "" {
+		t.Fatalf("local switch must clear OVK keys: %v", env2)
+	}
+
+	// 编辑:默认态 → provider 键也清除(切回平台派生)
+	up2, _, err := core.UpdateAgent(ws.ID, 1, svc.ID, &AgentForm{
+		Name: "mem-agent", Description: "d", Prompt: "p", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Memory:           &MemoryForm{Provider: ""},
+	})
+	if err != nil {
+		t.Fatalf("update default: %v", err)
+	}
+	env3 := map[string]string{}
+	_ = json.Unmarshal([]byte(up2.EnvJSON), &env3)
+	// 默认态清显式键后,Republish 链的 applyOpenVikingEnv 按平台配置派生回填
+	// (平台启用→openviking;与 TestPublishWithOpenVikingProvision 的派生键补齐同语义)
+	if env3[AgentMemoryProviderEnv] != MemoryProviderOpenViking {
+		t.Fatalf("default provider must re-derive from platform config: %v", env3)
 	}
 }

@@ -147,6 +147,10 @@ export interface SandboxFormPayload {
   memoryMb?: number;
   cpuCount?: number;
 }
+export interface MemoryFormPayload {
+  provider: "" | "local" | "openviking";
+  sessionCommit: boolean; knowledgeImport: boolean; sharedSkills: boolean; mcpSharedContext: boolean;
+}
 export interface AgentFormPayload {
   mode?: string; name: string; description?: string; image?: string;
   modelConnections: { connectionId: number; isDefault: boolean }[];
@@ -155,6 +159,7 @@ export interface AgentFormPayload {
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
   sandbox?: SandboxFormPayload | null;
+  memory?: MemoryFormPayload | null;
   spec: string; replicas: number; publicEndpoint?: boolean;
   remoteAuth?: Record<string, string>;
   importPackageId?: number;
@@ -174,6 +179,7 @@ export interface EditFormView {
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
   sandbox?: SandboxFormPayload | null;
+  memory?: MemoryFormPayload | null;
   spec: string; replicas: number; publicEndpoint: boolean; version: string; packageId: number;
 }
 export interface AuditItem { time: string; actor: string; action: string; object: string; detail: string; }

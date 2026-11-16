@@ -8,9 +8,9 @@ package service
 
 import (
 	"bytes"
-	"encoding/json"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
@@ -72,11 +72,57 @@ type McpServerRef struct {
 // 显式关必须落包声明 config.sandbox.enabled=false——否则运行时三层裁决会回退到
 // 包内已有旧版本的 true（copy-on-write 沿用），用户关闭的意图失效。
 type SandboxForm struct {
-	Enabled   *bool  `json:"enabled"`
-	Image     string `json:"image,omitempty"`     // 空 = 运行时默认镜像（不注入 env）
-	TimeoutMin int  `json:"timeoutMinutes,omitempty"` // 0 = 不注入（运行时默认 60）
-	MemoryMB  int    `json:"memoryMb,omitempty"`  // 0 = 不注入（运行时默认 1024）
-	CPUCount  int    `json:"cpuCount,omitempty"`  // 0 = 不注入（运行时默认 1）
+	Enabled    *bool  `json:"enabled"`
+	Image      string `json:"image,omitempty"`          // 空 = 运行时默认镜像（不注入 env）
+	TimeoutMin int    `json:"timeoutMinutes,omitempty"` // 0 = 不注入（运行时默认 60）
+	MemoryMB   int    `json:"memoryMb,omitempty"`       // 0 = 不注入（运行时默认 1024）
+	CPUCount   int    `json:"cpuCount,omitempty"`       // 0 = 不注入（运行时默认 1）
+}
+
+// MemoryForm 记忆供给配置（openviking-memory-integration-design §11.1，创建/编辑表单
+// 「记忆配置」区块）：Provider 三态——""（跟随平台派生：平台启用即 openviking、未启用即
+// local，不注入键）、"local"（显式退出）、"openviking"（显式接管）。OVK 开关 true 注入
+// "true"、false 清除键（与未设置同语义，聚合状态表读缺省 false 一致）。注入键全为
+// 服务 env 用户可设键（平台注入键 OPENVIKING_URL/ACCOUNT/OVK_ADMIN_KEY/USER_SEED 不在
+// 表单面——由发布链路派生）。
+type MemoryForm struct {
+	Provider         string `json:"provider,omitempty"`
+	SessionCommit    bool   `json:"sessionCommit"`
+	KnowledgeImport  bool   `json:"knowledgeImport"`
+	SharedSkills     bool   `json:"sharedSkills"`
+	MCPSharedContext bool   `json:"mcpSharedContext"`
+}
+
+// memoryEnv 表单记忆配置 → 服务 env：返回 (注入键, 需清除键)。provider 空态清除
+// 显式键（切回平台派生）；开关 false 清除（显式关 = 不设置）。清除语义仅表单管键。
+func (m *MemoryForm) memoryEnv() (map[string]string, []string) {
+	inject := map[string]string{}
+	var clear []string
+	if m == nil {
+		return inject, clear
+	}
+	switch m.Provider {
+	case MemoryProviderLocal, MemoryProviderOpenViking:
+		inject[AgentMemoryProviderEnv] = m.Provider
+	default:
+		clear = append(clear, AgentMemoryProviderEnv) // 默认态：清显式值（切回平台派生）
+	}
+	for _, sw := range []struct {
+		on  bool
+		key string
+	}{
+		{m.SessionCommit, OvkSessionCommitEnv},
+		{m.KnowledgeImport, OvkKnowledgeImportEnv},
+		{m.SharedSkills, OvkSharedSkillsEnv},
+		{m.MCPSharedContext, OvkMCPSharedCtxEnv},
+	} {
+		if sw.on {
+			inject[sw.key] = "true"
+		} else {
+			clear = append(clear, sw.key)
+		}
+	}
+	return inject, clear
 }
 
 // normalized 沙箱资源项边界校验：负值归零（不注入），上限护栏防误填。
@@ -104,6 +150,7 @@ type AgentForm struct {
 	SubAgents        []SubAgentRef  `json:"subAgents"`
 	McpServers       []McpServerRef `json:"mcpServers"`
 	Sandbox          *SandboxForm   `json:"sandbox,omitempty"`
+	Memory           *MemoryForm    `json:"memory,omitempty"`
 	Spec             string         `json:"spec"`
 	Replicas         int            `json:"replicas"`
 	PublicEndpoint   *bool          `json:"publicEndpoint"`
@@ -658,6 +705,12 @@ func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, for
 			env["SANDBOX_CPU_COUNT"] = strconv.Itoa(s.CPUCount)
 		}
 	}
+	// 记忆供给配置（表单管键）：provider 三态 + OVK 开关注入
+	if memEnv, _ := form.Memory.memoryEnv(); len(memEnv) > 0 {
+		for k, v := range memEnv {
+			env[k] = v
+		}
+	}
 	return env, secretKeys, nil
 }
 
@@ -878,6 +931,7 @@ type EditFormView struct {
 	SubAgents        []SubAgentRef  `json:"subAgents"`
 	McpServers       []McpServerRef `json:"mcpServers"`
 	Sandbox          *SandboxForm   `json:"sandbox,omitempty"`
+	Memory           *MemoryForm    `json:"memory,omitempty"`
 	Spec             string         `json:"spec"`
 	Replicas         int            `json:"replicas"`
 	PublicEndpoint   bool           `json:"publicEndpoint"`
@@ -910,6 +964,16 @@ func (c *Core) EditForm(workspaceID, serviceID uint) (*EditFormView, error) {
 		Name: svc.DisplayName, K8sName: svc.K8sName, Description: cfg.Description,
 		Image: svc.Image, Spec: svc.Spec, Replicas: svc.Replicas,
 		PublicEndpoint: svc.EndpointPublic(), Version: pkg.Version, PackageID: pkg.ID,
+	}
+	// 记忆配置回显（表单管键）：env 显式值 → 表单显式值（未设置 = 默认态 ""，保存清显式键）
+	viewEnv := map[string]string{}
+	_ = json.Unmarshal([]byte(svc.EnvJSON), &viewEnv)
+	view.Memory = &MemoryForm{
+		Provider:         viewEnv[AgentMemoryProviderEnv],
+		SessionCommit:    viewEnv[OvkSessionCommitEnv] == "true",
+		KnowledgeImport:  viewEnv[OvkKnowledgeImportEnv] == "true",
+		SharedSkills:     viewEnv[OvkSharedSkillsEnv] == "true",
+		MCPSharedContext: viewEnv[OvkMCPSharedCtxEnv] == "true",
 	}
 	view.Prompt = cfg.Instructions
 	// 空间技能资产按名索引（回显 source=skill；停用资产也回显——已勾选状态是事实，
@@ -1074,6 +1138,11 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	}
 	for k, v := range env { // 仅覆盖表单管的键，其余用户 env sticky
 		oldPlain[k] = v
+	}
+	if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {
+		for _, k := range clearKeys { // 表单显式默认/关：清除既有显式键（切回平台派生）
+			delete(oldPlain, k)
+		}
 	}
 	public := form.PublicEndpoint == nil || *form.PublicEndpoint
 	newPkgID := newPkg.ID
