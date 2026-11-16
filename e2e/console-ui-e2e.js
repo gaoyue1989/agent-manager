@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * 控制台浏览器 E2E（Puppeteer）：登录 → 工作空间 → Agent 列表/创建/详情/编辑 →
- * 模型连接 → 工具（MCP）→ 技能中心 → 沙箱配置总览 → 沙箱管理（admin）→ 沙箱实例（console）。
+ * 模型连接 → 工具（MCP）→ 技能中心 → 沙箱配置总览 → 沙箱管理（admin）+ 分页回归（issue #298）
+ * → 沙箱实例（console）。
  *
  * 设计：
  *  - 数据准备走 API（登录/建空间/模型连接/工具/技能/导入包/沙箱 Agent），浏览器只驱动 UI；
@@ -16,6 +17,7 @@
  */
 const fs = require("node:fs");
 const path = require("node:path");
+const { execSync } = require("node:child_process");
 const puppeteer = require("puppeteer");
 
 const BASE = process.env.BASE || "http://localhost:30080/api/v1";
@@ -48,6 +50,31 @@ function check(name, cond, detail = "") {
   }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// mock-sandbox 直连通道（admin/sandboxes 分页造数用；backend 无创建沙箱代理端点，
+// api.ts 仅 list/delete——造数只能进 mock 容器打本机 8090，m12-sandbox-admin.sh 先例同路径）。
+// mock 仅存在于 CI overlay + 本地预置：无 svc 时调用方跳过相应小节
+const hasMockSandbox = () => {
+  try { execSync("kubectl -n agent-platform get svc mock-sandbox", { stdio: "pipe" }); return true; }
+  catch { return false; }
+};
+const mockNode = (js) => execSync("kubectl -n agent-platform exec -i deploy/mock-sandbox -- node", { input: js, encoding: "utf8" });
+// 清空 mock 全量沙箱（内存 Map 跨步骤残留——失败运行/X 组遗留——不清基线分页计数必 flaky）
+const MOCK_CLEAR = `
+const base = "http://127.0.0.1:8090";
+const j = async (m, p, b) => {
+  const r = await fetch(base + p, { method: m, headers: { "content-type": "application/json" }, body: b === undefined ? undefined : JSON.stringify(b) });
+  const t = await r.text();
+  return t ? JSON.parse(t) : null;
+};
+for (let g = 0; g < 50; g++) {
+  const pg = await j("GET", "/v1/sandboxes?pageSize=200");
+  const items = pg.items || [];
+  if (!items.length) break;
+  for (const it of items) await j("DELETE", "/v1/sandboxes/" + it.id);
+}
+console.log("cleared");
+`;
 
 async function api(method, p, body, token) {
   const headers = {};
@@ -321,6 +348,64 @@ async function main() {
     check("沙箱管理汇总卡渲染", !!(await page.$(testid("sb-stat-pools"))) && !!(await page.$(testid("sb-stat-running"))));
     check("沙箱管理池区块渲染", !!(await page.$(testid("pool-create-open"))));
     check("沙箱管理实例表渲染", !!(await page.$(testid("sandbox-table"))));
+
+    // ---- 沙箱管理分页（issue #298 回归：第 50 条之后的沙箱可达可销毁 + 空尾页兜底回退）----
+    console.log("== UI：沙箱管理分页（admin）==");
+    // 页码指示 span 无 testid，定位下一页按钮所在 footer 内匹配「n / n」的 span（池卡片
+    // 的 available/allocated 计数在 <p>/<b> 内，不与本模式冲突）
+    const pageIndicator = () => page.evaluate(() => {
+      const next = document.querySelector('[data-testid="sandbox-page-next"]');
+      const hit = next && [...next.parentElement.querySelectorAll("span")]
+        .find((s) => /^\d+ \/ \d+$/.test((s.textContent || "").trim()));
+      return hit ? hit.textContent.trim() : "";
+    });
+    const sandboxRows = () => page.$$eval('[data-testid^="sandbox-row-"]', (els) => els.length);
+    if (hasMockSandbox()) {
+      mockNode(MOCK_CLEAR);
+      mockNode(`${MOCK_CLEAR}
+for (let i = 1; i <= 51; i++) {
+  await j("POST", "/v1/sandboxes", { metadata: { service: "ui-e2e-admin", session_id: "ui-e2e-page-" + i }, timeout: 1800 });
+}
+console.log("seeded");`);
+      await goto("/admin/sandboxes", testid("sandbox-admin"));
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid^="sandbox-row-"]').length === 50, { timeout: 30000 }).catch(() => {});
+      const rowsP1 = await sandboxRows();
+      check("分页第 1 页恰 50 行（PAGE_SIZE=50）", rowsP1 === 50, `rows=${rowsP1}`);
+      check("第 51 条使下一页可点（hasNextPage 透传）",
+        (await page.$eval(testid("sandbox-page-next"), (el) => el.disabled)) === false);
+      check("页码指示 1 / 2", (await pageIndicator()) === "1 / 2", await pageIndicator());
+
+      await click("sandbox-page-next");
+      // 页码指示随 page state 先行更新（React 重渲染早于重拉完成），数据行数才是终态信号：
+      // 等第 2 页行数就位（1 行）再断言指示与行数
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid^="sandbox-row-"]').length === 1,
+        { timeout: 15000 }).catch(() => {});
+      check("翻页后页码指示 2 / 2", (await pageIndicator()) === "2 / 2", await pageIndicator());
+      const rowsP2 = await sandboxRows();
+      check("第 2 页恰 1 行（51 - 50）", rowsP2 === 1, `rows=${rowsP2}`);
+      const rowId = await page.$eval('[data-testid^="sandbox-row-"]', (el) => el.dataset.testid.replace("sandbox-row-", ""));
+      // confirm 对话框由 page.on(dialog,accept) 自动接受
+      await click(`sandbox-destroy-${rowId}`);
+      await page.waitForFunction((id) => !document.querySelector(`[data-testid="sandbox-row-${id}"]`),
+        { timeout: 15000 }, rowId).catch(() => {});
+      check("第 51 条可达可销毁：销毁后该行消失", !(await page.$(testid(`sandbox-row-${rowId}`))));
+
+      // 空尾页兜底回退（page.tsx load() 不变量：page=2 空列表 → setPage(Math.max(1, totalPages))，
+      // 回退重拉后不再满足 page>1，无死循环——此处为该不变量的 UI 级证实）
+      // 同上：指示先变 1/1、行数待回退重拉完成，以行数=50 为终态信号
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid^="sandbox-row-"]').length === 50,
+        { timeout: 15000 }).catch(() => {});
+      check("空尾页兜底回退：页码指示回 1 / 1", (await pageIndicator()) === "1 / 1", await pageIndicator());
+      const rowsBack = await sandboxRows();
+      check("回退后第 1 页仍满 50 行", rowsBack === 50, `rows=${rowsBack}`);
+      await sleep(5500); // 覆盖至少一个 5s 轮询周期，状态稳定 = 无回退死循环
+      check("回退状态稳定（无死循环振荡）",
+        (await pageIndicator()) === "1 / 1" && (await sandboxRows()) === 50,
+        `${await pageIndicator()} rows=${await sandboxRows()}`);
+      try { mockNode(MOCK_CLEAR); } catch (e) { console.log(`  ⚠️ mock 沙箱清理失败（下轮造数前会再清基线）：${e.message}`); }
+    } else {
+      console.log("  ⏭️ SKIP：集群内无 mock-sandbox svc（仅 CI overlay 部署）——分页小节跳过，渲染冒烟保持");
+    }
 
     // ---- 用户侧沙箱实例（§6.2：本工作空间只读视图，空态亦渲染表格框架）----
     console.log("== UI：沙箱实例（console）==");
