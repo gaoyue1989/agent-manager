@@ -14,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.mcp.McpUserContextMiddleware;
 import io.agentmanager.framework.mcp.UserHeaderRule;
+import io.agentmanager.framework.mcp.ReconnectableMcpClientWrapper;
 import io.agentmanager.framework.mcp.UserScopedMcpClientWrapper;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.core.tool.Toolkit;
@@ -267,7 +268,9 @@ class McpToolRegistrarUserHeadersTest {
 
         var wrapper = registrar.buildClient(mcp("stdio-arg", "stdio-arg"));
         assertNotNull(wrapper);
-        assertInstanceOf(UserScopedMcpClientWrapper.class, wrapper);
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, wrapper);
+        assertInstanceOf(UserScopedMcpClientWrapper.class,
+            ((ReconnectableMcpClientWrapper) wrapper).delegate());
 
         var delegate = new RecordingClient();
         var scoped = new UserScopedMcpClientWrapper(delegate, UserHeaderRule.EMPTY);
@@ -294,7 +297,10 @@ class McpToolRegistrarUserHeadersTest {
 
         var wrapper = registrar.buildClient(mcp("scoped-mcp", "scoped-mcp"));
         assertNotNull(wrapper);
-        assertInstanceOf(UserScopedMcpClientWrapper.class, wrapper);
+        // issue #348：buildClient 返回可换芯句柄，UserScoped 装饰器内移一层
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, wrapper);
+        assertInstanceOf(UserScopedMcpClientWrapper.class,
+            ((ReconnectableMcpClientWrapper) wrapper).delegate());
         assertEquals("scoped-mcp", wrapper.getName());
         assertFalse(wrapper.isInitialized()); // 构建不连接
     }
@@ -316,7 +322,9 @@ class McpToolRegistrarUserHeadersTest {
 
         var wrapper = registrar.buildClient(mcp("stdio-mcp", "stdio-mcp"));
         assertNotNull(wrapper);
-        assertInstanceOf(UserScopedMcpClientWrapper.class, wrapper, "stdio 常驻装饰，仅剥离不注入");
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, wrapper);
+        assertInstanceOf(UserScopedMcpClientWrapper.class,
+            ((ReconnectableMcpClientWrapper) wrapper).delegate(), "stdio 常驻装饰，仅剥离不注入");
 
         // EMPTY rule（stdio 时 buildClient 固定传入）无 header 注入语义：delegate 收到的
         // meta 剥离 reqHeader:*、不写 McpTransportContext（复用 RecordingClient 模式）
@@ -348,7 +356,9 @@ class McpToolRegistrarUserHeadersTest {
 
         var wrapper = registrar.buildClient(mcp("plain-mcp", "plain-mcp"));
         assertNotNull(wrapper);
-        assertInstanceOf(UserScopedMcpClientWrapper.class, wrapper);
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, wrapper);
+        assertInstanceOf(UserScopedMcpClientWrapper.class,
+            ((ReconnectableMcpClientWrapper) wrapper).delegate());
     }
 
     @Test

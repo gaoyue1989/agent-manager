@@ -61,7 +61,7 @@ agent-framework/
 │   │   │   │   ├── SkillZipSupport.java         # 技能 zip 解压/定位/命名工具（全局上传与 L4 zip 上传共用）
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据 + userHeaders 解析/装饰)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
-│   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: UserScopedMcpClientWrapper (per-call header/参数注入 + reqHeader:* 出站剥离) / McpUserContextMiddleware (userId+reqHeader→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule (headers+arguments 双通道) / ChatRequestHeaders (chat 请求透传头捕获)
+│   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: ReconnectableMcpClientWrapper (可换芯连接句柄, issue #348 断联恢复) / UserScopedMcpClientWrapper (per-call header/参数注入 + reqHeader:* 出站剥离) / McpUserContextMiddleware (userId+reqHeader→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule (headers+arguments 双通道) / ChatRequestHeaders (chat 请求透传头捕获)
 │   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
 │   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
@@ -208,6 +208,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 模型集成 | ✅ | OpenAI 兼容 API；多托管模型（`/models`）+ 会话级切换 + 全局默认模型（`PUT /models/{id}/default`）+ 可配置备用模型（`PUT /models/{id}/fallback`，DB 优先于 `LLM_FALLBACK_MODEL_ID`；见 [docs/model-fallback-design.md](docs/model-fallback-design.md)） |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
 | MCP 启动容错 | ✅ | 默认 fail-soft：server 不可达仅告警跳过不阻断启动；config.yaml `startup.required: true` 可声明严格失败 |
+| MCP 断联恢复 | ✅ | 共享连接缓存句柄化（ReconnectableMcpClientWrapper，issue #348）：注册失败 CAS 驱逐死句柄（下会话重建）；McpConnectionWatchdog 对共享句柄探活（listTools）+ 原地换芯（build+握手成功才 swap，全部 toolkit 持有同一句柄实例免重注册自愈）；缓存无句柄时 compensate 复用 registerOne 补建；独立懒连接 McpResourceProxy 由看门狗联动 evictClient |
 | A2A 协议 | ✅ | AgentScopeA2aServer + HarnessAgentRunner |
 | 多租户 | ✅ | IsolationScope.USER (按 userId 隔离) |
 
@@ -335,7 +336,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 - **跨副本幂等只信原子 CAS**，不做「先 exists 再 CAS」两段判定（两段之间既有竞态又各自吞异常）。
 - **竞态原语不许把边界当成功**：`A2aJobRedisStore.claim` 的 NX→GET 键过期窗口原地重试、耗尽抛出 fail-closed，不把 null 快照当认领成功。
 - 进程内兜底守卫（如 `wokenTasks`）必须有界（上限清空，registry 是权威判据），不随进程生命周期无界增长。
-- 周期自愈组件（看门狗/rebuild）只扫「已注册」集合时，必须补偿「有配置但未注册」的成员（`McpConnectionWatchdog.compensateUnregistered`），否则摘旧后注册失败 = 工具静默消失。
+- 周期自愈组件（看门狗/rebuild）只扫「已注册」集合时，必须补偿「有配置但未注册」的成员（issue #348 后补建口为共享缓存无句柄的 compensate：`McpConnectionWatchdog.probeOne` → `registerOne`/`sharedClient`），否则摘旧后注册失败 = 工具静默消失。
 
 ---
 
@@ -421,7 +422,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_A2A_JOB_RETENTION_HOURS` | `24` | | 完成态幂等映射保留小时（Redis TTL）；窗口外同键重试 = 新任务（标准幂等窗口语义） |
 | `AGENT_A2A_JOB_MAX_CONCURRENT` | `32` | | 并发准入（Semaphore tryAcquire(0)）：loopback 自环每 Job 占 2 Tomcat 线程，防自环死锁（Issue §2.5）；饱和返回 503 + Retry-After |
 | `AGENT_AGUI_*` | 见左 | | AG-UI 协议面（`/agui/runs` + 续传端点，`@ConditionalOnProperty` 装配）：`AGENT_AGUI_ENABLED`=`false` 总开关 / `AGENT_AGUI_EMIT_TOKEN_USAGE`=`true` / `AGENT_AGUI_EMIT_TOOL_CALL_ARGS`=`true` / `AGENT_AGUI_ENABLE_REASONING`=`true` / `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE`=`false`（application.yml `agent.agui` 段） |
-| `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活，失联按 reload swap-on-success 语义原地重建（修 biz-mcp 重启后长连接静默失效 → ConnectException 永久失败）；≤0 关闭；OAF reload 进行中让位 |
+| `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活共享缓存句柄，失联对句柄原地换芯（build+握手成功才 swap，存量会话免重注册自愈，issue #348）；缓存无句柄 compensate 补建；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
 
 > **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24；默认模型可配置，2026-10-22）**：`LLM_*` 是**系统模型**——

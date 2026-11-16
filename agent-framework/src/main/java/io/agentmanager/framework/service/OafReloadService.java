@@ -30,7 +30,8 @@ import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
  *
  * <ul>
  *   <li><b>A：MCP 原地 reload</b>——重解析 frontmatter 取最新 mcpServers 声明，逐 server
- *       clearServer（toolkit.removeMcpClient 关连接摘工具 + 缓存清理）→ registerOne 重建；</li>
+ *       共享句柄换芯 + clearServer/registerOne 重注册（issue #348：连接换芯对全部会话生效，
+ *       工具面刷新落在单例 toolkit）；</li>
  *   <li><b>B：整包重建 agent</b>——AGENTS.md 变化（sysPrompt/model/权限/mcpServers 声明）
  *       时，重新解析 OafConfig → WorkspaceInitializer.reinitialize 覆盖 workspace 生成文件
  *       → HarnessAgentFactory.build 全新 agent → 原子切换引用 → 旧 agent 的 MCP 连接关闭。</li>
@@ -133,7 +134,8 @@ public class OafReloadService {
     /**
      * A 路径：全部 MCP server 原地 reload。
      * 重解析 frontmatter 取最新 mcpServers 声明（声明增删即时生效），与已注册集合做差异：
-     * 声明中已删除 → clearServer 摘除；声明中的 server → 先摘后建（重连+重列工具）。
+     * 声明中已删除 → clearServer 摘除 + 共享句柄定向驱逐；声明中的 server → 共享句柄
+     * 原地换芯后摘旧注册、registerOne 重注册（重连+重列工具）。
      * 成功后同步刷新 OafConfigHolder（/metadata、McpResourceProxy 声明视图一致）。
      */
     public synchronized ReloadResult reloadMcpAll() {
@@ -148,13 +150,14 @@ public class OafReloadService {
         var detail = new ArrayList<Map<String, Object>>();
         var declaredNames = freshConfig.mcpServers().stream().map(OafConfig.McpServerConfig::server).toList();
 
-        // ① 声明中已删除的 server：摘除（工具下线 + 连接关闭）
+        // ① 声明中已删除的 server：摘除（工具下线 + 连接关闭，含共享句柄定向驱逐）
         for (var registered : mcpToolRegistrar.getRegisteredServerNames()) {
             if (!declaredNames.contains(registered)) {
                 var entry = new LinkedHashMap<String, Object>();
                 entry.put("server", registered);
                 boolean removed = mcpToolRegistrar.clearServer(currentToolkitOrNull(), registered);
                 mcpResourceProxy.evictClient(registered);
+                mcpToolRegistrar.evictSharedWrapper(registered);
                 entry.put("action", "removed");
                 entry.put("ok", removed);
                 detail.add(entry);
@@ -359,31 +362,31 @@ public class OafReloadService {
     }
 
     /**
-     * 单 server 原地 reload（swap-on-success）：先 build 新客户端（不触碰旧注册），
-     * build 成功才摘旧注册并登记新连接。required server build/注册失败时抛出异常
-     * （由调用方决定回滚语义），fail-soft 失败返回 false 保留旧注册。
+     * 单 server 原地 reload（swap-on-success，issue #348 对齐共享句柄架构）：
+     * ① 共享缓存有句柄时先原地换芯（build+握手成功才 swap），存量会话/单例/新会话
+     * 全部走新连接；② 单例 toolkit 摘旧注册后 registerOne 重注册（工具面随 config
+     * 变化刷新：filter/app_only/read_only），缓存无句柄时此步兼做首次补建。
+     * required server 重注册失败时抛出异常（由调用方决定回滚语义），fail-soft 失败
+     * 返回 false 保留旧注册。
      */
     private boolean reloadServerSwapOnSuccess(OafConfig.McpServerConfig mcp) {
         var toolkit = currentToolkitOrNull();
         if (toolkit == null) {
             return false;
         }
-        var newWrapper = mcpToolRegistrar.buildClientForReload(mcp);
-        if (newWrapper == null) {
-            log.warn("[Reload] server '{}' client build failed, keeping old registration", mcp.server());
+        if (mcpToolRegistrar.sharedWrapper(mcp.server()) != null
+                && !mcpToolRegistrar.rebuildSharedWrapper(mcp.server(), mcp)) {
+            log.warn("[Reload] server '{}' shared connection swap failed, keeping old registration", mcp.server());
             return false;
         }
-        mcpToolRegistrar.clearServer(toolkit, mcp.server());
         mcpResourceProxy.evictClient(mcp.server());
-        try {
-            mcpToolRegistrar.registerBuiltClient(toolkit, newWrapper, mcp);
-            return true;
-        } catch (Exception e) {
-            // 已 build 成功但注册失败：关闭新连接，避免泄漏
-            mcpToolRegistrar.closeWrapperQuietly(newWrapper);
-            log.warn("[Reload] server '{}' registration failed after build: {}", mcp.server(), e.getMessage());
+        mcpToolRegistrar.clearServer(toolkit, mcp.server());
+        var registered = mcpToolRegistrar.registerOne(toolkit, mcp);
+        if (registered == null) {
+            log.warn("[Reload] server '{}' re-registration failed after connection swap", mcp.server());
             return false;
         }
+        return true;
     }
 
     private int safeToolCount(io.agentscope.core.tool.mcp.McpClientWrapper wrapper) {
