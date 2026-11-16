@@ -16,18 +16,19 @@ import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 
 /**
- * MCP 长连接健康看门狗（PR #62 遗留 P0-1）：biz-mcp 重启后 member 侧 SSE/streamable
- * 长连接静默失效，后续工具调用抛 ConnectException 且模型重试无效，此前仅重启 member
- * 恢复（order-fulfillment demo 实证）。本服务周期性对每个已注册连接做 listTools 探测
- * （短超时），失联即按 OAF reload 的 swap-on-success 语义原地重建：build 新客户端 →
- * clearServer 摘旧 → evict 资源代理缓存 → registerBuiltClient 登记新连接。
+ * MCP 长连接健康看门狗（PR #62 遗留 P0-1，issue #348 对齐 per-session 共享缓存架构）：
+ * biz-mcp 重启后 SSE/streamable 长连接静默失效，此前重建目标错在单例 agent 的 toolkit
+ * 注册，而会话实际经由 McpToolRegistrar 共享连接缓存取连接——重建后新会话依然命中死
+ * 缓存（2026-11-16 发布助手断联故障实证）。现探测与恢复都对准共享缓存句柄：
+ * 失联即对句柄原地换芯（{@code rebuildSharedWrapper}），所有 toolkit 注册的是同一句柄
+ * 实例，换芯后存量会话/单例/新会话全部自愈，无需任何重注册。
  *
- * <p>探活走 {@code listTools()}（发现通道走静态凭据，与用户级 header 注入无关，
- * 单连接覆盖全部用户调用）；重建期间该 server 跳过后续探测（per-server 在途标记），
- * OAF reload 进行中整体让位（换连语义同源，避免双 swap 竞态）。全部动作 fail-soft：
- * 单 server 失败只告警，下一周期重试，不影响其他 server 与主流程——重建 register
- * 失败导致「有配置但未注册」的 server 由 {@code compensateUnregistered} 每周期补偿重建
- * （否则摘旧后注册失败会让工具静默消失、脱离探测集合）。
+ * <p>探活走 {@code listTools()}（发现通道走静态凭据，与用户级 header 注入无关）；
+ * 重建期间该 server 跳过后续探测（per-server 在途标记），OAF reload 进行中整体让位
+ * （换连语义同源，避免双 swap 竞态）。缓存无句柄（典型：启动期注册失败被 P0 驱逐）
+ * 走 compensate：复用 {@code registerOne} 补建——会话隔离模式下新会话经共享缓存自然
+ * 取到；单例 agent 存在时顺带补登记（隔离关闭模式的会话入口）。
+ * 全部动作 fail-soft：单 server 失败只告警，下一周期重试。
  *
  * <p>调度参数在 {@link McpHealthTiming}（独立 bean——@Scheduled SpEL 不能自引用宿主）。
  */
@@ -43,7 +44,7 @@ public class McpConnectionWatchdog {
     private final OafReloadService oafReloadService;
     private final McpHealthTiming timing;
 
-    /** per-server 重建在途标记（防同 server 重入；fixedDelay 已保证周期间不重叠） */
+    /** per-server 探测/补偿在途标记（防同 server 重入；fixedDelay 已保证周期间不重叠） */
     private final Map<String, AtomicBoolean> rebuilding = new ConcurrentHashMap<>();
 
     private final AtomicLong probeCount = new AtomicLong();
@@ -70,66 +71,72 @@ public class McpConnectionWatchdog {
         if (!timing.enabled() || oafReloadService.isReloadInProgress()) {
             return;
         }
-        for (var server : mcpToolRegistrar.getRegisteredServerNames()) {
-            probeOne(server);
-        }
-        compensateUnregistered();
-    }
-
-    /**
-     * 补偿「有 OAF 配置但未注册」的 server：rebuild 的 register 阶段失败时 clearServer
-     * 已摘除旧注册，而 probeOne 只扫已注册集合——若无此口，该 server 的工具会静默消失
-     * 直至手动 OAF reload/重启（违背本类「下一周期重试」的 fail-soft 承诺）。每周期对
-     * 未注册声明走一次重建（含 register），自愈口与探测同一让位/防重入语义。
-     */
-    private void compensateUnregistered() {
         var oaf = oafConfigHolder.get();
         if (oaf == null || oaf.mcpServers() == null) {
             return;
         }
-        var registered = mcpToolRegistrar.getRegisteredServerNames();
         for (var m : oaf.mcpServers()) {
-            if (registered.contains(m.server())) {
-                continue;
-            }
-            var flag = rebuilding.computeIfAbsent(m.server(), k -> new AtomicBoolean());
-            if (!flag.compareAndSet(false, true)) {
-                continue;
-            }
-            try {
-                log.info("[MCP-watchdog] server '{}' configured but unregistered, compensating rebuild",
-                    m.server());
-                rebuild(m.server());
-                rebuildCount.incrementAndGet();
-            } catch (Exception e) {
-                log.warn("[MCP-watchdog] compensate rebuild failed for '{}': {}",
-                    m.server(), e.getMessage());
-            } finally {
-                flag.set(false);
-            }
+            probeOne(m);
         }
     }
 
-    /** 单 server 探测 + 失联重建（测试可直接调用） */
-    void probeOne(String server) {
-        var wrapper = mcpToolRegistrar.getRegisteredWrapper(server);
+    /**
+     * 单 server 探测 + 失联换芯（测试可直接调用）。共享缓存无句柄走 compensate 补建，
+     * 有句柄则探活、失联即原地换芯。
+     */
+    void probeOne(OafConfig.McpServerConfig m) {
+        var wrapper = mcpToolRegistrar.sharedWrapper(m.server());
         if (wrapper == null) {
+            compensate(m);
             return;
         }
-        var flag = rebuilding.computeIfAbsent(server, k -> new AtomicBoolean());
+        var flag = rebuilding.computeIfAbsent(m.server(), k -> new AtomicBoolean());
         if (!flag.compareAndSet(false, true)) {
-            return; // 该 server 正在重建
+            return; // 该 server 正在探测/换芯
         }
         try {
             probeCount.incrementAndGet();
             if (probe(wrapper)) {
                 return;
             }
-            log.warn("[MCP-watchdog] server '{}' unhealthy, rebuilding connection", server);
-            rebuild(server);
+            log.warn("[MCP-watchdog] server '{}' unhealthy, rebuilding shared connection in place", m.server());
+            if (mcpToolRegistrar.rebuildSharedWrapper(m.server(), m)) {
+                rebuildCount.incrementAndGet();
+                // 独立懒连接（资源代理自建 McpSyncClient）不随句柄换芯，联动失效重建
+                mcpResourceProxy.evictClient(m.server());
+            }
+        } catch (Exception e) {
+            log.warn("[MCP-watchdog] probe/rebuild failed for '{}': {}", m.server(), e.getMessage());
+        } finally {
+            flag.set(false);
+        }
+    }
+
+    /**
+     * 补偿「有 OAF 配置但共享缓存无句柄」的 server（启动期注册失败被 P0 驱逐后的现场）。
+     * 复用 {@code registerOne} 完整语义（构建/缓存/注册/P0 驱逐）：会话隔离模式下
+     * 句柄入缓存后新会话自然取用；单例 agent 存在时补登记其 toolkit（隔离关闭模式
+     * 的会话入口）。失败只告警，下一周期重试。
+     */
+    private void compensate(OafConfig.McpServerConfig m) {
+        var flag = rebuilding.computeIfAbsent(m.server(), k -> new AtomicBoolean());
+        if (!flag.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            var agent = agentRuntimeService.getAgent();
+            if (agent != null && agent.getToolkit() != null) {
+                log.info("[MCP-watchdog] server '{}' configured but no shared connection, compensating via registerOne",
+                    m.server());
+                mcpToolRegistrar.registerOne(agent.getToolkit(), m);
+            } else {
+                log.info("[MCP-watchdog] server '{}' no shared connection and no live agent, caching client only",
+                    m.server());
+                mcpToolRegistrar.sharedClient(m);
+            }
             rebuildCount.incrementAndGet();
         } catch (Exception e) {
-            log.warn("[MCP-watchdog] probe/rebuild failed for '{}': {}", server, e.getMessage());
+            log.warn("[MCP-watchdog] compensate failed for '{}': {}", m.server(), e.getMessage());
         } finally {
             flag.set(false);
         }
@@ -145,64 +152,6 @@ public class McpConnectionWatchdog {
             log.info("[MCP-watchdog] probe failed ({}): {}", wrapper.getName(), e.getMessage());
             return false;
         }
-    }
-
-    /**
-     * 失联重建：与 {@code OafReloadService.reloadServerSwapOnSuccess} 同序——
-     * 先 build（不触碰旧注册），成功才摘旧/清代理缓存/登记新连接；build 失败保留旧注册，
-     * 注册失败关闭新连接防泄漏。
-     */
-    private void rebuild(String server) {
-        // TOCTOU 收窄（CR P1-2）：probeAll 入口的让位检查距此最长一个周期，reload 可能
-        // 已在途——摘旧前重查一次（仍存窗口但从分钟级收窄到毫秒级，残余竞态 fail-soft
-        // 由下一周期再重建自愈）
-        if (oafReloadService.isReloadInProgress()) {
-            log.info("[MCP-watchdog] OAF reload started mid-cycle, defer rebuild of '{}'", server);
-            return;
-        }
-        var mcp = currentServerConfig(server);
-        if (mcp == null) {
-            log.warn("[MCP-watchdog] server '{}' has no active config, skip rebuild", server);
-            return;
-        }
-        var agent = agentRuntimeService.getAgent();
-        if (agent == null || agent.getToolkit() == null) {
-            log.warn("[MCP-watchdog] no live agent/toolkit, skip rebuild for '{}'", server);
-            return;
-        }
-        var toolkit = agent.getToolkit();
-
-        var newWrapper = mcpToolRegistrar.buildClientForReload(mcp);
-        if (newWrapper == null) {
-            log.warn("[MCP-watchdog] server '{}' client build failed, keeping old registration", server);
-            return;
-        }
-        mcpToolRegistrar.clearServer(toolkit, server);
-        mcpResourceProxy.evictClient(server);
-        try {
-            // registerBuiltClient 失败时自关闭并返回 null（fail-soft），非异常路径
-            var registered = mcpToolRegistrar.registerBuiltClient(toolkit, newWrapper, mcp);
-            if (registered == null) {
-                log.warn("[MCP-watchdog] server '{}' registration failed after rebuild (client closed by registrar)", server);
-            } else {
-                log.info("[MCP-watchdog] server '{}' connection rebuilt ({})", server, newWrapper);
-            }
-        } catch (Exception e) {
-            mcpToolRegistrar.closeWrapperQuietly(newWrapper);
-            log.warn("[MCP-watchdog] server '{}' registration failed after rebuild: {}", server, e.getMessage());
-        }
-    }
-
-    /** 从当前 OAF 配置找 server 声明（reload 换包后以新配置为准） */
-    private OafConfig.McpServerConfig currentServerConfig(String server) {
-        var oaf = oafConfigHolder.get();
-        if (oaf == null || oaf.mcpServers() == null) {
-            return null;
-        }
-        return oaf.mcpServers().stream()
-            .filter(m -> server.equals(m.server()))
-            .findFirst()
-            .orElse(null);
     }
 
     /** [累计探测次数, 累计重建次数]（观测用） */

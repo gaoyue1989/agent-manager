@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentmanager.framework.mcp.ChatRequestHeaders;
 import io.agentmanager.framework.mcp.McpUserHeaderCustomizer;
+import io.agentmanager.framework.mcp.ReconnectableMcpClientWrapper;
 import io.agentmanager.framework.mcp.UserHeaderRule;
 import io.agentmanager.framework.mcp.UserScopedMcpClientWrapper;
 import io.agentmanager.framework.model.OafConfig;
@@ -81,9 +82,9 @@ public class McpToolRegistrar {
 
     /**
      * userHeaders 规则缓存: serverName -> UserHeaderRule（捕获名单来源，mcp-chat-header-forward-design §6.1）。
-     * 装载点与 uiMappings 等同生命周期：registerOne / registerBuiltClient 各自独立重读
+     * 装载点与 uiMappings 等同生命周期：registerOne 独立重读
      * config.yaml 装载，clearServer 移除。不得在 buildClient 里登记——reload swap-on-success
-     * 顺序是 build→clear→register，build 时放入会被紧跟的 clearServer 抹掉且不再重装。
+     * 顺序是 swap→clear→registerOne，build 时放入会被紧跟的 clearServer 抹掉且不再重装。
      */
     private final Map<String, UserHeaderRule> userHeaderRules = new ConcurrentHashMap<>();
 
@@ -94,14 +95,19 @@ public class McpToolRegistrar {
     private final Map<String, McpClientWrapper> registeredWrappers = new ConcurrentHashMap<>();
 
     /**
-     * 共享连接缓存: serverName -> McpClientWrapper（per-session agent 隔离的配套层）。
-     * wrapper 是无状态引用（initialize 幂等、底层 McpAsyncClient 线程安全，字节码核对），
-     * 多个 toolkit 注册同一 wrapper 安全——一次物理连接服务 N 个会话实例。
-     * 生命周期：只增不主动关；{@link #evictSharedWrappers()}（reload build 前）清缓存后
-     * 旧 wrapper 仅被旧 toolkit 引用，由既有 reload 清理路径关闭。绕过缓存的路径：
-     * {@link #buildClientForReload}（显式换连接）。
+     * 共享连接缓存: serverName -> ReconnectableMcpClientWrapper（per-session agent 隔离的配套层）。
+     * 缓存可换芯句柄而非裸连接（issue #348 断联恢复）：单例 agent 与全部会话的 toolkit
+     * 注册的都是同一句柄实例，服务端重启后看门狗对句柄 swap 换芯即全员自愈，免重注册。
+     * 句柄是无状态引用（initialize 幂等、底层 McpAsyncClient 线程安全，字节码核对），
+     * 多个 toolkit 注册同一句柄安全——一次物理连接服务 N 个会话实例。
+     * 生命周期：只增不主动关；注册失败路径 CAS 驱逐死句柄（不 close，防误伤其他 toolkit）；
+     * {@link #evictSharedWrappers()}（reload build 前）清缓存后旧句柄仅被旧 toolkit 引用，
+     * 由既有 reload 清理路径关闭。
      */
     private final Map<String, McpClientWrapper> sharedWrappers = new ConcurrentHashMap<>();
+
+    /** per-server 换芯在途标记（防同 server 并发重建；看门狗与后续调用方共用此去重） */
+    private final Map<String, java.util.concurrent.atomic.AtomicBoolean> rebuildInFlight = new ConcurrentHashMap<>();
 
     public McpToolRegistrar(io.agentmanager.framework.config.AgentManagerProperties props) {
         this.configDir = Path.of(props.resolvedConfigDir());
@@ -125,69 +131,12 @@ public class McpToolRegistrar {
     }
 
     /**
-     * 注册单个 MCP server 到 Toolkit（registerAll 循环体提取，供运行时 reload 复用）。
-     * 语义与启动期注册完全一致：ui/权限/只读/required 配置即时装载，
-     * fail-soft（连接失败仅告警跳过），startup.required=true 时抛异常。
-     *
-     * @return 本次注册的 server 名（构建失败返回 null）
-     */
-    /**
-     * reload 两阶段阶段一：仅构建客户端（不触碰任何注册状态，供 swap-on-success 先建后摘）。
-     * 构建失败返回 null（config.yaml 缺失/格式错误）。
-     */
-    public McpClientWrapper buildClientForReload(OafConfig.McpServerConfig mcp) {
-        return buildClient(mcp);
-    }
-
-    /**
-     * reload 两阶段阶段二：登记已构建的客户端（配置装载 + 双路径注册 + 跟踪）。
-     * 与 {@link #registerOne} 共享注册语义（含 startup.required 严格失败）。
-     *
-     * @return server 名
-     */
-    public String registerBuiltClient(Toolkit toolkit, McpClientWrapper wrapper, OafConfig.McpServerConfig mcp) {
-        var uiMapping = loadUiMapping(mcp);
-        uiMappings.put(mcp.server(), uiMapping);
-        toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
-        readOnlyServers.put(mcp.server(), isReadOnlyConfigured(mcp));
-        startupRequired.put(mcp.server(), isStartupRequired(mcp));
-        userHeaderRules.put(mcp.server(), loadUserHeaderRule(mcp));
-        try {
-            var activeMcpConfig = loadActiveMcpConfig(mcp);
-            boolean forceReadOnly = Boolean.TRUE.equals(readOnlyServers.get(mcp.server()));
-            boolean hasAppOnly = !uiMapping.appOnly().isEmpty();
-            if (forceReadOnly || activeMcpConfig != null || hasAppOnly) {
-                registerFiltered(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping, forceReadOnly);
-            } else {
-                registerStandard(toolkit, wrapper, mcp.server());
-                recordRegisteredTools(wrapper, mcp.server(), uiMapping);
-            }
-            registeredWrappers.put(mcp.server(), wrapper);
-            log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
-            return mcp.server();
-        } catch (Exception e) {
-            closeQuietly(wrapper);
-            if (Boolean.TRUE.equals(startupRequired.get(mcp.server()))) {
-                throw new IllegalStateException(
-                    "MCP server '" + mcp.server() + "' declared startup.required=true but registration failed",
-                    e);
-            }
-            log.warn("[MCP] server '{}' registration failed, skipped: {}", mcp.server(), e.getMessage());
-            return null;
-        }
-    }
-
-    /** reload 兜底：显式关闭已跟踪的 wrapper（clearServer 已 remove 跟踪，按引用直接关）。 */
-    public void closeWrapperQuietly(McpClientWrapper wrapper) {
-        closeQuietly(wrapper);
-    }
-
-    /**
      * 共享连接入口：命中缓存直接复用；未命中构建并缓存（并发同 server 只建一次）。
-     * 注册失败路径（registerOne catch）**不 close** 共享 wrapper——它可能正被其他
-     * toolkit 引用，生命周期归本缓存统一管理（evict 时统一关）。
+     * 包内开放（看门狗 compensate 复用同一构建/缓存/竞态语义）。
+     * 注册失败路径（registerOne catch）**不 close** 共享句柄——它可能正被其他
+     * toolkit 引用，生命周期归本缓存统一管理（仅 CAS 驱逐，evict/reload 时统一关）。
      */
-    private McpClientWrapper sharedClient(OafConfig.McpServerConfig mcp) {
+    McpClientWrapper sharedClient(OafConfig.McpServerConfig mcp) {
         var existing = sharedWrappers.get(mcp.server());
         if (existing != null) {
             log.info("[MCP] reusing shared client for server '{}'", mcp.server());
@@ -215,6 +164,34 @@ public class McpToolRegistrar {
         }
     }
 
+    /**
+     * 定向驱逐并关闭单个共享句柄（server 从 OAF 声明中移除时用，issue #348）。
+     * CAS 语义：仅当缓存中仍是该 server 现存句柄时驱逐；句柄可能仍被存量会话
+     * toolkit 引用，close 是刻意的——声明已删除，其连接应当下线。
+     */
+    public boolean evictSharedWrapper(String serverName) {
+        var handle = sharedWrappers.remove(serverName);
+        if (handle == null) {
+            return false;
+        }
+        closeQuietly(handle);
+        log.info("[MCP] shared client for server '{}' evicted and closed (declaration removed)", serverName);
+        return true;
+    }
+
+    /** B 路径 reload 收尾：显式关闭旧世代句柄（clearServer 已 remove 跟踪，按引用直接关）。 */
+    public void closeWrapperQuietly(McpClientWrapper wrapper) {
+        closeQuietly(wrapper);
+    }
+
+    /**
+     * 注册单个 MCP server 到 Toolkit（registerAll 循环体提取，供运行时 reload 复用）。
+     * 语义与启动期注册完全一致：ui/权限/只读/required 配置即时装载，
+     * fail-soft（连接失败仅告警跳过），startup.required=true 时抛异常；
+     * 注册失败时 CAS 驱逐共享缓存死句柄（P0 自愈口，issue #348）。
+     *
+     * @return 本次注册的 server 名（构建失败返回 null）
+     */
     public String registerOne(Toolkit toolkit, OafConfig.McpServerConfig mcp) {
         var uiMapping = loadUiMapping(mcp);
         uiMappings.put(mcp.server(), uiMapping);
@@ -245,15 +222,23 @@ public class McpToolRegistrar {
             }
             var prev = registeredWrappers.put(mcp.server(), wrapper);
             if (prev != null && prev != wrapper) {
-                // 重注册路径（reload，走 buildClientForReload 显式换连接）：旧连接已由调用方
-                // removeMcpClient 关闭，此处兜底防泄漏。prev 是旧专属连接（非共享缓存成员）
+                // 重注册路径（reload 换连接）：旧专属连接已由调用方 clearServer 关闭，
+                // 此处兜底防泄漏。prev 是旧专属连接（非共享缓存成员，共享句柄永不在此出现）
                 closeQuietly(prev);
             }
             log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
         } catch (Exception e) {
-            // 共享 wrapper 不得在此 close：它可能正被其他 toolkit 引用，
-            // 生命周期归 sharedWrappers 缓存统一管理（evict 时经 reload 清理路径关闭）
+            // 共享句柄不得在此 close：它可能正被其他 toolkit 引用，
+            // 生命周期归 sharedWrappers 缓存统一管理（evict 时经 reload 清理路径关闭）。
+            // 但必须 CAS 驱逐出缓存（issue #348 P0）：注册失败意味着该连接不可用
+            // （典型：服务端重启毒化缓存的死会话），不驱逐会让后续所有新会话
+            // 命中同一死连接、故障永不自愈；驱逐后下一会话自然重建全新连接。
+            var evicted = sharedWrappers.remove(mcp.server(), wrapper);
+            if (evicted) {
+                log.warn("[MCP] server '{}' registration failed, evicted poisoned shared client for rebuild: {}",
+                    mcp.server(), e.getMessage());
+            }
             if (Boolean.TRUE.equals(startupRequired.get(mcp.server()))) {
                 log.error("[MCP] server '{}' declared startup.required=true but registration failed", mcp.server(), e);
                 throw new IllegalStateException(
@@ -306,8 +291,11 @@ public class McpToolRegistrar {
                 log.warn("[MCP] removeMcpClient '{}' failed (continuing cleanup): {}", serverName, e.getMessage());
             }
         }
-        // ③ 显式关闭被跟踪的旧 wrapper（两条路径统一，兜 SDK 未覆盖的手动路径连接）
-        if (oldWrapper != null) {
+        // ③ 显式关闭被跟踪的旧 wrapper（两条路径统一，兜 SDK 未覆盖的手动路径连接）。
+        //    共享句柄除外（issue #348）：句柄生命周期归 sharedWrappers 缓存统一管理，
+        //    A 路径 reload「摘旧注册→registerOne 重注册」复用同一句柄，此处 close 会
+        //    误杀全部存量会话的连接；句柄的下线由定向驱逐（evictSharedWrapper）负责
+        if (oldWrapper != null && sharedWrappers.get(serverName) != oldWrapper) {
             closeQuietly(oldWrapper);
         }
         registeredTools.keySet().removeIf(key -> key.startsWith(serverName + ":"));
@@ -603,6 +591,61 @@ public class McpToolRegistrar {
     /** 当前已注册（含 fail-soft 记录）的 server 名集合。 */
     public java.util.Set<String> getRegisteredServerNames() {
         return java.util.Set.copyOf(registeredWrappers.keySet());
+    }
+
+    /**
+     * 查询共享连接缓存中的可换芯句柄（看门狗探测入口，issue #348）。
+     * 注册失败路径已驱逐死句柄，null 即「无共享连接」——由 compensate 补建。
+     */
+    McpClientWrapper sharedWrapper(String serverName) {
+        return sharedWrappers.get(serverName);
+    }
+
+    /**
+     * 共享连接原地换芯（issue #348 断联恢复核心）：构建全新底层连接 → initialize 握手
+     * 成功 → 对缓存句柄 swap。所有 toolkit 持有同一句柄实例，换芯后存量会话、单例 agent
+     * 与后续新会话的下一步调用自动走新连接，无需任何重注册。
+     *
+     * <p>per-server 单飞：同一 server 并发失败只做一次重建，其余调用方直接拿到失败
+     * 返回（工具报错由模型下一轮自然重试，届时连接已换芯）。build/握手失败不换芯、
+     * 不驱逐旧句柄（它已死，留着只是占位；下一轮探测/调用重试重建）。
+     *
+     * @return true 表示已成功换芯（调用方应联动失效 McpResourceProxy 的独立懒连接）
+     */
+    boolean rebuildSharedWrapper(String serverName, OafConfig.McpServerConfig mcp) {
+        var flag = rebuildInFlight.computeIfAbsent(serverName, k -> new java.util.concurrent.atomic.AtomicBoolean());
+        if (!flag.compareAndSet(false, true)) {
+            return false;
+        }
+        try {
+            var handle = sharedWrappers.get(serverName);
+            if (!(handle instanceof ReconnectableMcpClientWrapper reconnectable)) {
+                return false;
+            }
+            var base = buildBaseClient(mcp);
+            if (base == null) {
+                log.warn("[MCP] server '{}' rebuild build failed, keeping dead handle", serverName);
+                return false;
+            }
+            try {
+                base.initialize().block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
+            } catch (Exception e) {
+                closeQuietly(base);
+                log.warn("[MCP] server '{}' rebuild initialize failed, keeping dead handle: {}",
+                    serverName, e.getMessage());
+                return false;
+            }
+            if (!reconnectable.swap(base)) {
+                closeQuietly(base);
+                log.warn("[MCP] server '{}' handle rejected swap (closed or stale), dropped fresh connection",
+                    serverName);
+                return false;
+            }
+            log.info("[MCP] server '{}' shared connection rebuilt in place ({})", serverName, base);
+            return true;
+        } finally {
+            flag.set(false);
+        }
     }
 
     /**
@@ -1026,12 +1069,24 @@ public class McpToolRegistrar {
     }
 
     /**
-     * 从 config.yaml 构建 McpClientWrapper。
+     * 从 config.yaml 构建共享连接句柄（可换芯，issue #348）。
+     * 构建/握手由 {@link #buildBaseClient} 完成，此处仅负责句柄包装——
+     * 所有 toolkit 注册的都是句柄实例，断联恢复靠句柄换芯而非重注册。
+     *
+     * @return 可换芯句柄；config.yaml 缺失/格式错误或构建失败返回 null
+     */
+    McpClientWrapper buildClient(OafConfig.McpServerConfig mcp) {
+        var base = buildBaseClient(mcp);
+        return base == null ? null : new ReconnectableMcpClientWrapper(mcp.server(), base);
+    }
+
+    /**
+     * 从 config.yaml 构建裸 MCP 连接（UserScoped 装饰器，含静态凭据发现 + _meta 剥离）。
      * 支持 sse / streamableHttp / stdio 三种传输。
-     * package-private：构建本身不发起连接，便于单元测试。
+     * package-private：构建本身不发起连接，便于单元测试（测试覆写此方法注入桩连接）。
      */
     @SuppressWarnings("unchecked")
-    McpClientWrapper buildClient(OafConfig.McpServerConfig mcp) {
+    McpClientWrapper buildBaseClient(OafConfig.McpServerConfig mcp) {
         var mcpDir = resolveMcpDir(mcp);
         var configYaml = mcpDir.resolve("config.yaml");
         if (!configYaml.toFile().exists()) {
