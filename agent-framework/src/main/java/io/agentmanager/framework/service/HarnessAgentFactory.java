@@ -106,6 +106,14 @@ public class HarnessAgentFactory {
     @Autowired(required = false)
     private TurnControlRegistry turnControlRegistry;
 
+    /** OpenViking 记忆供给配置（agent.viking.*；未注册/未启用时 null → local 现状） */
+    @Autowired(required = false)
+    private io.agentmanager.framework.config.VikingConfig vikingConfig;
+
+    /** OpenViking 记忆客户端（VikingConfig 未启用时 bean 为 null → 注入落空） */
+    @Autowired(required = false)
+    private VikingMemoryClient vikingMemoryClient;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -196,6 +204,27 @@ public class HarnessAgentFactory {
             // 是全进程共享的网关 gw-hash、ctx.userId 是 peer，不翻译会让 LLM 记录与 span
             // 属性都记成运行时路由键——前者按 sid 查不到（issue #44），后者按会话过滤失效
             var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
+
+            // OpenViking 记忆供给分支（openviking-memory-integration-design §11.1）：
+            // AGENT_MEMORY_PROVIDER=openviking 且配置齐备时接管记忆——SDK 文件记忆全关
+            // （与 memory-enabled=false 同款双关），换为 VikingMemoryClient 链路
+            // （首推理注入中间件 + memory_* 工具桥 + 会话归档装饰器[装配在 distributedStore]）
+            var vikingMemory = harness.memoryEnabled()
+                && vikingConfig != null && vikingConfig.enabled() && vikingMemoryClient != null;
+            if (vikingMemory) {
+                // ① memory_* 工具桥（同名替代 SDK 内置，模型侧工具面不变；权限无需额外
+                // 规则——三个名字均在 BUILT_IN_TOOL_NAMES 静态白名单内，自动 ALLOW 且
+                // verifyToolCoverage 天然覆盖）
+                var vikingTools = new io.agentmanager.framework.tool.VikingMemoryTools(
+                    vikingMemoryClient, sessionKeyResolver, vikingConfig);
+                toolkit.registerTool(vikingTools);
+                log.info("OpenViking memory tools registered (provider=openviking)");
+                // ② OVK_MCP_SHARED_CONTEXT=true：注入合成 MCP server openviking（服务身份
+                // 连接，account 共享 resources/skills 与 rule_search 等；per-user 记忆不走 MCP）
+                if (vikingConfig.mcpSharedContext()) {
+                    registerVikingSharedContextMcp(toolkit);
+                }
+            }
 
             var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
@@ -341,10 +370,14 @@ public class HarnessAgentFactory {
                 builder.permissionContext(permissionContext);
             }
 
-            // 记忆装配分支（AGENT_MEMORY_ENABLED 可调）：false 时不仅要跳过 .memory(...)，
-            // 还须显式关闭记忆 hooks 与 memory_* 工具——只去掉 .memory(...) 不算"完全关闭"，
-            // SDK 仍会以内置默认装配记忆钩子/工具（disableMemoryHooks + disableMemoryTools 双关）
-            if (harness.memoryEnabled()) {
+            // 记忆装配分支（openviking-memory-integration-design §11.1 矩阵）：
+            //   provider=openviking（且配置齐备）→ SDK 文件记忆全关（双关语义同下），换
+            //   VikingMemoryClient 链路（首推理注入中间件 + memory_* 工具桥 + 会话归档
+            //   装饰器[装配在 distributedStore]）
+            //   memory-enabled=true 且 provider=local → SDK 文件记忆现状
+            //   memory-enabled=false → 完全关闭（不跳过 .memory(...) 也不算"完全关闭"，
+            //   SDK 仍会以内置默认装配记忆钩子/工具，disableMemoryHooks + disableMemoryTools 双关）
+            if (harness.memoryEnabled() && !vikingMemory) {
                 // P1: 包装 memory 内部 LLM 调用追踪（flush + consolidation LLM 调用 span）
                 var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "memory");
                 builder
@@ -358,7 +391,14 @@ public class HarnessAgentFactory {
                         .build());
             } else {
                 builder.disableMemoryHooks().disableMemoryTools();
-                log.info("Memory fully disabled (agent.harness.memory-enabled=false)");
+                if (vikingMemory) {
+                    builder.middleware(new VikingMemoryInjectionMiddleware(
+                        vikingMemoryClient, sessionKeyResolver, vikingConfig));
+                    log.info("OpenViking memory supply active (account={}, sessionCommit={}, "
+                        + "SDK file memory disabled)", vikingConfig.account(), vikingConfig.sessionCommit());
+                } else {
+                    log.info("Memory fully disabled (agent.harness.memory-enabled=false)");
+                }
             }
 
             var agent = builder
@@ -373,8 +413,9 @@ public class HarnessAgentFactory {
                     // 记忆总开关关闭时强制不刷写：SDK 2.0.3 的压缩前 flush 走 CompactionMiddleware
                     // 内部自建的 MemoryFlushManager（仅判 CompactionConfig.isFlushBeforeCompact()），
                     // 不经 disableMemoryHooks —— 不在此处置 false，压缩阈值触发仍会发起记忆抽取
-                    // LLM 调用并写 MEMORY.md/memory/，违反"完全关闭"
-                    .flushBeforeCompact(harness.memoryEnabled() && harness.compactionFlushBeforeCompact())
+                    // LLM 调用并写 MEMORY.md/memory/，违反"完全关闭"。vikingMemory 同理关闸
+                    .flushBeforeCompact(harness.memoryEnabled() && !vikingMemory
+                        && harness.compactionFlushBeforeCompact())
                     .offloadBeforeCompact(harness.compactionOffloadBeforeCompact())
                     .model(compactionModel)        // ← 新增：包装后的 model（compaction LLM 调用 span）
                     .build())
@@ -405,6 +446,34 @@ public class HarnessAgentFactory {
         AgentManagerProperties.LLMConfig llm,
         AgentManagerProperties.HarnessConfig harness) {
         return io.agentmanager.framework.config.ChatModelFactory.build(llm, harness);
+    }
+
+    /**
+     * 合成 MCP server openviking 注入（OVK_MCP_SHARED_CONTEXT，openviking-memory-integration-design
+     * §11.1）：服务身份 ADMIN key 固定 Bearer 连接 {@code {url}/mcp}（streamable HTTP），
+     * 暴露 account 级共享工具（find/search/read/rule_search/add_resource 等，见 OpenViking
+     * MCP 工具表）；per-user 记忆不走 MCP（共享连接无法 per-user 换身份，设计 §7）。
+     * 走 registerBuiltClient 复用既有注册/权限/只读装配；连接失败 fail-soft 仅告警
+     * （对齐 registerOne 语义），不影响 agent 构建。
+     */
+    private void registerVikingSharedContextMcp(io.agentscope.core.tool.Toolkit toolkit) {
+        try {
+            var builder = io.agentscope.core.tool.mcp.McpClientBuilder.create("openviking");
+            builder.streamableHttpTransport(vikingConfig.url() + "/mcp");
+            builder.header("Authorization", "Bearer " + vikingConfig.adminKey());
+            var wrapper = builder.buildAsync().block();
+            if (wrapper == null) {
+                log.warn("[viking] shared-context MCP client build returned empty, skipped");
+                return;
+            }
+            var synthetic = new io.agentmanager.framework.model.OafConfig.McpServerConfig(
+                "openviking", "openviking", "1.0.0", "", false);
+            var registered = mcpToolRegistrar.registerSyntheticClient(toolkit, synthetic, wrapper);
+            log.info("[viking] shared-context MCP server registered: {} (tools={})",
+                registered, registered != null ? "account-shared find/search/read/..." : "none");
+        } catch (Exception e) {
+            log.warn("[viking] shared-context MCP registration failed (fail-soft): {}", e.getMessage());
+        }
     }
 
     /** remoteHeadersJson 解析用（ObjectMapper 线程安全，复用实例） */

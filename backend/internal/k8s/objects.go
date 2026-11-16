@@ -15,6 +15,10 @@ import (
 )
 
 // 平台保留键：用户 env 出现同名键则拒绝（见 REDESIGN §5.2）。
+// 注意：OpenViking 注入键（OPENVIKING_URL/OPENVIKING_ACCOUNT/OVK_ADMIN_KEY/OVK_USER_SEED）
+// 不在本集合——它们由 service.dropPlatformInjectedEnv 在写路径剥离后由
+// applyOpenVikingEnv 重建（拒绝语义会把 UpdateEnv 全量覆盖的回显变成死锁，真机验证
+// 发现；剥离与重建等效封死注入面，且值只能来自平台配置）。
 var ReservedEnvKeys = map[string]bool{
 	"AGENT_CONFIG_DIR": true, "AGENT_WORKSPACE_DIR": true, "SERVER_HOST": true, "SERVER_PORT": true,
 	// 日志规范注入键：HOST_NAME=Pod Name，日志路径/内容依赖

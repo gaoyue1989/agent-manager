@@ -11,9 +11,10 @@ import io.agentmanager.framework.config.AgentRedisProperties;
 import io.agentmanager.framework.config.HistoryConfig;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.config.SandboxLifecycleConfig;
+import io.agentmanager.framework.config.VikingConfig;
 
 @SpringBootApplication
-@EnableConfigurationProperties({AgentManagerProperties.class, SandboxConfig.class, SandboxLifecycleConfig.class, AgentRedisProperties.class, HistoryConfig.class, AgentA2aJobProperties.class})
+@EnableConfigurationProperties({AgentManagerProperties.class, SandboxConfig.class, SandboxLifecycleConfig.class, AgentRedisProperties.class, HistoryConfig.class, AgentA2aJobProperties.class, VikingConfig.class})
 @EnableScheduling
 public class AgentFrameworkApplication {
 

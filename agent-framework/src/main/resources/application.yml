@@ -249,6 +249,7 @@ agent:
     memory-flush-throttle-minutes: ${AGENT_MEMORY_FLUSH_THROTTLE_MINUTES:10}
     memory-consolidation-max-tokens: ${AGENT_MEMORY_CONSOLIDATION_MAX_TOKENS:8000}
     memory-consolidation-min-gap-minutes: ${AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES:60}
+
     # Compaction
     compaction-trigger-messages: ${AGENT_COMPACTION_TRIGGER_MESSAGES:30}
     # token 触发阈值（与消息数任一命中即压缩）：>0 固定阈值；0 = 动态（模型上下文窗口 - reserved）
@@ -264,6 +265,23 @@ agent:
     db-pool-connection-timeout-ms: ${AGENT_DB_POOL_CONNECTION_TIMEOUT_MS:30000}
     db-pool-idle-timeout-ms: ${AGENT_DB_POOL_IDLE_TIMEOUT_MS:600000}
     db-pool-max-lifetime-ms: ${AGENT_DB_POOL_MAX_LIFETIME_MS:1800000}
+
+  # OpenViking 记忆供给（openviking-memory-integration-design §11.1；全部经服务 env 由
+  # 平台发布链路注入，用户不可直设的注入键见 backend 保留键表）
+  viking:
+    # 记忆供给切换：local = SDK 文件记忆现状；openviking = 记忆全链路走 OpenViking
+    memory-provider: ${AGENT_MEMORY_PROVIDER:local}
+    url: ${OPENVIKING_URL:}
+    account: ${OPENVIKING_ACCOUNT:}
+    admin-key: ${OVK_ADMIN_KEY:}
+    user-seed: ${OVK_USER_SEED:}
+    # 会话归档+自动提取（与逐 turn remember 互斥）
+    session-commit: ${OVK_SESSION_COMMIT:false}
+    # 服务级共享上下文 MCP 注入（服务身份连接，暴露 find/search/rule_search 等）
+    mcp-shared-context: ${OVK_MCP_SHARED_CONTEXT:false}
+    # 首推理检索超时（ms，超时降级无记忆）与注入缓存秒数（同用户多 turn 复用）
+    search-timeout-ms: ${OVK_SEARCH_TIMEOUT_MS:2000}
+    inject-cache-ttl-seconds: ${OVK_INJECT_CACHE_TTL_SECONDS:300}
 
 # OTel 链路追踪（默认关闭，设置 OTEL_TRACES_EXPORTER=otlp 启用）
 otel:

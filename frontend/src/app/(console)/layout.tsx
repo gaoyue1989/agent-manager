@@ -27,7 +27,7 @@ const NAV: { group?: string; items: { href: string; label: string; soon?: boolea
       { href: "/console/assets/sandbox", label: "沙箱配置" },
       { href: "/console/assets/sandbox-instances", label: "沙箱实例" },
       { href: "/console/assets/knowledge", label: "知识库", soon: true },
-      { href: "/console/assets/memory", label: "记忆空间" },
+      { href: "/console/assets/memory", label: "记忆管理" },
       { href: "/console/assets/credentials", label: "凭证管理" },
       { href: "/console/workspace-config", label: "空间配置" },
     ],
