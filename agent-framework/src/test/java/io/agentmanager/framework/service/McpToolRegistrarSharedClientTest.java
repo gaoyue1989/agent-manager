@@ -20,7 +20,10 @@ import io.agentscope.core.tool.mcp.McpClientWrapper;
 import io.modelcontextprotocol.spec.McpSchema;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -174,5 +177,62 @@ class McpToolRegistrarSharedClientTest {
         assertNull(registrar.sharedWrapper(mcp.server()));
         verify(base).close();
         assertFalse(registrar.evictSharedWrapper(mcp.server()), "重复驱逐幂等返回 false");
+    }
+
+    // ---------- clearServer 共享句柄不 close 契约（issue #348 防回归核心） ----------
+    // clearServer ③ 的守卫（sharedWrappers.get(server) == oldWrapper 时不 close）保护
+    // A 路径 reload「摘旧注册→重注册」复用同一句柄，不误杀全部存量会话的连接；
+    // 句柄的下线由定向驱逐（evictSharedWrapper）负责。删掉守卫现有套件全绿。
+
+    /**
+     * clearServer 契约隔离桩：registration() 走真实 SDK 生命周期（一次性 toolkit 承接注册），
+     * removeMcpClient 打空 Mono——真实 Toolkit 的 ② 步命中 mcpClients 登记会经 SDK 关闭共享句柄
+     * （Mono.fromRunnable(wrapper::close)），隔离后才能钉住 ③ 守卫自身的 close/no-close 契约。
+     */
+    private Toolkit contractToolkit() {
+        var toolkit = mock(Toolkit.class);
+        when(toolkit.registration()).thenAnswer(inv -> new Toolkit().registration());
+        when(toolkit.removeMcpClient(anyString())).thenReturn(Mono.empty());
+        return toolkit;
+    }
+
+    @Test
+    void clearServerShouldKeepSharedHandleAliveForAPathReload() {
+        var base = healthyBase("b1");
+        registrar.bases.add(base);
+        var toolkit = contractToolkit();
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var handleBefore = registrar.sharedWrapper(mcp.server());
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, handleBefore);
+
+        assertTrue(registrar.clearServer(toolkit, mcp.server()));
+        // 守卫：缓存中仍是该句柄 → 不 close（误杀即全部存量会话连接被 reload 关闭）
+        assertSame(handleBefore, registrar.sharedWrapper(mcp.server()));
+        verify(base, never()).close();
+
+        // A 路径 reload 收尾：bases 队列已空 → 重注册命中缓存复用同一句柄
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        assertSame(handleBefore, registrar.sharedWrapper(mcp.server()));
+        assertSame(handleBefore, registrar.getRegisteredWrapper(mcp.server()));
+        verify(base, never()).close();
+    }
+
+    @Test
+    void clearServerShouldCloseWrapperNoLongerInSharedCache() {
+        var base = healthyBase("b1");
+        registrar.bases.add(base);
+        var toolkit = contractToolkit();
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var handle = registrar.sharedWrapper(mcp.server());
+
+        // 定向驱逐（声明已移除）：缓存摘除 + 显式关闭（第 1 次 close）
+        assertTrue(registrar.evictSharedWrapper(mcp.server()));
+        verify(base, times(1)).close();
+
+        // clearServer：缓存已无该句柄（tracked ≠ 缓存）→ else 分支必须兜底 close（第 2 次），
+        // 防手动路径旧专属连接/被驱逐句柄的连接泄漏；守卫被「简化」成永不 close 则此用例红
+        assertTrue(registrar.clearServer(toolkit, mcp.server()));
+        verify(base, times(2)).close();
+        assertNull(registrar.sharedWrapper(mcp.server()), "clearServer 不回填共享缓存");
     }
 }
