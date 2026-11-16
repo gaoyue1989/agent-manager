@@ -155,6 +155,44 @@ class SandboxUserKeyMiddlewareTest {
     }
 
     @Test
+    void shouldResetInjectedStateUsePendingSessionIdWhenUserIdBlank() {
+        // userId 空白：pendingSessionId 降级取 sessionId（与 userKey 降级同值），reset 与
+        // setSessionId 透传均按会话键执行（issue #345 P2 会话化语义）
+        var spec = new OpenSandboxFilesystemSpec();
+        var sandbox = mockSandbox("sbx-1");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        spec.fileAssetStore(store);
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(mock(SessionUserStore.class)));
+
+        run(mw, turnCtx("s-9", " ", sandbox));
+
+        verify(store).resetInjectedToPending("s-9");
+        verify(sandbox).setSessionId("s-9");
+    }
+
+    @Test
+    void shouldResetInjectedStateScopeByPendingSessionIdNotUserKey() {
+        // resolver 命中（Channel 链路：ctx.sessionId=共享 gw-hash、ctx.userId=前端 sid）：
+        // userKey=alice ≠ pendingSessionId=front-sid（userId 优先推导）——reset 必须按会话键
+        // 传参（issue #345 P2），任何回退 userKey 维度传参/透传的改动在此红
+        var spec = new OpenSandboxFilesystemSpec();
+        var sandbox = mockSandbox("sbx-1");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        spec.fileAssetStore(store);
+        var sessionStore = mock(SessionUserStore.class);
+        when(sessionStore.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
+
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+
+        verify(store).resetInjectedToPending("front-sid");
+        verify(sandbox).setSessionId("front-sid");
+        verify(sandbox).setUserKey("alice");
+        verify(store, never()).resetInjectedToPending("alice");
+    }
+
+    @Test
     void shouldBindOnlyItsOwnTurnSandboxUnderConcurrency() {
         // 并发串沙箱回归：两个并发 turn 各自 ctx 持有自己的沙箱，onAgent 只重绑本 turn 的沙箱
         // （历史上 spec.latestSandbox 进程级指针会被其他用户 create/resume 覆盖 → 误绑他人沙箱）

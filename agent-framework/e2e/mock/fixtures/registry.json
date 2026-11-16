@@ -36,6 +36,10 @@
       "marker": "[E2E:file:deliver]",
       "calls": 3
     },
+    "file-present": {
+      "marker": "[E2E:file:present]",
+      "calls": 2
+    },
     "oaf-package": {
       "marker": "[E2E:oaf:package]",
       "calls": 3

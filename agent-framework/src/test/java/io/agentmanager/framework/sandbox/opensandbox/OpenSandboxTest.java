@@ -1569,6 +1569,76 @@ class OpenSandboxTest {
         org.mockito.Mockito.verify(sandbox, atLeastOnce()).hydrateScopedSkillCache();
     }
 
+    // ---------- present_file 交付 seam：statWorkspaceFile / openWorkspaceStream（issue #345 P3） ----------
+
+    private static EntryInfo fileEntry(String path, long size) {
+        var epoch = java.time.OffsetDateTime.ofInstant(java.time.Instant.EPOCH, java.time.ZoneOffset.UTC);
+        return new EntryInfo(path, 644, "root", "root", size, epoch, epoch, "file");
+    }
+
+    @Test
+    void statWorkspaceFileShouldMatchEntryByBasenameAndReturnSize() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var files = osb.files();
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        // 多级路径形态：relPath 相对 /workspace，entry.getPath 带目录前缀——按 basename 等值匹配
+        when(files.listDirectory("tree/sub"))
+            .thenReturn(List.of(fileEntry("/workspace/tree/sub/x.md", 42)));
+        assertEquals(42, sandbox.statWorkspaceFile("tree/sub/x.md"));
+
+        // 无目录前缀形态：根下文件，dir 为空串
+        when(files.listDirectory("")).thenReturn(List.of(fileEntry("MEMORY.md", 7)));
+        assertEquals(7, sandbox.statWorkspaceFile("MEMORY.md"));
+    }
+
+    @Test
+    void statWorkspaceFileShouldDegradeToMinusOneOnListFailureAndMissingEntry() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var files = osb.files();
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        // 链式单次打桩（thenThrow → thenReturn），规避 throwing 桩重打桩触发旧桩（同 §execTranslate）
+        // 父目录列举失败（execd 5xx）：降级 -1 交调用方走 writeBounded 兜底
+        when(files.listDirectory("docs")).thenThrow(sandboxApi500())
+            .thenReturn(List.of(fileEntry("/workspace/docs/other.txt", 9)));
+        assertEquals(-1, sandbox.statWorkspaceFile("docs/report.pdf"), "列举失败降级 -1");
+
+        // 列举成功但入口缺失：同样 -1（缺失非错误，不抛）
+        assertEquals(-1, sandbox.statWorkspaceFile("docs/report.pdf"), "入口缺失降级 -1");
+
+        assertEquals(-1, sandbox.statWorkspaceFile(" "), "blank 路径防御性降级 -1");
+    }
+
+    @Test
+    void workspaceFileAccessShouldHydrateScopedSkillCacheForSkillsCachePathOnly() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var files = osb.files();
+        var sandbox = org.mockito.Mockito.spy(new OpenSandbox(state(), osb, options(), null, null));
+        doNothing().when(sandbox).hydrateScopedSkillCache();
+
+        // 非 .skills-cache 路径：stat / 读流均不触发投放
+        when(files.readStream("MEMORY.md"))
+            .thenReturn(new ByteArrayInputStream("mem".getBytes(StandardCharsets.UTF_8)));
+        assertEquals("mem", new String(sandbox.openWorkspaceStream("MEMORY.md").readAllBytes(),
+            StandardCharsets.UTF_8), "openWorkspaceStream 返回 execd 读流原文");
+        verify(sandbox, never()).hydrateScopedSkillCache();
+
+        // .skills-cache 命中：stat 与读流各自触发一次延迟投放（未投放目录 stat/读流恒失败）
+        when(files.listDirectory(".skills-cache/sess-A/oaf-package/demo-a")).thenReturn(List.of());
+        assertEquals(-1, sandbox.statWorkspaceFile(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"));
+        verify(sandbox, times(1)).hydrateScopedSkillCache();
+
+        when(files.readStream(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"))
+            .thenReturn(new ByteArrayInputStream(new byte[]{1}));
+        sandbox.openWorkspaceStream(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md");
+        verify(sandbox, times(2)).hydrateScopedSkillCache();
+        verify(files).readStream(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md");
+
+        // openWorkspaceStream 防御：blank 路径拒绝（非法输入不应触达 execd）
+        assertThrows(IllegalArgumentException.class, () -> sandbox.openWorkspaceStream(" "));
+    }
+
     // ---------- 软链农场（skills-syncd §6.2/§6.4/§7.2：会话级二值判定 + 软链农场 + D-5 打点） ----------
 
     private static final String FARM_STORE = "/skills-store";
