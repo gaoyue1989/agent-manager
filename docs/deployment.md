@@ -11,8 +11,8 @@
 ## 一、构建镜像
 
 > tag 必须与 `manifests/*.yaml` 中 `image:` 字段一致，否则 apply 后 Pod 拉不到镜像（ImagePullBackOff）。
-> 当前值：`platform-backend:v4`（platform.yaml:270）、`172.20.0.1:5001/platform-frontend:v7`（frontend.yaml:17）、
-> `172.20.0.1:5001/agent-framework:latest`（platform.yaml:278-279 的 AVAILABLE_IMAGES/DEFAULT_IMAGE）。
+> 当前值：`platform-backend:v4`（platform.yaml:296）、`172.20.0.1:5001/platform-frontend:v7`（frontend.yaml:17）、
+> `172.20.0.1:5001/agent-framework:latest`（platform.yaml:304-305 的 AVAILABLE_IMAGES/DEFAULT_IMAGE）。
 
 ```bash
 # 1) agent-framework（业务运行时，Java）——发布助手/业务 Agent 的业务镜像
