@@ -281,7 +281,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 | `GET /api/v1/exports/:id` | `GET /api/v1/console/exports/:id` | `Core.GetExportOrder(uid, id)`：调用者须为 order.workspace_id 成员或平台 admin（复用 `Core.ResolveWorkspace` / `Core.GetUser`，identity.go） | 跟随 workspace（设计 §9） |
 | `GET /api/v1/exports/:id/values.yaml` | `GET .../exports/:id/values.yaml` | 同上归属校验后返回 ValuesYAML；`Content-Disposition: attachment`；下载写审计日志（§5.7） | 同上 |
 | `GET /api/v1/exports/:id/manifest.json` | `GET .../exports/:id/manifest.json` | 同上 | 同上 |
-| `POST /api/v1/exports/:id/status` | `POST .../exports/:id/status` | `Core.AdvanceExportOrder(uid, id, {status, itsmTicketID})`：合法迁移 built→approving→approved→deploying→deployed + 非终态→failed/cancelled；记录操作人与 ITSM 单号（写 ItsmTicketID/ManifestJSON.itsm） | 同上 + **owner/admin**（推进属运维动作） |
+| `POST /api/v1/exports/:id/status` | `POST .../exports/:id/status` | `Core.AdvanceExportOrder(uid, id, {status, itsmTicketID})`：合法迁移 built→approving→approved→deploying→deployed + 非终态→failed/cancelled；itsmTicketId ≤128 字节（issue #270，超长 400）；记录操作人与 ITSM 单号（写 ItsmTicketID/ManifestJSON.itsm） | 同上 + **owner/admin**（推进属运维动作） |
 
 设计 §9 的 `config/mcp-connectors`、`config/templates/:group`、`config/registry` 三组端点 v1 **以 workspaceconfig.go 分组视图骨架落地**（templates/registry 完整读写、mcp-connectors GET + PUT 501；导出键空间事实源仍为 runtime-defaults 单端点，前端两页不消费该组）——实现与 §9-D4 原裁剪的偏差见该条评审修订（2026-10-30）。
 
@@ -358,6 +358,8 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 导出单号规则：`EXP-YYYYMMDD-%04d`（%04d = export_orders 自增 id，创建行后回填）。人工推进 status 时同步更新 manifest 的 `itsm` 段。
 
 manifest 的全部并发更新（创建首渲落库 / itsm 写回 / `downloadedBy` 追加 / 构建完成回写）均为 `(id + status + manifest_version)` 乐观锁 CAS（issue #233）：写者 bump 版本 +1，CAS 不命中即重读重试或放弃（首渲不命中放弃留痕；其余 ≤2 次重读，耗尽 400 / 留痕放弃），杜绝 stale 快照整段覆盖丢并发方条目。
+
+草稿保存与冻结快照另有独立并发域（issue #268）：`ExportPackageMarkEntity` 以 `(id, status=draft, draft_version)` CAS 保存/冻结，不命中重读重放（耗尽 ErrBadState），冻结不触碰 files_json——防并发保存丢快照/复位版本号。
 
 ### 5.8 下载审计（v1）
 

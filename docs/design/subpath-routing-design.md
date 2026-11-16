@@ -174,10 +174,12 @@ http {
 }
 ```
 
+> 补记（2026-11-13）：上方 §4.2 为设计时快照，非现状原文——配置真相源以 manifests/platform-router.yaml 为准，本节不逐字同步。该 manifest 此后新增：M9 数据面网关鉴权（`/_auth` auth_request 子请求、`ROUTER_AUTH_MODE` 三态 off|report|enforce、`DNS_RESOLVER` 变量化 resolver，2026-10-17 b1c2a72）与内部路径排除 location `/agent/[a-z0-9-]+/(internal|actuator)(/|$)` 恒 404（2026-11-13 7a82f0c，host 模式 per-service Ingress 排除表同语义，改道 platform-router 恒 404 由同日 def3a4d 落地）。
+
 固化进这份配置的平台约定（backend 改命名规则时须同步）：`oaf-` 前缀、`-svc` 后缀、
 业务端口 8100、namespace `agent-platform`。
 
-### 4.3 manifests（`manifests/platform-router.yaml`，一次性自举，仅 router 模式集群 apply）
+### 4.3 manifests（`manifests/platform-router.yaml`，一次性自举；router 模式必 apply，2026-11-13 起 host 模式同样依赖——per-service Ingress 内部路径排除表 `/internal`、`/actuator` 改道 `platform-router-svc` 恒 404，router 缺失时这些路径 503 fail-closed，见 docs/deployment.md §七之二/§七之三与 sandbox-skills-syncd 设计 §6.1 补记）
 
 | 对象 | 要点 |
 |---|---|
