@@ -38,6 +38,10 @@ type Core struct {
 	// OnServiceRunning 服务转 running 后的回调（M5 模型下发挂载点；nil 跳过）。
 	// 在 transition 内 goroutine 触发，失败不影响状态机推进。
 	OnServiceRunning func(serviceID uint)
+
+	// Viking OpenViking Admin 客户端（openviking-memory-integration-design；nil = 平台未
+	// 启用 OpenViking，发布链路零接触）。发布路径经它建 account、注入 env/Secret。
+	Viking *VikingAdmin
 }
 
 // ConfigView 发布所需的最小配置集（避免直接依赖 config.Config，便于测试）。
@@ -65,6 +69,10 @@ type ConfigView struct {
 	RegisterRetry                  int
 	// PackageDownloadBase create_oaf_zip 返回 download_url 的基地址（空则取 DefaultPackageDownloadBase）
 	PackageDownloadBase string
+	// OpenViking 记忆供给配置（openviking-memory-integration-design §11.1）：
+	// Enabled=false（默认）时发布链路完全不感知 OpenViking
+	OpenVikingEnabled bool
+	OpenVikingBaseURL string
 	// DeployBuilder 业务 Deployment 构造门面（内置构造 + 可选环境 overlay）；
 	// nil 视为纯内置构造，模式同 ImageAllowed 函数字段便于测试注入。
 	DeployBuilder *k8s.DeploymentBuilder
@@ -214,6 +222,11 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// 会话隔离派生（issue #142）：k8sName 定型后按服务派生独立 checkpoint 库名与
 	// Redis key 前缀——仅 env 未显式配置时生效，用户显式值优先
 	c.applyIsolationEnv(k8sName, plain, secret)
+	// OpenViking 记忆供给派生（同 issue #142 模式）：平台启用即默认 provider=openviking，
+	// 建户 + env/Secret 注入 + 包内知识导入（显式 local 退出；失败即发布失败，不留半配置记录）
+	if err := c.applyOpenVikingEnv(k8sName, pkg, plain, secret); err != nil {
+		return nil, err
+	}
 	params := applySpec(c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath), req.Spec)
 	params.EnvSecret = secret
 	// 展示 endpoint 派生 + Ingress overlay 纯函数前置（host 模式）：非法 overlay 直接
@@ -426,6 +439,14 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
+	// OpenViking 派生幂等重跑（provider 切换经 UpdateEnv 时的补装入口；已供给则零外呼）
+	pkg, err := c.Packages.Get(svc.PackageID)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyOpenVikingEnv(svc.K8sName, pkg, plain, secret); err != nil {
+		return nil, err
+	}
 	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
 	params.EnvSecret = secret
 	if err := c.applyServiceEnvObjects(params); err != nil {
@@ -501,11 +522,14 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	}
 
 	newPkgID := svc.PackageID
+	var newPkg *store.OafPackage
 	if opt.PackageID != nil && *opt.PackageID != svc.PackageID {
-		if _, err := c.Packages.Get(*opt.PackageID); err != nil {
+		p, err := c.Packages.Get(*opt.PackageID)
+		if err != nil {
 			return nil, err
 		}
 		newPkgID = *opt.PackageID
+		newPkg = p
 	}
 	image := svc.Image
 	if opt.Image != nil {
@@ -530,6 +554,17 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	// Ingress overlay 纯函数前置（事务前，host 模式）：非法 overlay 直接拒绝，库与 K8s
 	// 均保持原状；同时派生展示 endpoint 随事务回写（模板/配置变更后展示地址跟随合并
 	// 结果）。router 模式纯配置拼装（RouterEndpoint）。
+	// OpenViking 派生幂等重跑（换包时按新包重导 knowledge/skills；已供给则零外呼）
+	if newPkg == nil {
+		p, err := c.Packages.Get(newPkgID)
+		if err != nil {
+			return nil, err
+		}
+		newPkg = p
+	}
+	if err := c.applyOpenVikingEnv(svc.K8sName, newPkg, plain, secret); err != nil {
+		return nil, err
+	}
 	params := applySpec(c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID)), spec)
 	params.EnvSecret = secret
 	endpoint, err := c.deriveEndpoint(params)
@@ -657,6 +692,15 @@ func (c *Core) Delete(id uint) error {
 	// 404）。包是独立资产（可再发布、版本链可回溯），与显式删包 API（Packages.Delete，
 	// 记录+目录同删）保持一致：服务删除只递减引用计数，文件保留。
 	// 存量悬空包（目录已清、记录在）无法自动识别，需要管理员经删包 API 手工清理。
+
+	// OpenViking account 同生命周期删除（best-effort：OpenViking 故障不阻断服务删除，
+	// 与 K8s 对象删除同语义；失败仅告警，残留 account 由运维经 OpenViking Admin 清理）
+	if c.Viking != nil {
+		if err := c.Viking.DeleteAccount(VikingAccountID(svc.K8sName)); err != nil {
+			log.Printf("[openviking] delete account %s failed (service %d deleted, leftover account needs manual cleanup): %v",
+				VikingAccountID(svc.K8sName), svc.ID, err)
+		}
+	}
 	return nil
 }
 

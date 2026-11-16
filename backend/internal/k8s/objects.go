@@ -19,6 +19,9 @@ var ReservedEnvKeys = map[string]bool{
 	"AGENT_CONFIG_DIR": true, "AGENT_WORKSPACE_DIR": true, "SERVER_HOST": true, "SERVER_PORT": true,
 	// 日志规范注入键：HOST_NAME=Pod Name，日志路径/内容依赖
 	"HOST_NAME": true,
+	// OpenViking 记忆供给注入键（openviking-memory-integration-design §11.1）：值只能来自
+	// 平台发布链路（applyOpenVikingEnv），用户可设即等于把记忆指向任意服务器
+	"OPENVIKING_URL": true, "OPENVIKING_ACCOUNT": true, "OVK_ADMIN_KEY": true, "OVK_USER_SEED": true,
 }
 
 var dnsNameRe = regexp.MustCompile(`[^a-z0-9-]+`)

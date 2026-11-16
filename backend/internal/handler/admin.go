@@ -204,6 +204,25 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 		OK(c, gin.H{"items": items, "total": total})
 	})
 
+	// OpenViking per-user key 签发（openviking-memory-integration-design §11.1）：
+	// 为服务下平台用户签发个人 user key（明文一次性返回，供 Studio/外部 MCP 凭证访问）。
+	// 未启用/未供给 → 400（service 层 ErrInvalidForm 语义）。
+	ad.POST("/services/:id/memory-keys", func(c *gin.Context) {
+		var body struct {
+			UserId string `json:"userId"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		key, err := core.IssueMemoryKey(parseUint(c.Param("id")), body.UserId)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, gin.H{"userKey": key})
+	})
+
 	registerAdminSandboxes(ad, core)
 }
 
