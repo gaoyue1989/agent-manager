@@ -13,7 +13,8 @@ OAF 服务发布平台**跨集群导出发布**的生产侧交付 chart（设计
 |------|------|------|
 | `deployment.yaml` | `{fullname}` | initContainer `inject-oaf`（image.oaf，`cp -a /oaf/. /config/` 注入 emptyDir）+ 主容器 agent（image.base）+ `/health:8100` 探针 + `HOST_NAME` downward API 注入 |
 | `service.yaml` | `{fullname}-svc` | ClusterIP:8100；无 sessionAffinity（多副本横向扩展语义与单集群一致） |
-| `ingress.yaml` | `{fullname}` | 双模式：`host`（默认）/ `router`（见下） |
+| `ingress.yaml` | `{fullname}` | 双模式：`host`（默认）/ `router`（见下）；内置内部路径排除表（见下「内部路径排除」） |
+| `blocked-backend.yaml` | `{fullname}-blocked` | 内部路径排除表的 backend：无 selector = 无 endpoints 占位 Service，命中排除表的请求恒 503（fail-closed） |
 | `configmap.yaml` | `{fullname}-env` | values.env（非敏感 env，空值剔除） |
 | `secret.yaml` | `{fullname}-env-secret` | values.secretEnv（敏感 env，stringData） |
 | `mysql-init-job.yaml` | `{fullname}-mysql-init` | `mysql.createDatabase=true` 时启用；pre-install hook 幂等建库 |
@@ -25,6 +26,14 @@ envFrom 两源与平台发布链路同序：**服务 Secret `{fullname}-env-secr
 
 - **host（默认）**：`host={fullnameOverride}{ingress.hostSuffix}`、path `/`、pathType Prefix，仅 `ssl-redirect=false` 与 `proxy-read/send-timeout=3600`，无 rewrite 注解（与平台 host 模式不变量一致）。
 - **router**：子路径 `ingress.pathPrefix`（如 `/agent/travel-agent`）+ ingress-nginx `rewrite-target`/`use-regex`/`x-forwarded-prefix` 注解剥前缀——生产集群无平台共享路由器，该语义由环境自担。
+
+**内部路径排除（issue #351，语义对齐平台 `objects.go` hostModeBlockPathList）**：`/internal`
+（skills-syncd 端点，SKILLSYNC_TOKEN 门）与 `/actuator`（健康 + Micrometer 指标，无鉴权）
+不经业务 Ingress 对外暴露（仅集群内访问）。两模式的排除表都改道 `{fullname}-blocked`
+无 endpoints 占位 Service，恒 **503 fail-closed**（平台形态 router 在位时为 404、缺失时
+503；本 chart 自包含无平台路由器，统一 503）。host 模式为无尾斜杠 Prefix（同盖裸
+`/actuator` 发现页）；router 模式为 `{prefix}{path}(/|$)(.*)` 正则（与主路径同捕获组序，
+rewrite-target `/$2` 统一生效；ingress-nginx 正则按长度降序，更长先命中）。
 
 ## values 必填项
 
