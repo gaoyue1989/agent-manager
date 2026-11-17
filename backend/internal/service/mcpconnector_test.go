@@ -1,0 +1,142 @@
+package service
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"agent-manager/backend/internal/store"
+)
+
+// TestValidatePermissions 三态权限声明入口强校验：对象形态放行；字符串 token（双重编码）、
+// 非法枚举值、空工具名、非 tools 形状一律 ErrInvalidForm——不得静默修复
+// （双重编码入库会让 agentgen 解析失败，生成包静默丢失 permissions 段）。
+func TestValidatePermissions(t *testing.T) {
+	valid := []string{
+		`{}`,
+		`{"tools":{}}`,
+		`{"tools":{"a":"allow","b":"ask","c":"deny"}}`,
+		`{"tools":{"a":"allow"},"extra":1}`,
+	}
+	for _, raw := range valid {
+		if err := validatePermissions(json.RawMessage(raw)); err != nil {
+			t.Fatalf("valid %q rejected: %v", raw, err)
+		}
+	}
+	invalid := []string{
+		`"{\"tools\":{\"a\":\"allow\"}}"`, // 双重编码字符串 token
+		`"{}"`,                            // 字符串 token
+		`[]`,                              // 非 tools 形状
+		`42`,
+		`{"tools":{"a":"block"}}`, // 非法枚举值
+		`{"tools":{"a":""}}`,      // 空权限值
+		`{"tools":{"":"allow"}}`,  // 空工具名
+		`{"tools":"allow"}`,       // tools 非映射
+	}
+	for _, raw := range invalid {
+		err := validatePermissions(json.RawMessage(raw))
+		if err == nil {
+			t.Fatalf("invalid %q accepted", raw)
+		}
+		if !errors.Is(err, ErrInvalidForm) {
+			t.Fatalf("invalid %q wrong error: %v", raw, err)
+		}
+	}
+}
+
+// TestMcpConnectorPermissionEntryValidation Create/Update 入口同样拦截非法 permissions；
+// 合法对象形态经 PATCH 落库为对象 JSON（非字符串化）。
+func TestMcpConnectorPermissionEntryValidation(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-375a", "权限空间")
+
+	if _, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name: "p1", Endpoint: "http://x/mcp",
+		Permissions: json.RawMessage(`{"tools":{"a":"block"}}`)}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("create invalid perms: %v", err)
+	}
+
+	view, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{Name: "p1", Endpoint: "http://x/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := json.RawMessage(`"{\"tools\":{\"a\":\"allow\"}}"`)
+	if _, err := c.UpdateMcpConnector(ws.ID, view.ID, PatchMcpConnectorInput{Permissions: &bad}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("patch double-encoded perms: %v", err)
+	}
+
+	ok := json.RawMessage(`{"tools":{"a":"deny"}}`)
+	v2, err := c.UpdateMcpConnector(ws.ID, view.ID, PatchMcpConnectorInput{Permissions: &ok})
+	if err != nil {
+		t.Fatalf("patch valid perms: %v", err)
+	}
+	if v2.Permissions != `{"tools":{"a":"deny"}}` {
+		t.Fatalf("patch response permissions: %q", v2.Permissions)
+	}
+	var m store.McpConnector
+	if err := c.DB.First(&m, view.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if m.Permissions != `{"tools":{"a":"deny"}}` {
+		t.Fatalf("persisted permissions: %q", m.Permissions)
+	}
+}
+
+// TestMcpConnectorVerifyErrorLifecycle verify 失败路径写 lastVerifyError（512 字符截断、
+// 多字节按 rune 数截断）；复验成功路径清空。
+func TestMcpConnectorVerifyErrorLifecycle(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-375b", "验证错误空间")
+
+	longMsg := strings.Repeat("错", 600)
+	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0", "id": 1,
+			"error": map[string]interface{}{"code": -32000, "message": longMsg},
+		})
+	}))
+	defer errSrv.Close()
+
+	view, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name: "ve", Endpoint: errSrv.URL, TimeoutSec: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.VerifyMcpConnector(ws.ID, view.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res["ok"] != false {
+		t.Fatalf("expect verify failure: %+v", res)
+	}
+	var m store.McpConnector
+	if err := c.DB.First(&m, view.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if m.LastVerifyError == "" {
+		t.Fatal("failure must record lastVerifyError")
+	}
+	if n := len([]rune(m.LastVerifyError)); n != 512 {
+		t.Fatalf("lastVerifyError rune length = %d, want 512", n)
+	}
+
+	okSrv := fakeMCP(200, []map[string]string{{"name": "t1", "description": "d"}})
+	defer okSrv.Close()
+	if _, err := c.UpdateMcpConnector(ws.ID, view.ID, PatchMcpConnectorInput{Endpoint: &okSrv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if res, err = c.VerifyMcpConnector(ws.ID, view.ID); err != nil || res["ok"] != true {
+		t.Fatalf("re-verify: %v %+v", err, res)
+	}
+	if err := c.DB.First(&m, view.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if m.Status != "verified" || m.LastVerifyError != "" {
+		t.Fatalf("success must clear lastVerifyError: status=%s err=%q", m.Status, m.LastVerifyError)
+	}
+}

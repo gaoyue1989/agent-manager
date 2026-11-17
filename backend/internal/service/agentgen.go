@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -393,6 +394,33 @@ permissions:
     delete_service: ask
 `
 }
+
+// BuiltinPlatformDecl 内置 platform 连接器的声明事实（server 名 + 工具三态策略）。
+// builtinPlatformMCPConfig 模板是唯一真相源，此处为唯一派生入口（缓存一次解析）；
+// 解析失败 fail-soft 返零值——消费方仅做只读展示。
+type BuiltinPlatformDecl struct {
+	Server string            `json:"server"`
+	Tools  map[string]string `json:"tools"`
+}
+
+var builtinPlatformDeclOnce = sync.OnceValue(func() BuiltinPlatformDecl {
+	var cfg struct {
+		Server      string `yaml:"server"`
+		Permissions struct {
+			Tools map[string]string `yaml:"tools"`
+		} `yaml:"permissions"`
+	}
+	if err := yaml.Unmarshal([]byte(builtinPlatformMCPConfig()), &cfg); err != nil {
+		log.Printf("builtin platform mcp config parse failed: %v", err)
+		return BuiltinPlatformDecl{}
+	}
+	if cfg.Permissions.Tools == nil {
+		cfg.Permissions.Tools = map[string]string{}
+	}
+	return BuiltinPlatformDecl{Server: cfg.Server, Tools: cfg.Permissions.Tools}
+})
+
+func GetBuiltinPlatformDecl() BuiltinPlatformDecl { return builtinPlatformDeclOnce() }
 
 // buildAgentFiles 表单 → 包文件集。
 // base 非空时（编辑链路）以基础包文件为底（copy-on-write 沿用 SOUL.md 等补充文件），
