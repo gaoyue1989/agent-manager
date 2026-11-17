@@ -244,6 +244,9 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    服务未配 token Secret → 该池按旧行为建（补配后重建池即默认开启）；`disableSyncd: true`
    显式关闭（与 extraEnv 互斥）。镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不
    crashloop（D-1）。
+   删除顺序守卫（issue #359）：绑定池在运行时删除服务被拒（409 提示先删池）——池模板
+   secretKeyRef 引用服务 token Secret，先删服务会使池新 Pod 卡 CreateContainerConfigError；
+   管理面不可达时同样拒绝（池状态未知即不动）。
 
 **升级**：重跑 `./scripts/build-skillsync-image.sh`（同 tag 覆盖）→ 直建新沙箱即用新镜像；池化 Pod
 须重建才换镜像（沙箱管理页销毁 warm 实例，或删池重建——上游改模板必须删池重建）。
