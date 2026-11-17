@@ -360,7 +360,9 @@ func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 // env 含敏感键 SKILLSYNC_TOKEN 时幂等 Ensure 技能同步 token Secret（D-8：池模板
 // secretKeyRef 引用，落点=池 workload ns k8s.SandboxWorkloadNamespace 消费方——跨 ns
 // 引用不成立，服务 ns 无消费方；轮换=本入口同值更新 + 池 Pod 重建，单写入口即服务
-// env 表单）；无该键不产出对象。
+// env 表单）；无该键不产出对象，且存量 token Secret 同步撤销（不变量：池 ns token
+// Secret 存在 ⇔ env 携带非空 SKILLSYNC_TOKEN，issue #350——先 SecretExists 确认存在
+// 再删，无该键的常规发布零 delete 调用、不依赖 RBAC delete 授权）。
 func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
 	if err := c.K8s.EnsureConfigMap(k8s.EnvConfigMap(p)); err != nil {
 		return fmt.Errorf("configmap: %w", err)
@@ -373,6 +375,18 @@ func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
 			return fmt.Errorf("skillsync token secret (ns %s, 部署前提见 docs/deployment.md「技能同步」): %w",
 				k8s.SandboxWorkloadNamespace, err)
 		}
+		return nil
+	}
+	exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
+	if err != nil {
+		return fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
+	}
+	if !exists {
+		return nil
+	}
+	if err := c.K8s.DeleteSecret(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName)); err != nil {
+		return fmt.Errorf("skillsync token secret revoke (ns %s, RBAC 需 delete，见 docs/deployment.md「技能同步」): %w",
+			k8s.SandboxWorkloadNamespace, err)
 	}
 	return nil
 }

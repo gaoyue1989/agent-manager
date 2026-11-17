@@ -353,6 +353,39 @@ func TestNoSkillsyncTokenSecretWithoutToken(t *testing.T) {
 	}
 }
 
+// TestSkillsyncTokenSecretRevocation 撤销闭环（issue #350）：UpdateEnv 清空 SKILLSYNC_TOKEN
+// （三态语义「空串=删除」）→ 池 ns token Secret 同步删除（撤销落地到消费方落点）；
+// 填回 → 幂等重建。
+func TestSkillsyncTokenSecretRevocation(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID,
+		map[string]string{"SKILLSYNC_TOKEN": "tok-1"}, nil)
+
+	secName := k8s.SkillsyncTokenName(svc.K8sName)
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err != nil {
+		t.Fatalf("precondition: token secret ensured on publish: %v", err)
+	}
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": ""}, nil); err != nil {
+		t.Fatalf("revoke via UpdateEnv: %v", err)
+	}
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
+		t.Fatal("token secret must be revoked when env drops SKILLSYNC_TOKEN")
+	}
+	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, nil); err != nil {
+		t.Fatalf("re-grant via UpdateEnv: %v", err)
+	}
+	sec, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("re-grant must recreate token secret: %v", err)
+	}
+	if string(sec.Data["token"]) != "tok-2" {
+		t.Fatalf("re-grant token value wrong: %q", sec.Data["token"])
+	}
+}
+
 // TestEnvSecretKeysMasking 掩码视图：值不随 JSON 直出，键集含存量未迁移键。
 func TestEnvSecretKeysMasking(t *testing.T) {
 	core, _, done := newTestCore(t)
