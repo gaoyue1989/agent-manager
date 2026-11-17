@@ -42,6 +42,35 @@ class SkillBundleServiceTest {
 
     private final MutableClock clock = new MutableClock(Instant.now().toEpochMilli());
 
+    /** issue #358：未显式配置 SKILLSYNC_BUNDLE_CACHE_DIR 时解析落 workspace 卷内——业务 Pod
+     * /tmp 不可写实测（resolvedSpoolDir 同源结论），旧默认 /tmp 让 D-3 磁盘缓存静默失效 */
+    @Test
+    void unconfiguredBundleCacheDirResolvesUnderWorkspaceVolume(@TempDir Path workspaceBase) {
+        var props = new AgentManagerProperties(null, null, null, workspaceBase.toString(),
+            null, null, null, null, null);
+        var service = new SkillBundleService(manageService(), sandboxConfigWithCacheDir(""), props);
+        assertEquals(workspaceBase.resolve("tmp").resolve("skills-bundle-cache"), service.bundleCacheDir(),
+            "未配置默认必须落 workspace 卷内，不得落 /tmp");
+    }
+
+    @Test
+    void explicitBundleCacheDirWinsOverWorkspaceDefault() {
+        var props = new AgentManagerProperties(null, null, null, configDir.toString(),
+            null, null, null, null, null);
+        var service = new SkillBundleService(manageService(), sandboxConfigWithCacheDir("/data/bundle-cache"), props);
+        assertEquals(Path.of("/data/bundle-cache"), service.bundleCacheDir(),
+            "显式配置（SKILLSYNC_BUNDLE_CACHE_DIR）优先");
+    }
+
+    private SandboxConfig sandboxConfigWithCacheDir(String cacheDir) {
+        return new SandboxConfig(
+            true, "img", 30, 30, 512, 1, List.of("sh"),
+            Duration.ofMillis(100),
+            true, true, 900, true, true, true, true, 500, 30,
+            "tok", cacheDir, "/skills-store",
+            new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
+    }
+
     @Test
     void versionShouldStayStableAcrossRecomputesOnUntouchedSource() throws Exception {
         var service = service(Duration.ZERO);
@@ -210,6 +239,9 @@ class SkillBundleServiceTest {
         try (var ctx = new AnnotationConfigApplicationContext()) {
             ctx.registerBean("skillManageService", SkillManageService.class, this::manageService);
             ctx.registerBean("sandboxConfig", SandboxConfig.class, () -> config);
+            ctx.registerBean("agentManagerProperties", io.agentmanager.framework.config.AgentManagerProperties.class,
+                () -> new io.agentmanager.framework.config.AgentManagerProperties(null, null, null,
+                    configDir.toString(), null, null, null, null, null));
             ctx.register(SkillBundleService.class);
             ctx.refresh();
 

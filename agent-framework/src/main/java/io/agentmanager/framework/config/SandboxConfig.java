@@ -69,11 +69,13 @@ public record SandboxConfig(
     @DefaultValue("30") int sessionAgentCacheTtlMinutes,
     /**
      * skills-syncd 内部端点鉴权 token（{@code SKILLSYNC_TOKEN}，空 = 端点关闭 404）；
-     * bundle 磁盘缓存目录（{@code SKILLSYNC_BUNDLE_CACHE_DIR}，默认 /tmp/skills-bundle-cache）；
+     * bundle 磁盘缓存目录（{@code SKILLSYNC_BUNDLE_CACHE_DIR}，空 = 运行时解析 workspace 卷内
+     * {@code {workspaceBase}/tmp/skills-bundle-cache}，业务 Pod /tmp 不可写实测 issue #358，
+     * 解析在 SkillBundleService.resolveBundleCacheDir）；
      * 沙箱内共享技能库路径（{@code SANDBOX_SKILLS_SHARED_STORE}，空 = 软链农场整体关闭走现行为）
      */
     @DefaultValue("") String skillsSyncToken,
-    @DefaultValue("/tmp/skills-bundle-cache") String skillsBundleCacheDir,
+    @DefaultValue("") String skillsBundleCacheDir,
     @DefaultValue("") String skillsSharedStore,
     OpenSandboxConfig opensandbox
 ) {
