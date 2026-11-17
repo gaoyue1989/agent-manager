@@ -129,7 +129,8 @@ var introspectThrottle = struct {
 // Introspect 处理 GET /api/v1/auth/introspect：
 //   - Authorization: Bearer <JWT> → 校验签名/过期（不验空间，M9 回填决议）；
 //   - Authorization: Bearer ak-… → sha256 查 api_keys（active+未过期）；
-//     agentId 作用域经 X-Original-URI 的 /agent/{short}/ 前缀裁决。
+//     agentId 作用域经 X-Original-URI 的 /agent/{short}/ 前缀裁决；
+//   - Authorization 缺失时回落 oaf_session cookie（JWT 通道，issue #373）。
 //
 // 200 回写 X-User-Id 响应头（nginx auth_request_set 取用）；401/403 fail-closed。
 func (c *Core) Introspect(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +140,14 @@ func (c *Core) Introspect(w http.ResponseWriter, r *http.Request) {
 	token := ""
 	if auth := r.Header.Get("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
 		token = auth[7:]
+	}
+	if token == "" {
+		// issue #373：router off 档「免鉴权但不免身份」——浏览器只携带 httpOnly 会话
+		// cookie、无自报头；auth_request 子请求把 Cookie 一并带到 upstream，introspect
+		// 读回签发身份（header 优先、cookie 回落，与 handler.sessionFromToken 同序）
+		if ck, err := r.Cookie(SessionCookieName); err == nil {
+			token = ck.Value
+		}
 	}
 	if token == "" {
 		http.Error(w, `{"code":401,"message":"invalid credential"}`, http.StatusUnauthorized)

@@ -66,9 +66,13 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 
 > **控制台拆分（2026-10 起）**：frontend 升级后浏览器访问任意页面先跳 `/login`（首个 admin 由
 > `ADMIN_INIT_USER/ADMIN_INIT_PASSWORD` 种子创建）。数据面网关鉴权分三档灰度
-> （platform-router `ROUTER_AUTH_MODE=off|report|enforce`，默认 off 行为与历史一致；
-> 转档 = `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
-> 后 rollout restart，回滚同路径改回 off；enforce 前须先在控制台签发 API Key 或以 JWT 调用）。
+> （platform-router `ROUTER_AUTH_MODE`，默认 off；转档 =
+> `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
+> 后 rollout restart，回滚同路径改回 off）。三态语义（issue #373 修订）：
+> `off` = 免鉴权但不免身份——introspect 尽力解析 Authorization/登录 cookie 注入 `X-User-Id`，
+> 无凭据或 backend 不可用时放行回落自报（浏览器经统一入口的会话回放/删除/HITL 确认因此可用）；
+> `report` = 同 off 尽力解析 + 坏凭据放行（灰度观察）、backend 5xx 拒绝；
+> `enforce` = fail-closed（无凭据/坏凭据 401、backend 5xx 拒绝；前须先在控制台签发 API Key 或以 JWT 调用）。
 >
 > **Helm 部署路径（charts/oaf-platform）等价配置**：`backend.jwtSecret`（登录签发密钥，**渲染期必填**，
 > 经 Secret 注入；复用已有 Secret 时 keys 契约 `mysql-dsn/auth-token/jwt-secret/admin-init-password`）、

@@ -12,8 +12,6 @@ import (
 	"agent-manager/backend/internal/service"
 )
 
-const sessionCookieName = "oaf_session"
-
 // sessionTTLSeconds 登录态有效期（与 Set-Cookie Max-Age 一致）。
 var sessionTTLSeconds = int(authtoken.TTL.Seconds())
 
@@ -26,7 +24,7 @@ func issueToken(secret string, uid uint, username, role string) string {
 func sessionFromToken(secret string, c *gin.Context) (authtoken.Claims, bool) {
 	tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 	if tok == "" {
-		if ck, err := c.Cookie(sessionCookieName); err == nil {
+		if ck, err := c.Cookie(service.SessionCookieName); err == nil {
 			tok = ck
 		}
 	}

@@ -47,7 +47,7 @@ assert_contains "packages 含公共包+本空间" "$PKGS" '"data":'
 IMGS=$(req GET /console/images "" "$TOKEN")
 assert_contains "console images 面可用（JWT）" "$IMGS" '"Image"'
 
-# ---- proxy 身份注入（数据面；业务 Pod 收到 X-User-Id → threads 按 user 落库）----
+# ---- proxy 身份注入（前端 :30881 链路；body userId 兜底 → threads 按 user 落库）----
 DEF_SVC=$(req GET "/admin/workspaces/$DEF_WS/agents" "" "$TOKEN" | jqr "['data'][0]['shortName']" 2>/dev/null || true)
 if [ -n "$DEF_SVC" ] && [ "$DEF_SVC" != "None" ]; then
   C=$(curl -s -D /tmp/m2h.txt -o /dev/null "$BASE/auth/login" -X POST -H 'Content-Type: application/json' \
@@ -61,12 +61,40 @@ if [ -n "$DEF_SVC" ] && [ "$DEF_SVC" != "None" ]; then
     -d "{\"message\":\"ping\",\"userId\":\"u-$(echo "$UT" | python3 -c "import sys,json,base64;print(json.loads(base64.b64decode(sys.stdin.read().split('.')[1]+'==').decode())['uid'])")\",\"sessionId\":\"$SID\"}" 2>/dev/null | head -c 200 || true)
   THREADS=$(curl -s -m 10 "$FE/agent/$DEF_SVC/threads?userId=u-$(echo "$UT" | python3 -c "import sys,json,base64;print(json.loads(base64.b64decode(sys.stdin.read().split('.')[1]+'==').decode())['uid'])")" -H "Cookie: oaf_session=$CK" 2>/dev/null)
   if echo "$THREADS" | grep -q "$SID"; then
-    assert_contains "proxy 注入 X-User-Id（threads 按 uid 落库）" "$THREADS" "$SID"
+    assert_contains "proxy 链路 threads 按 body userId 兜底落库" "$THREADS" "$SID"
   else
     skip "proxy 身份注入（业务面不可达或 LLM 未配；RESP=${RESP:0:60}）"
   fi
 else
   skip "default 空间无服务，跳过 proxy 身份注入"
+fi
+
+# ---- 统一入口数据面身份（issue #373：router off 免鉴权但不免身份）----
+# GATEWAY_BASE = 集群入口 /agent/*：CI 为 kind provider ingress-nginx NodePort patch
+# （platform-e2e-ci.yml）；本地为 kind extraPortMappings + 宿主 nginx :8911 同链路。
+# cookie-only（body 不带 userId）→ X-User-Id 由 router introspect 登录 cookie 注入：
+# history/DELETE 走 SessionAccessGuard 归属裁决，修复前匿名 fail-closed 404、修复后 200。
+if runtime_is_real && [ -n "$DEF_SVC" ] && [ "$DEF_SVC" != "None" ]; then
+  GW="${GATEWAY_BASE:-http://localhost:30080}"
+  GUID=$(echo "$UT" | python3 -c "import sys,json,base64;print(json.loads(base64.b64decode(sys.stdin.read().split('.')[1]+'==').decode())['uid'])")
+  GSID="m2-gateway-$TS"
+  GRESP=$(curl -s -N -m 25 "$GW/agent/$DEF_SVC/threads/chat" -H "Cookie: oaf_session=$CK" \
+    -H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+    -d "{\"message\":\"ping\",\"sessionId\":\"$GSID\"}" 2>/dev/null | head -c 200 || true)
+  GHIST=$(curl -s -m 10 "$GW/agent/$DEF_SVC/threads/$GSID/history" -H "Cookie: oaf_session=$CK" 2>/dev/null)
+  if echo "$GHIST" | grep -q '"messages"'; then
+    assert_eq "统一入口 cookie-only history 200（归属 u-$GUID）" \
+      "$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$GW/agent/$DEF_SVC/threads/$GSID/history" -H "Cookie: oaf_session=$CK")" "200"
+    GLIST=$(curl -s -m 10 "$GW/agent/$DEF_SVC/threads" -H "Cookie: oaf_session=$CK" 2>/dev/null)
+    assert_contains "统一入口 threads 列表含新会话（网关身份落库）" "$GLIST" "$GSID"
+    assert_contains "统一入口 threads 列表按网关身份过滤（user_id=u-$GUID）" "$GLIST" "\"user_id\":\"u-$GUID\""
+    assert_eq "统一入口 cookie-only DELETE 200" \
+      "$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X DELETE "$GW/agent/$DEF_SVC/threads/$GSID" -H "Cookie: oaf_session=$CK")" "200"
+  else
+    skip "统一入口数据面身份（会话未建立或业务面不可达；RESP=${GRESP:0:60}）"
+  fi
+else
+  skip "统一入口数据面身份（mock 运行时或缺业务服务）"
 fi
 
 finish "M2-console-foundation"

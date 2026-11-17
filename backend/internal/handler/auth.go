@@ -12,11 +12,11 @@ import (
 // setSessionCookie 下发 httpOnly 会话 cookie（集群 http 部署不加 Secure——
 // https 入口由环境侧终结，加 Secure 反而丢 cookie；内网工具定位，SameSite=Lax 足够）。
 func setSessionCookie(c *gin.Context, token string) {
-	c.SetCookie(sessionCookieName, token, sessionTTLSeconds, "/", "", false, true)
+	c.SetCookie(service.SessionCookieName, token, sessionTTLSeconds, "/", "", false, true)
 }
 
 func clearSessionCookie(c *gin.Context) {
-	c.SetCookie(sessionCookieName, "", -1, "/", "", false, true)
+	c.SetCookie(service.SessionCookieName, "", -1, "/", "", false, true)
 }
 
 // registerAuth 挂载 /auth 组（login/logout 无鉴权；me 需 JWT）。

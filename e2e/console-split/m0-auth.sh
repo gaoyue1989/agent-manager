@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M0 · 身份认证与路由分层（实施文档 01 §4/§5）
 # 覆盖：登录三分支 / me 双通道 / cookie 属性 / 路由分层矩阵（AUTH_TOKEN 与 JWT 并存）/
-#       introspect JWT 通道 / logout 清 cookie / admin 种子幂等
+#       introspect JWT+cookie 通道（#373）/ logout 清 cookie / admin 种子幂等
 source "$(dirname "$0")/lib.sh"
 
 TS=$(date +%s)
@@ -49,6 +49,12 @@ assert_contains "introspect JWT 200" "$INTRO" " 200"
 assert_contains "introspect 回写 X-User-Id" "$(echo "$INTRO" | grep -i '^x-user-id')" "u-"
 assert_eq "introspect 无凭据 401" "$(code GET /auth/introspect)" "401"
 assert_eq "introspect 坏 token 401" "$(code GET /auth/introspect "" "" "bad.token.here")" "401"
+# 5b) introspect cookie 通道（issue #373：router off 档「免鉴权但不免身份」的 backend 前置；
+#     浏览器只有 httpOnly cookie 无自报头，auth_request 子请求把 Cookie 带到 upstream）
+CK_INTRO=$(curl -s -D - -o /dev/null "$BASE/auth/introspect" -H "Cookie: oaf_session=$COOKIE" | tr -d '\r')
+assert_contains "introspect cookie 通道 200" "$CK_INTRO" " 200"
+assert_contains "introspect cookie 回写 X-User-Id" "$(echo "$CK_INTRO" | grep -i '^x-user-id')" "u-"
+assert_eq "introspect 坏 cookie 401" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/introspect" -H 'Cookie: oaf_session=bad.token.here')" "401"
 
 # 6) logout 清 cookie + admin 种子幂等（重登仍一个 admin）
 assert_eq "logout 200" "$(code POST /auth/logout)" "200"

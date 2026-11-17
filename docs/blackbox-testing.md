@@ -62,12 +62,12 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 |----------|----------|--------------|
 | `/api/v1/auth/login` `logout` | 无 | 200 可访问 |
 | `/api/v1/auth/me` | JWT（Bearer 或 `oaf_session` cookie） | 401 |
-| `/api/v1/auth/introspect` | 数据面专用：`Authorization: Bearer <JWT>` 或 `Bearer ak-…`（API Key） | 按无凭据语义返回 401/403 |
+| `/api/v1/auth/introspect` | 数据面专用：`Authorization: Bearer <JWT>` 或 `Bearer ak-…`（API Key）；Authorization 缺失时回落 `oaf_session` cookie（issue #373） | 按无凭据语义返回 401/403 |
 | `/api/v1/console/*` | JWT（任意角色）+ 空间成员裁决 | 401；无成员关系的空间 404 |
 | `/api/v1/admin/*` | JWT（**admin 角色**，按 DB 实时角色/状态裁决）或 `AUTH_TOKEN` | 401；user 角色访问 403；admin 被降级/禁用后**旧 token 即时 403**（删号 401，issue #148） |
 | `/api/v1/{services,packages,images,platform-config}` | `AUTH_TOKEN`（存量面，语义不变） | **当前环境未配置 AUTH_TOKEN → 匿名放行**（现状行为，配置后变 401） |
 | `/mcp` | 同上 | 当前匿名放行 |
-| `/agent/{short}/*`（数据面） | 网关三态 `ROUTER_AUTH_MODE`（见下） | 当前 `off` → 不鉴权 |
+| `/agent/{short}/*`（数据面） | 网关三态 `ROUTER_AUTH_MODE`（见下） | 当前 `off` → 免鉴权但不免身份（introspect 尽力注入，无凭据放行） |
 
 关键开关（测试前向运维确认当前档位）：
 
@@ -75,7 +75,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 |----------|--------|------|
 | `JWT_SECRET` | `oaf-console-jwt-secret-CHANGE-ME`（占位） | 缺失时 backend 拒绝启动；更换后所有已签发 token 失效（全员重新登录） |
 | `AUTH_TOKEN` | **未配置** | legacy 面 + `/mcp` 匿名可用；如配置，未带凭据一律 401 |
-| `ROUTER_AUTH_MODE`（platform-router） | `off` | `off`=不鉴权（历史行为）；`report`=只记日志不拦截；`enforce`=数据面强制 introspect（无凭据 401 / 跨作用域 403） |
+| `ROUTER_AUTH_MODE`（platform-router） | `off` | `off`=免鉴权但不免身份：introspect 尽力解析 Authorization/登录 cookie 注入 `X-User-Id`，无凭据或 backend 不可用时放行回落自报（#373）；`report`=同 off 尽力解析 + 坏凭据放行、backend 5xx 拒绝；`enforce`=fail-closed（无凭据/坏凭据 401 / backend 5xx 拒绝 / 跨作用域 403） |
 
 ## 4. API 端点清单
 
@@ -88,7 +88,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 | `POST /auth/login` | body `{username, password}`；成功返回 `{token, user, workspaces}` 并种 cookie | 200 / 401 / 403(禁用) |
 | `POST /auth/logout` | 清 cookie（JWT 无状态，语义性登出） | 200 |
 | `GET /auth/me` | 当前用户 + 所属工作空间列表 | 200（需 JWT）/ 401 |
-| `GET /auth/introspect` | 网关 introspect：JWT 校验签名/过期；`ak-` 前缀走 API Key（active+未过期）；经 `X-Forwarded-*` 回写身份 | 见 M9 三态语义 |
+| `GET /auth/introspect` | 网关 introspect：JWT 校验签名/过期（Authorization 优先，缺失回落 `oaf_session` cookie）；`ak-` 前缀走 API Key（active+未过期）；200 回写 `X-User-Id` 身份头 | 见 M9 三态语义 |
 
 ### 4.2 admin（运维侧；JWT-admin 或 AUTH_TOKEN）
 
@@ -174,7 +174,12 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 
 ### 数据面（不进 backend）
 
-Agent 调试/会话 SSE 走 `/agent/{short}/*`，前端 Next.js proxy 注入 `X-User-Id: u-{uid}`（会话按 `session_user` 落业务库，多副本可落任意 Pod）。黑盒验证点：同用户跨请求会话连续、不同用户会话隔离。
+Agent 调试/会话 SSE 走 `/agent/{short}/*`，两条注入路径（会话按 `session_user` 落业务库，多副本可落任意 Pod）：
+
+- **统一入口 :8911（:30080）**：`/agent` 经 ingress → platform-router `auth_request`，introspect 解析 `Authorization`（Bearer）或登录 cookie（浏览器只有 httpOnly cookie）注入 `X-User-Id: u-{uid}`（issue #373；off 档无凭据放行回落自报）。
+- **前端 proxy :30881（本地 dev）**：Next.js 同源反代注入 `X-User-Id`，不经 router。
+
+黑盒验证点：同用户跨请求会话连续、不同用户会话隔离；经统一入口登录后打开会话回放/删除/HITL 确认应 200（匿名 fail-closed 404 = 身份未注入）。行为矩阵本地复验：`bash e2e/scripts/router-auth-modes-verify.sh`。
 
 ## 6. 典型测试链路（可直接照抄的最小请求序列）
 

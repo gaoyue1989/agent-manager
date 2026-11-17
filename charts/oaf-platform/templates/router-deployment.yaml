@@ -62,6 +62,9 @@ spec:
             - name: conf
               mountPath: /etc/nginx/templates   # nginx 官方 entrypoint envsubst 渲染到 conf.d/
               readOnly: true
+            - name: auth-mode
+              mountPath: /etc/nginx/auth-mode   # 三档拦截片段（/_auth include 渲染期三选一）
+              readOnly: true
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 3
@@ -76,4 +79,17 @@ spec:
         - name: conf
           configMap:
             name: {{ include "oaf.fullname" . }}-router-conf
+            items:
+              - key: default.conf.template
+                path: default.conf.template
+        - name: auth-mode
+          configMap:
+            name: {{ include "oaf.fullname" . }}-router-conf
+            items:
+              - key: auth-off.conf
+                path: auth-off.conf
+              - key: auth-report.conf
+                path: auth-report.conf
+              - key: auth-enforce.conf
+                path: auth-enforce.conf
 {{- end }}

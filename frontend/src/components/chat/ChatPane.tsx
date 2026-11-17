@@ -144,52 +144,61 @@ export default function ChatPane({
     const msgs: ChatMsg[] = [];
     try {
       const resp = await fetch(`${agentBase}/threads/${encodeURIComponent(fullKey)}/history`);
-      if (resp.ok) {
-        const data = await resp.json();
-        for (const m of (data.messages ?? [])) {
-          if (m.role === "user") {
-            msgs.push({ role: "user", content: m.content ?? "" });
-          } else if (m.role === "assistant") {
-            // 工具调用步骤渲染在 assistant 文本之前（与实时流一致：步骤在上、答案在下）。
-            // state 与 output 来自 AgentState（DB 权威来源，官方 SDK 自动持久化）：
-            // 含 HITL 批准后的恢复段；无 state 的调用（未批准）渲染中性态，不臆造成败
-            for (const tc of (m.tool_calls ?? [])) {
-              msgs.push({
-                // summary 与实时流 tool_call_summary 同文案（后端按工具名+参数生成），
-                // 缺失时回落原始工具名
-                role: "tool", content: `${tc.summary || tc.name}`, pending: false,
-                // 工具调用 id：刷新续传时实时 TOOL_RESULT_END 据此认领对应步骤写入终态
-                ...(tc.id ? { toolCallId: String(tc.id) } : {}),
-                ...(tc.state ? { state: String(tc.state) } : {}),
-                ...(tc.output ? { output: String(tc.output) } : {}),
-                ...(tc.output_truncated ? {
-                  output_truncated: true,
-                  output_full_length: Number(tc.output_full_length) || 0,
-                } : {}),
-              });
-            }
-            if (m.content) msgs.push({ role: "assistant", content: m.content });
+      if (!resp.ok) {
+        // 失败可见化（issue #373）：统一入口身份缺失等错误不再按空会话掩蔽；
+        // 解析 {code,message} 直出，与 confirm 失败的 ⚠️ system message 同构
+        let detail = `历史加载失败（HTTP ${resp.status}）`;
+        try {
+          const body = await resp.json();
+          if (body?.message) detail = `${body.message}（HTTP ${resp.status}）`;
+        } catch { /* 非 JSON 响应体保留状态码文案 */ }
+        msgs.push({ role: "system", content: `⚠️ ${detail}` });
+        return msgs;
+      }
+      const data = await resp.json();
+      for (const m of (data.messages ?? [])) {
+        if (m.role === "user") {
+          msgs.push({ role: "user", content: m.content ?? "" });
+        } else if (m.role === "assistant") {
+          // 工具调用步骤渲染在 assistant 文本之前（与实时流一致：步骤在上、答案在下）。
+          // state 与 output 来自 AgentState（DB 权威来源，官方 SDK 自动持久化）：
+          // 含 HITL 批准后的恢复段；无 state 的调用（未批准）渲染中性态，不臆造成败
+          for (const tc of (m.tool_calls ?? [])) {
+            msgs.push({
+              // summary 与实时流 tool_call_summary 同文案（后端按工具名+参数生成），
+              // 缺失时回落原始工具名
+              role: "tool", content: `${tc.summary || tc.name}`, pending: false,
+              // 工具调用 id：刷新续传时实时 TOOL_RESULT_END 据此认领对应步骤写入终态
+              ...(tc.id ? { toolCallId: String(tc.id) } : {}),
+              ...(tc.state ? { state: String(tc.state) } : {}),
+              ...(tc.output ? { output: String(tc.output) } : {}),
+              ...(tc.output_truncated ? {
+                output_truncated: true,
+                output_full_length: Number(tc.output_full_length) || 0,
+              } : {}),
+            });
           }
+          if (m.content) msgs.push({ role: "assistant", content: m.content });
         }
-        // 产出文件卡片：挂到最后一条 assistant 气泡（与 SSE file_ready 渲染一致）
-        const files: FileCard[] = (data.files ?? []).map((f: any) => ({
-          file_id: f.file_id, file_name: f.file_name, mime_type: f.mime_type,
-          size: f.size ?? 0, download_url: `${agentBase}/files/${f.file_id}`,
-        }));
-        if (files.length > 0) {
-          const last = msgs.map((m) => m.role).lastIndexOf("assistant");
-          if (last >= 0) {
-            msgs[last] = { ...msgs[last], files: [...(msgs[last].files ?? []), ...files] };
-          } else {
-            msgs.push({ role: "assistant", content: "", files });
-          }
+      }
+      // 产出文件卡片：挂到最后一条 assistant 气泡（与 SSE file_ready 渲染一致）
+      const files: FileCard[] = (data.files ?? []).map((f: any) => ({
+        file_id: f.file_id, file_name: f.file_name, mime_type: f.mime_type,
+        size: f.size ?? 0, download_url: `${agentBase}/files/${f.file_id}`,
+      }));
+      if (files.length > 0) {
+        const last = msgs.map((m) => m.role).lastIndexOf("assistant");
+        if (last >= 0) {
+          msgs[last] = { ...msgs[last], files: [...(msgs[last].files ?? []), ...files] };
+        } else {
+          msgs.push({ role: "assistant", content: "", files });
         }
-        // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）
-        if (data.pendingConfirm?.tools?.length) {
-          try {
-            msgs.push({ role: "assistant", content: "", confirm: createConfirmCard(data.pendingConfirm.tools) });
-          } catch { /* 工具格式异常忽略 */ }
-        }
+      }
+      // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）
+      if (data.pendingConfirm?.tools?.length) {
+        try {
+          msgs.push({ role: "assistant", content: "", confirm: createConfirmCard(data.pendingConfirm.tools) });
+        } catch { /* 工具格式异常忽略 */ }
       }
     } catch { /* 回放失败按空会话处理（上下文仍在后端，不影响继续对话） */ }
     return msgs;
