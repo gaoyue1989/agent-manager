@@ -331,7 +331,9 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
   发布事件因此不做事件失效，靠 TTL 过期自然重算。规模化下（1000 pod × 1/60s 轮询 ≈ 0.8 核纯
   stat 遍历）该缓存是必要项而非优化项；内容哈希只在 bundle 打包时使用
 - **bundle 产物按 version 落盘缓存**（D-3，关闭原开放问题 4）：确定性打包（§4.3）保证同 version
-  字节一致，磁盘缓存即内容寻址——keep-2 LRU、目录可配（默认 `/tmp/skills-bundle-cache`）、
+  字节一致，磁盘缓存即内容寻址——keep-2 LRU、目录可配（默认 workspace 卷内
+  `{workspaceBase}/tmp/skills-bundle-cache`，issue #358 修正：业务 Pod /tmp 不可写实测，
+  旧默认 /tmp 会让缓存静默失效）、
   pod 重启冷启重建一次可接受。版本发布的集群级风暴从「N 次 tar+gzip 压缩」降为
   「1 次压缩 + N 次文件读」；流式即时压缩仅作缓存目录不可写时的实现内退化路径，不作为设计形态
 

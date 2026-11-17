@@ -52,6 +52,8 @@ public class SkillBundleService {
 
     private final SkillManageService skillManageService;
     private final SkillBundleCache cache;
+    /** 解析后的 bundle 磁盘缓存目录（D-3 keep-2 LRU；issue #358 默认落 workspace 卷内） */
+    private final Path bundleCacheDir;
     private final Duration ttl;
     private final Clock clock;
     private final Object versionLock = new Object();
@@ -59,17 +61,38 @@ public class SkillBundleService {
     private volatile CachedVersion cachedVersion;
 
     @Autowired
-    public SkillBundleService(SkillManageService skillManageService, SandboxConfig sandboxConfig) {
-        this(skillManageService, Path.of(sandboxConfig.skillsBundleCacheDir()),
+    public SkillBundleService(SkillManageService skillManageService, SandboxConfig sandboxConfig,
+            io.agentmanager.framework.config.AgentManagerProperties properties) {
+        this(skillManageService, Path.of(resolveBundleCacheDir(sandboxConfig.skillsBundleCacheDir(), properties)),
             VERSION_TTL, Clock.systemUTC());
+    }
+
+    /**
+     * bundle 磁盘缓存目录解析（issue #358）：显式配置（{@code SKILLSYNC_BUNDLE_CACHE_DIR}）
+     * 优先；未配置回落 workspace 卷内 {@code {workspaceBase}/tmp/skills-bundle-cache}——
+     * 业务 Pod /tmp 不可写实测（issue #345 同源结论，{@code AgentManagerProperties
+     * .resolvedSpoolDir} 同款回落），旧默认 /tmp 会让 D-3 keep-2 LRU 磁盘缓存静默失效
+     * （每次版本同步退化为内存即时打包 + WARN 刷屏）。
+     */
+    private static String resolveBundleCacheDir(String configured,
+            io.agentmanager.framework.config.AgentManagerProperties properties) {
+        return configured == null || configured.isBlank()
+            ? Path.of(properties.resolvedWorkspaceBaseDir(), "tmp", "skills-bundle-cache").toString()
+            : configured;
     }
 
     SkillBundleService(SkillManageService skillManageService, Path bundleCacheDir,
                        Duration ttl, Clock clock) {
         this.skillManageService = skillManageService;
         this.cache = new SkillBundleCache(bundleCacheDir);
+        this.bundleCacheDir = bundleCacheDir;
         this.ttl = ttl;
         this.clock = clock;
+    }
+
+    /** 解析后的 bundle 磁盘缓存目录（D-3 keep-2 LRU 落点；issue #358 默认落 workspace 卷内） */
+    Path bundleCacheDir() {
+        return bundleCacheDir;
     }
 
     /**
