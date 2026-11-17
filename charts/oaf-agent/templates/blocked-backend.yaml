@@ -1,0 +1,21 @@
+{{- $fullname := include "oaf-agent.fullname" . -}}
+{{/* 内部路径排除表的 backend（issue #351，语义对齐平台 objects.go hostModeBlockPathList）：
+     /internal（skills-syncd 端点，SKILLSYNC_TOKEN 门）与 /actuator（健康 + Micrometer 指标，
+     无鉴权）设计断言「不经业务 Ingress 对外暴露（仅集群内访问）」。本 chart 自包含红线
+     （无平台共享路由器），排除路径改道本占位 Service——无 selector 即无 endpoints，
+     ingress-nginx 对命中 location 的无 endpoints backend 恒 503，fail-closed 与平台
+     「router 缺失时这些路径 503」一致（平台 router 在位时为 404）。仅被 ingress.yaml
+     排除表引用，不承接任何真实流量。 */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-blocked
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oaf-agent.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
