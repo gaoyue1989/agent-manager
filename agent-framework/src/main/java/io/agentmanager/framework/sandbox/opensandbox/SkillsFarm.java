@@ -241,7 +241,8 @@ final class SkillsFarm {
         return List.copyOf(candidates);
     }
 
-    /** 端点 enabled 技能名单（D-4 缓存内；异常上抛由 {@link #hydrate} 归为指纹未知走收敛，候选为空仅清理） */
+    /** 端点 enabled 技能名单（D-4 缓存内；异常上抛由 {@link #hydrate} 归为指纹未知走收敛——
+     *  ERR- 空清单的收敛跳过孤儿差集（issue #355），指纹健康下的空候选（真实移除）照删） */
     private List<String> endpointSkillNames() {
         var svc = options != null ? options.getSkillBundleService() : null;
         if (svc == null) {
@@ -273,10 +274,11 @@ final class SkillsFarm {
         try {
             fingerprint = farmFingerprint(userKey.get());
         } catch (Exception e) {
-            // 端点瞬时不可达：无法判定稳态 → 仍收敛（幂等安全：链目标经 CURRENT 间接寻址，
-            // store 内容由守护维护）；不记账（record 对 null 指纹为 no-op），下次触发重新判定
-            log.warn("[sandbox-open] skills farm fingerprint unavailable ({}), converging anyway",
-                e.getMessage());
+            // 端点瞬时不可达：无法判定稳态 → 仍收敛，但孤儿差集跳过（issue #355：ERR- 空清单
+            // 的差集会删光有效软链且无法恢复）——保留现状等恢复；不记账（record 对 null 指纹
+            // 为 no-op），下次触发重新判定
+            log.warn("[sandbox-open] skills farm fingerprint unavailable ({}), converging anyway "
+                + "(orphan diff skipped)", e.getMessage());
             fingerprint = null;
         }
         String id = sandboxId.get();
@@ -310,7 +312,13 @@ final class SkillsFarm {
         String pruneCmd = "find " + options.getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR
             + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
         String rmCmd = disabledRmCmd(scope, disabledNames, options.getWorkspaceRoot());
-        String orphanCmd = orphanDiffCmd(scope, candidates, options.getWorkspaceRoot());
+        // 孤儿差集仅在指纹可信时执行（issue #355）：fingerprint==null（ERR-/端点不可达）
+        // 时候选来自空清单——差集空候选形态（case '|'）会把 scope 内全部有效软链当孤儿删光
+        // 且 exit 0 记账旧指纹、稳态短路吞掉恢复收敛，同沙箱代内技能执行面全废。指纹未知 =
+        // 保留现状等恢复（prune/禁用清理语义独立于指纹，照常执行）
+        String orphanCmd = fingerprint == null
+            ? ""
+            : orphanDiffCmd(scope, candidates, options.getWorkspaceRoot());
         String cleanup = pruneCmd;
         if (!rmCmd.isEmpty()) {
             cleanup += "; " + rmCmd;
