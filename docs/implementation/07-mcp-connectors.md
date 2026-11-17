@@ -33,6 +33,7 @@ type McpConnector struct {
     ToolScope   string    `gorm:"type:json" json:"toolScope"`     // {"mode":"all"} | {"mode":"subset","tools":[…]}
     Permissions string    `gorm:"type:json" json:"permissions"`   // {"tools":{"ticket_query":"allow",…}} 三态默认策略
     Status      string    `gorm:"size:16" json:"status"`          // verified | unverified | failed
+    LastVerifyError string `gorm:"size:512" json:"lastVerifyError"` // 最近 verify 失败原因（512 rune 截断；复验成功清空）
     LastVerifiedAt *time.Time `json:"lastVerifiedAt"`
     CreatedAt   time.Time `json:"createdAt"`
     UpdatedAt   time.Time `json:"updatedAt"`
@@ -44,7 +45,7 @@ func (McpConnector) TableName() string { return "mcp_connectors" }
 
 ```
 GET    /api/v1/console/workspaces/:ws/tools
-  → {data:[{id,name,transport,endpoint,authType,timeoutSec,toolScope,permissions,status,lastVerifiedAt,refCount}]}
+  → {data:[{id,name,transport,endpoint,authType,timeoutSec,toolScope,permissions,status,lastVerifyError,lastVerifiedAt,refCount}]}
      // refCount = 引用该连接器的生成包数（按 mcpServers 声明统计，粗粒度：统计 services 包 frontmatter 含 server 名）
 POST   /api/v1/console/workspaces/:ws/tools          （owner/admin）
   {name, transport, endpoint, authType?, authToken?, timeoutSec?, toolScope?, permissions?}
@@ -54,6 +55,7 @@ POST   /api/v1/console/workspaces/:ws/tools/:id/verify
   → {data:{ok, toolCount, tools:[{name,description}], latencyMs, error}}
      // MCP initialize + tools/list 探测（Go 侧最小 MCP 客户端：POST {endpoint} initialize → tools/list）
      // 成功回写 status=verified + tools 快照进 toolScope（subset 模式的选项源）；失败 status=failed
+     // 且落 lastVerifyError（512 rune 截断），复验成功清空
 DELETE /api/v1/console/workspaces/:ws/tools/:id      // 被 Agent 引用中（refCount>0）→ 409 connector_in_use
 ```
 

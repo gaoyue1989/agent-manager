@@ -312,6 +312,7 @@ async function main() {
     await waitFor(async () => (await text("body")).includes("权限策略已保存"), 30000, 500);
     check("权限策略保存反馈", (await text("body")).includes("权限策略已保存"));
     await goto("/console/assets/tools", testid("console-tools"));
+    await waitFor(async () => (await text(testid("conn-list"))).includes(`ui-new-tool-${TS}`), 30000, 1000);
     await page.evaluate(() => {
       const el = document.querySelector('[data-testid="conn-list"]');
       const row = el && [...el.querySelectorAll("tr")].find((r) => r.textContent.includes("ui-new-tool-"));
