@@ -33,9 +33,10 @@ routing:
   hostSuffix: ""          # host 模式必填（以 "." 开头，如 .region.example.cn）
   # 控制台拆分（M9）：数据面网关鉴权三态（router nginx auth_request → backend introspect）
   #   off     免鉴权但不免身份：introspect 尽力解析（Authorization/登录 cookie）注入 X-User-Id，
-  #           无凭据或 backend 不可用时放行回落自报（fail-open，默认）
-  #   report  同 off 尽力解析 + 坏凭据放行（灰度观察）；backend 5xx 拒绝（fail-closed）
-  #   enforce fail-closed：无凭据/坏凭据 401、backend 5xx 拒绝
+  #           无凭据/坏凭据/introspect 失败或 backend 不可用（401/403/其余 4xx/5xx）一律
+  #           放行回落自报（fail-open，默认）
+  #   report  同 off 尽力解析 + 坏凭据放行（灰度观察）；其余失败码与 backend 5xx 拒绝（fail-closed）
+  #   enforce fail-closed：无凭据/坏凭据 401、其余失败码与 backend 5xx 拒绝
   # 转档 = 改本值 + helm upgrade（router Pod 滚动重启；与裸清单 set env + rollout 等价）
   authMode: "off"
   # 动态 upstream（/agent/{short} → oaf-{short}-svc）的 DNS resolver；

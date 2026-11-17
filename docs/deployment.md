@@ -70,9 +70,10 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 > `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
 > 后 rollout restart，回滚同路径改回 off）。三态语义（issue #373 修订）：
 > `off` = 免鉴权但不免身份——introspect 尽力解析 Authorization/登录 cookie 注入 `X-User-Id`，
-> 无凭据或 backend 不可用时放行回落自报（浏览器经统一入口的会话回放/删除/HITL 确认因此可用）；
-> `report` = 同 off 尽力解析 + 坏凭据放行（灰度观察）、backend 5xx 拒绝；
-> `enforce` = fail-closed（无凭据/坏凭据 401、backend 5xx 拒绝；前须先在控制台签发 API Key 或以 JWT 调用）。
+> 无凭据/坏凭据/introspect 失败或 backend 不可用（401/403/其余 4xx/5xx）一律放行回落自报
+> （浏览器经统一入口的会话回放/删除/HITL 确认因此可用）；
+> `report` = 同 off 尽力解析 + 坏凭据放行（灰度观察）、其余失败码与 backend 5xx 拒绝；
+> `enforce` = fail-closed（无凭据/坏凭据 401、其余失败码与 5xx 拒绝；前须先在控制台签发 API Key 或以 JWT 调用）。
 >
 > **Helm 部署路径（charts/oaf-platform）等价配置**：`backend.jwtSecret`（登录签发密钥，**渲染期必填**，
 > 经 Secret 注入；复用已有 Secret 时 keys 契约 `mysql-dsn/auth-token/jwt-secret/admin-init-password`）、

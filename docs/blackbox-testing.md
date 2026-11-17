@@ -75,7 +75,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 |----------|--------|------|
 | `JWT_SECRET` | `oaf-console-jwt-secret-CHANGE-ME`（占位） | 缺失时 backend 拒绝启动；更换后所有已签发 token 失效（全员重新登录） |
 | `AUTH_TOKEN` | **未配置** | legacy 面 + `/mcp` 匿名可用；如配置，未带凭据一律 401 |
-| `ROUTER_AUTH_MODE`（platform-router） | `off` | `off`=免鉴权但不免身份：introspect 尽力解析 Authorization/登录 cookie 注入 `X-User-Id`，无凭据或 backend 不可用时放行回落自报（#373）；`report`=同 off 尽力解析 + 坏凭据放行、backend 5xx 拒绝；`enforce`=fail-closed（无凭据/坏凭据 401 / backend 5xx 拒绝 / 跨作用域 403） |
+| `ROUTER_AUTH_MODE`（platform-router） | `off` | `off`=免鉴权但不免身份：introspect 尽力解析 Authorization/登录 cookie 注入 `X-User-Id`，无凭据/坏凭据/introspect 失败或 backend 不可用（401/403/其余 4xx/5xx）一律放行回落自报（#373）；`report`=同 off 尽力解析 + 坏凭据放行、其余失败码与 backend 5xx 拒绝；`enforce`=fail-closed（无凭据/坏凭据 401 / 其余失败码与 5xx 拒绝 / 跨作用域 403） |
 
 ## 4. API 端点清单
 
@@ -176,7 +176,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 
 Agent 调试/会话 SSE 走 `/agent/{short}/*`，两条注入路径（会话按 `session_user` 落业务库，多副本可落任意 Pod）：
 
-- **统一入口 :8911（:30080）**：`/agent` 经 ingress → platform-router `auth_request`，introspect 解析 `Authorization`（Bearer）或登录 cookie（浏览器只有 httpOnly cookie）注入 `X-User-Id: u-{uid}`（issue #373；off 档无凭据放行回落自报）。
+- **统一入口 :8911（:30080）**：`/agent` 经 ingress → platform-router `auth_request`，introspect 解析 `Authorization`（Bearer）或登录 cookie（浏览器只有 httpOnly cookie）注入 `X-User-Id: u-{uid}`（issue #373；off 档无凭据/坏凭据/introspect 失败或 backend 不可用一律放行回落自报）。
 - **前端 proxy :30881（本地 dev）**：Next.js 同源反代注入 `X-User-Id`，不经 router。
 
 黑盒验证点：同用户跨请求会话连续、不同用户会话隔离；经统一入口登录后打开会话回放/删除/HITL 确认应 200（匿名 fail-closed 404 = 身份未注入）。行为矩阵本地复验：`bash e2e/scripts/router-auth-modes-verify.sh`。

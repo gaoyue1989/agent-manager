@@ -10,12 +10,17 @@ import (
 )
 
 // setSessionCookie 下发 httpOnly 会话 cookie（集群 http 部署不加 Secure——
-// https 入口由环境侧终结，加 Secure 反而丢 cookie；内网工具定位，SameSite=Lax 足够）。
+// https 入口由环境侧终结，加 Secure 反而丢 cookie；内网工具定位）。显式 SameSite=Lax：
+// 未声明时浏览器按 treated-as-Lax 处理并保留顶层跨站 POST 2 分钟豁免，该 cookie 升级为
+// 数据面凭据（introspect cookie 通道）后豁免窗口内可盲触达 confirm-stream/DELETE 等
+// 状态变更端点——显式声明不享受豁免，同站链路不受影响。
 func setSessionCookie(c *gin.Context, token string) {
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(service.SessionCookieName, token, sessionTTLSeconds, "/", "", false, true)
 }
 
 func clearSessionCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(service.SessionCookieName, "", -1, "/", "", false, true)
 }
 

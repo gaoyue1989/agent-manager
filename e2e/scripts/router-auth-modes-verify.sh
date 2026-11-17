@@ -89,7 +89,7 @@ PYEOF
 # ---- mock upstream：introspect（Bearer ok-jwt / cookie ok-cookie → u-42；disabled → 403；
 #      其余 401）+ 业务回显（body marker = 收到的 X-User-Id；18088 恒 connect refused → 502）----
 cat > "$WORK/mock.py" <<'PYEOF'
-import http.server, threading, sys
+import http.server, json, re, threading, sys
 
 class Introspect(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
@@ -111,6 +111,10 @@ class Introspect(http.server.BaseHTTPRequestHandler):
                 self.reply(200, 'u-42')
             elif tok == 'disabled-jwt':
                 self.reply(403)
+            elif tok == 'e404-jwt':   # 非 401/403/5xx 白名单码：auth-off error_page 漏列即回归
+                self.reply(404)
+            elif tok == 'e429-jwt':   # 限流码同上
+                self.reply(429)
             else:
                 self.reply(401)
             return
@@ -120,17 +124,47 @@ class Introspect(http.server.BaseHTTPRequestHandler):
             self.reply(401)
 
 class Biz(http.server.BaseHTTPRequestHandler):
+    # 归属裁决最小模拟（复刻业务面 SessionAccessGuard 契约）：chat 记会话归属（收到的
+    # X-User-Id，缺失=debug-user），history/DELETE 按 owner==请求者放行、未建会话 404——
+    # 使「身份注入失效 → cookie-only history 404」成为矩阵内可门禁的断言
     protocol_version = 'HTTP/1.0'
+    owners = {}
     def log_message(self, *a): pass
-    def handle_one(self):
-        uid = self.headers.get('X-User-Id') or 'missing'
-        body = ('called uid=%s' % uid).encode()
-        self.send_response(200)
+    def reply(self, code, uid):
+        body = ('called uid=%s' % uid).encode() if code == 200 else b'{"error":"thread_not_found"}'
+        self.send_response(code)
         self.send_header('Content-Type', 'text/plain')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def handle_one(self):
+        raw = self.headers.get('X-User-Id')
+        uid = raw or 'missing'          # 回显：missing = 头未到达业务面（区分注入失效与匿名自报）
+        requester = raw or 'debug-user' # 裁决：复刻业务面匿名回落
+        path = self.path.split('?')[0]
+        n = int(self.headers.get('Content-Length') or 0)
+        payload = self.rfile.read(n) if n else b''
+        if path == '/threads/chat' and self.command == 'POST':
+            sid = ''
+            try:
+                sid = json.loads(payload or b'{}').get('sessionId') or ''
+            except Exception:
+                pass
+            if sid:
+                self.owners[sid] = requester
+            self.reply(200, uid)
+            return
+        m = re.match(r'^/threads/([^/]+)(/history)?$', path)
+        if m:
+            owner = self.owners.get(m.group(1))
+            if owner is None or owner != requester:
+                self.reply(404, uid)
+                return
+            self.reply(200, uid)
+            return
+        self.reply(200, uid)
     do_GET = handle_one
+    do_POST = handle_one
     do_DELETE = handle_one
 
 for port, h in ((int(sys.argv[1]), Introspect), (int(sys.argv[2]), Biz)):
@@ -182,6 +216,25 @@ run_matrix() { # run_matrix <label> <extract-src-file>
   check_case "off 坏凭据放行回落自报 u-9" 200 '^called uid=u-9$' -H 'Authorization: Bearer bad-jwt' -H 'X-User-Id: u-9' "$url"
   check_case "off 好凭据鉴权结果覆盖恶意自报" 200 '^called uid=u-42$' -H 'Authorization: Bearer ok-jwt' -H 'X-User-Id: u-9' "$url"
   check_case "off 登录 cookie 通道注入身份（#373）" 200 '^called uid=u-42$' -H 'Cookie: oaf_session=ok-cookie' "$url"
+  check_case "off introspect 404 异常码放行回落自报（error_page 漏列码回归门）" 200 '^called uid=u-9$' \
+    -H 'Authorization: Bearer e404-jwt' -H 'X-User-Id: u-9' "$url"
+  check_case "off introspect 429 限流码放行（error_page 漏列码回归门）" 200 '^called uid=missing$' \
+    -H 'Authorization: Bearer e429-jwt' "$url"
+  # 归属裁决契约（mock 复刻业务面 SessionAccessGuard；CI 可执行的 #373 归属覆盖）：
+  # chat 落归属 + cookie-only history/DELETE 裁决，网关身份注入失效时此组必红
+  check_case "off cookie-only chat 落归属 u-42（body 无 userId）" 200 '^called uid=u-42$' \
+    -X POST -H 'Cookie: oaf_session=ok-cookie' -H 'Content-Type: application/json' \
+    -d '{"message":"ping","sessionId":"mock-own-1"}' \
+    "http://127.0.0.1:$PORT_NGINX/agent/demo-svc/threads/chat"
+  check_case "off cookie-only history 归属裁决通过（注入失效此案必红）" 200 '^called uid=u-42$' \
+    -H 'Cookie: oaf_session=ok-cookie' \
+    "http://127.0.0.1:$PORT_NGINX/agent/demo-svc/threads/mock-own-1/history"
+  check_case "off cookie-only DELETE 归属裁决通过" 200 '^called uid=u-42$' \
+    -H 'Cookie: oaf_session=ok-cookie' -X DELETE \
+    "http://127.0.0.1:$PORT_NGINX/agent/demo-svc/threads/mock-own-1"
+  check_case "off cookie-only history 未建会话 404（fail-closed 对照）" 404 - \
+    -H 'Cookie: oaf_session=ok-cookie' \
+    "http://127.0.0.1:$PORT_NGINX/agent/demo-svc/threads/mock-none/history"
   render "$conf" "$WORK/run" off "$PORT_DEAD" "$PORT_NGINX"
   start_container "$WORK/run" "$auth" || return 1
   check_case "off introspect 不可用放行回落自报" 200 '^called uid=u-9$' -H 'X-User-Id: u-9' "$url"
@@ -190,6 +243,7 @@ run_matrix() { # run_matrix <label> <extract-src-file>
   start_container "$WORK/run" "$auth" || return 1
   check_case "report 坏凭据放行但不信任自报" 200 '^called uid=missing$' -H 'Authorization: Bearer bad-jwt' -H 'X-User-Id: u-9' "$url"
   check_case "report cookie 好凭据注入身份" 200 '^called uid=u-42$' -H 'Cookie: oaf_session=ok-cookie' "$url"
+  check_case "report introspect 404 异常码拒绝（fail-closed 对照）" 500 - -H 'Authorization: Bearer e404-jwt' "$url"
   render "$conf" "$WORK/run" report "$PORT_DEAD" "$PORT_NGINX"
   start_container "$WORK/run" "$auth" || return 1
   check_case "report introspect 不可用拒绝（fail-closed）" 500 - "$url"
@@ -200,6 +254,7 @@ run_matrix() { # run_matrix <label> <extract-src-file>
   check_case "enforce 坏凭据 401" 401 - -H 'Authorization: Bearer bad-jwt' "$url"
   check_case "enforce 禁用用户 403" 403 - -H 'Authorization: Bearer disabled-jwt' "$url"
   check_case "enforce 好凭据 200 + 注入身份" 200 '^called uid=u-42$' -H 'Authorization: Bearer ok-jwt' "$url"
+  check_case "enforce introspect 404 异常码拒绝（fail-closed 对照）" 500 - -H 'Authorization: Bearer e404-jwt' "$url"
   render "$conf" "$WORK/run" enforce "$PORT_DEAD" "$PORT_NGINX"
   start_container "$WORK/run" "$auth" || return 1
   check_case "enforce introspect 不可用拒绝（fail-closed）" 500 - "$url"

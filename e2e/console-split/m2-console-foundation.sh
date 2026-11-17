@@ -72,26 +72,35 @@ fi
 # ---- 统一入口数据面身份（issue #373：router off 免鉴权但不免身份）----
 # GATEWAY_BASE = 集群入口 /agent/*：CI 为 kind provider ingress-nginx NodePort patch
 # （platform-e2e-ci.yml）；本地为 kind extraPortMappings + 宿主 nginx :8911 同链路。
-# cookie-only（body 不带 userId）→ X-User-Id 由 router introspect 登录 cookie 注入：
-# history/DELETE 走 SessionAccessGuard 归属裁决，修复前匿名 fail-closed 404、修复后 200。
+# chat 带显式 body userId（复刻 ChatPane 真实形态）：网关注入失效与否，归属恒为
+# u-$GUID（ChatStreamController header>body 兜底）；history/DELETE 保持 cookie-only——
+# 注入失效时请求者退化为 debug-user ≠ 归属，SessionAccessGuard fail-closed 404，
+# 回归必红；若 chat 也 cookie-only，归属与请求者同步退化、全程 200 假通过。
 if runtime_is_real && [ -n "$DEF_SVC" ] && [ "$DEF_SVC" != "None" ]; then
   GW="${GATEWAY_BASE:-http://localhost:30080}"
   GUID=$(echo "$UT" | python3 -c "import sys,json,base64;print(json.loads(base64.b64decode(sys.stdin.read().split('.')[1]+'==').decode())['uid'])")
   GSID="m2-gateway-$TS"
   GRESP=$(curl -s -N -m 25 "$GW/agent/$DEF_SVC/threads/chat" -H "Cookie: oaf_session=$CK" \
     -H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
-    -d "{\"message\":\"ping\",\"sessionId\":\"$GSID\"}" 2>/dev/null | head -c 200 || true)
-  GHIST=$(curl -s -m 10 "$GW/agent/$DEF_SVC/threads/$GSID/history" -H "Cookie: oaf_session=$CK" 2>/dev/null)
-  if echo "$GHIST" | grep -q '"messages"'; then
-    assert_eq "统一入口 cookie-only history 200（归属 u-$GUID）" \
+    -d "{\"message\":\"ping\",\"userId\":\"u-$GUID\",\"sessionId\":\"$GSID\"}" 2>/dev/null | head -c 200 || true)
+  # 以 chat 是否真正建流（AGENT_START）分岔：会话归属已落库，history 404 即身份注入失效（红）；
+  # chat 未达 AGENT_START 才允许 skip（业务面不可达或 LLM 未配）
+  if echo "$GRESP" | grep -q '"type":"AGENT_START"'; then
+    assert_eq "统一入口 cookie-only history 200（网关注入身份=归属 u-$GUID）" \
       "$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$GW/agent/$DEF_SVC/threads/$GSID/history" -H "Cookie: oaf_session=$CK")" "200"
     GLIST=$(curl -s -m 10 "$GW/agent/$DEF_SVC/threads" -H "Cookie: oaf_session=$CK" 2>/dev/null)
-    assert_contains "统一入口 threads 列表含新会话（网关身份落库）" "$GLIST" "$GSID"
-    assert_contains "统一入口 threads 列表按网关身份过滤（user_id=u-$GUID）" "$GLIST" "\"user_id\":\"u-$GUID\""
+    GSID_ROW=$(echo "$GLIST" | GSID="$GSID" python3 -c "
+import sys, json, os
+try:
+    row = next((t for t in json.load(sys.stdin) if t.get('session_id') == os.environ['GSID']), None)
+    print(row.get('user_id') if row else 'MISSING')
+except Exception:
+    print('PARSE_ERROR')" 2>/dev/null)
+    assert_eq "统一入口 threads 列表 GSID 条目归属 u-$GUID（逐条目，防他条目误中）" "$GSID_ROW" "u-$GUID"
     assert_eq "统一入口 cookie-only DELETE 200" \
       "$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X DELETE "$GW/agent/$DEF_SVC/threads/$GSID" -H "Cookie: oaf_session=$CK")" "200"
   else
-    skip "统一入口数据面身份（会话未建立或业务面不可达；RESP=${GRESP:0:60}）"
+    skip "统一入口数据面身份（chat 未达 AGENT_START：业务面不可达或 LLM 未配；RESP=${GRESP:0:60}）"
   fi
 else
   skip "统一入口数据面身份（mock 运行时或缺业务服务）"

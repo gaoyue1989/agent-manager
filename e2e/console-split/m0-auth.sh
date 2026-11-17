@@ -22,6 +22,7 @@ HDR=$(curl -s -D - -o /dev/null "$BASE/auth/login" -X POST -H 'Content-Type: app
 assert_contains "Set-Cookie oaf_session" "$HDR" "oaf_session="
 assert_contains "cookie httpOnly" "$HDR" "HttpOnly"
 assert_contains "cookie Path=/" "$HDR" "Path=/;"
+assert_contains "cookie SameSite=Lax（显式声明，无顶层跨站 POST 豁免窗口）" "$HDR" "SameSite=Lax"
 
 # 3) me 双通道（header / cookie）+ 匿名 401
 assert_eq "me 匿名 401" "$(code GET /auth/me)" "401"
