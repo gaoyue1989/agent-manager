@@ -4,12 +4,11 @@
 // （viking://~/ 经 backend 只读代理；编辑/删除在 OpenViking Studio 完成）。
 import { useCallback, useEffect, useState } from "react";
 import { api, type MemorySupplyItem, type VikingFsEntry } from "@/lib/api";
-import { useConsoleWs, useMe } from "@/lib/useMe";
+import { useConsoleWs } from "@/lib/useMe";
 import { Badge, Btn, Card, Note, PageHead } from "@/components/ui";
 
 export default function MemoryPage() {
   const ws = useConsoleWs();
-  const { me } = useMe();
   const [rows, setRows] = useState<MemorySupplyItem[]>([]);
   const [keyword, setKeyword] = useState("");
   const [selected, setSelected] = useState<number>(0);
@@ -69,7 +68,7 @@ export default function MemoryPage() {
       {sel && sel.provider === "openviking" && (
         <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
           <MemoryCredentialCard ws={ws} item={sel} />
-          <MemoryBrowserCard ws={ws} item={sel} uid={me?.user.id ?? 0} />
+          <MemoryBrowserCard ws={ws} item={sel} />
         </div>
       )}
       {!sel && ovRows.length > 0 && (
@@ -122,38 +121,40 @@ function MemoryCredentialCard({ ws, item }: { ws: number; item: MemorySupplyItem
 }
 
 // 本人记忆空间浏览（只读代理 viking://~/memories）：目录列表 + 文本内容查看。
-function MemoryBrowserCard({ ws, item }: { ws: number; item: MemorySupplyItem; uid: number }) {
+// msg 主文案中文化、原始错误进 title 属性供诊断（issue #374）。
+function MemoryBrowserCard({ ws, item }: { ws: number; item: MemorySupplyItem }) {
   const [entries, setEntries] = useState<VikingFsEntry[]>([]);
   const [content, setContent] = useState("");
   const [reading, setReading] = useState("");
   const [path, setPath] = useState("viking://~/memories");
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState<{ text: string; detail: string } | null>(null);
 
   const list = useCallback(async (uri: string) => {
-    setMsg(""); setContent(""); setReading("");
+    setMsg(null); setContent(""); setReading("");
     try {
       const raw = await api.console.memoryFiles(ws, item.serviceId, "list", uri);
       const result = (raw as any)?.result ?? raw ?? [];
       setEntries(Array.isArray(result) ? result : []);
       setPath(uri);
-    } catch (e: any) { setMsg(e.message); setEntries([]); }
+    } catch (e: any) { setMsg({ text: "目录加载失败，请稍后重试", detail: e?.message ?? String(e) }); setEntries([]); }
   }, [ws, item.serviceId]);
 
   useEffect(() => { list("viking://~/memories"); }, [list]);
 
   const read = async (uri: string) => {
-    setMsg(""); setReading(uri);
+    setMsg(null); setContent(""); setReading(uri);
     try {
       const raw = await api.console.memoryFiles(ws, item.serviceId, "read", uri);
       const text = (raw as any)?.result ?? "";
       setContent(typeof text === "string" ? text : JSON.stringify(text, null, 2));
-    } catch (e: any) { setMsg(e.message); setContent(""); }
+    } catch (e: any) { setMsg({ text: "读取失败，请稍后重试", detail: e?.message ?? String(e) }); setContent(""); }
+    finally { setReading(""); }
   };
 
   const crumb = path.replace("viking://~/memories", "").replace(/^\//, "");
   return (
     <Card title={`我的记忆空间 · ${item.displayName}`}>
-      <Note tone="info">只读浏览 viking://~/memories（编辑与删除请在 OpenViking Studio 完成）。{msg && <span className="text-amber-700"> {msg}</span>}</Note>
+      <Note tone="info">只读浏览 viking://~/memories（编辑与删除请在 OpenViking Studio 完成）。{msg && <span className="text-amber-700" title={msg.detail}> {msg.text}</span>}</Note>
       <div className="mb-2 flex items-center gap-2 text-xs">
         <Btn sm onClick={() => list("viking://~/memories")}>根目录</Btn>
         {path !== "viking://~/memories" && (

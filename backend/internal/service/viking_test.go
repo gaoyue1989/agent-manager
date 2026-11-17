@@ -36,20 +36,30 @@ func TestVikingAccountID(t *testing.T) {
 	}
 }
 
-// fakeOpenViking 模拟 Admin API 与数据面 content/write（PoC 实测响应形状），
-// 记录收到的 account 建户数与 write URI 供断言。未覆盖路径一律 404（测试内显式）。
+// fakeOpenViking 模拟 Admin API、数据面 content/write 与记忆浏览 ls/read（PoC 实测
+// 响应形状），记录收到的 account 建户数、write URI 与 browse 入参 URI 供断言。未覆盖
+// 路径一律 404（测试内显式）。ls/read 条目 uri 模仿真机返回本人展开形态
+// viking://user/u-1001/…；plan.md 的 size 取 2^53+1 探测出参重序列化数字精度。
 type fakeOpenViking struct {
-	mu       sync.Mutex
-	creates  int
-	writeURI []string
+	mu        sync.Mutex
+	creates   int
+	writeURI  []string
+	browseURI []string
 }
 
 func (f *fakeOpenViking) recordCreate() { f.mu.Lock(); f.creates++; f.mu.Unlock() }
 func (f *fakeOpenViking) recordWrite(uri string) {
 	f.mu.Lock(); f.writeURI = append(f.writeURI, uri); f.mu.Unlock()
 }
+func (f *fakeOpenViking) recordBrowse(uri string) {
+	f.mu.Lock(); f.browseURI = append(f.browseURI, uri); f.mu.Unlock()
+}
 func (f *fakeOpenViking) createCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.creates }
 func (f *fakeOpenViking) uris() []string   { f.mu.Lock(); defer f.mu.Unlock(); return append([]string{}, f.writeURI...) }
+func (f *fakeOpenViking) browseURIs() []string {
+	f.mu.Lock(); defer f.mu.Unlock(); return append([]string{}, f.browseURI...)
+}
+func (f *fakeOpenViking) resetBrowse() { f.mu.Lock(); f.browseURI = nil; f.mu.Unlock() }
 
 func (f *fakeOpenViking) handler(okWrites bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +83,17 @@ func (f *fakeOpenViking) handler(okWrites bool) http.HandlerFunc {
 			} else {
 				w.WriteHeader(http.StatusBadGateway)
 			}
+		case r.URL.Path == "/api/v1/fs/ls" && r.Method == http.MethodGet:
+			f.recordBrowse(r.URL.Query().Get("uri"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "result": []map[string]any{
+				{"uri": "viking://user/u-1001/memories/plan.md", "size": 9007199254740993,
+					"isDir": false, "modTime": "2026-11-18T10:00:00+08:00", "abstract": "user u-1001 的计划摘要"},
+				{"uri": "viking://user/u-1001/memories/sessions", "size": 0,
+					"isDir": true, "modTime": "2026-11-18T10:00:00+08:00", "abstract": ""},
+			}})
+		case r.URL.Path == "/api/v1/content/read" && r.Method == http.MethodGet:
+			f.recordBrowse(r.URL.Query().Get("uri"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "result": "# 计划\n正文内容"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -463,9 +484,9 @@ func TestMemorySupplyAndBrowse(t *testing.T) {
 		t.Fatalf("admin supply: %v %d", err, len(adminRows))
 	}
 
-	// 浏览代理:uri 白名单(仅 viking://~/)+ provider 校验 + fake 数据面透传
-	if _, err := core.ConsoleMemoryBrowse(7, ov.ID, 1001, "list", "viking://user/u-1001/memories"); err == nil {
-		t.Fatalf("non-home uri must be rejected")
+	// 浏览代理:uri 白名单(viking://~/ 契约口径 + 自有 user/{uid} 归一)+ provider 校验
+	if _, err := core.ConsoleMemoryBrowse(7, ov.ID, 1001, "list", "viking://user/u-9999/memories"); err == nil {
+		t.Fatalf("other user-form uri must be rejected")
 	}
 	if _, err := core.ConsoleMemoryBrowse(7, local.ID, 1001, "list", "viking://~/memories"); err == nil {
 		t.Fatalf("local provider must be rejected")
@@ -473,5 +494,107 @@ func TestMemorySupplyAndBrowse(t *testing.T) {
 	// 归属外服务 404
 	if _, err := core.ConsoleMemoryBrowse(999, ov.ID, 1001, "list", "viking://~/memories"); err == nil {
 		t.Fatalf("cross-workspace browse must fail")
+	}
+}
+
+// mustDecodeBrowseList 解码 ls 响应 envelope 的 result 条目数组（出参形状断言共用）。
+func mustDecodeBrowseList(t *testing.T, raw json.RawMessage) []map[string]any {
+	t.Helper()
+	var env struct {
+		Status string           `json:"status"`
+		Result []map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("ls envelope: %v\nraw: %.400s", err, raw)
+	}
+	if env.Status != "ok" {
+		t.Fatalf("ls status = %q", env.Status)
+	}
+	return env.Result
+}
+
+// 记忆浏览代理 URI 双向归一（issue #374）：入参 ~/ 与自有 user/{uid} 两形态等价、
+// 出参条目统一 ~/ 契约口径、他人形态拒绝且绝不触上游、read 回传闭环、白名单闸门不变。
+func TestMemoryBrowseURINormalization(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, _ := newVikingTestCore(t, fake.handler(true))
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", WorkspaceID: 7})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+
+	// ① ~/ 入参 → 出参条目 uri 全部归一为 viking://~/ 前缀（size 数字字面量、abstract 原样保留）
+	raw, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://~/memories")
+	if err != nil {
+		t.Fatalf("home-form list: %v", err)
+	}
+	if !strings.Contains(string(raw), "9007199254740993") {
+		t.Fatalf("size number literal must survive re-marshal (UseNumber), raw: %.400s", raw)
+	}
+	entries := mustDecodeBrowseList(t, raw)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	for _, e := range entries {
+		if u, _ := e["uri"].(string); !strings.HasPrefix(u, "viking://~/memories/") {
+			t.Fatalf("entry uri not normalized to ~/: %q", u)
+		}
+	}
+	if entries[0]["abstract"] != "user u-1001 的计划摘要" {
+		t.Fatalf("non-uri fields must be preserved verbatim, got %v", entries[0]["abstract"])
+	}
+
+	// ② 自有展开形态入参 → 200，代理上游前先归一为 ~/ 形态，出参同样归一
+	fake.resetBrowse()
+	raw, err = core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://user/u-1001/memories")
+	if err != nil {
+		t.Fatalf("own user-form list: %v", err)
+	}
+	if got := fake.browseURIs(); len(got) != 1 || got[0] != "viking://~/memories" {
+		t.Fatalf("upstream must receive normalized ~/ uri, got %v", got)
+	}
+	for _, e := range mustDecodeBrowseList(t, raw) {
+		if u, _ := e["uri"].(string); !strings.HasPrefix(u, "viking://~/memories/") {
+			t.Fatalf("own user-form output not normalized: %q", u)
+		}
+	}
+
+	// ③ 他人展开形态 → 400 且零上游调用（绝不代理他人形态）
+	fake.resetBrowse()
+	if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://user/u-9999/memories"); err == nil {
+		t.Fatalf("other user-form must be rejected")
+	} else if !strings.Contains(err.Error(), "own space") {
+		t.Fatalf("rejection must be identity-mismatch 400, got %v", err)
+	}
+	if got := fake.browseURIs(); len(got) != 0 {
+		t.Fatalf("other user-form must never reach upstream, got %v", got)
+	}
+
+	// ④ read 回传闭环：以 ① 出参的 ~/ 形态读回文本内容（read 纯透传不改写）
+	raw, err = core.ConsoleMemoryBrowse(7, svc.ID, 1001, "read", "viking://~/memories/plan.md")
+	if err != nil {
+		t.Fatalf("round-trip read: %v", err)
+	}
+	if got := fake.browseURIs(); len(got) != 1 || got[0] != "viking://~/memories/plan.md" {
+		t.Fatalf("read upstream uri mismatch: %v", got)
+	}
+	var env struct {
+		Status string          `json:"status"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Status != "ok" {
+		t.Fatalf("read envelope: %v %s", err, raw)
+	}
+	var text string
+	if err := json.Unmarshal(env.Result, &text); err != nil || text != "# 计划\n正文内容" {
+		t.Fatalf("read result = %s (%v)", env.Result, err)
+	}
+
+	// ⑤ 白名单闸门语义不变：非 ~/ 且非 user/ 形态仍拒绝
+	if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://resources/x"); err == nil {
+		t.Fatalf("non-home non-user uri must stay rejected by whitelist")
 	}
 }
