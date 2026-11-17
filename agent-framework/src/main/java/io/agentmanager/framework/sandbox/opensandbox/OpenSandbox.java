@@ -795,7 +795,9 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         // 截断可观测性（issue #296）：每次 translateGlob 仅一条 WARN，避免深树逐分支刷屏
+        // （issue #357：WARN 在 4d4fcc1 重构搬移时被误删成空 if 块，补回）
         if (truncated.get()) {
+            log.warn("[sandbox-open] glob translate truncated (root={}, entries={})", root, files.size());
         }
         var sb = new StringBuilder();
         for (FileEntry e : files) {

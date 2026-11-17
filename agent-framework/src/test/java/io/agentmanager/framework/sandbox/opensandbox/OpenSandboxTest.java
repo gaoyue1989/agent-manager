@@ -2451,4 +2451,117 @@ class OpenSandboxTest {
                 && m.contains("oaf-package/bad skill")),
             "跳过必须 WARN 留痕（含 rel 名）：" + messages);
     }
+
+    @Test
+    void farmFingerprintUnknownShouldPreserveLinksAndSkipOrphanDiff() throws Exception {
+        // issue #355：端点 skills 目录瞬时 I/O 异常（此处以删除目录模拟 walk 抛错）→ ERR-
+        // 版本 + 空清单 → 指纹未知仍收敛。收敛执行孤儿差集的空候选形态（case '|'）会把
+        // scope 内全部有效软链删光且 exit 0 记账旧指纹、稳态短路吞掉恢复收敛——指纹未知
+        // 时必须跳过孤儿差集段（保留现状等恢复），prune/禁用清理语义不变
+        var host = java.nio.file.Files.createTempDirectory("farm-err");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-err-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleServiceLive(cfg);
+        var version = svc.currentVersion().version();
+        var osb = farmOsb("v-" + version);
+        // gate 记忆跨 call 生效的前提：同一会话同一 filesystemSpec（生产形态 spec 常驻）
+        var spec = new OpenSandboxFilesystemSpec();
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-err"), osb,
+            farmOptions(svc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            null, null, spec);
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var first = farmConvergeCommands(osb);
+        assertEquals(1, first.size());
+        assertTrue(first.get(0).contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a'"),
+            "健康端点收敛先建链：" + first.get(0));
+
+        // call2 前命令快照（指纹未知收敛只跑 prune 清理，不含带引号容器路径段——
+        // farmConvergeCommands 的过滤形态不适用，改用全量命令快照 diff）
+        var beforeCaptor = ArgumentCaptor.forClass(String.class);
+        verify(osb.commands(), atLeastOnce()).run(beforeCaptor.capture());
+        var beforeCall2 = beforeCaptor.getAllValues().size();
+
+        // 指纹源损坏（同会话后续 call）：gate 已记忆 farm，收敛照常触发，但端点 ERR-
+        try (var walk = java.nio.file.Files.walk(cfg.resolve("skills"))) {
+            walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+        }
+        var call2 = new OpenSandbox(farmState(host, "sbx-farm-err"), osb,
+            farmOptions(svc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            null, null, spec);
+        bindFarmSession(call2, "sess-A");
+        call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var afterCaptor = ArgumentCaptor.forClass(String.class);
+        verify(osb.commands(), atLeastOnce()).run(afterCaptor.capture());
+        var all = afterCaptor.getAllValues();
+        assertTrue(all.size() > beforeCall2, "指纹未知仍触发收敛 exec（gate 记忆 farm，自愈重试语义不变）");
+        var added = String.join("\n---\n", all.subList(beforeCall2, all.size()));
+        assertTrue(added.contains("-maxdepth 1 -type d ! -name 'sess-A'"),
+            "prune/其它 scope 清理语义保留：" + added);
+        assertFalse(added.contains("while IFS= read -r __f"),
+            "指纹未知必须跳过孤儿差集（空候选差集会删光有效软链，issue #355）：" + added);
+        assertFalse(added.contains("ln -s"), "ERR- 无候选：不建链：" + added);
+    }
+
+    @Test
+    void farmEndpointHealthyWithNoSkillsShouldStillWipeOrphanLinks() throws Exception {
+        // 对照（防回归）：端点健康但零技能（包技能真实移除场景）→ 空候选孤儿差集必须照常
+        // 执行（删链是设计的 §6.2-3 语义，issue #355 只豁免指纹未知分支）
+        var host = java.nio.file.Files.createTempDirectory("farm-noskill");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-noskill-cfg");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var osb = farmOsb("v-" + version);
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-noskill"), osb,
+            farmOptions(svc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var cmd = farmConvergeCommands(osb).get(0);
+        assertTrue(cmd.contains("while IFS= read -r __f"),
+            "健康端点空候选 = 真实移除场景，孤儿差集照常执行：" + cmd);
+    }
+
+    @Test
+    void globTranslateTruncationShouldEmitSingleWarn() throws Exception {
+        // issue #357：截断可观测性（#296）——WARN 在重构搬移时被删成空 if 块，截断重回静默。
+        // 补回后断言：一条 WARN、含 root（farm 用例已立 logback appender 断言先例）
+        var files = mock(Filesystem.class);
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+        when(osb.commands()).thenReturn(mock(Commands.class));
+        String dir = "tree";
+        for (int i = 0; i < 12; i++) {
+            String next = dir + "/d" + (i + 1);
+            when(files.listDirectory(dir)).thenReturn(List.of(
+                dirEntry("/workspace/" + next), fileEntry("/workspace/" + dir + "/f" + i + ".md")));
+            dir = next;
+        }
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var logger = org.slf4j.LoggerFactory.getLogger(
+            io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        ((ch.qos.logback.classic.Logger) logger).addAppender(appender);
+        try {
+            sandbox.exec(RuntimeContext.builder().userId("u").build(), FIND_PROBE, 30);
+        } finally {
+            ((ch.qos.logback.classic.Logger) logger).detachAppender(appender);
+            appender.stop();
+        }
+
+        var warns = appender.list.stream()
+            .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage).toList();
+        assertEquals(1, warns.size(), "每次 translateGlob 截断仅一条 WARN：" + warns);
+        assertTrue(warns.get(0).contains("tree"), "截断 WARN 必须含 root 便于定位：" + warns);
+    }
 }
