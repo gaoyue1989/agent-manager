@@ -235,12 +235,46 @@ class UploadWorkspaceInjectorTest {
     // ---------- 非沙箱注入（injectToWorkspace）：injected 幂等跳过 + 磁盘撞名重分配 ----------
 
     @Test
-    void injectToWorkspaceShouldSkipAlreadyInjectedRow() throws Exception {
+    void injectToWorkspaceShouldSkipAlreadyInjectedRow(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        // 幂等跳过的前提是工作区文件仍在磁盘（issue #355/#354 语境区分：这里是 #354）——
+        // workspaceBase 用 @TempDir 并预写文件，模拟「已注入且磁盘健在」
+        var base = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var props = new AgentManagerProperties(base.llm(), base.server(), base.checkpoint(),
+            "/config", tmp.toString(), base.cleanup(), base.file(), base.sse(), base.harness());
+        var localInjector = new UploadWorkspaceInjector(fileStorage, fileAssetStore, props);
         when(fileAssetStore.get("f1")).thenReturn(Optional.of(
             uploadRow("f1", "alice", "s1", "uploads/note.txt", "injected")));
+        java.nio.file.Files.createDirectories(localInjector.workspaceRoot("s1").resolve("uploads"));
+        java.nio.file.Files.writeString(
+            localInjector.workspaceRoot("s1").resolve("uploads/note.txt"), "materialized");
 
-        assertEquals("uploads/note.txt", injector.injectToWorkspace("f1", "s1"));
+        assertEquals("uploads/note.txt", localInjector.injectToWorkspace("f1", "s1"));
         verify(fileStorage, never()).read(any());
+    }
+
+    @Test
+    void injectToWorkspaceShouldRematerializeWhenWorkspaceFileMissing(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        // issue #354：injected 行 + 工作区文件丢失（oaf-agent 工作区卷 emptyDir，Pod 重建
+        // 即清空）——只看 DB 状态的幂等跳过会让提示路径永久指向已消失文件。磁盘缺失必须
+        // 落回写盘路径重物化（S3 后端字节仍在，下次引用即自愈）
+        var base = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var props = new AgentManagerProperties(base.llm(), base.server(), base.checkpoint(),
+            "/config", tmp.toString(), base.cleanup(), base.file(), base.sse(), base.harness());
+        var localInjector = new UploadWorkspaceInjector(fileStorage, fileAssetStore, props);
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(
+            uploadRow("f1", "alice", "s1", "uploads/note.txt", "injected")));
+        when(fileStorage.read("upload/k/f1")).thenReturn(
+            new java.io.ByteArrayInputStream("content".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+
+        var wsPath = localInjector.injectToWorkspace("f1", "s1");
+
+        assertEquals("uploads/note.txt", wsPath, "磁盘缺失 → 重物化而非早退");
+        assertEquals("content",
+            java.nio.file.Files.readString(localInjector.workspaceRoot("s1").resolve("uploads/note.txt")),
+            "工作区文件必须重建");
+        verify(fileAssetStore).markInjected(java.util.List.of("f1"));
     }
 
     @Test

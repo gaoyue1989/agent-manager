@@ -61,7 +61,16 @@ public class UploadWorkspaceInjector {
         }
         var asset = meta.get();
         if ("injected".equals(asset.status())) {
-            return asset.workspacePath();
+            // 幂等跳过的前提是工作区文件仍在磁盘（issue #354）：oaf-agent 工作区卷为
+            // emptyDir，Pod 重建清空后 file_asset 行（injected）在 MySQL 存活——只看 DB
+            // 会早退、提示路径永久指向已消失文件。磁盘缺失 → 落回写盘路径重物化（S3 后端
+            // 字节仍在，下次引用即自愈；local 后端 storage read 失败走既有降级）
+            var existing = workspaceRoot(workspaceKey).resolve(asset.workspacePath());
+            if (Files.exists(existing)) {
+                return asset.workspacePath();
+            }
+            log.warn("inject: workspace file missing for injected asset {} ({}), re-materializing",
+                fileId, asset.workspacePath());
         }
         byte[] bytes;
         try (var in = fileStorage.read(asset.storageKey())) {
