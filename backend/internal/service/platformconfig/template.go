@@ -81,7 +81,7 @@ var template = []Group{
 			// 池模板 secretKeyRef 引用）；漏路由则 token 明文落 CM 且 Secret 不产出，
 			// 池 Pod secretKeyRef 解析失败卡 CreateContainerConfigError。
 			{EnvKey: "SKILLSYNC_TOKEN", Label: "技能同步 Token", Sensitive: true,
-				Placeholder: "池化沙箱 skills-syncd 拉取鉴权（空 = 端点免鉴权）"},
+				Placeholder: "池化沙箱 skills-syncd 拉取鉴权（空 = 内部端点关闭 404，撤销 = 池 ns token Secret 同步删除）"},
 		},
 	},
 	{
