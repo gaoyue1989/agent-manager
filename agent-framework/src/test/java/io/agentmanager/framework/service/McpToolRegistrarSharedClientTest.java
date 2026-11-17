@@ -40,6 +40,8 @@ class McpToolRegistrarSharedClientTest {
     /** buildBaseClient 桩化：按队列吐出预置 base，不发起真实连接 */
     private static final class StubRegistrar extends McpToolRegistrar {
         final Queue<McpClientWrapper> bases = new ArrayDeque<>();
+        /** 非空时强制 registerFiltered 路径（SDK 未介入，失败可归因 registrar 自身行为） */
+        Map<String, Boolean> activeMcpOverride;
 
         StubRegistrar(AgentManagerProperties props) {
             super(props);
@@ -48,6 +50,11 @@ class McpToolRegistrarSharedClientTest {
         @Override
         McpClientWrapper buildBaseClient(OafConfig.McpServerConfig mcp) {
             return bases.poll();
+        }
+
+        @Override
+        Map<String, Boolean> loadActiveMcpConfig(OafConfig.McpServerConfig mcp) {
+            return activeMcpOverride != null ? activeMcpOverride : super.loadActiveMcpConfig(mcp);
         }
     }
 
@@ -177,6 +184,64 @@ class McpToolRegistrarSharedClientTest {
         assertNull(registrar.sharedWrapper(mcp.server()));
         verify(base).close();
         assertFalse(registrar.evictSharedWrapper(mcp.server()), "重复驱逐幂等返回 false");
+    }
+
+    // ---------- 注册失败驱逐即关闭 fresh 句柄（issue #353 防泄漏） ----------
+    // fresh 句柄（本次新建且刚 CAS 入缓存，注册失败发生在交付任何 toolkit 之前）被 CAS
+    // 驱逐后即脱离缓存，evictSharedWrapper/reload 收尾/toolkit 清理全部不可达——不 close
+    // 即无持有者孤儿，server 持续宕机时看门狗每 30s 补偿一次泄漏一个连接（stdio 泄漏
+    // 子进程、HTTP 泄漏 HttpClient）。
+
+    @Test
+    void registerOneFailureShouldCloseFreshlyBuiltHandle() {
+        var base = deadBase();
+        registrar.bases.add(base);
+
+        assertNull(registrar.registerOne(toolkit, mcp));
+        assertNull(registrar.sharedWrapper(mcp.server()), "死句柄仍须驱逐（自愈语义不变）");
+        verify(base, times(1)).close();
+    }
+
+    @Test
+    void registerOneFailureShouldNotCloseReusedHandle() {
+        // activeMcpOverride 强制 registerFiltered（initialize→listTools，SDK 未介入），
+        // 失败可归因 registrar 自身；标准路径 SDK apply() 失败会自关 client
+        // （McpClientManager lambda:373 在案），无法隔离 registrar 的 close 契约
+        var base = healthyBase("b1");
+        when(base.listTools()).thenReturn(Mono.just(List.<McpSchema.Tool>of()),
+            Mono.error(new RuntimeException("tools listing failed")));
+        registrar.activeMcpOverride = Map.of("tool-x", true);
+        registrar.bases.add(base);
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+
+        assertNull(registrar.registerOne(new Toolkit(), mcp));
+        assertNull(registrar.sharedWrapper(mcp.server()), "失败句柄仍须驱逐");
+        // 复用句柄可能被其他 toolkit 引用（首注册 toolkit 在持），生命周期归缓存统一管理
+        verify(base, never()).close();
+    }
+
+    @Test
+    void syntheticRegistrationFailureShouldCloseFreshWrapper() {
+        var base = deadBase();
+        var synthetic = new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+
+        assertNull(registrar.registerSyntheticClient(toolkit, synthetic, base));
+        assertNull(registrar.sharedWrapper(synthetic.server()));
+        verify(base, times(1)).close();
+    }
+
+    @Test
+    void syntheticRejectedWrapperShouldBeClosedImmediately() {
+        var base = healthyBase("b1");
+        registrar.bases.add(base);
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+
+        // 缓存已有句柄：合成 wrapper 被拒（putIfAbsent 竞败）——从未入缓存即无任何持有者，
+        // 即刻关闭（sharedClient 竞态败者 closeQuietly 先例），注册走既有句柄照常成功
+        var rejected = deadBase();
+        assertEquals(mcp.server(), registrar.registerSyntheticClient(new Toolkit(), mcp, rejected));
+        verify(rejected, times(1)).close();
+        verify(base, never()).close();
     }
 
     // ---------- clearServer 共享句柄不 close 契约（issue #348 防回归核心） ----------
