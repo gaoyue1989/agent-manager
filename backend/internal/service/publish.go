@@ -679,6 +679,12 @@ func (c *Core) Delete(id uint) error {
 	if err != nil {
 		return err
 	}
+	// 删除守卫（issue #359）：绑定池 {k8sName}-pool 仍在上游运行时拒绝——本函数下方
+	// 连带删除的池 ns token Secret 被池模板 secretKeyRef 引用，池新 Pod 会卡
+	// CreateContainerConfigError、池容量静默退化；建池门只护建池，Delete 复核同一前提。
+	if err := c.guardBoundSandboxPool(svc.K8sName); err != nil {
+		return err
+	}
 	ns := c.Cfg.Namespace
 	_ = c.K8s.DeleteIngress(ns, svc.K8sName)
 	_ = c.K8s.DeleteService(ns, svc.K8sName+"-svc")

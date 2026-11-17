@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"agent-manager/backend/internal/k8s"
+	"agent-manager/backend/internal/k8s/k8sfake"
 	"agent-manager/backend/internal/store"
 )
 
@@ -52,10 +53,10 @@ func (h *upstreamHarness) handle(fn func(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-// newProxyCore 组装：sqlite core + platform_config 指向 httptest 上游。
-func newProxyCore(t *testing.T, extra map[string]string) (*Core, *upstreamHarness, func()) {
+// newProxyCore 组装：sqlite core（含 fake K8s 句柄）+ platform_config 指向 httptest 上游。
+func newProxyCore(t *testing.T, extra map[string]string) (*Core, *k8sfake.FakeK8s, *upstreamHarness, func()) {
 	t.Helper()
-	core, _, done := newTestCore(t)
+	core, fk, done := newTestCore(t)
 	h := &upstreamHarness{}
 	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot) // 未注册路由兜底：测试应显式声明各端点行为
@@ -70,7 +71,7 @@ func newProxyCore(t *testing.T, extra map[string]string) (*Core, *upstreamHarnes
 	if _, err := core.UpdatePlatformConfig(values); err != nil {
 		t.Fatal(err)
 	}
-	return core, h, func() { h.srv.Close(); done() }
+	return core, fk, h, func() { h.srv.Close(); done() }
 }
 
 // statusWithBody 按路径前缀路由到固定 (status, body)（有序切片：前缀最长优先，防 map 序随机）。
@@ -126,7 +127,7 @@ const sandboxPageJSON = `{"items":[{"id":"sb-1","status":{"state":"Running"},"me
 
 // TestSandboxProxySevenEndpoints 七端点 happy path：方法/路径/body/APIKey 透传断言。
 func TestSandboxProxySevenEndpoints(t *testing.T) {
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
 
@@ -248,7 +249,7 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 	// recycleStrategy 枚举校验（设计 §5.2，黑盒第 1 轮实锤契约偏差）：
 	// 合法值（Delete/Restart/Noop/缺省）接受但不透传上游；非法值 400
 	{
-		core, h, done := newProxyCore(t, nil)
+		core, _, h, done := newProxyCore(t, nil)
 		defer done()
 		seedWsService(t, core, 1, "oaf-demo")
 		h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
@@ -275,7 +276,7 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 		}
 	}
 	// image 缺省 → 取平台默认 SANDBOX_IMAGE
-	core, h, done := newProxyCore(t, map[string]string{"SANDBOX_IMAGE": "reg.example.com/ci:v9"})
+	core, _, h, done := newProxyCore(t, map[string]string{"SANDBOX_IMAGE": "reg.example.com/ci:v9"})
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
@@ -381,7 +382,7 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 // Secret 缺失（服务未接入 token）→ 旧行为建池不让 secretKeyRef 卡死 warm pod
 // （未接入服务不受默认开启影响），审计 syncd 三态留痕。
 func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
 	if err := core.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(k8s.ObjectParams{
@@ -513,7 +514,7 @@ func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
 // 在位（默认开启生效）时手动 extraEnv 键级覆盖缺省派生值（同名后者胜）、其余键追加；
 // value / secretKeyRef→valueFrom 两种形态照常。
 func TestSandboxProxyPresetExtraEnvOverride(t *testing.T) {
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
 	if err := core.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(k8s.ObjectParams{
@@ -598,7 +599,7 @@ func TestSandboxProxyPresetExtraEnvOverride(t *testing.T) {
 // TestSandboxProxyValidation createPool 校验矩阵：name DNS label + capacitySpec 四值链 +
 // 池名/服务绑定（C-1/C-2）+ extraEnv 受控白名单 + disableSyncd/extraEnv 互斥（skills-syncd §5.2）。
 func TestSandboxProxyValidation(t *testing.T) {
-	core, _, done := newProxyCore(t, nil)
+	core, _, _, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
 	overLimit := CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3}}
@@ -652,7 +653,7 @@ func TestSandboxProxyValidation(t *testing.T) {
 
 // TestSandboxProxyErrorMapping 错误映射矩阵（§5.1，d19：按状态码判定）。
 func TestSandboxProxyErrorMapping(t *testing.T) {
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	h.srv.Config.Handler = statusWithBody(map[string]func() (int, string){
 		"/v1/pools/impl": func() (int, string) { return 501, `{"code":"K8S_POOL_NOT_SUPPORTED"}` },
@@ -683,7 +684,7 @@ func TestSandboxProxyErrorMapping(t *testing.T) {
 		}
 	}
 	// 上游不可达（连接拒绝）→ 502
-	core2, _, done2 := newProxyCore(t, nil)
+	core2, _, _, done2 := newProxyCore(t, nil)
 	defer done2()
 	if _, err := core2.UpdatePlatformConfig(map[string]string{"OPENSANDBOX_SERVER_URL": "127.0.0.1:1"}); err != nil {
 		t.Fatal(err)
@@ -700,7 +701,7 @@ func TestSandboxProxyUpstreamTimeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short 模式跳过 5s 超时用例")
 	}
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	release := make(chan struct{})
 	h.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -720,7 +721,7 @@ func TestSandboxProxyUpstreamTimeout(t *testing.T) {
 
 // TestSandboxProxyNotConfigured URL / APIKey 任一缺失 → ErrSandboxNotConfigured（handler 映射 503）。
 func TestSandboxProxyNotConfigured(t *testing.T) {
-	core, _, done := newProxyCore(t, nil)
+	core, _, _, done := newProxyCore(t, nil)
 	defer done()
 	// OPENSANDBOX_SERVER_URL 为 Required 键（API 拒绝清除），直删 DB 行模拟「未配置」
 	clearKey := func(t *testing.T, key string) {
@@ -765,7 +766,7 @@ func seedWsService(t *testing.T, c *Core, wsID uint, k8sName string) {
 // TestConsoleSandboxInstancesFilter console 只读过滤：metadata.service ∈ ws 服务集合
 // （oaf- 前缀 K8sName 口径，d4）；跨空间与他 metadata 的实例被滤除；只读字段投影。
 func TestConsoleSandboxInstancesFilter(t *testing.T) {
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-a")
 	seedWsService(t, core, 1, "oaf-b")
@@ -822,7 +823,7 @@ func TestConsoleSandboxInstancesFilter(t *testing.T) {
 
 // TestConsoleSandboxInstancesPagination 多页拉取：hasNextPage 翻页直至收齐（POC 内存过滤，封顶 10 页）。
 func TestConsoleSandboxInstancesPagination(t *testing.T) {
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-a")
 	pages := 0
@@ -843,7 +844,7 @@ func TestConsoleSandboxInstancesPagination(t *testing.T) {
 
 // TestSandboxAdminAuditTrail 管理操作写审计行（PlatformConfigEvent 同款先例；§10/m12-3）。
 func TestSandboxAdminAuditTrail(t *testing.T) {
-	core, h, done := newProxyCore(t, nil)
+	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
@@ -892,5 +893,107 @@ func TestSandboxAdminAuditTrail(t *testing.T) {
 	}
 	if after := len(auditKinds(t, core)); after != before {
 		t.Fatalf("read-only ops must not audit: %d → %d", before, after)
+	}
+}
+
+// publishForDeleteGuard 发布一个待删除服务并推进到稳态（publishWithEnv 同语义，供删除守卫用例复用）。
+func publishForDeleteGuard(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgID uint) *store.ServiceEntity {
+	t.Helper()
+	return publishWithEnv(t, core, fk, pkgID, map[string]string{"LOG_LEVEL": "info"}, nil)
+}
+
+// TestDeleteServiceRefusedWhileBoundPoolExists（issue #359）：绑定池 {k8sName}-pool 仍在上游
+// 运行时删除服务被拒（ErrConflict → handler 409），K8s 对象原样未动——池模板 secretKeyRef
+// 引用 {k8sName}-skillsync-token，连带删除会使池新 Pod 卡 CreateContainerConfigError。
+func TestDeleteServiceRefusedWhileBoundPoolExists(t *testing.T) {
+	core, fk, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishForDeleteGuard(t, core, fk, pkg.ID)
+
+	poolPath := "/v1/pools/" + svc.K8sName + "-pool"
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		statusWithBody(map[string]func() (int, string){
+			poolPath: func() (int, string) { return 200, `{"name":"pool","replicas":{"current":1}}` },
+		})(w, r)
+	})
+	err := core.Delete(svc.ID)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("delete must be refused with ErrConflict, got %v", err)
+	}
+	if !strings.Contains(err.Error(), svc.K8sName+"-pool") {
+		t.Fatalf("refusal must name the bound pool, got %s", err.Error())
+	}
+	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err != nil {
+		t.Fatalf("refused delete must leave deployment intact: %v", err)
+	}
+	found := false
+	for _, req := range h.Reqs {
+		if req.Method == http.MethodGet && req.Path == poolPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("delete must probe GET /v1/pools/{k8sName}-pool before deleting")
+	}
+}
+
+// TestDeleteServiceProceedsWhenPoolAbsent（issue #359）：上游 404（无绑定池）→ 正常删除，
+// K8s 对象清理；#350 语义不受影响。
+func TestDeleteServiceProceedsWhenPoolAbsent(t *testing.T) {
+	core, fk, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishForDeleteGuard(t, core, fk, pkg.ID)
+
+	h.srv.Config.Handler = statusWithBody(map[string]func() (int, string){
+		"/v1/pools/" + svc.K8sName + "-pool": func() (int, string) { return 404, `{"message":"no pool"}` },
+	})
+	if err := core.Delete(svc.ID); err != nil {
+		t.Fatalf("delete with no bound pool must proceed: %v", err)
+	}
+	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err == nil {
+		t.Fatal("deployment must be deleted after successful Delete")
+	}
+}
+
+// TestDeleteServiceRefusedWhenUpstreamUnreachable（issue #359）：探测传输失败 fail-closed——
+// 池状态未知即不动，拒绝删除并提示恢复上游或先删池。
+func TestDeleteServiceRefusedWhenUpstreamUnreachable(t *testing.T) {
+	core, fk, _, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishForDeleteGuard(t, core, fk, pkg.ID)
+
+	if _, err := core.UpdatePlatformConfig(map[string]string{"OPENSANDBOX_SERVER_URL": "127.0.0.1:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Delete(svc.ID); err == nil {
+		t.Fatal("delete with unreachable upstream must be refused (pool state unknown)")
+	} else if !strings.Contains(err.Error(), "探测") {
+		t.Fatalf("refusal must explain probe failure, got %s", err.Error())
+	}
+	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err != nil {
+		t.Fatalf("refused delete must leave deployment intact: %v", err)
+	}
+}
+
+// TestDeleteServiceProceedsWhenSandboxNotConfigured：管理面未配置（平台未接 OpenSandbox）
+// → 无池可言，删除照常（存量无沙箱部署零影响）。
+func TestDeleteServiceProceedsWhenSandboxNotConfigured(t *testing.T) {
+	core, fk, _, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishForDeleteGuard(t, core, fk, pkg.ID)
+
+	// OPENSANDBOX_SERVER_URL 为 Required 键（API 拒绝清除），直删 DB 行模拟「未配置」
+	if err := core.DB.Where("env_key = ?", "OPENSANDBOX_SERVER_URL").Delete(&store.PlatformConfigEntity{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Delete(svc.ID); err != nil {
+		t.Fatalf("delete must proceed when sandbox proxy is not configured: %v", err)
+	}
+	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err == nil {
+		t.Fatal("deployment must be deleted after successful Delete")
 	}
 }
