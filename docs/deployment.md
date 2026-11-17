@@ -268,10 +268,10 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 | 入口 | 地址 |
 |------|------|
 | 统一入口（宿主机 nginx） | http://100.66.1.5:8911 |
-| 前端直连 | http://172.20.0.3:30881 |
+| 前端直连 | http://localhost:30881 |
 | REST API | http://localhost:30080/api/v1 |
 | MCP | http://localhost:30080/mcp |
-| 发布助手 Debug 页 | http://172.20.0.3:30080/agent/release-agent/debug |
+| 发布助手 Debug 页 | http://127.0.0.1:30080/agent/release-agent/debug |
 
 集群内组件：
 
