@@ -782,6 +782,17 @@ public class OpenSandbox extends AbstractBaseSandbox
             var skipDirs = probeCacheCoveredDirs(root, pattern);
             walkFilesSkippingDirs(root, pattern, files, 0, truncated, skipDirs);
             fillGlobFromProbeCache(root, pattern, files);
+            // D1 读穿（issue #356）：工作区根级 glob 并入 KV 的 MEMORY.md——读穿跳过预热
+            // 注入，第一轮探测窗口容器无此文件，与 read 探针的 KV 回落口径对齐；模式预检
+            // 不匹配即零开销，补注入后容器条目与 KV 条目同 rel 去重无害。根判定用绝对路径
+            // 精确等值或归一化空/点（normalizeRel 对 '/workspace' 只剥前导斜杠得 'workspace'，
+            // 不能作为根判定）
+            var rootRel = normalizeRel(root);
+            if (runtimeReadThroughEnabled && (root.equals(getWorkspaceRoot())
+                    || rootRel.isEmpty() || rootRel.equals("."))
+                    && globMatch(pattern, WorkspaceReader.MEMORY_FILE)) {
+                fillGlobFromMemoryRootFile(files);
+            }
         }
         // 截断可观测性（issue #296）：每次 translateGlob 仅一条 WARN，避免深树逐分支刷屏
         if (truncated.get()) {
@@ -819,6 +830,25 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         } catch (Exception e) {
             log.debug("[sandbox-open] read-through memory glob failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * D1 读穿根级并入（issue #356）：KV 运行时清单里的 MEMORY.md 条目（size=KV 字节数，
+     * mtime=0）——仅工作区根级 glob 且 pattern 匹配时由 translateGlob 调用（调用方已做模式
+     * 预检），memory/ 子树语义由 {@link #fillGlobFromMemoryKv} 负责、不含根级文件。
+     */
+    private void fillGlobFromMemoryRootFile(java.util.TreeSet<FileEntry> out) {
+        if (workspaceReader == null || userKey == null || userKey.isBlank() || out.size() > 5000) {
+            return;
+        }
+        try {
+            var size = workspaceReader.listRuntimeFiles(userKey).get(WorkspaceReader.MEMORY_FILE);
+            if (size != null) {
+                out.add(new FileEntry(WorkspaceReader.MEMORY_FILE, size, 0));
+            }
+        } catch (Exception e) {
+            log.debug("[sandbox-open] read-through memory root glob failed: {}", e.getMessage());
         }
     }
 
@@ -945,6 +975,12 @@ public class OpenSandbox extends AbstractBaseSandbox
             if (isMemoryRelPath(rel) && WorkspaceReader.MEMORY_DIR.equals(rel)) {
                 return workspaceReader.listRuntimeFiles(userKey).keySet().stream()
                     .anyMatch(k -> k.startsWith(WorkspaceReader.MEMORY_DIR + "/"));
+            }
+            if (WorkspaceReader.MEMORY_FILE.equals(rel)) {
+                // 根级 MEMORY.md（issue #356）：read 探针同路径经 isMemoryRelPath 回落 KV，
+                // 存在性判定必须同口径——KV 点查非 null 即存在（空内容 → yes，与 read 的
+                // __EMPTY__ 一致）
+                return workspaceReader.readMemoryFile(userKey, rel) != null;
             }
             if (rel != null && rel.startsWith(WorkspaceReader.MEMORY_DIR + "/")
                     && rel.endsWith(".md") && rel.indexOf('/', WorkspaceReader.MEMORY_DIR.length() + 1) < 0) {

@@ -833,6 +833,14 @@ class OpenSandboxTest {
             + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
             + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
 
+    /** glob 探测模板参数化形态（P_FIND 同形，root/pattern 可指定的根级/子树 glob 用例构造） */
+    private static String findProbeForm(String root, String pattern) {
+        return "find '" + root + "' -type f -name '" + pattern + "' 2>/dev/null | sort | while IFS= read -r f; do"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
+    }
+
     /** e2e mock 空 body 404 形态：SDK 对空 body 解析出 UNEXPECTED_RESPONSE（非 FILE_NOT_FOUND） */
     private static SandboxApiException sandboxApi404() {
         return new SandboxApiException("HTTP 404 Not Found", null, 404,
@@ -1375,6 +1383,92 @@ class OpenSandboxTest {
         var result = sandbox.exec(ctx, probeRead("/workspace/MEMORY.md", 10), 30);
 
         assertEquals("__EMPTY__", result.stdout(), "容器空文件 ≠ 缺失：不回落 KV");
+    }
+
+    /** 读穿开启下的根级 MEMORY.md test -e 探针（P_TEST_E 同形）：KV 有 → yes，KV 无 → no */
+    @Test
+    void readThroughTestExistsRootMemoryMdShouldFallBackToKv() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).readByteArray(org.mockito.ArgumentMatchers.anyString());
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).listDirectory(org.mockito.ArgumentMatchers.anyString());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var probe = "test -e '/workspace/MEMORY.md' && echo yes || echo no";
+        assertEquals("no", sandbox.exec(ctx, probe, 30).stdout(), "KV 无 MEMORY.md → 探测答 no");
+
+        fs.write(ctx, "MEMORY.md", "# kv memory line1\nline2\n");
+        assertEquals("yes", sandbox.exec(ctx, probe, 30).stdout(),
+            "KV 有 MEMORY.md → 探测必须与 read 同口径答 yes（issue #356）");
+        verify(osb.files(), never()).write(anyList());
+    }
+
+    /** 读穿开启下的根级 glob：MEMORY.md / *.md 命中并入 KV 条目；memory/ 子树模式不并入 */
+    @Test
+    @SuppressWarnings("unchecked")
+    void readThroughRootGlobShouldMergeKvMemoryMd() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "MEMORY.md", "# kv memory line1\nline2\n");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).listDirectory(org.mockito.ArgumentMatchers.anyString());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var exact = sandbox.exec(ctx, findProbeForm("/workspace", "MEMORY.md"), 30);
+        assertTrue(exact.stdout().contains("MEMORY.md\t24\t0"),
+            "根级 glob MEMORY.md 必须并入 KV 条目（issue #356），got: " + exact.stdout());
+
+        var star = sandbox.exec(ctx, findProbeForm("/workspace", "*.md"), 30);
+        assertTrue(star.stdout().contains("MEMORY.md\t24\t0"),
+            "*.md 模式同样要拿到 KV 中的 MEMORY.md，got: " + star.stdout());
+
+        var memorySubtree = sandbox.exec(ctx, findProbeForm("/workspace/memory", "*.md"), 30);
+        assertFalse(memorySubtree.stdout().contains("MEMORY.md"),
+            "memory/ 子树 glob 不得混入根级 MEMORY.md");
+    }
+
+    /** 口径一致性：KV 空 MEMORY.md → test -e yes 且 read __EMPTY__（两侧同判「存在但空」） */
+    @Test
+    void readThroughEmptyKvMemoryMdShouldBeConsistentAcrossProbes() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "MEMORY.md", "");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).readByteArray(org.mockito.ArgumentMatchers.anyString());
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).listDirectory(org.mockito.ArgumentMatchers.anyString());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        assertEquals("yes", sandbox.exec(ctx, "test -e '/workspace/MEMORY.md' && echo yes || echo no", 30).stdout(),
+            "空内容 ≠ 不存在：test -e 必须 yes");
+        assertEquals("__EMPTY__", sandbox.exec(ctx, probeRead("/workspace/MEMORY.md", 10), 30).stdout(),
+            "read 侧同口径 __EMPTY__");
     }
 
     /** D1：SDK edit_file 形态（python3 -c + base64 载荷，路径不可见）的真实 exec 也要触发补注入 */
