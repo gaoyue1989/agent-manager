@@ -11,6 +11,10 @@ import (
 	"agent-manager/backend/internal/store"
 )
 
+// SessionCookieName 登录态 cookie 名的单一真相源：handler 下发/读取、router auth_request
+// 子请求随 Cookie 头到达 introspect（issue #373 off 档「免鉴权但不免身份」）读回。
+const SessionCookieName = "oaf_session"
+
 // ParseSessionJWT 校验平台登录 token（introspect 数据面复用）。
 func (c *Core) ParseSessionJWT(token string) (authtoken.Claims, error) {
 	return authtoken.Parse(c.JWTSecret, token)

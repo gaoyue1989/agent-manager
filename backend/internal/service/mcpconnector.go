@@ -30,6 +30,33 @@ type McpToolInfo struct {
 	Description string `json:"description"`
 }
 
+// validatePermissions 三态权限声明强校验：仅接受对象形态 {"tools":{<tool>:"allow|ask|deny"}}。
+// *json.RawMessage 捕获的是原始字节——双重编码的字符串 token 在此直接拒绝而非静默修复
+// （带引号入库会让 agentgen 解析失败，生成包静默丢失 permissions 段）。
+func validatePermissions(raw json.RawMessage) error {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	var perm struct {
+		Tools map[string]string `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &perm); err != nil {
+		return fmt.Errorf("%w: permissions must be an object {\"tools\":{...}}", ErrInvalidForm)
+	}
+	for tool, act := range perm.Tools {
+		if tool == "" {
+			return fmt.Errorf("%w: permissions.tools has empty tool name", ErrInvalidForm)
+		}
+		switch act {
+		case "allow", "ask", "deny":
+		default:
+			return fmt.Errorf("%w: permissions.tools[%s] must be allow|ask|deny", ErrInvalidForm, tool)
+		}
+	}
+	return nil
+}
+
 // McpConnectorView 连接器视图（token 永不直出）。
 type McpConnectorView struct {
 	store.McpConnector
@@ -105,6 +132,9 @@ func (c *Core) CreateMcpConnector(workspaceID uint, in CreateMcpConnectorInput) 
 	}
 	if !strings.HasPrefix(in.Endpoint, "http://") && !strings.HasPrefix(in.Endpoint, "https://") {
 		return nil, fmt.Errorf("%w: endpoint must be http(s)", ErrInvalidForm)
+	}
+	if err := validatePermissions(in.Permissions); err != nil {
+		return nil, err
 	}
 	var cnt int64
 	if err := c.DB.Model(&store.McpConnector{}).
@@ -183,6 +213,9 @@ func (c *Core) UpdateMcpConnector(workspaceID, id uint, in PatchMcpConnectorInpu
 		updates["tool_scope"] = string(*in.ToolScope)
 	}
 	if in.Permissions != nil {
+		if err := validatePermissions(*in.Permissions); err != nil {
+			return nil, err
+		}
 		updates["permissions"] = string(*in.Permissions)
 	}
 	if len(updates) > 0 {
@@ -225,14 +258,22 @@ func (c *Core) VerifyMcpConnector(workspaceID, id uint) (map[string]interface{},
 	tools, latency, err := mcpListTools(m.Endpoint, m.AuthToken, timeout)
 	now := time.Now()
 	if err != nil {
-		_ = c.DB.Model(m).Updates(map[string]interface{}{
-			"status": "failed", "last_verified_at": &now,
-		}).Error
+		reason := []rune(err.Error())
+		if len(reason) > 512 {
+			reason = reason[:512]
+		}
+		if e := c.DB.Model(m).Updates(map[string]interface{}{
+			"status": "failed", "last_verified_at": &now, "last_verify_error": string(reason),
+		}).Error; e != nil {
+			return nil, e
+		}
 		return map[string]interface{}{"ok": false, "error": err.Error(), "latencyMs": latency}, nil
 	}
-	_ = c.DB.Model(m).Updates(map[string]interface{}{
-		"status": "verified", "last_verified_at": &now,
-	}).Error
+	if e := c.DB.Model(m).Updates(map[string]interface{}{
+		"status": "verified", "last_verified_at": &now, "last_verify_error": "",
+	}).Error; e != nil {
+		return nil, e
+	}
 	// 工具快照写入 toolScope（subset 模式的选项源；mode 保持不变）
 	var scope struct {
 		Mode  string   `json:"mode"`
@@ -248,7 +289,9 @@ func (c *Core) VerifyMcpConnector(workspaceID, id uint) (map[string]interface{},
 	}
 	scope.Tools = names
 	b, _ := json.Marshal(scope)
-	_ = c.DB.Model(m).Update("tool_scope", string(b)).Error
+	if err := c.DB.Model(m).Update("tool_scope", string(b)).Error; err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{"ok": true, "toolCount": len(tools), "tools": tools, "latencyMs": latency}, nil
 }
 

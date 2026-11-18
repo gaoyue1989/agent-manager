@@ -55,6 +55,12 @@ V2=$(req POST /console/workspaces/$WS/tools/$BAD/verify "" "$TOKEN")
 assert_contains "不可达端点 verify ok=false" "$V2" '"ok":false'
 assert_eq "verify 失败状态回写 failed" "$(req GET /console/workspaces/$WS/tools "" "$TOKEN" | python3 -c "import sys,json;print([c['status'] for c in json.load(sys.stdin)['data'] if c['id']==$BAD][0])")" "failed"
 assert_contains "toolScope 快照写入（选项源）" "$(req GET /console/workspaces/$WS/tools "" "$TOKEN")" "list_services"
+BAD_ERR=$(req GET /console/workspaces/$WS/tools "" "$TOKEN" | python3 -c "import sys,json;print([c['lastVerifyError'] for c in json.load(sys.stdin)['data'] if c['id']==$BAD][0])")
+assert_eq "verify 失败记录 lastVerifyError" "$([ -n "$BAD_ERR" ] && [ "$BAD_ERR" != "None" ] && echo yes || echo no)" "yes"
+code PATCH /console/workspaces/$WS/tools/$BAD "{\"endpoint\":\"$MCP_EP\"}" "" "$TOKEN" >/dev/null
+code POST /console/workspaces/$WS/tools/$BAD/verify "" "$TOKEN" >/dev/null
+BAD_ERR2=$(req GET /console/workspaces/$WS/tools "" "$TOKEN" | python3 -c "import sys,json;print([c['lastVerifyError'] for c in json.load(sys.stdin)['data'] if c['id']==$BAD][0])")
+assert_eq "复验成功清空 lastVerifyError" "$BAD_ERR2" ""
 
 # ---- bearer 连接器：token 不落包/不回显 → Secret；PATCH 权限 ----
 CONN_B=$(req POST /console/workspaces/$WS/tools \
@@ -66,6 +72,10 @@ P=$(req PATCH /console/workspaces/$WS/tools/$CONN_B \
   '{"timeoutSec":45,"permissions":{"tools":{"list_services":"deny"}}}' "" "$TOKEN")
 assert_eq "PATCH timeoutSec 生效" "$(echo "$P" | jqr "['data']['timeoutSec']")" "45"
 assert_contains "PATCH permissions 生效" "$P" "list_services"
+assert_eq "PATCH permissions 非法枚举 400" "$(code PATCH /console/workspaces/$WS/tools/$CONN_B \
+  '{"permissions":{"tools":{"list_services":"block"}}}' "" "$TOKEN")" "400"
+assert_eq "PATCH permissions 双重编码字符串 400" "$(code PATCH /console/workspaces/$WS/tools/$CONN_B \
+  '{"permissions":"{\"tools\":{\"list_services\":\"deny\"}}"}' "" "$TOKEN")" "400"
 
 # ---- sse transport：创建 + verify 契约（当前 verify 统一走 streamable HTTP 探测）----
 SSE_ID=$(req POST /console/workspaces/$WS/tools \

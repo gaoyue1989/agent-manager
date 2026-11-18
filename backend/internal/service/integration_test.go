@@ -245,6 +245,50 @@ func TestIntrospectApiKeyChannel(t *testing.T) {
 	_ = fresh
 }
 
+// TestIntrospectCookieChannel issue #373：introspect 会话 cookie 通道——router off 档
+// 「免鉴权但不免身份」的 backend 前置。浏览器只有 httpOnly cookie 无自报头，auth_request
+// 子请求把 Cookie 带到 upstream，introspect 读回注入 X-User-Id（header 优先、cookie 回落）。
+func TestIntrospectCookieChannel(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	c.JWTSecret = "test-jwt-secret"
+	hash, _ := store.HashPassword("p-cookie")
+	c.DB.Create(&store.User{Username: "cookieuser", PasswordHash: hash, Role: "user", Status: "active"})
+	var u store.User
+	c.DB.Where("username = ?", "cookieuser").First(&u)
+	tok := signTestJWT(u.ID)
+	intro := func(cookie, bearer string) *httptest.ResponseRecorder {
+		req, _ := http.NewRequest(http.MethodGet, "http://router/api/v1/auth/introspect", nil)
+		if cookie != "" {
+			req.Header.Set("Cookie", SessionCookieName+"="+cookie)
+		}
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		w := httptest.NewRecorder()
+		c.Introspect(w, req)
+		return w
+	}
+	// cookie 通道：200 + X-User-Id
+	w := intro(tok, "")
+	if w.Code != http.StatusOK || w.Header().Get("X-User-Id") != fmt.Sprintf("u-%d", u.ID) {
+		t.Fatalf("cookie channel: %d %q", w.Code, w.Header().Get("X-User-Id"))
+	}
+	// 坏 cookie 401
+	if w2 := intro("bad.token.here", ""); w2.Code != http.StatusUnauthorized {
+		t.Fatalf("bad cookie: %d (want 401)", w2.Code)
+	}
+	// Authorization 优先于 cookie：header 有效 token + cookie 坏 token → 200（cookie 优先会 401）
+	if w3 := intro("bad.token.here", tok); w3.Code != http.StatusOK {
+		t.Fatalf("header priority over cookie: %d (want 200)", w3.Code)
+	}
+	// 禁用用户的 cookie 即时 403（issue #148 语义，与 Bearer 通道同链）
+	c.DB.Model(&store.User{}).Where("id = ?", u.ID).Update("status", "disabled")
+	if w4 := intro(tok, ""); w4.Code != http.StatusForbidden {
+		t.Fatalf("disabled user cookie: %d (want 403)", w4.Code)
+	}
+}
+
 // signTestJWT 与 handler 层同格式的测试 JWT（HS256 标准库，见 internal/authtoken）。
 func signTestJWT(uid uint) string {
 	return testIssueToken(uid, "u", "user")

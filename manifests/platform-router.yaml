@@ -20,21 +20,23 @@ data:
   # /etc/nginx/conf.d/*.conf，仅替换环境中已定义的变量，$host/$short 等 nginx 变量不受影响）。
   # ROUTER_AUTH_MODE 由 Deployment env 注入（off|report|enforce），改档 = 改 ConfigMap/env + 滚动重启。
   default.conf.template: |
-    # 数据面网关鉴权（console-user-workspace-split M9 §3）：
-    #   off     不鉴权：/_auth 直接 200，X-User-Id 透传客户端自报（历史行为，默认）
-    #   report  introspect 结果只记日志放行（灰度观察未鉴权流量比例，≥48h 后转 enforce）
-    #   enforce 无凭据/无效凭据 401、吊销即时 403；作用域不匹配 403（fail-closed）
-    # auth 子请求是短平快元数据调用，业务流量本体不经 backend（原则一不变量）；
-    # SSE 仅握手时一次。身份信任链：report/enforce 以 introspect 结果覆盖客户端自报身份（M9 §4）。
-    map "${ROUTER_AUTH_MODE}" $router_auth_mode {
-      default "off";
-      "report"  "report";
-      "enforce" "enforce";
-    }
-    map $router_auth_mode $auth_uid {
-      default $http_x_user_id;   # off：透传客户端自报（frontend proxy 注入或直连自报，历史行为）
-      "report"  $auth_result_uid; # report/enforce：以鉴权结果为准（不信任客户端自报）
-      "enforce" $auth_result_uid;
+    # 数据面网关鉴权（console-user-workspace-split M9 §3；issue #373 修订 off 语义）：
+    #   off     免鉴权但不免身份：/_auth introspect 尽力解析（Authorization / 登录 cookie），
+    #           无凭据/坏凭据/introspect 失败或 backend 不可用（401/403/其余 4xx/5xx）一律
+    #           放行并回落客户端自报 X-User-Id（fail-open，业务面恒达）
+    #   report  同 off 的身份尽力解析，坏凭据 401/403 放行（灰度观察）；其余失败码与
+    #           backend 5xx 拒绝（fail-closed）
+    #   enforce 无凭据/无效凭据 401、吊销即时 403、其余失败码与 backend 5xx 拒绝（全 fail-closed）
+    # auth 子请求是短平快元数据调用，业务流量本体不经 backend（原则一不变量）；SSE 仅握手时一次。
+    # 分档拦截挂在 /_auth 子请求内（include 分档片段：proxy_intercept_errors + error_page）——
+    # 数据面 location 挂 error_page 实测把 401 拒绝变成「200 空响应」且业务 upstream 未被调用，
+    # 不可用（行为矩阵见 e2e/scripts/router-auth-modes-verify.sh）。
+    # 身份信任链：map 模式源必须用 envsubst 字面量 ${ROUTER_AUTH_MODE}（渲染后为常量；请求变量
+    # 做模式源实测被子请求求值污染）——off 无鉴权结果回落自报、off 有结果 / report+enforce
+    # 一律以 introspect 结果覆盖客户端自报（M9 §4）。
+    map "${ROUTER_AUTH_MODE}:${auth_result_uid}" $auth_uid {
+      ~^off:$    $http_x_user_id;  # off 无鉴权结果（无凭据/解析失败）：回落客户端自报（历史行为）
+      default    $auth_result_uid; # off 有结果 / report+enforce：以鉴权结果为准（不信任自报）
     }
     map $http_x_forwarded_proto $fwd_proto_fwd { default $http_x_forwarded_proto; "" $scheme; }
     map $http_x_forwarded_host  $fwd_host      { default $http_x_forwarded_host;  "" $http_host; }
@@ -51,26 +53,26 @@ data:
       # 上限由应用层裁决
       client_max_body_size 200m;
 
-      # auth_request 内部子请求：backend introspect（JWT 或 API Key 双通道）。
-      # X-User-Id 响应头经 auth_request_set 回注；X-Original-URI 供 API Key 作用域裁决
-      #（绑定单 Agent 的 key 仅放行该 Agent 路由）。5s 超时 fail-closed（仅 enforce 生效路径）。
+      # auth_request 内部子请求：三档共用的纯 introspect（backend JWT / API Key / 会话 cookie
+      # 三通道），分档拦截语义经 include 切换（见 auth-*.conf 片段）。X-User-Id 响应头经
+      # auth_request_set 回注；X-Original-URI 供 API Key 作用域裁决（绑定单 Agent 的 key 仅
+      # 放行该 Agent 路由）。Cookie 显式透传：浏览器只有 httpOnly 登录 cookie、无自报头，
+      # introspect 读 cookie 注入身份（issue #373；nginx 默认即透传客户端头，声明防误读）。
       location = /_auth {
         internal;
-        if ($router_auth_mode = "off") {
-          return 200;
-        }
-        if ($router_auth_mode = "report") {
-          # 灰度观察：非 2xx 转 200 放行，仅 access_log 记 auth=$auth_code 供统计
-          error_page 401 403 =200 @report_allow;
-        }
+        include /etc/nginx/auth-mode/auth-${ROUTER_AUTH_MODE}.conf;
         proxy_pass http://oaf-platform-backend.agent-platform.svc.cluster.local:8080/api/v1/auth/introspect;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie $http_cookie;
         proxy_set_header X-Original-URI $request_uri;
         proxy_connect_timeout 5s;
         proxy_read_timeout 5s;
       }
+      # 放行 named location 无条件定义（未被引用的档无害）：off=拦截 introspect 全部失败码
+      # 后恒放行；report=坏凭据 401/403 放行
+      location @off_allow { internal; return 200; }
       location @report_allow { internal; return 200; }
 
       # 内部路径排除（安全不变量，与 host 模式 per-service Ingress 排除表同语义，
@@ -92,7 +94,7 @@ data:
 
         rewrite ^/agent/[a-z0-9-]+/?(.*)$ /$1 break;    # 剥前缀：nginx 原生能力，替代 ingress 注解
         proxy_pass http://oaf-$short-svc.agent-platform.svc.cluster.local:8100;
-        proxy_set_header X-User-Id       $auth_uid;      # off=透传自报 / report+enforce=鉴权结果覆盖
+        proxy_set_header X-User-Id       $auth_uid;      # off 无结果=自报兜底 / off 有结果+report+enforce=鉴权结果覆盖
         proxy_set_header Host              $host;
         proxy_set_header X-Forwarded-Proto $fwd_proto_fwd;
         proxy_set_header X-Forwarded-Host  $fwd_host;
@@ -109,6 +111,26 @@ data:
       location = /healthz { access_log off; return 200 "ok"; }   # router 自身存活探针
       location / { return 404; }
     }
+
+  # 分档拦截片段（/_auth 内 include /etc/nginx/auth-mode/auth-${ROUTER_AUTH_MODE}.conf，
+  # envsubst 渲染期三选一；非法档位 → include 文件缺失 → 配置装载失败 crashloop，fail-fast）。
+  # 拦截必须挂子请求内：proxy_intercept_errors 拦 introspect 上游响应码 + error_page 转 named
+  # location 内部重定向，子请求 200 → auth_request 放行主请求恒达业务面。
+  auth-off.conf: |
+    # off：免鉴权但不免身份——fail-open 无死角：nginx error_page 不支持通配，列全 HTTP
+    # 4xx/5xx 失败码（覆盖 introspect 401/403、限流 429、路由 404 等异常 4xx 与
+    # backend/proxy 5xx）；漏列的失败码会让 auth_request 置主请求 500 且业务零调用
+    proxy_intercept_errors on;
+    error_page 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418
+               421 422 423 424 425 426 428 429 431 451
+               500 501 502 503 504 505 506 507 508 510 511
+               =200 @off_allow;
+  auth-report.conf: |
+    # report：坏凭据真放行（灰度观察）；其余失败码与 backend 5xx 不拦截 → 主请求 500（fail-closed）
+    proxy_intercept_errors on;
+    error_page 401 403 =200 @report_allow;
+  auth-enforce.conf: |
+    # enforce：fail-closed——无任何拦截，全部失败码原样拒绝主请求
 
 ---
 apiVersion: apps/v1
@@ -141,13 +163,16 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            - name: ROUTER_AUTH_MODE          # off | report | enforce（灰度三态，见模板头注释）
+            - name: ROUTER_AUTH_MODE          # off=免鉴权但不免身份 | report | enforce（灰度三态，见模板头注释）
               value: "off"
             - name: DNS_RESOLVER              # 动态 upstream 解析（kube-dns ClusterIP）
               value: "10.96.0.10"
           volumeMounts:
             - name: conf
               mountPath: /etc/nginx/templates   # nginx 官方 entrypoint envsubst 渲染到 conf.d/
+              readOnly: true
+            - name: auth-mode
+              mountPath: /etc/nginx/auth-mode   # 三档拦截片段（/_auth include 渲染期三选一）
               readOnly: true
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
@@ -167,6 +192,16 @@ spec:
             items:
               - key: default.conf.template
                 path: default.conf.template
+        - name: auth-mode
+          configMap:
+            name: platform-router-conf
+            items:
+              - key: auth-off.conf
+                path: auth-off.conf
+              - key: auth-report.conf
+                path: auth-report.conf
+              - key: auth-enforce.conf
+                path: auth-enforce.conf
 ---
 apiVersion: v1
 kind: Service

@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { api, type ApiKeyView, type ServiceDetail, type PackageRec } from "@/lib/api";
+import { api, type ApiKeyView, type ServiceDetail, type PackageRec, type PodInfo } from "@/lib/api";
 import { useConsoleWs, useConsoleWsRole, useMe } from "@/lib/useMe";
 import { Badge, Btn, Card, CopyBtn, Note, PageHead, Tag } from "@/components/ui";
 import ChatPane from "@/components/chat/ChatPane";
@@ -32,7 +32,8 @@ export default function AgentDetailPage() {
   const tab = params.get("tab") ?? "overview";
   const [detail, setDetail] = useState<ServiceDetail | null>(null);
   const [msg, setMsg] = useState("");
-  // 删除确认后置位：暂停 PodTable 轮询，避免删除进行中打出 agentDetail 404（issue #377）
+  // 删除确认后置位：暂停页面级 5s 轮询（徽标/Pod 表/时间线同一 detail 状态派生），
+  // 避免删除进行中打出 agentDetail 404（issue #377；#376 起 SSOT 派生）
   const [deleting, setDeleting] = useState(false);
   const writable = wsRole === "owner" || wsRole === "admin";
 
@@ -46,6 +47,11 @@ export default function AgentDetailPage() {
     if (invalidId) { setMsg("Agent 不存在：非法 ID"); return; }
     if (ws) load();
   }, [ws, sid, load, invalidId]);
+  useEffect(() => {
+    if (invalidId || !ws || deleting) return;
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [load, invalidId, ws, deleting]);
 
   const act = async (action: "publish" | "unpublish" | "republish" | "register", okMsg: string) => {
     try {
@@ -110,7 +116,7 @@ export default function AgentDetailPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab detail={detail} model={model} ws={ws} deleting={deleting} />}
+      {tab === "overview" && <OverviewTab detail={detail} model={model} />}
       {tab === "debug" && (
         <>
           <Note>调试流量直连业务运行时（SSE，不经控制面后端）；身份以平台用户注入（X-User-Id: u-{me?.user.id}），会话与记忆按用户隔离。</Note>
@@ -128,7 +134,7 @@ export default function AgentDetailPage() {
   );
 }
 
-function OverviewTab({ detail, model, ws, deleting }: { detail: ServiceDetail; model: string; ws: number; deleting: boolean }) {
+function OverviewTab({ detail, model }: { detail: ServiceDetail; model: string }) {
   return (
     <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1.6fr_1fr]">
       <div className="flex flex-col gap-3.5">
@@ -143,7 +149,7 @@ function OverviewTab({ detail, model, ws, deleting }: { detail: ServiceDetail; m
           </dl>
         </Card>
         <Card title="实时 Pod（5s 轮询）">
-          <PodTable ws={ws} id={detail.id} paused={deleting} />
+          <PodTable pods={detail.pods ?? []} />
         </Card>
       </div>
       <Card title="事件时间线">
@@ -171,21 +177,7 @@ function Kv({ k, v }: { k: string; v: React.ReactNode }) {
   );
 }
 
-function PodTable({ ws, id, paused }: { ws: number; id: number; paused?: boolean }) {
-  const [pods, setPods] = useState<{ name: string; phase: string; ready: boolean; restarts: number }[]>([]);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      if (paused) return;
-      try {
-        const d = await api.console.agentDetail(ws, id);
-        if (alive) setPods(d.pods ?? []);
-      } catch { /* 轮询失败静默 */ }
-    };
-    tick();
-    const t = setInterval(tick, 5000);
-    return () => { alive = false; clearInterval(t); };
-  }, [ws, id, paused]);
+function PodTable({ pods }: { pods: PodInfo[] }) {
   if (pods.length === 0) return <p className="text-sm text-gray-400">暂无 Pod（未部署或已下线）</p>;
   return (
     <div className="overflow-x-auto">
@@ -212,22 +204,30 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
   const [rows, setRows] = useState<ThreadRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [replayTo, setReplayTo] = useState("");
+  const [loadErr, setLoadErr] = useState("");
+  const [actionErr, setActionErr] = useState("");
   const load = useCallback(async () => {
     try {
-      // 前端直取业务面（不经 backend；proxy 注入 X-User-Id，按用户隔离）
+      // 前端直取业务面（经统一入口/前端 proxy 注入 X-User-Id，按用户隔离）
       const resp = await fetch(`/agent/${shortName}/threads?userId=${encodeURIComponent(uid)}`);
-      if (resp.ok) {
+      if (!resp.ok) {
+        setLoadErr(`会话加载失败（HTTP ${resp.status}）`);
+        setRows([]);
+      } else {
         const list = await resp.json();
         setRows(Array.isArray(list) ? list : []);
+        setLoadErr("");
       }
-    } catch { /* 业务面不可达静默 */ }
+    } catch (e: any) { setLoadErr(`会话加载失败: ${e.message}`); }
     setLoading(false);
   }, [shortName, uid]);
   useEffect(() => { load(); }, [load]);
 
   const removeThread = async (sid: string) => {
     if (!confirm(`确认删除会话 ${sid}？（业务面真删）`)) return;
-    await fetch(`/agent/${shortName}/threads/${encodeURIComponent(sid)}`, { method: "DELETE" }).catch(() => {});
+    setActionErr("");
+    const resp = await fetch(`/agent/${shortName}/threads/${encodeURIComponent(sid)}`, { method: "DELETE" }).catch(() => null);
+    if (!resp || !resp.ok) setActionErr(`删除失败（HTTP ${resp ? resp.status : "网络错误"}）`);
     await load();
   };
 
@@ -268,10 +268,12 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
               </td>
             </tr>
           ))}
-          {rows.length === 0 && !loading && <tr><td colSpan={7} className="p-6 text-center text-sm text-gray-400">当前用户暂无会话（去「调试」发一句话即可建立）</td></tr>}
+          {loadErr ? <tr><td colSpan={7} className="p-6 text-center text-sm text-red-600">{loadErr}</td></tr>
+            : rows.length === 0 && !loading && <tr><td colSpan={7} className="p-6 text-center text-sm text-gray-400">当前用户暂无会话（去「调试」发一句话即可建立）</td></tr>}
         </tbody>
       </table>
       </div>
+      {actionErr && <div className="mt-2 text-xs text-red-600">{actionErr}</div>}
       <div className="mt-2.5 text-xs text-gray-400">会话数据存于服务 checkpoint 库与 Redis Streams，跨副本可续传；此处为按用户过滤视图。</div>
     </>
   );
@@ -279,11 +281,17 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
 
 function SkillsTab({ detail, shortName }: { detail: ServiceDetail; shortName: string }) {
   const [l4, setL4] = useState<{ name: string; description?: string }[]>([]);
+  const [l4Err, setL4Err] = useState("");
   useEffect(() => {
     fetch(`/agent/${shortName}/skills/users`)
-      .then((r) => (r.ok ? r.json() : []))
-      .then((d) => setL4(Array.isArray(d) ? d : d?.skills ?? []))
-      .catch(() => {});
+      .then(async (r) => {
+        if (!r.ok) { setL4Err(`用户技能加载失败（HTTP ${r.status}）`); return []; }
+        setL4Err("");
+        const d = await r.json();
+        return Array.isArray(d) ? d : d?.skills ?? [];
+      })
+      .then((d) => setL4(d))
+      .catch(() => setL4Err("用户技能加载失败（网络错误）"));
   }, [shortName]);
   const pkgSkills = (() => {
     try { return JSON.parse(detail.skillsJson || "[]"); } catch { return []; }
@@ -325,7 +333,8 @@ function SkillsTab({ detail, shortName }: { detail: ServiceDetail; shortName: st
                 <td className="p-2 text-right"><Btn sm kind="danger" onClick={() => removeL4(s.name)}>删除</Btn></td>
               </tr>
             ))}
-            {l4.length === 0 && <tr><td colSpan={3} className="p-4 text-xs text-gray-400">暂无用户级技能（上传入口见「资产管理 → Skill 管理」，L4 按用户隔离）</td></tr>}
+            {l4Err ? <tr><td colSpan={3} className="p-4 text-xs text-red-600">{l4Err}</td></tr>
+              : l4.length === 0 && <tr><td colSpan={3} className="p-4 text-xs text-gray-400">暂无用户级技能（上传入口见「资产管理 → Skill 管理」，L4 按用户隔离）</td></tr>}
           </tbody>
         </table>
         </div>

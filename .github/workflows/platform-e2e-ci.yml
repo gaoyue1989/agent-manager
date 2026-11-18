@@ -234,6 +234,16 @@ jobs:
           LLM_ENDPOINT=http://mock-llm.agent-platform.svc.cluster.local:8080/v1
           EOF
 
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      # 数据面网关三态行为级门禁（nginx 真容器 + body 级 marker 防假放行；含 helm 渲染物
+      # 分叉防回归与归属裁决契约案）。nginx -t 全过的错误落法仍可能行为错误，此 step 是
+      # 该行为域的唯一门禁真相源（docs/implementation/10-gateway-auth.md §7）
+      - name: 数据面网关三态行为矩阵（nginx 真容器）
+        run: bash e2e/scripts/router-auth-modes-verify.sh
+
       - name: 平台发布主链路 E2E（legacy REST + K8s 对象 + 零残留）
         env:
           BASE: http://localhost:30080/api/v1

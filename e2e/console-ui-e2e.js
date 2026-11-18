@@ -304,6 +304,26 @@ async function main() {
       if (row) row.click();
     });
     check("工具权限表渲染", !!(await page.$(testid("perm-table"))));
+    // #375：perm-table 按 verify 快照回填行 + 三态编辑保存持久化 + platform 双口径标注
+    await waitFor(async () => (await text(testid("perm-table"))).includes("list_services"), 30000, 1000);
+    check("perm-table 回填快照工具行（含 list_services）", (await text(testid("perm-table"))).includes("list_services"));
+    await page.select(testid("perm-select-list_services"), "deny");
+    await click("perm-save");
+    await waitFor(async () => (await text("body")).includes("权限策略已保存"), 30000, 500);
+    check("权限策略保存反馈", (await text("body")).includes("权限策略已保存"));
+    await goto("/console/assets/tools", testid("console-tools"));
+    await waitFor(async () => (await text(testid("conn-list"))).includes(`ui-new-tool-${TS}`), 30000, 1000);
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="conn-list"]');
+      const row = el && [...el.querySelectorAll("tr")].find((r) => r.textContent.includes("ui-new-tool-"));
+      if (row) row.click();
+    });
+    await page.waitForSelector(testid("perm-select-list_services"), { timeout: 30000 });
+    check("重新进入页面 deny 持久化", (await page.$eval(testid("perm-select-list_services"), (el) => el.value)) === "deny");
+    const platPerm = await text(testid("platform-perm"));
+    check("platform-mcp 行声明口径标注（不再含 ask 全量）",
+      platPerm.includes("声明") && platPerm.includes("allow") && platPerm.includes("ask（HITL）")
+      && !(await text(testid("conn-list"))).includes("ask 全量"));
 
     // ---- 技能中心 ----
     console.log("== UI：技能中心 ==");
