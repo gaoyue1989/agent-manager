@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type MemorySupplyItem, type VikingFsEntry } from "@/lib/api";
 import { useConsoleWs } from "@/lib/useMe";
-import { Badge, Btn, Card, Note, PageHead } from "@/components/ui";
+import { Badge, Btn, Card, CopyBtn, Note, PageHead } from "@/components/ui";
 
 export default function MemoryPage() {
   const ws = useConsoleWs();
@@ -111,7 +111,7 @@ function MemoryCredentialCard({ ws, item }: { ws: number; item: MemorySupplyItem
           <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{issued.userKey}</div>
           <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
           <div className="flex gap-2 mt-2">
-            <Btn onClick={() => navigator.clipboard?.writeText(issued.userKey)}>复制</Btn>
+            <CopyBtn text={issued.userKey} />
             <Btn kind="pri" onClick={() => setIssued(null)}>我已保存，关闭</Btn>
           </div>
         </div>

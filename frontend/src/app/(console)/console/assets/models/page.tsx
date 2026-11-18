@@ -150,7 +150,11 @@ export default function ModelsPage() {
               <td className="p-2.5 font-medium">{cn.name}</td>
               <td className="p-2.5 font-mono text-xs">{cn.modelId}</td>
               <td className="p-2.5 max-w-[220px] truncate font-mono text-[11px] text-gray-500" title={cn.baseUrl}>{cn.baseUrl}</td>
-              <td className="p-2.5"><Badge status={cn.status}>{cn.status === "verified" ? "已验证" : cn.status === "failed" ? "测试失败" : "未验证"}</Badge></td>
+              <td className="p-2.5" title={cn.lastTestedAt
+                ? `最近验证：${new Date(cn.lastTestedAt).toLocaleString("zh-CN", { hour12: false })}${cn.status === "failed" ? "（上次测试失败）" : ""}`
+                : "尚未验证（点「测试」验证连通性）"}>
+                <Badge status={cn.status}>{cn.status === "verified" ? "已验证" : cn.status === "failed" ? "测试失败" : "未验证"}</Badge>
+              </td>
               <td className="p-2.5 text-xs">{cn.deliveryCount > 0 ? `${cn.deliveryCount} 个` : "未下发"}</td>
               <td className="p-2.5 text-right">
                 <span className="inline-flex gap-1">
@@ -208,7 +212,10 @@ export default function ModelsPage() {
                     : <Badge status="stopped">未下发</Badge>}
                   {writable && deliverable.length > 0 && (
                     <Btn sm kind="pri" testid={`deliver-${u.serviceId}`}
-                      onClick={() => Promise.all(deliverable.map((c) => deliver(c.connectionId, u.serviceId)))}>
+                      onClick={() => {
+                        if (!confirm(`确认将 ${deliverable.length} 个连接下发到「${u.displayName}」？（将变更其运行时 /models 模型清单）`)) return;
+                        Promise.all(deliverable.map((c) => deliver(c.connectionId, u.serviceId)));
+                      }}>
                       {synced.length > 0 ? "重新下发" : "下发"}
                     </Btn>
                   )}

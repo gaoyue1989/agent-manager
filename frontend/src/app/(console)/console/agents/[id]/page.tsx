@@ -8,7 +8,7 @@ import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { api, type ApiKeyView, type ServiceDetail, type PackageRec, type PodInfo } from "@/lib/api";
 import { useConsoleWs, useConsoleWsRole, useMe } from "@/lib/useMe";
-import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
+import { Badge, Btn, Card, CopyBtn, Note, PageHead, Tag } from "@/components/ui";
 import ChatPane from "@/components/chat/ChatPane";
 
 const TABS = [
@@ -32,6 +32,9 @@ export default function AgentDetailPage() {
   const tab = params.get("tab") ?? "overview";
   const [detail, setDetail] = useState<ServiceDetail | null>(null);
   const [msg, setMsg] = useState("");
+  // 删除确认后置位：暂停页面级 5s 轮询（徽标/Pod 表/时间线同一 detail 状态派生），
+  // 避免删除进行中打出 agentDetail 404（issue #377；#376 起 SSOT 派生）
+  const [deleting, setDeleting] = useState(false);
   const writable = wsRole === "owner" || wsRole === "admin";
 
   const load = useCallback(async () => {
@@ -45,10 +48,10 @@ export default function AgentDetailPage() {
     if (ws) load();
   }, [ws, sid, load, invalidId]);
   useEffect(() => {
-    if (invalidId || !ws) return;
+    if (invalidId || !ws || deleting) return;
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
-  }, [load, invalidId, ws]);
+  }, [load, invalidId, ws, deleting]);
 
   const act = async (action: "publish" | "unpublish" | "republish" | "register", okMsg: string) => {
     try {
@@ -59,8 +62,9 @@ export default function AgentDetailPage() {
   };
   const remove = async () => {
     if (!confirm(`确认删除 Agent「${detail?.displayName}」？将删除全部 K8s 资源与记录。`)) return;
+    setDeleting(true);
     try { await api.console.deleteAgent(ws, sid); router.push("/console/agents"); }
-    catch (e: any) { setMsg(`删除失败: ${e.message}`); }
+    catch (e: any) { setDeleting(false); setMsg(`删除失败: ${e.message}`); }
   };
 
   if (invalidId && !detail) return (
@@ -87,8 +91,7 @@ export default function AgentDetailPage() {
         sub={<span className="font-mono">
           Endpoint：{detail.endpoint || "（仅集群内）"}
           {detail.endpoint && (
-            <button className="ml-2 text-blue-600 hover:underline"
-              onClick={() => navigator.clipboard?.writeText(detail.endpoint)}>复制</button>
+            <span className="ml-2 inline-flex align-middle"><CopyBtn sm text={detail.endpoint} /></span>
           )}
         </span>}
         actions={<>
@@ -481,7 +484,7 @@ function CredentialsTab({ ws, sid, detail, writable }: { ws: number; sid: number
             <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{plaintext}</div>
             <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
             <div className="flex justify-end gap-2">
-              <Btn onClick={() => navigator.clipboard?.writeText(plaintext)}>复制</Btn>
+              <CopyBtn text={plaintext} />
               <Btn kind="pri" onClick={() => setPlaintext("")}>我已保存，关闭</Btn>
             </div>
           </Card>
@@ -564,7 +567,7 @@ function MemoryTab({ ws, sid, detail }: { ws: number; sid: number; detail: Servi
             <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{issued.userKey}</div>
             <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
             <div className="flex justify-end gap-2">
-              <Btn onClick={() => navigator.clipboard?.writeText(issued.userKey)}>复制</Btn>
+              <CopyBtn text={issued.userKey} />
               <Btn kind="pri" onClick={() => setIssued(null)}>我已保存，关闭</Btn>
             </div>
           </Card>

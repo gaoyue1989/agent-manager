@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type AgentListItem, type ApiKeyView } from "@/lib/api";
 import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
-import { Badge, Btn, Card, Note, PageHead } from "@/components/ui";
+import { Badge, Btn, Card, CopyBtn, Note, PageHead } from "@/components/ui";
 
 export default function CredentialsPage() {
   const ws = useConsoleWs();
@@ -101,7 +101,7 @@ export default function CredentialsPage() {
             <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{plaintext}</div>
             <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
             <div className="flex justify-end gap-2">
-              <Btn onClick={() => navigator.clipboard?.writeText(plaintext)}>复制</Btn>
+              <CopyBtn text={plaintext} />
               <Btn kind="pri" onClick={() => setPlaintext("")}>我已保存，关闭</Btn>
             </div>
           </Card>

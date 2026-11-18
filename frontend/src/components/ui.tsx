@@ -1,6 +1,8 @@
 "use client";
 // 控制台轻量 UI 基件（Tailwind 原生，对齐 demo 视觉：蓝主色 + 卡片 + 徽标）。
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { copyToClipboard } from "@/lib/clipboard";
 import { badgeClass } from "@/lib/status";
 
 export function Badge({ status, children }: { status: string; children?: React.ReactNode }) {
@@ -75,6 +77,23 @@ export function Btn({ children, onClick, kind = "default", sm, disabled, testid,
       className={`${base} ${kindCls} ${sm ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-[13px]"}`}>
       {children}
     </button>
+  );
+}
+
+// 复制按钮（issue #377）：统一走 copyToClipboard 策略级联——HTTP 非安全上下文经
+// execCommand 兜底真实写入剪贴板；成功「已复制 ✓」2s 还原，失败「复制失败」驻留可重试。
+export function CopyBtn({ text, children, sm, testid }: { text: string; children?: React.ReactNode; sm?: boolean; testid?: string }) {
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    if (note !== "已复制 ✓") return;
+    const t = setTimeout(() => setNote(""), 2000);
+    return () => clearTimeout(t);
+  }, [note]);
+  return (
+    <Btn sm={sm} testid={testid} onClick={async () => {
+      const r = await copyToClipboard(text);
+      setNote(r.ok ? "已复制 ✓" : "复制失败");
+    }}>{note || children || "复制"}</Btn>
   );
 }
 
