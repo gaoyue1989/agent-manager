@@ -430,9 +430,12 @@ func (c *Core) AdminMemorySupply(keyword string) ([]MemorySupplyItem, error) {
 //   - action=list → GET /api/v1/fs/ls（目录列表）
 //   - action=read → GET /api/v1/content/read（文件内容，限 .md/.txt 文本）
 //
-// 身份：userId = u-{uid}（与数据面 X-User-Id 同源），key 本地推导；uri 强制
-// viking://~/ 前缀（服务端按 key 解析身份，~ 即本人空间根，无法越权他人）。
-// 外部服务不可用/失败原样返回错误（fail-soft 由前端呈现空态）。
+// 身份：userId = u-{uid}（与数据面 X-User-Id 同源），key 本地推导；uri 双向归一到
+// viking://~/ 本人空间单一口径（issue #374）：入参接受 ~/ 契约口径与自有 user/{uid}
+// 展开形态（外部服务原生形态），出参 list 条目统一改写为 ~/ 形态（read 纯文本透传）。
+// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；他人 user/{uid} 形态一律
+// ErrInvalidForm 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
+// （fail-soft 由前端呈现空态）。
 func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri string) (json.RawMessage, error) {
 	if _, err := c.ConsoleAgentDetail(workspaceID, serviceID); err != nil {
 		return nil, err
@@ -440,11 +443,17 @@ func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri
 	if action != "list" && action != "read" {
 		return nil, fmt.Errorf("%w: unsupported browse action %q", ErrInvalidForm, action)
 	}
+	ownID := fmt.Sprintf("u-%d", uid)
+	ownUserPrefix := "viking://user/" + ownID + "/"
+	uri, err := vikingNormalizeBrowseInput(uri, ownUserPrefix)
+	if err != nil {
+		return nil, err
+	}
 	const prefix = "viking://~/"
 	if !strings.HasPrefix(uri, prefix) {
 		return nil, fmt.Errorf("%w: uri must start with %s (own space only)", ErrInvalidForm, prefix)
 	}
-	ovURL, key, err := c.memoryBrowseClient(workspaceID, serviceID, fmt.Sprintf("u-%d", uid))
+	ovURL, key, err := c.memoryBrowseClient(workspaceID, serviceID, ownID)
 	if err != nil {
 		return nil, err
 	}
@@ -469,7 +478,63 @@ func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("openviking %s: HTTP %d: %.200s", action, resp.StatusCode, raw)
 	}
+	if action == "list" {
+		raw = vikingNormalizeListOutput(raw, ownUserPrefix)
+	}
 	return json.RawMessage(raw), nil
+}
+
+// vikingNormalizeBrowseInput 入参 URI 归一（issue #374）：在 ~/ 契约口径外同时接受
+// 本人展开形态 viking://user/u-{uid}/…，仅当 {uid} 段与登录人身份精确相等时改写为
+// ~/ 形态；他人展开形态 ErrInvalidForm 拒绝、绝不代理给上游；其余形态原样返回交
+// 白名单闸门（viking://~/）拒绝。
+func vikingNormalizeBrowseInput(uri, ownUserPrefix string) (string, error) {
+	if !strings.HasPrefix(uri, "viking://user/") {
+		return uri, nil
+	}
+	if rest, ok := strings.CutPrefix(uri, ownUserPrefix); ok {
+		return "viking://~/" + rest, nil
+	}
+	return "", fmt.Errorf("%w: uri %q is not own space, expected prefix %s",
+		ErrInvalidForm, uri, strings.TrimSuffix(ownUserPrefix, "/"))
+}
+
+// vikingNormalizeListOutput 出参条目 URI 归一（仅 action=list，issue #374）：OpenViking
+// 返回条目 uri 为本人展开形态 viking://user/u-{uid}/…，改写前缀为前端契约口径
+// viking://~/…；仅改写 own-uid 前缀（他人 URI 不动，防伪造归属），其余字段与未知
+// 字段原样保留（UseNumber 保数字精度）；非预期 envelope 形状原样透传。
+func vikingNormalizeListOutput(raw json.RawMessage, ownUserPrefix string) json.RawMessage {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return raw
+	}
+	var entries []map[string]any
+	dec := json.NewDecoder(bytes.NewReader(envelope["result"]))
+	dec.UseNumber()
+	if err := dec.Decode(&entries); err != nil {
+		return raw
+	}
+	changed := false
+	for _, e := range entries {
+		u, _ := e["uri"].(string)
+		if rest, ok := strings.CutPrefix(u, ownUserPrefix); ok {
+			e["uri"] = "viking://~/" + rest
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	res, err := json.Marshal(entries)
+	if err != nil {
+		return raw
+	}
+	envelope["result"] = res
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // memoryBrowseClient 校验供给并返回 (数据面地址, 本人推导 key)。
