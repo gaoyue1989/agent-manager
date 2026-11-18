@@ -1013,6 +1013,9 @@ func registerConsoleModels(cg *gin.RouterGroup, core *service.Core) {
 // registerConsoleTools M6：MCP 连接器端点。
 func registerConsoleTools(cg *gin.RouterGroup, core *service.Core) {
 	tc := cg.Group("/workspaces/:ws/tools")
+	tc.GET("/builtin-platform", func(c *gin.Context) {
+		OK(c, service.GetBuiltinPlatformDecl())
+	})
 	tc.GET("", func(c *gin.Context) {
 		wsID, _, _ := wsCtx(c)
 		list, err := core.ListMcpConnectors(wsID)

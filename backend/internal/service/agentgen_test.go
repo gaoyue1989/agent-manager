@@ -153,6 +153,40 @@ func TestAgentGenMcpConfigGolden(t *testing.T) {
 
 // TestAgentGenMcpConfigBearerAuth bearer 连接器必须输出 auth.token 占位符（issue #139）：
 // 真实 token 走服务 Secret env（MCP_TOKEN_<NAME>），包内只有运行时可解析的 ${ENV} 引用。
+// TestBuiltinPlatformDecl 内置 platform 声明策略（模板唯一真相源的派生锁）：
+// 只锁模板解析事实——server 名 + 14 项声明（9 allow + 5 ask）；不锁注册总数与
+// 未声明集，注册清单与声明清单的漂移由 UI 双口径呈现暴露。
+func TestBuiltinPlatformDecl(t *testing.T) {
+	decl := GetBuiltinPlatformDecl()
+	if decl.Server != "platform-publisher" {
+		t.Fatalf("server: %q", decl.Server)
+	}
+	if len(decl.Tools) != 14 {
+		t.Fatalf("declared tools = %d, want 14: %+v", len(decl.Tools), decl.Tools)
+	}
+	var allow, ask, deny int
+	for name, act := range decl.Tools {
+		switch act {
+		case "allow":
+			allow++
+		case "ask":
+			ask++
+		case "deny":
+			deny++
+		default:
+			t.Fatalf("tool %q unexpected action %q", name, act)
+		}
+	}
+	if allow != 9 || ask != 5 || deny != 0 {
+		t.Fatalf("allow=%d ask=%d deny=%d, want 9/5/0", allow, ask, deny)
+	}
+	if decl.Tools["list_services"] != "allow" || decl.Tools["publish_service"] != "ask" {
+		t.Fatalf("declared mapping drifted: %+v", decl.Tools)
+	}
+}
+
+// TestAgentGenMcpConfigBearerAuth bearer 连接器必须输出 auth.token 占位符（issue #139）：
+// 真实 token 走服务 Secret env（MCP_TOKEN_<NAME>），包内只有运行时可解析的 ${ENV} 引用。
 func TestAgentGenMcpConfigBearerAuth(t *testing.T) {
 	got := mcpConfigYAML("mcd-mcp", "streamableHttp", "https://mcp.mcd.cn", 120,
 		`{"mode":"all"}`, `{}`, "bearer")

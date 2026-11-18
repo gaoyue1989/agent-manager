@@ -33,6 +33,7 @@ type McpConnector struct {
     ToolScope   string    `gorm:"type:json" json:"toolScope"`     // {"mode":"all"} | {"mode":"subset","tools":[…]}
     Permissions string    `gorm:"type:json" json:"permissions"`   // {"tools":{"ticket_query":"allow",…}} 三态默认策略
     Status      string    `gorm:"size:16" json:"status"`          // verified | unverified | failed
+    LastVerifyError string `gorm:"size:512" json:"lastVerifyError"` // 最近 verify 失败原因（512 rune 截断；复验成功清空）
     LastVerifiedAt *time.Time `json:"lastVerifiedAt"`
     CreatedAt   time.Time `json:"createdAt"`
     UpdatedAt   time.Time `json:"updatedAt"`
@@ -44,7 +45,7 @@ func (McpConnector) TableName() string { return "mcp_connectors" }
 
 ```
 GET    /api/v1/console/workspaces/:ws/tools
-  → {data:[{id,name,transport,endpoint,authType,timeoutSec,toolScope,permissions,status,lastVerifiedAt,refCount}]}
+  → {data:[{id,name,transport,endpoint,authType,timeoutSec,toolScope,permissions,status,lastVerifyError,lastVerifiedAt,refCount}]}
      // refCount = 引用该连接器的生成包数（按 mcpServers 声明统计，粗粒度：统计 services 包 frontmatter 含 server 名）
 POST   /api/v1/console/workspaces/:ws/tools          （owner/admin）
   {name, transport, endpoint, authType?, authToken?, timeoutSec?, toolScope?, permissions?}
@@ -54,11 +55,12 @@ POST   /api/v1/console/workspaces/:ws/tools/:id/verify
   → {data:{ok, toolCount, tools:[{name,description}], latencyMs, error}}
      // MCP initialize + tools/list 探测（Go 侧最小 MCP 客户端：POST {endpoint} initialize → tools/list）
      // 成功回写 status=verified + tools 快照进 toolScope（subset 模式的选项源）；失败 status=failed
+     // 且落 lastVerifyError（512 rune 截断），复验成功清空
 DELETE /api/v1/console/workspaces/:ws/tools/:id      // 被 Agent 引用中（refCount>0）→ 409 connector_in_use
 ```
 
 - 读：member 可见；写：owner/admin。
-- `platform-mcp（backend）` 不落表——创建页将其作为**内置虚拟连接器**注入选项（endpoint=/mcp、17 工具、ask 全量），生成 `mcp-configs/platform/config.yaml` 时按 release-agent 同款格式硬编码模板。
+- `platform-mcp（backend）` 不落表——创建页将其作为**内置虚拟连接器**注入选项（endpoint=/mcp、17 个注册工具（声明策略 9 allow · 5 ask，未声明默认放行）），生成 `mcp-configs/platform/config.yaml` 时按 release-agent 同款格式硬编码模板。声明清单唯一真相源 = `agentgen.builtinPlatformMCPConfig` 模板，经 `GET /tools/builtin-platform` 派生下发（issue #375 双口径澄清）。
 
 ### 2.3 注入约定（与 M3 生成器的字段契约）
 
@@ -87,7 +89,7 @@ permissions:
 对照 demo `c/tools` 双栏：
 
 - 左列上：「已保存的连接器配置（工作空间级）」表（连接器/传输/Endpoint/工具数/状态徽标：已验证·未验证·失败/被引用数/编辑·验证·删除）；platform-mcp 内置行置顶（tag「平台内置」，无操作）；
-- 左列下：「工具权限默认策略（三态）」表（工具/权限 badge/说明），数据 = 选中连接器的 Permissions（行点击联动或默认首个 verified 连接器）；
+- 左列下：「工具权限默认策略（三态）」表，行 = 选中连接器的 verify 快照工具 ∪ 已声明 permissions 键（快照外键标注；快照存在但状态非 verified 时提示重验）；owner/admin 行内三态下拉 + 「保存策略」（对象形态 PATCH，按所见全量写入 permissions，issue #375）；platform-mcp 行点选只读查看内置声明策略；verify 失败徽章悬停显示 lastVerifyError；
 - 右列：「新建连接器（表单）」卡片（名称/传输下拉/Endpoint/认证下拉（Bearer Token（存服务 Secret）/无认证）/超时/工具范围下拉（全部/指定子集——子集选项来自上次 verify 快照））+「保存并验证」提交 → 成功后左表新增行且 status=verified；
 - 底部说明条（demo 原文要点）：注入 = Agent 创建/更新勾选后写入生成包 `mcpServers` + `mcp-configs/`；认证凭据不落包，经 `{name}-env-secret` 注入运行时。
 
@@ -107,7 +109,7 @@ permissions:
 ## 4. 验收标准
 
 - [ ] 创建连接器 → 保存并验证：探测真实 MCP server（可用 platform 自身 `/mcp` 当靶子：endpoint 指向 backend NodePort）返回 17 工具，status=verified。
-- [ ] 三态权限保存后，创建 Agent 勾选该连接器 → 生成包 config.yaml 的 permissions 段与配置一致（下载包 diff 验证）；token 只在服务 Secret（`kubectl get secret {name}-env-secret` 有 `MCP_TOKEN_*`，包内无）。
+- [x] 三态权限保存后，创建 Agent 勾选该连接器 → 生成包 config.yaml 的 permissions 段与配置一致（下载包 diff 验证）；token 只在服务 Secret（`kubectl get secret {name}-env-secret` 有 `MCP_TOKEN_*`，包内无）。
 - [ ] 被 Agent 引用的连接器删除 409；解除引用（重发布去掉勾选）后可删。
 - [ ] member 只读（按钮隐藏）；owner/admin 全量可写。
 
