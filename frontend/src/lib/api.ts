@@ -120,7 +120,11 @@ export interface ModelConnUsageRow {
 export interface McpConnectorView {
   id: number; workspaceId: number; name: string; transport: string; endpoint: string;
   authType: string; timeoutSec: number; toolScope: string; permissions: string;
-  status: string; lastVerifiedAt?: string | null; refCount: number;
+  status: string; lastVerifyError?: string | null; lastVerifiedAt?: string | null; refCount: number;
+}
+export interface BuiltinPlatformDecl {
+  server: string;
+  tools: Record<string, string>;
 }
 export type ToolPerm = Record<string, string>;
 export interface IntegrationView {
@@ -359,6 +363,8 @@ export const api = {
     },
     tools: {
       list: (ws: number | string) => request<McpConnectorView[]>(`/console/workspaces/${ws}/tools`),
+      builtinPlatform: (ws: number | string) =>
+        request<BuiltinPlatformDecl>(`/console/workspaces/${ws}/tools/builtin-platform`),
       create: (ws: number | string, body: object) =>
         requestRaw<McpConnectorView>(`/console/workspaces/${ws}/tools`, { method: "POST", body: JSON.stringify(body) }),
       patch: (ws: number | string, id: number, body: object) =>

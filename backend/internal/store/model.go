@@ -236,10 +236,11 @@ type McpConnector struct {
 	TimeoutSec     int        `json:"timeoutSec"`
 	ToolScope      string     `gorm:"type:json" json:"toolScope"`   // {"mode":"all"} | {"mode":"subset","tools":[…]}
 	Permissions    string     `gorm:"type:json" json:"permissions"` // {"tools":{"t":"allow|ask|deny"}}
-	Status         string     `gorm:"size:16" json:"status"`
-	LastVerifiedAt *time.Time `json:"lastVerifiedAt"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	Status          string     `gorm:"size:16" json:"status"`
+	LastVerifyError string     `gorm:"size:512" json:"lastVerifyError"`
+	LastVerifiedAt  *time.Time `json:"lastVerifiedAt"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 func (McpConnector) TableName() string { return "mcp_connectors" }
