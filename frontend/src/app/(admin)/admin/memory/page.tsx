@@ -3,7 +3,7 @@
 // 全平台 Agent×记忆供给状态总览 + 为任意平台用户代签发访问 Key。
 import { useCallback, useEffect, useState } from "react";
 import { api, type MemorySupplyItem } from "@/lib/api";
-import { Badge, Btn, Card, Note, PageHead } from "@/components/ui";
+import { Badge, Btn, Card, CopyBtn, Note, PageHead } from "@/components/ui";
 
 export default function AdminMemoryPage() {
   const [rows, setRows] = useState<MemorySupplyItem[]>([]);
@@ -102,7 +102,7 @@ export default function AdminMemoryPage() {
             <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{issued.key}</div>
             <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
             <div className="flex justify-end gap-2">
-              <Btn onClick={() => navigator.clipboard?.writeText(issued.key)}>复制</Btn>
+              <CopyBtn text={issued.key} />
               <Btn kind="pri" onClick={() => setIssued(null)}>我已保存，关闭</Btn>
             </div>
           </Card>

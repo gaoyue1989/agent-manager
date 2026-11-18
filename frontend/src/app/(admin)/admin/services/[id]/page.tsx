@@ -2,8 +2,9 @@
 // 服务详情：状态轮询、Pod、Agent Card、env 编辑、操作与事件时间线
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { api, PackageRec, ServiceDetail } from "@/lib/api";
+import { CopyBtn } from "@/components/ui";
 
 const STATUS_STYLE: Record<string, string> = {
   running: "bg-green-100 text-green-800",
@@ -17,6 +18,7 @@ const STATUS_STYLE: Record<string, string> = {
 export default function ServiceDetailPage() {
   const params = useParams<{ id: string }>();
   const id = Number(params.id);
+  const router = useRouter();
   const [svc, setSvc] = useState<ServiceDetail | null>(null);
   const [msg, setMsg] = useState("");
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
@@ -136,6 +138,13 @@ const saveEnv = async () => {
     await act(() => api.republish(id, { packageId: target.id }), "配置包升级中，滚动完成后回到 running");
   };
 
+  // 删除成功即回列表（issue #377）：留在本页会因已删 id 的 5s 轮询永久 404
+  const remove = async () => {
+    if (!confirm("确认删除该服务？")) return;
+    try { await api.deleteService(id); router.push("/admin/services"); }
+    catch (e: any) { setMsg(`删除失败: ${e.message}`); }
+  };
+
   if (!svc) return <p className="text-gray-500">{msg || "加载中…"}</p>;
   let card: any = null;
   try { card = JSON.parse(svc.agentCardJson || "null"); } catch {}
@@ -196,7 +205,7 @@ const saveEnv = async () => {
         {svc.status === "register_failed" && (
           <button onClick={() => act(() => api.reregister(id), "重新注册中")} className="text-sm px-3 py-1.5 border rounded hover:bg-gray-100">重新注册</button>
         )}
-        <button onClick={() => { if (confirm("确认删除该服务？")) act(() => api.deleteService(id), "已删除"); }}
+        <button onClick={remove}
           className="text-sm px-3 py-1.5 border rounded text-red-600 hover:bg-red-50">删除</button>
       </section>
 
@@ -319,8 +328,7 @@ const saveEnv = async () => {
           <div className="mt-2 rounded border p-3 bg-gray-50" data-testid="memory-key-result">
             <div className="break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{mkKey}</div>
             <p className="mt-1 text-xs text-amber-600">明文仅此一次展示；同一 (服务， 用户) 重复签发得到相同 Key。</p>
-            <button onClick={() => navigator.clipboard?.writeText(mkKey)}
-              className="mt-1.5 text-xs px-2 py-1 border rounded hover:bg-gray-100">复制 Key</button>
+            <div className="mt-1.5"><CopyBtn sm text={mkKey}>复制 Key</CopyBtn></div>
           </div>
         )}
       </section>

@@ -8,7 +8,7 @@ import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { api, type ApiKeyView, type ServiceDetail, type PackageRec } from "@/lib/api";
 import { useConsoleWs, useConsoleWsRole, useMe } from "@/lib/useMe";
-import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
+import { Badge, Btn, Card, CopyBtn, Note, PageHead, Tag } from "@/components/ui";
 import ChatPane from "@/components/chat/ChatPane";
 
 const TABS = [
@@ -32,6 +32,8 @@ export default function AgentDetailPage() {
   const tab = params.get("tab") ?? "overview";
   const [detail, setDetail] = useState<ServiceDetail | null>(null);
   const [msg, setMsg] = useState("");
+  // 删除确认后置位：暂停 PodTable 轮询，避免删除进行中打出 agentDetail 404（issue #377）
+  const [deleting, setDeleting] = useState(false);
   const writable = wsRole === "owner" || wsRole === "admin";
 
   const load = useCallback(async () => {
@@ -54,8 +56,9 @@ export default function AgentDetailPage() {
   };
   const remove = async () => {
     if (!confirm(`确认删除 Agent「${detail?.displayName}」？将删除全部 K8s 资源与记录。`)) return;
+    setDeleting(true);
     try { await api.console.deleteAgent(ws, sid); router.push("/console/agents"); }
-    catch (e: any) { setMsg(`删除失败: ${e.message}`); }
+    catch (e: any) { setDeleting(false); setMsg(`删除失败: ${e.message}`); }
   };
 
   if (invalidId && !detail) return (
@@ -82,8 +85,7 @@ export default function AgentDetailPage() {
         sub={<span className="font-mono">
           Endpoint：{detail.endpoint || "（仅集群内）"}
           {detail.endpoint && (
-            <button className="ml-2 text-blue-600 hover:underline"
-              onClick={() => navigator.clipboard?.writeText(detail.endpoint)}>复制</button>
+            <span className="ml-2 inline-flex align-middle"><CopyBtn sm text={detail.endpoint} /></span>
           )}
         </span>}
         actions={<>
@@ -108,7 +110,7 @@ export default function AgentDetailPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab detail={detail} model={model} ws={ws} />}
+      {tab === "overview" && <OverviewTab detail={detail} model={model} ws={ws} deleting={deleting} />}
       {tab === "debug" && (
         <>
           <Note>调试流量直连业务运行时（SSE，不经控制面后端）；身份以平台用户注入（X-User-Id: u-{me?.user.id}），会话与记忆按用户隔离。</Note>
@@ -126,7 +128,7 @@ export default function AgentDetailPage() {
   );
 }
 
-function OverviewTab({ detail, model, ws }: { detail: ServiceDetail; model: string; ws: number }) {
+function OverviewTab({ detail, model, ws, deleting }: { detail: ServiceDetail; model: string; ws: number; deleting: boolean }) {
   return (
     <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1.6fr_1fr]">
       <div className="flex flex-col gap-3.5">
@@ -141,7 +143,7 @@ function OverviewTab({ detail, model, ws }: { detail: ServiceDetail; model: stri
           </dl>
         </Card>
         <Card title="实时 Pod（5s 轮询）">
-          <PodTable ws={ws} id={detail.id} />
+          <PodTable ws={ws} id={detail.id} paused={deleting} />
         </Card>
       </div>
       <Card title="事件时间线">
@@ -169,11 +171,12 @@ function Kv({ k, v }: { k: string; v: React.ReactNode }) {
   );
 }
 
-function PodTable({ ws, id }: { ws: number; id: number }) {
+function PodTable({ ws, id, paused }: { ws: number; id: number; paused?: boolean }) {
   const [pods, setPods] = useState<{ name: string; phase: string; ready: boolean; restarts: number }[]>([]);
   useEffect(() => {
     let alive = true;
     const tick = async () => {
+      if (paused) return;
       try {
         const d = await api.console.agentDetail(ws, id);
         if (alive) setPods(d.pods ?? []);
@@ -182,7 +185,7 @@ function PodTable({ ws, id }: { ws: number; id: number }) {
     tick();
     const t = setInterval(tick, 5000);
     return () => { alive = false; clearInterval(t); };
-  }, [ws, id]);
+  }, [ws, id, paused]);
   if (pods.length === 0) return <p className="text-sm text-gray-400">暂无 Pod（未部署或已下线）</p>;
   return (
     <div className="overflow-x-auto">
@@ -472,7 +475,7 @@ function CredentialsTab({ ws, sid, detail, writable }: { ws: number; sid: number
             <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{plaintext}</div>
             <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
             <div className="flex justify-end gap-2">
-              <Btn onClick={() => navigator.clipboard?.writeText(plaintext)}>复制</Btn>
+              <CopyBtn text={plaintext} />
               <Btn kind="pri" onClick={() => setPlaintext("")}>我已保存，关闭</Btn>
             </div>
           </Card>
@@ -555,7 +558,7 @@ function MemoryTab({ ws, sid, detail }: { ws: number; sid: number; detail: Servi
             <div className="mb-2 break-all rounded-md bg-gray-900 p-3 font-mono text-xs text-emerald-300">{issued.userKey}</div>
             <Note tone="warn">关闭后不再可见，请立即复制保存。</Note>
             <div className="flex justify-end gap-2">
-              <Btn onClick={() => navigator.clipboard?.writeText(issued.userKey)}>复制</Btn>
+              <CopyBtn text={issued.userKey} />
               <Btn kind="pri" onClick={() => setIssued(null)}>我已保存，关闭</Btn>
             </div>
           </Card>
