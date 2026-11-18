@@ -66,9 +66,14 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 
 > **控制台拆分（2026-10 起）**：frontend 升级后浏览器访问任意页面先跳 `/login`（首个 admin 由
 > `ADMIN_INIT_USER/ADMIN_INIT_PASSWORD` 种子创建）。数据面网关鉴权分三档灰度
-> （platform-router `ROUTER_AUTH_MODE=off|report|enforce`，默认 off 行为与历史一致；
-> 转档 = `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
-> 后 rollout restart，回滚同路径改回 off；enforce 前须先在控制台签发 API Key 或以 JWT 调用）。
+> （platform-router `ROUTER_AUTH_MODE`，默认 off；转档 =
+> `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
+> 后 rollout restart，回滚同路径改回 off）。三态语义（issue #373 修订）：
+> `off` = 免鉴权但不免身份——introspect 尽力解析 Authorization/登录 cookie 注入 `X-User-Id`，
+> 无凭据/坏凭据/introspect 失败或 backend 不可用（401/403/其余 4xx/5xx）一律放行回落自报
+> （浏览器经统一入口的会话回放/删除/HITL 确认因此可用）；
+> `report` = 同 off 尽力解析 + 坏凭据放行（灰度观察）、其余失败码与 backend 5xx 拒绝；
+> `enforce` = fail-closed（无凭据/坏凭据 401、其余失败码与 5xx 拒绝；前须先在控制台签发 API Key 或以 JWT 调用）。
 >
 > **Helm 部署路径（charts/oaf-platform）等价配置**：`backend.jwtSecret`（登录签发密钥，**渲染期必填**，
 > 经 Secret 注入；复用已有 Secret 时 keys 契约 `mysql-dsn/auth-token/jwt-secret/admin-init-password`）、
@@ -268,10 +273,10 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 | 入口 | 地址 |
 |------|------|
 | 统一入口（宿主机 nginx） | http://100.66.1.5:8911 |
-| 前端直连 | http://172.20.0.3:30881 |
+| 前端直连 | http://localhost:30881 |
 | REST API | http://localhost:30080/api/v1 |
 | MCP | http://localhost:30080/mcp |
-| 发布助手 Debug 页 | http://172.20.0.3:30080/agent/release-agent/debug |
+| 发布助手 Debug 页 | http://127.0.0.1:30080/agent/release-agent/debug |
 
 集群内组件：
 
@@ -308,17 +313,18 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
 ## 运维备忘
 
 1. **更新任一镜像后**：重新 save/import 后必须 `kubectl -n agent-platform rollout restart deployment/<name>`——同名 tag 不会自动触发滚动，且 Ingress 注解由 platform-backend 下发，改注解逻辑后必须重启它再 republish。
-2. 业务 Pod 的 OAF 包挂载在 `/config`（只读）+ 工作区 `/workspace`（可写）+ 日志目录 `/applog`（可写，规范日志输出，见「五、业务日志规范」）。
-3. MCP server 不可达默认不阻断启动（fail-soft）；必需依赖在包内写 `startup.required: true`。
-4. **发布多个业务服务时的数据隔离（issue #142 起新发布自动派生）**：Publish 新建服务时自动派生独立 checkpoint 库（`CHECKPOINT_JDBC_URL` 改写为 `{原库}_{k8s 名}` + `createDatabaseIfNotExist=true` 首连自动建库）与 Redis key 前缀（`AGENT_REDIS_PREFIX={k8s 名}:`，仅平台已配置共享 Redis 时）——用户显式配置的值优先于派生；**存量服务不受影响**（env 已固化），收敛需显式改 env 后 republish。**前置授权**：MySQL 账号须能建 `{原库}_%` 模式库——fresh 集群 init.sql 已含 `GRANT ALL ON \`oaf_checkpoint\_%\`.*`；存量集群手工执行一次：
+2. **platform.yaml 清单 env 变更**（AVAILABLE_IMAGES / INGRESS_HOST 等）：rollout restart **不更新 env**——必须重新 `kubectl apply -f manifests/platform.yaml` 或 `kubectl -n agent-platform set env deploy/platform-backend <K>=<V>`；只改 manifest 不落地会让清单与线上漂移（AVAILABLE_IMAGES 列入 registry 不存在的标签时，「按列表首个候选发布」直接 deploy_failed）。
+3. 业务 Pod 的 OAF 包挂载在 `/config`（只读）+ 工作区 `/workspace`（可写）+ 日志目录 `/applog`（可写，规范日志输出，见「五、业务日志规范」）。
+4. MCP server 不可达默认不阻断启动（fail-soft）；必需依赖在包内写 `startup.required: true`。
+5. **发布多个业务服务时的数据隔离（issue #142 起新发布自动派生）**：Publish 新建服务时自动派生独立 checkpoint 库（`CHECKPOINT_JDBC_URL` 改写为 `{原库}_{k8s 名}` + `createDatabaseIfNotExist=true` 首连自动建库）与 Redis key 前缀（`AGENT_REDIS_PREFIX={k8s 名}:`，仅平台已配置共享 Redis 时）——用户显式配置的值优先于派生；**存量服务不受影响**（env 已固化），收敛需显式改 env 后 republish。**前置授权**：MySQL 账号须能建 `{原库}_%` 模式库——fresh 集群 init.sql 已含 `GRANT ALL ON \`oaf_checkpoint\_%\`.*`；存量集群手工执行一次：
    ```sql
    GRANT ALL ON `oaf_checkpoint\_%`.* TO 'oaf'@'%'; FLUSH PRIVILEGES;
    ```
    未派生的存量默认值（共享 `oaf_checkpoint` 库 + 空 Redis 前缀）多服务沿用仍会互相串数据。
-5. backend 重启/升级不影响已在跑的业务服务（数据面不经 backend）；唯一边界：发布等待期（`deploying` 状态）重启 backend 会丢后台注册推进，该服务会停在 `deploying`，用 Republish 解救，业务 Pod 不受影响。
-6. **共享 PVC 名可配**：`PLATFORM_PVC_NAME`（默认 `platform-data`）决定业务 Pod 与 backend 共用的平台数据卷名——环境已有 PVC 用别的名字时设它（Helm 部署即 `persistence.existingClaim`）；变更后需 republish 才刷到业务 Deployment。
-7. **skills-syncd（沙箱技能同步，可选）**：镜像构建/导入 `./scripts/build-skillsync-image.sh`；部署前提与回滚见「五之二 → 4. 技能同步」，排障 runbook 见设计文档 §10.4（docs/design/sandbox-skills-syncd-design-261112.md）。
-8. **OpenViking 记忆供给（openviking-memory-integration-design-261116，可选）**：长期记忆/知识/技能迁至 OpenViking 上下文数据库。三凭证分层——root key 仅 backend（建/删 account、per-user key 签发）、account ADMIN key + user seed 经服务 Secret 下发（`OVK_ADMIN_KEY`/`OVK_USER_SEED`，保留键用户不可设）、per-user user key 业务面本地推导（免存储表，Go/Java 同公式同测试向量）。
+6. backend 重启/升级不影响已在跑的业务服务（数据面不经 backend）；唯一边界：发布等待期（`deploying` 状态）重启 backend 会丢后台注册推进，该服务会停在 `deploying`，用 Republish 解救，业务 Pod 不受影响。
+7. **共享 PVC 名可配**：`PLATFORM_PVC_NAME`（默认 `platform-data`）决定业务 Pod 与 backend 共用的平台数据卷名——环境已有 PVC 用别的名字时设它（Helm 部署即 `persistence.existingClaim`）；变更后需 republish 才刷到业务 Deployment。
+8. **skills-syncd（沙箱技能同步，可选）**：镜像构建/导入 `./scripts/build-skillsync-image.sh`；部署前提与回滚见「五之二 → 4. 技能同步」，排障 runbook 见设计文档 §10.4（docs/design/sandbox-skills-syncd-design-261112.md）。
+9. **OpenViking 记忆供给（openviking-memory-integration-design-261116，可选）**：长期记忆/知识/技能迁至 OpenViking 上下文数据库。三凭证分层——root key 仅 backend（建/删 account、per-user key 签发）、account ADMIN key + user seed 经服务 Secret 下发（`OVK_ADMIN_KEY`/`OVK_USER_SEED`，保留键用户不可设）、per-user user key 业务面本地推导（免存储表，Go/Java 同公式同测试向量）。
    - **OpenViking 由外部提供服务**（与外部 MySQL/Redis 同模式，平台不部署）：接入契约 = 服务可达（业务 Pod 网络）+ `server.auth_mode="api_key"` + root key 交 backend + VLM/embedding 供给由外部运维保障（检索热路径依赖 embedding——免费/限速档不可用，实测 50 次/日即 429）
    - 启用：`kubectl -n agent-platform set env deploy/platform-backend OPENVIKING_ENABLED=true OPENVIKING_BASE_URL=<外部服务地址> OPENVIKING_ROOT_API_KEY=<root-key>` 后 rollout restart；启用后**新发布默认** `AGENT_MEMORY_PROVIDER=openviking`（服务显式 `local` 退出；平台未启用时显式 `openviking` 400 拒绝）
    - 切换：`AGENT_MEMORY_PROVIDER` 发布期固化于服务 env，切换 = PATCH `/services/{id}/env`（含该键）+ 滚动重启；`OVK_SESSION_COMMIT`（会话归档+自动提取，默认 false=逐 turn remember）/`OVK_KNOWLEDGE_IMPORT`/`OVK_SHARED_SKILLS`/`OVK_MCP_SHARED_CONTEXT`（服务级共享检索 MCP）逐服务开关

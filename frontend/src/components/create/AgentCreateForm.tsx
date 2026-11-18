@@ -4,7 +4,8 @@
 // 编辑模式：无方式卡片、名称锁定、标题/按钮换「保存」、提交 PUT（copy-on-write 新版本 + republish）。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type MemoryFormPayload, SandboxFormPayload, type SkillRefPayload, type SkillRec } from "@/lib/api";
+import { api, type BuiltinPlatformDecl, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type MemoryFormPayload, SandboxFormPayload, type SkillRefPayload, type SkillRec } from "@/lib/api";
+import { parseSnapshotTools, parseToolPerms } from "@/lib/connectors";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import { PERM_STYLE } from "@/lib/status";
 
@@ -80,6 +81,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
   const [images, setImages] = useState<ImageOption[]>([]);
   const [conns, setConns] = useState<ModelConnectionView[]>([]);
   const [connectors, setConnectors] = useState<McpConnectorView[]>([]);
+  const [builtinDecl, setBuiltinDecl] = useState<BuiltinPlatformDecl | null>(null);
   const [integrations, setIntegrations] = useState<IntegrationView[]>([]);
   const [packages, setPackages] = useState<PackageRec[]>([]);
   // Skill 候选池（Skill 中心 2026-10-19）：空间技能资产（启用中）+ 各自已发布版本列表；
@@ -97,6 +99,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     api.console.images().then(setImages).catch(() => {});
     api.console.modelConnections.list(ws).then(setConns).catch(() => {});
     api.console.tools.list(ws).then(setConnectors).catch(() => {});
+    api.console.tools.builtinPlatform(ws).then(setBuiltinDecl).catch(() => {});
     api.console.integrations.list(ws).then((r) => setIntegrations(r.relations.filter((x) => x.enabled))).catch(() => {});
     api.console.packages(ws).then(setPackages).catch(() => {});
     api.console.skillCenter.list(ws).then(async (list) => {
@@ -442,7 +445,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                             : s.mcpServers.filter((m) => m.builtin !== "platform"),
                         }))} /></td>
                       <td className="p-2 font-medium">platform-mcp <Tag>平台内置</Tag></td>
-                      <td className="p-2">17</td>
+                      <td className="p-2">17（注册）</td>
                     </tr>
                     {connectors.map((cn) => (
                       <tr key={cn.id} className="border-b last:border-0">
@@ -461,7 +464,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                     {connectors.length === 0 && <tr><td colSpan={3} className="p-3 text-xs text-gray-400">暂无连接器 —— 先到「工具管理」创建 MCP 连接器</td></tr>}
                   </tbody>
                 </table>
-                <PermPreview connectors={connectors} selected={state.mcpServers} />
+                <PermPreview connectors={connectors} selected={state.mcpServers} builtin={builtinDecl} />
                 <div className="mt-4 rounded-md bg-gray-100 px-3 py-1.5 text-xs text-gray-500">凭证 / 知识库：暂无可用 · 规划中</div>
               </div>
             </div>
@@ -625,29 +628,50 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
 }
 
 function toolCount(cn: McpConnectorView): number {
-  try {
-    const scope = JSON.parse(cn.toolScope || "{}");
-    if (scope.mode === "subset" && Array.isArray(scope.tools)) return scope.tools.length;
-  } catch { /* 忽略 */ }
-  return -1; // 全量模式：运行时枚举数未知，前端显示 —
+  const tools = parseSnapshotTools(cn);
+  return tools.length > 0 ? tools.length : -1;
 }
 
-function PermPreview({ connectors, selected }: { connectors: McpConnectorView[]; selected: { connectorId?: number; builtin?: string }[] }) {
+function PermPreview({ connectors, selected, builtin }: {
+  connectors: McpConnectorView[];
+  selected: { connectorId?: number; builtin?: string }[];
+  builtin: BuiltinPlatformDecl | null;
+}) {
   const picked = connectors.filter((cn) => selected.some((s) => s.connectorId === cn.id));
-  if (picked.length === 0) return null;
+  const hasPlatform = selected.some((s) => s.builtin === "platform");
+  if (picked.length === 0 && !hasPlatform) return null;
+  const platformVals = builtin ? Object.values(builtin.tools) : [];
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded-md bg-gray-100 px-2.5 py-1.5 text-xs text-gray-500">
       权限预览：
+      {hasPlatform && platformVals.length > 0 && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-[11px]">
+          platform-mcp · 声明 {platformVals.filter((a) => a === "allow").length} allow · {platformVals.filter((a) => a === "ask").length} ask（HITL）
+        </span>
+      )}
       {picked.slice(0, 3).map((cn) => {
-        let perms: Record<string, string> = {};
-        try { perms = JSON.parse(cn.permissions || "{}").tools ?? {}; } catch { /* 忽略 */ }
-        return Object.entries(perms).slice(0, 3).map(([tool, perm]) => (
-          <span key={`${cn.id}-${tool}`} className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${PERM_STYLE[perm] ?? "bg-gray-100 text-gray-500"}`}>
-            {tool} · {perm}
+        const perms = parseToolPerms(cn);
+        const names = Object.keys(perms);
+        const vals = Object.values(perms);
+        return (
+          <span key={cn.id} className="inline-flex flex-wrap items-center gap-1">
+            {cn.name}：
+            {names.length === 0 && parseSnapshotTools(cn).length > 0
+              ? <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-700">未声明策略 → 运行时全放行</span>
+              : names.slice(0, 3).map((tool) => (
+                <span key={tool} className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${PERM_STYLE[perms[tool]] ?? "bg-gray-100 text-gray-500"}`}>
+                  {tool} · {perms[tool]}
+                </span>
+              ))}
+            {names.length > 0 && (
+              <span className="text-[11px] text-gray-400">
+                （allow {vals.filter((a) => a === "allow").length} · ask {vals.filter((a) => a === "ask").length} · deny {vals.filter((a) => a === "deny").length}）
+              </span>
+            )}
           </span>
-        ));
+        );
       })}
-      <span className="text-gray-400">细调在创建后经包编辑器修改</span>
+      <span className="text-gray-400">细调在「工具管理」页配置</span>
     </div>
   );
 }

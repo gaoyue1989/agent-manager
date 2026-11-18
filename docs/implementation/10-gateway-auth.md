@@ -5,6 +5,7 @@
 | 依赖 | M0–M8（本模块是二期独立立项，一期全部完成后开工） |
 | 对应设计 | §5.4 数据面身份与网关鉴权（二期）、§7.1 introspect、§13 决议 3 |
 | demo 对照 | 无新页面（后台链路；凭证页警示条「二期生效」兑现） |
+| 修订 | 2026-11 issue #373：off 档语义修订为「免鉴权但不免身份」+ introspect 会话 cookie 通道 + 分档拦截重构（见 §7） |
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：introspect 双通道（JWT/API Key）、作用域裁决、last_used_at 节流写全绿（`cd backend && make test`）；router 配置以 `nginx -t` 渲染校验进 CI；②e2e（独立环境配置，enforce 三态）：无凭据 401 / 带凭据 200 且 `X-User-Id` 正确 / 跨作用域 403 / 吊销即时 403 + 四必需 job 带凭据回归全绿；report 灰度观察 48h 指标为上线前置（附记录）；③§5 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 
@@ -74,3 +75,13 @@ location = /_auth {
 
 - router 单点配置错误影响全部业务路由 → 上线走 report 灰度 + `ROUTER_AUTH_MODE` 一键回 off；
 - introspect 不可用 = 全量 401（fail-closed）——backend 是发布链路必需组件，此依赖在设计 §11 已评审接受；仍建议 router 对 `_auth` 加 5s 超时 + 一次重试。
+
+## 7. 修订记录（issue #373，2026-11）
+
+落地三态语义与拦截机制的承载真相源是 `manifests/platform-router.yaml` / `charts/.../router-configmap.yaml` 模板头注释；行为级断言真相源是 `e2e/scripts/router-auth-modes-verify.sh`（nginx 真容器 + body 级 marker，manifests 与 helm 渲染物双源各 13 案）。此处只记结论与防重蹈：
+
+- **off 档语义修订：「免鉴权但不免身份」**。`/_auth` 不再直接 return 200（原实现跳过 introspect，`$auth_uid` 纯透传客户端自报），三档共用纯 introspect 子请求：浏览器只有 httpOnly `oaf_session` cookie、无自报头，introspect 增加 cookie 回落通道（header 优先、cookie 回落，backend `service.SessionCookieName` 单一真相源）注入 `X-User-Id`；introspect 失败/不可用时放行并回落自报（fail-open，业务面恒达）。此前 off 档经统一入口 :8911 的 threads 回放/删除、HITL confirm-stream、skills/users 因 SessionAccessGuard 匿名 fail-closed 404/400，即此根因。
+- **report 档死代码修复**：原模板 `if ($router_auth_mode = "report") { error_page ... }` 实测 if 块内 error_page 不生效（401 原样透传拒绝），report「放行观察」语义从未落地；三态语义本次经分档 include 片段才真正生效——report 现网未启用（默认 off），无存量影响。
+- **拦截机制承载点（防重蹈）**：分档拦截挂 `/_auth` 子请求内（`proxy_intercept_errors` + `error_page ... =200 @off_allow/@report_allow`，经 `include /etc/nginx/auth-mode/auth-${ROUTER_AUTH_MODE}.conf` 渲染期三选一）。**「数据面 location 挂 error_page」实测证伪**：状态码 200 但响应体为空、业务 upstream 未被调用（假放行）——本模块的 nginx 行为实验（docker nginx:1.27.1-alpine + body 级断言）确认唯一同时满足「fail-open + 业务恒达 + 身份正确」的落法是子请求内拦截；error_page if 块内不生效 / 目标变量化无效 / auth_request 不支持变量 URI 同为实验结论。
+- **身份信任链**：`$auth_uid` 改组合源 map（模式源必须是 envsubst 字面量 `${ROUTER_AUTH_MODE}`，请求变量做模式源实测被子请求求值污染）：off 无鉴权结果回落自报、off 有结果 / report+enforce 一律以 introspect 结果覆盖客户端自报（M9 §4 语义不变）。
+- **连带行为变化**：report 坏凭据从实际 401 变为真放行（死代码修复的语义兑现）；off 档新增每数据面请求一次 introspect 子请求（无凭据走 backend 401 快速路径无 DB 查询，有凭据 JWT 通道每请求一次用户查询）；经统一入口的调试/回放会话归属从匿名 debug-user 变为登录用户 `u-{uid}`。

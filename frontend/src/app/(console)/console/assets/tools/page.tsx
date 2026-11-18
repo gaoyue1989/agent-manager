@@ -2,10 +2,14 @@
 // 用户侧 · 工具管理（M6 §3.1，demo c/tools）：MCP 连接器配置表 + 三态权限策略；
 // 新建连接器走右侧抽屉（slide-over，与模型连接页同交互——评审反馈统一弹出形态）。
 import { useCallback, useEffect, useState } from "react";
-import { api, type McpConnectorView } from "@/lib/api";
+import { api, type BuiltinPlatformDecl, type McpConnectorView } from "@/lib/api";
+import { parseSnapshotTools, parseToolPerms } from "@/lib/connectors";
+import { PERM_STYLE } from "@/lib/status";
 import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import Drawer from "@/components/Drawer";
+
+type ToolSel = { kind: "connector"; cn: McpConnectorView } | { kind: "platform" };
 
 // 抽屉内新建表单（保存并验证成功后经 onDone 关闭刷新）
 function ConnectorForm({ ws, onDone }: { ws: number; onDone: (msg: string) => void }) {
@@ -84,7 +88,9 @@ export default function ToolsPage() {
   const role = useConsoleWsRole();
   const writable = role === "owner" || role === "admin";
   const [list, setList] = useState<McpConnectorView[]>([]);
-  const [selected, setSelected] = useState<McpConnectorView | null>(null);
+  const [builtin, setBuiltin] = useState<BuiltinPlatformDecl | null>(null);
+  const [sel, setSel] = useState<ToolSel | null>(null);
+  const [draft, setDraft] = useState<Record<string, string> | null>(null);
   const [msg, setMsg] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -92,11 +98,22 @@ export default function ToolsPage() {
     try {
       const rows = await api.console.tools.list(ws);
       setList(rows);
-      setSelected((cur) => (cur ? rows.find((r) => r.id === cur.id) ?? rows[0] ?? null : rows[0] ?? null));
+      setSel((cur) => {
+        if (cur?.kind === "platform") return cur;
+        const id = cur?.kind === "connector" ? cur.cn.id : undefined;
+        const found = id === undefined ? undefined : rows.find((r) => r.id === id);
+        if (found) return { kind: "connector", cn: found };
+        return rows[0] ? { kind: "connector", cn: rows[0] } : { kind: "platform" };
+      });
       setMsg("");
     } catch (e: any) { setMsg(`加载失败: ${e.message}`); }
   }, [ws]);
-  useEffect(() => { if (ws) load(); }, [ws, load]);
+  useEffect(() => {
+    if (!ws) return;
+    load();
+    api.console.tools.builtinPlatform(ws).then(setBuiltin).catch(() => {});
+  }, [ws, load]);
+  useEffect(() => { setDraft(null); }, [sel]);
 
   const verify = async (id: number) => {
     try {
@@ -117,8 +134,33 @@ export default function ToolsPage() {
     load();
   };
 
-  const perms: Record<string, string> = (() => {
-    try { return JSON.parse(selected?.permissions || "{}").tools ?? {}; } catch { return {}; }
+  const selCn = sel?.kind === "connector" ? sel.cn : null;
+  const snapTools = selCn ? parseSnapshotTools(selCn) : [];
+  const declared = selCn ? parseToolPerms(selCn) : (builtin?.tools ?? {});
+  const rowNames = selCn
+    ? [...new Set([...snapTools, ...Object.keys(declared)])]
+    : Object.keys(builtin?.tools ?? {});
+  const effective: Record<string, string> = draft
+    ?? Object.fromEntries(rowNames.map((n) => [n, declared[n] ?? "allow"]));
+  const dirty = selCn !== null
+    && (Object.keys(effective).length !== Object.keys(declared).length
+      || rowNames.some((n) => effective[n] !== declared[n]));
+
+  const savePerms = async () => {
+    if (!selCn) return;
+    const tools = Object.fromEntries(rowNames.map((n) => [n, effective[n] ?? "allow"]));
+    try {
+      await api.console.tools.patch(ws, selCn.id, { permissions: { tools } });
+      setDraft(null);
+      await load();
+      setMsg("权限策略已保存");
+    } catch (e: any) { setMsg(`保存失败: ${e.message}`); }
+  };
+
+  const builtinCounts = (() => {
+    if (!builtin) return null;
+    const vals = Object.values(builtin.tools);
+    return { allow: vals.filter((a) => a === "allow").length, ask: vals.filter((a) => a === "ask").length };
   })();
 
   return (
@@ -134,26 +176,37 @@ export default function ToolsPage() {
           <th className="p-2.5">状态</th><th className="p-2.5">被引用</th><th className="p-2.5 text-right">操作</th>
         </tr></thead>
         <tbody>
-          <tr className="border-b bg-gray-50/60">
+          <tr className={`cursor-pointer border-b ${sel?.kind === "platform" ? "bg-blue-50/50" : sel ? "" : "bg-gray-50/60"}`}
+            onClick={() => setSel({ kind: "platform" })}>
             <td className="p-2.5 font-medium">platform-mcp <Tag>平台内置</Tag></td>
             <td className="p-2.5 text-xs">Streamable HTTP</td>
             <td className="p-2.5 font-mono text-[11px] text-gray-500">/mcp（backend 同进程）</td>
-            <td className="p-2.5"><Badge status="pending">ask 全量（HITL）</Badge></td>
+            <td className="p-2.5" data-testid="platform-perm">
+              <Badge status="pending">
+                {builtinCounts
+                  ? `声明 ${builtinCounts.allow} allow · ${builtinCounts.ask} ask（HITL）· 未声明默认放行`
+                  : "平台内置"}
+              </Badge>
+            </td>
             <td className="p-2.5 text-xs">按需勾选</td>
             <td className="p-2.5 text-right text-xs text-gray-400">—</td>
           </tr>
-          {list.map((cn) => (
-            <tr key={cn.id} className={`cursor-pointer border-b last:border-0 hover:bg-gray-50 ${selected?.id === cn.id ? "bg-blue-50/50" : ""}`}
-              onClick={() => setSelected(cn)}>
-              <td className="p-2.5 font-medium">{cn.name}</td>
-              <td className="p-2.5 text-xs">{cn.transport === "sse" ? "SSE" : "Streamable HTTP"}</td>
-              <td className="p-2.5 max-w-[220px] truncate font-mono text-[11px] text-gray-500" title={cn.endpoint}>{cn.endpoint}</td>
-              <td className="p-2.5"><Badge status={cn.status}>{cn.status === "verified" ? "已验证" : cn.status === "failed" ? "失败" : "未验证"}</Badge></td>
-              <td className="p-2.5 text-xs">{cn.refCount > 0 ? `${cn.refCount} 个 Agent` : "未被引用"}</td>
+          {list.map((row) => (
+            <tr key={row.id} className={`cursor-pointer border-b last:border-0 hover:bg-gray-50 ${sel?.kind === "connector" && sel.cn.id === row.id ? "bg-blue-50/50" : ""}`}
+              onClick={() => setSel({ kind: "connector", cn: row })}>
+              <td className="p-2.5 font-medium">{row.name}</td>
+              <td className="p-2.5 text-xs">{row.transport === "sse" ? "SSE" : "Streamable HTTP"}</td>
+              <td className="p-2.5 max-w-[220px] truncate font-mono text-[11px] text-gray-500" title={row.endpoint}>{row.endpoint}</td>
+              <td className="p-2.5">
+                <span title={row.lastVerifyError || undefined}>
+                  <Badge status={row.status}>{row.status === "verified" ? "已验证" : row.status === "failed" ? "失败" : "未验证"}</Badge>
+                </span>
+              </td>
+              <td className="p-2.5 text-xs">{row.refCount > 0 ? `${row.refCount} 个 Agent` : "未被引用"}</td>
               <td className="p-2.5 text-right" onClick={(e) => e.stopPropagation()}>
                 <span className="inline-flex gap-1">
-                  {writable && <Btn sm kind="pri" onClick={() => verify(cn.id)}>验证</Btn>}
-                  {writable && <Btn sm kind="danger" onClick={() => remove(cn)}>删除</Btn>}
+                  {writable && <Btn sm kind="pri" onClick={() => verify(row.id)}>验证</Btn>}
+                  {writable && <Btn sm kind="danger" onClick={() => remove(row)}>删除</Btn>}
                 </span>
               </td>
             </tr>
@@ -161,20 +214,54 @@ export default function ToolsPage() {
         </tbody>
       </table>
 
-      <div className="mb-2 text-xs text-gray-400">工具权限默认策略（三态）{selected && ` · ${selected.name}`}</div>
+      <div className="mb-2 text-xs text-gray-400">
+        工具权限默认策略（三态） · {selCn ? selCn.name : "platform-mcp（平台内置）"}
+        {selCn && snapTools.length > 0 && selCn.status !== "verified" && (
+          <span className="ml-2 text-amber-600">快照可能过期，请重新验证</span>
+        )}
+      </div>
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="perm-table">
         <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500"><th className="p-2.5">工具</th><th className="p-2.5">权限</th><th className="p-2.5">说明</th></tr></thead>
         <tbody>
-          {Object.entries(perms).map(([tool, perm]) => (
-            <tr key={tool} className="border-b last:border-0">
-              <td className="p-2.5 font-mono text-xs">{tool}</td>
-              <td className="p-2.5"><Badge status={perm === "allow" ? "running" : perm === "ask" ? "pending" : "error"}>{perm}</Badge></td>
-              <td className="p-2.5 text-xs text-gray-500">{perm === "ask" ? "执行前经 HITL 确认卡" : perm === "deny" ? "拒绝调用" : "直接执行"}</td>
-            </tr>
-          ))}
-          {Object.keys(perms).length === 0 && <tr><td colSpan={3} className="p-4 text-xs text-gray-400">未声明工具策略（运行时按未声明自动放行 / 平台内置为 ask 全量）</td></tr>}
+          {rowNames.map((tool) => {
+            const act = effective[tool] ?? "allow";
+            const outOfSnap = selCn !== null && !snapTools.includes(tool);
+            return (
+              <tr key={tool} className="border-b last:border-0">
+                <td className="p-2.5 font-mono text-xs">{tool}{outOfSnap && <Tag>快照外</Tag>}</td>
+                <td className="p-2.5">
+                  {selCn && writable ? (
+                    <select value={act} data-testid={`perm-select-${tool}`}
+                      onChange={(e) => setDraft({ ...effective, [tool]: e.target.value })}
+                      className="rounded border border-gray-300 px-1.5 py-0.5 text-xs">
+                      <option value="allow">allow</option>
+                      <option value="ask">ask</option>
+                      <option value="deny">deny</option>
+                    </select>
+                  ) : (
+                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${PERM_STYLE[act] ?? "bg-gray-100 text-gray-500"}`}>{act}</span>
+                  )}
+                </td>
+                <td className="p-2.5 text-xs text-gray-500">
+                  {act === "ask" ? "执行前经 HITL 确认卡" : act === "deny" ? "拒绝调用" : "直接执行"}
+                  {selCn && !declared[tool] && " · 未声明，运行时默认"}
+                </td>
+              </tr>
+            );
+          })}
+          {rowNames.length === 0 && (
+            <tr><td colSpan={3} className="p-4 text-xs text-gray-400">
+              {selCn ? "无工具快照且未声明策略（运行时按未声明自动放行）——验证通过后按工具清单回填" : "平台内置声明策略加载中…"}
+            </td></tr>
+          )}
         </tbody>
       </table>
+      {selCn && writable && (
+        <div className="mb-3 mt-2 flex items-center gap-2">
+          <Btn kind="pri" testid="perm-save" disabled={!dirty} onClick={savePerms}>保存策略</Btn>
+          {dirty && <span className="text-xs text-amber-600">有未保存的修改</span>}
+        </div>
+      )}
       <Note>注入说明：Agent 创建/更新勾选后写入生成包 <code>mcpServers</code> + <code>mcp-configs/</code>；认证凭据不落包，经服务 Secret（{"{name}-env-secret"}）注入运行时。</Note>
 
       <Drawer open={drawerOpen} testid="tool-drawer" width={480}
