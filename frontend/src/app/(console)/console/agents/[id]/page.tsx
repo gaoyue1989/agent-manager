@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { api, type ApiKeyView, type ServiceDetail, type PackageRec } from "@/lib/api";
+import { api, type ApiKeyView, type ServiceDetail, type PackageRec, type PodInfo } from "@/lib/api";
 import { useConsoleWs, useConsoleWsRole, useMe } from "@/lib/useMe";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import ChatPane from "@/components/chat/ChatPane";
@@ -44,6 +44,11 @@ export default function AgentDetailPage() {
     if (invalidId) { setMsg("Agent 不存在：非法 ID"); return; }
     if (ws) load();
   }, [ws, sid, load, invalidId]);
+  useEffect(() => {
+    if (invalidId || !ws) return;
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [load, invalidId, ws]);
 
   const act = async (action: "publish" | "unpublish" | "republish" | "register", okMsg: string) => {
     try {
@@ -108,7 +113,7 @@ export default function AgentDetailPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab detail={detail} model={model} ws={ws} />}
+      {tab === "overview" && <OverviewTab detail={detail} model={model} />}
       {tab === "debug" && (
         <>
           <Note>调试流量直连业务运行时（SSE，不经控制面后端）；身份以平台用户注入（X-User-Id: u-{me?.user.id}），会话与记忆按用户隔离。</Note>
@@ -126,7 +131,7 @@ export default function AgentDetailPage() {
   );
 }
 
-function OverviewTab({ detail, model, ws }: { detail: ServiceDetail; model: string; ws: number }) {
+function OverviewTab({ detail, model }: { detail: ServiceDetail; model: string }) {
   return (
     <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1.6fr_1fr]">
       <div className="flex flex-col gap-3.5">
@@ -141,7 +146,7 @@ function OverviewTab({ detail, model, ws }: { detail: ServiceDetail; model: stri
           </dl>
         </Card>
         <Card title="实时 Pod（5s 轮询）">
-          <PodTable ws={ws} id={detail.id} />
+          <PodTable pods={detail.pods ?? []} />
         </Card>
       </div>
       <Card title="事件时间线">
@@ -169,20 +174,7 @@ function Kv({ k, v }: { k: string; v: React.ReactNode }) {
   );
 }
 
-function PodTable({ ws, id }: { ws: number; id: number }) {
-  const [pods, setPods] = useState<{ name: string; phase: string; ready: boolean; restarts: number }[]>([]);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const d = await api.console.agentDetail(ws, id);
-        if (alive) setPods(d.pods ?? []);
-      } catch { /* 轮询失败静默 */ }
-    };
-    tick();
-    const t = setInterval(tick, 5000);
-    return () => { alive = false; clearInterval(t); };
-  }, [ws, id]);
+function PodTable({ pods }: { pods: PodInfo[] }) {
   if (pods.length === 0) return <p className="text-sm text-gray-400">暂无 Pod（未部署或已下线）</p>;
   return (
     <div className="overflow-x-auto">
