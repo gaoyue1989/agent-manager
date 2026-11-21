@@ -75,4 +75,53 @@ class SandboxFailureClassifierTest {
     void sseErrorFrameShouldReturnNullForNonSandboxException() {
         assertNull(SandboxFailureClassifier.sseErrorFrame(new IllegalArgumentException("x")));
     }
+
+    // ===== issue #383：SSE 可读化域门控（非沙箱域一律原样透传） =====
+
+    @Test
+    void llmStreamErrorShouldNotProduceSandboxFrame() {
+        // OpenAIClient streaming 实际形态：LLM 端点不可达时 cause 链含裸 ConnectException，
+        // 沙箱从未参与——不得误报成 sandbox_create_failed「沙箱连接失败」
+        var e = new RuntimeException(
+            "HTTP transport error during streaming: SSE/NDJSON stream failed: java.net.ConnectException: Connection refused",
+            new java.io.IOException("SSE/NDJSON stream failed",
+                new java.net.ConnectException("Connection refused")));
+        assertNull(SandboxFailureClassifier.sseErrorFrame(e));
+        // kindOf 语义不变（SandboxLifecycleManager create 重试与 OpenSandbox 数据面计数依赖）
+        assertEquals(SandboxFailureClassifier.Kind.CONNECTION,
+            SandboxFailureClassifier.kindOf(e));
+    }
+
+    @Test
+    void harnessSandboxExceptionShouldStillProduceFrame() {
+        var wrapped = new io.agentscope.harness.agent.sandbox.SandboxException(
+            io.agentscope.harness.agent.sandbox.SandboxErrorCode.WORKSPACE_START_ERROR,
+            "create", "Lifecycle acquire failed: " + TIMEOUT_MSG, null);
+        String frame = SandboxFailureClassifier.sseErrorFrame(wrapped);
+        assertTrue(frame != null && frame.contains("沙箱创建超时"), frame);
+    }
+
+    @Test
+    void sdkSandboxExceptionFamilyShouldStillProduceFrame() {
+        var e = new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxConnectionException(
+            "connection refused", null, false);
+        String frame = SandboxFailureClassifier.sseErrorFrame(e);
+        assertTrue(frame != null && frame.contains("沙箱连接失败"), frame);
+    }
+
+    @Test
+    void harnessWrapperMessagePrefixesShouldStillProduceFrame() {
+        // harness 包装专属前缀（OpenSandboxClient create/start 两处）+ ConnectException cause → CONNECTION 帧
+        var acquire = new RuntimeException(
+            "Lifecycle acquire failed: java.net.ConnectException: Connection refused",
+            new java.net.ConnectException("Connection refused"));
+        String acquireFrame = SandboxFailureClassifier.sseErrorFrame(acquire);
+        assertTrue(acquireFrame != null && acquireFrame.contains("沙箱连接失败"), acquireFrame);
+
+        var start = new RuntimeException(
+            "Failed to start OpenSandbox: java.net.ConnectException: Connection refused",
+            new java.net.ConnectException("Connection refused"));
+        String startFrame = SandboxFailureClassifier.sseErrorFrame(start);
+        assertTrue(startFrame != null && startFrame.contains("沙箱连接失败"), startFrame);
+    }
 }

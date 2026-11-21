@@ -7,9 +7,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * <ul>
  *   <li>create 重试（SandboxLifecycleManager）：仅瞬时类（超时/连接/网关不可达）重试，
  *       配额/身份/参数类失败照常直抛；</li>
- *   <li>SSE error 可读化（ChatStreamController）：cause 链识别 SDK 沙箱异常 →
- *       结构化 error 帧（code=sandbox_create_failed + retryable + 中文文案），
- *       替代 "Lifecycle acquire failed: Request timed out: timeout" 生硬透出。</li>
+ *   <li>SSE error 可读化（ChatStreamController）：<b>仅作用沙箱域异常</b>（{@link #isSandboxDomain}）——
+ *       命中时出结构化 error 帧（code=sandbox_create_failed + retryable + 中文文案），
+ *       替代 "Lifecycle acquire failed: Request timed out: timeout" 生硬透出；
+ *       非沙箱域（LLM/MCP 等流错误，即使 cause 链含 ConnectException）一律返回 null 原样透传，
+ *       不得误报成沙箱故障（issue #383）。</li>
  * </ul>
  *
  * <p><b>包装层次</b>：SDK 2.0.3 的 {@code com.alibaba.opensandbox...SandboxTimeoutException}
@@ -85,12 +87,42 @@ public final class SandboxFailureClassifier {
     }
 
     /**
+     * 是否沙箱域异常（issue #383 域门控，SSE 可读化的作用域判定）：cause 链含
+     * harness SandboxException、SDK 沙箱异常族（Timeout/ReadyTimeout/Connection/Api），
+     * 或 message 带 harness 沙箱包装专属前缀（"Lifecycle acquire failed:" /
+     * "Failed to start OpenSandbox:"，OpenSandboxClient create/start 两处 catch 实证，
+     * 不会出现在 LLM/MCP 异常上）。非沙箱域流错误（如 OpenAIClient streaming 的
+     * ConnectException 形态）返回 false，SSE 帧原样透传。
+     */
+    private static boolean isSandboxDomain(Throwable root) {
+        for (Throwable t = root; t != null; t = t.getCause()) {
+            if (t instanceof io.agentscope.harness.agent.sandbox.SandboxException
+                    || t instanceof com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxTimeoutException
+                    || t instanceof com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
+                    || t instanceof com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxConnectionException
+                    || t instanceof com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException) {
+                return true;
+            }
+            String msg = t.getMessage();
+            if (msg != null && (msg.contains("Lifecycle acquire failed:")
+                    || msg.contains("Failed to start OpenSandbox:"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 沙箱类异常的 SSE error 帧载荷：{@code {"type":"error","error":<中文文案>,
      * "code":"sandbox_create_failed","retryable":true,"detail":<原始信息>}}。
-     * 非沙箱类（kindOf == NONE）返回 null（调用方保持原样透出）。
+     * 非沙箱域（{@link #isSandboxDomain} 为 false，如 LLM/MCP 流错误）或
+     * 非瞬时类（kindOf == NONE）返回 null（调用方保持原样透出）。
      * 组装失败兜底为纯文本帧（可用性优先，同 UserQuotaExhaustedException.sseFrameJson）。
      */
     public static String sseErrorFrame(Throwable root) {
+        if (!isSandboxDomain(root)) {
+            return null;
+        }
         Kind kind = kindOf(root);
         if (kind == Kind.NONE) {
             return null;
