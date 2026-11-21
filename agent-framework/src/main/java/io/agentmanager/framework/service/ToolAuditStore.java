@@ -17,8 +17,9 @@ import org.springframework.stereotype.Service;
 /**
  * 工具调用轻量审计存储（tool_audit_log 表，无状态单次流架构 4.1.2）。
  *
- * <p>写入范围：仅工具类事件（TOOL_CALL_START / TOOL_CALL_END /
- * TOOL_RESULT_START / TOOL_RESULT_END），不含文本 delta 与参数累积 delta。
+ * <p>写入范围：每次工具调用 2 行——TOOL_CALL_START + TOOL_RESULT_END（含
+ * result_state success/error），不含文本 delta 与参数累积 delta。写点唯一：
+ * ToolCallObservabilityMiddleware（onActing 事件流侧，覆盖全部协议链路）。
  * 审计粒度（O3 定稿）：仅元信息——何时、何工具、何状态，不落参数。
  *
  * <p>写入方式：异步批量（队列 + 定时合并），失败静默降级，不阻塞 SSE 直吐。
@@ -57,10 +58,12 @@ public class ToolAuditStore {
         flusher.scheduleWithFixedDelay(this::flushQueue, FLUSH_INTERVAL_MS, FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
-    /** 异步入队（不阻塞 SSE）；幂等 */
-    public void record(String sessionId, String toolName, String toolCallId, String state, String payloadJson) {
+    /** 异步入队（不阻塞事件流）；幂等。resultState 仅 TOOL_RESULT_END 行携带（success/error），其余行传 null */
+    public void record(String sessionId, String toolName, String toolCallId, String state,
+                       String resultState, String payloadJson) {
         synchronized (queue) {
-            queue.addLast(new AuditEntry(sessionId, toolName, toolCallId, state, payloadJson, Instant.now()));
+            queue.addLast(new AuditEntry(sessionId, toolName, toolCallId, state, resultState,
+                payloadJson, Instant.now()));
         }
     }
 
@@ -82,16 +85,17 @@ public class ToolAuditStore {
             try (var conn = dataSource.getConnection();
                  var stmt = conn.prepareStatement("""
                      INSERT INTO tool_audit_log
-                       (session_id, tool_name, tool_call_id, state, payload_json, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?)
+                       (session_id, tool_name, tool_call_id, state, result_state, payload_json, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)
                      """)) {
                 for (var e : batch) {
                     stmt.setString(1, e.sessionId());
                     stmt.setString(2, e.toolName());
                     stmt.setString(3, e.toolCallId());
                     stmt.setString(4, e.state());
-                    stmt.setString(5, e.payloadJson());
-                    stmt.setTimestamp(6, java.sql.Timestamp.from(e.createdAt()));
+                    stmt.setString(5, e.resultState());
+                    stmt.setString(6, e.payloadJson());
+                    stmt.setTimestamp(7, java.sql.Timestamp.from(e.createdAt()));
                     stmt.addBatch();
                 }
                 stmt.executeBatch();
@@ -126,6 +130,7 @@ public class ToolAuditStore {
         String toolName,
         String toolCallId,
         String state,
+        String resultState,
         String payloadJson,
         Instant createdAt
     ) {

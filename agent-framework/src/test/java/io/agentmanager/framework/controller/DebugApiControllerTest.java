@@ -311,13 +311,18 @@ class DebugApiControllerTest {
         var aggRs = mock(ResultSet.class);
         var psPending = mock(PreparedStatement.class);
         var pendingRs = mock(ResultSet.class);
+        var psToday = mock(PreparedStatement.class);
+        var todayRs = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(conn);
         when(conn.createStatement()).thenReturn(stmt1, stmt2, knownStmt, aggStmt);
         when(stmt1.executeQuery(anyString())).thenReturn(rs1);
         when(stmt2.executeQuery(anyString())).thenReturn(rs2);
         when(knownStmt.executeQuery(anyString())).thenReturn(knownRs);
         when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
-        when(conn.prepareStatement(anyString())).thenReturn(psPending);
+        when(conn.prepareStatement(anyString())).thenReturn(psToday, psPending);
+        when(psToday.executeQuery()).thenReturn(todayRs);
+        when(todayRs.next()).thenReturn(true, false);
+        when(todayRs.getLong(1)).thenReturn(5L);
         when(psPending.executeQuery()).thenReturn(pendingRs);
         when(rs1.next()).thenReturn(true, false);
         when(rs1.getLong("total_sessions")).thenReturn(12L);
@@ -348,6 +353,7 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.total_answers").value(18))
             .andExpect(jsonPath("$.total_messages").value(38))
             .andExpect(jsonPath("$.messages_today").value(8))
+            .andExpect(jsonPath("$.tool_calls_today").value(5))
             .andExpect(jsonPath("$.sessions_today").value(2))
             .andExpect(jsonPath("$.sessions_with_error").value(2))
             .andExpect(jsonPath("$.sessions_pending_confirm").value(1))
@@ -369,13 +375,17 @@ class DebugApiControllerTest {
         var aggRs = mock(ResultSet.class);
         var psPending = mock(PreparedStatement.class);
         var pendingRs = mock(ResultSet.class);
+        var psToday = mock(PreparedStatement.class);
+        var todayRs = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(conn);
         when(conn.createStatement()).thenReturn(statsStmt, roleStmt, knownStmt, aggStmt);
         when(statsStmt.executeQuery(anyString())).thenReturn(statsRs);
         when(roleStmt.executeQuery(anyString())).thenReturn(roleRs);
         when(knownStmt.executeQuery(anyString())).thenReturn(knownRs);
         when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
-        when(conn.prepareStatement(anyString())).thenReturn(psPending);
+        when(conn.prepareStatement(anyString())).thenReturn(psToday, psPending);
+        when(psToday.executeQuery()).thenReturn(todayRs);
+        when(todayRs.next()).thenReturn(false);
         when(psPending.executeQuery()).thenReturn(pendingRs);
         when(statsRs.next()).thenReturn(true, false);
         when(roleRs.next()).thenReturn(false);
@@ -390,6 +400,59 @@ class DebugApiControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.sessions_with_error").value(0))
             .andExpect(jsonPath("$.sessions_with_problem").value(0));
+    }
+
+    @Test
+    void monitorToolsShouldAggregatePerToolAndReturnRecent() throws Exception {
+        stubConfirmTtl();
+        var conn = mock(Connection.class);
+        var errStmt = mock(Statement.class);
+        var errRs = mock(ResultSet.class);
+        var aggStmt = mock(Statement.class);
+        var aggRs = mock(ResultSet.class);
+        var psRecent = mock(PreparedStatement.class);
+        var recentRs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.createStatement()).thenReturn(errStmt, aggStmt);
+        when(errStmt.executeQuery(anyString())).thenReturn(errRs);
+        when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
+        when(conn.prepareStatement(anyString())).thenReturn(psRecent);
+        when(psRecent.executeQuery()).thenReturn(recentRs);
+
+        // 失败聚合：get_weather 1 次失败；聚合：get_weather 12 次（今日 3，最近 10:00）
+        when(errRs.next()).thenReturn(true, false);
+        when(errRs.getString("tool_name")).thenReturn("get_weather");
+        when(errRs.getLong("errors")).thenReturn(1L);
+        when(aggRs.next()).thenReturn(true, false);
+        when(aggRs.getString("tool_name")).thenReturn("get_weather");
+        when(aggRs.getLong("calls")).thenReturn(12L);
+        when(aggRs.getLong("today")).thenReturn(3L);
+        when(aggRs.getTimestamp("last_call"))
+            .thenReturn(java.sql.Timestamp.valueOf("2026-11-21 10:00:00"));
+        // 最近明细：1 成功 1 失败
+        when(recentRs.next()).thenReturn(true, true, false);
+        when(recentRs.getTimestamp("created_at"))
+            .thenReturn(java.sql.Timestamp.valueOf("2026-11-21 10:00:00"),
+                java.sql.Timestamp.valueOf("2026-11-21 09:00:00"));
+        when(recentRs.getString("tool_name")).thenReturn("get_weather", "web_fetch");
+        when(recentRs.getString("session_id")).thenReturn("s1", "s2");
+        when(recentRs.getString("tool_call_id")).thenReturn("c-1", "c-2");
+        when(recentRs.getString("result_state")).thenReturn("success", "error");
+
+        mockMvc.perform(get("/debug/monitor/tools"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.connected").value(true))
+            .andExpect(jsonPath("$.tools[0].tool_name").value("get_weather"))
+            .andExpect(jsonPath("$.tools[0].calls").value(12))
+            .andExpect(jsonPath("$.tools[0].errors").value(1))
+            .andExpect(jsonPath("$.tools[0].today").value(3))
+            .andExpect(jsonPath("$.recent[0].tool_name").value("get_weather"))
+            .andExpect(jsonPath("$.recent[0].result_state").value("success"))
+            .andExpect(jsonPath("$.recent[1].result_state").value("error"));
+
+        // limit 钳制透传
+        mockMvc.perform(get("/debug/monitor/tools").param("limit", "10"))
+            .andExpect(status().isOk());
     }
 
     @Test

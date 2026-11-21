@@ -23,7 +23,6 @@ import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionTitleService;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.SkillInjectionService;
-import io.agentmanager.framework.service.ToolAuditStore;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import io.agentmanager.framework.service.UiContextStore;
 import io.agentmanager.framework.service.UploadWorkspaceInjector;
@@ -83,7 +82,6 @@ class ChatStreamControllerTest {
     private ChatUiChannel chatChannel;
     private AgentRuntimeService runtimeService;
     private TurnLeaseStore turnLeaseStore;
-    private ToolAuditStore toolAuditStore;
     private UploadWorkspaceInjector workspaceInjector;
     private SandboxConfig sandboxConfig;
     private SessionEventBus eventBus;
@@ -100,7 +98,6 @@ class ChatStreamControllerTest {
         chatChannel = mock(ChatUiChannel.class);
         runtimeService = mock(AgentRuntimeService.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
-        toolAuditStore = mock(ToolAuditStore.class);
         workspaceInjector = mock(UploadWorkspaceInjector.class);
         sandboxConfig = mock(SandboxConfig.class);
         eventStore = mock(SessionEventStore.class);
@@ -140,7 +137,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         controller = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
+            workspaceInjector, sandboxConfig, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -733,7 +730,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, modelCatalog, sessionTitleService);
 
@@ -783,7 +780,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, modelCatalog, sessionTitleService);
 
@@ -821,7 +818,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -862,7 +859,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -902,7 +899,7 @@ class ChatStreamControllerTest {
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var fileAssetStore = mock(io.agentmanager.framework.service.FileAssetStore.class);
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService);
 
@@ -945,7 +942,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -1009,7 +1006,7 @@ class ChatStreamControllerTest {
         when(registrar.resolveUiRef("show_form"))
             .thenReturn(new McpToolRegistrar.UiRef("ui://approval/form.html", "approval"));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), registrar, modelCatalog, sessionTitleService);
 
@@ -1043,7 +1040,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -1065,20 +1062,6 @@ class ChatStreamControllerTest {
         assertTrue(endPayload != null && endPayload.contains("\"type\":\"AGENT_END\"")
                 && !endPayload.contains("\"ui\""),
             "AGENT_END 载荷为 turn 汇总（非 ui 覆写）: " + endPayload);
-    }
-
-    @Test
-    void chatShouldAuditToolStartEvents() {
-        var sessionId = "test-user-audit1";
-        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-a1");
-        var end = new AgentEndEvent("r-a1");
-        var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-a1", "c-a1", "get_weather");
-        when(chatChannel.dispatchStream(any(InboundMessage.class)))
-            .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) end));
-
-        collect(sessionId, "go", null);
-        verify(toolAuditStore).record(eq(sessionId), eq("get_weather"), eq("c-a1"),
-            eq("TOOL_CALL_START"), anyString());
     }
 
     // ===== write_file → KV sync 测试 =====
@@ -1726,7 +1709,7 @@ class ChatStreamControllerTest {
     /** 以显式注入服务构建独立控制器（复用 @BeforeEach 的字段 mock） */
     private ChatStreamController controllerWithInjection(SkillInjectionService injection) {
         return new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
+            workspaceInjector, sandboxConfig, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, injection,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);

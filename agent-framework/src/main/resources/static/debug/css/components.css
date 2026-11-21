@@ -1152,6 +1152,7 @@ select.input { cursor: pointer; }
   white-space: nowrap;
 }
 .monitor-session .ms-badge.err { background: var(--red-bg); color: var(--red); }
+.monitor-session .ms-badge.ok { background: var(--green-bg, rgba(34, 197, 94, 0.12)); color: var(--green); }
 .monitor-session .ms-badge.warn { background: var(--yellow-bg); color: var(--yellow); }
 .monitor-session .ms-title {
   color: var(--text-h);

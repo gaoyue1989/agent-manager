@@ -236,8 +236,7 @@ class RemoteConfirmBridgeTest {
         assertEquals("booking", anchor.get("service"));
         assertEquals(TASK_ID, anchor.get("task_id"));
         // 审计：落卡记录（设计 §10）
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("CARD_QUEUED"), anyString());
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("CARD_QUEUED"), isNull(), anyString());
     }
 
     @Test
@@ -297,8 +296,7 @@ class RemoteConfirmBridgeTest {
         bridge.pollOnce();
         // 新任务照常排队（不悬挂、不丢弃），同时落 QUEUE_CONFLICT 审计
         verify(store).put(eq(CONFIRM_KEY), eq(SID), anyList(), isNull(), isNull(), isNull(), anyString());
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("QUEUE_CONFLICT"), argThat(p -> p.contains("serial_rule_violation")));
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("QUEUE_CONFLICT"), isNull(), argThat(p -> p.contains("serial_rule_violation")));
     }
 
     @Test
@@ -310,8 +308,7 @@ class RemoteConfirmBridgeTest {
         bridge.pollOnce();
         assertEquals(0, bridge.inFlightCount(), "终态任务清出登记表");
         verify(store).consume(SID, CONFIRM_KEY);
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("TASK_TERMINAL"), anyString());
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("TASK_TERMINAL"), isNull(), anyString());
     }
 
     // ===== 2.1 传输类错误 vs 真实失败（SDK 把 HTTP>=400/404 映射为 error 状态） =====
@@ -349,8 +346,7 @@ class RemoteConfirmBridgeTest {
 
         assertEquals(1, bridge.inFlightCount(), "传输类错误不清登记");
         verify(store, never()).consume(anyString(), anyString());
-        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(),
-            eq("TASK_TERMINAL"), anyString());
+        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(), eq("TASK_TERMINAL"), isNull(), anyString());
     }
 
     /** 连续超限（默认 60 次）才判失联放弃：清登记 + 审计；已落确认卡留给 TTL 治理 */
@@ -363,8 +359,7 @@ class RemoteConfirmBridgeTest {
             bridge.pollOnce();
         }
         assertEquals(0, bridge.inFlightCount(), "连续超限后放弃登记");
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("TRANSPORT_ERROR_GAVE_UP"), argThat(p -> p.contains("task not found")));
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("TRANSPORT_ERROR_GAVE_UP"), isNull(), argThat(p -> p.contains("task not found")));
 
         // 放弃后登记表为空：后续轮询不再打子服务（早退）
         int calls = taskClient.statusCalls.get();
@@ -405,8 +400,7 @@ class RemoteConfirmBridgeTest {
         bridge.pollOnce();
         assertEquals(0, bridge.inFlightCount(), "真实失败走终态清登记");
         verify(store).consume(SID, CONFIRM_KEY);
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("TASK_TERMINAL"), anyString());
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("TASK_TERMINAL"), isNull(), anyString());
     }
 
     // ===== 3. 决策路由（§5.4） =====
@@ -427,8 +421,7 @@ class RemoteConfirmBridgeTest {
         assertEquals(1, decisions.size());
         assertEquals("call-1", decisions.get(0).getToolCallId());
         assertTrue(decisions.get(0).isApproved(), "approve → ALLOW");
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("ALLOW"), anyString());
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("ALLOW"), isNull(), anyString());
     }
 
     @Test
@@ -549,8 +542,7 @@ class RemoteConfirmBridgeTest {
         // 监听跑满 MAX_TERMINAL_POLLS 次有界轮询后放弃（§13.9 降级），全程不唤醒
         awaitPolls(taskClient, RemoteConfirmBridge.MAX_TERMINAL_POLLS, 15_000);
         verify(runtimeService, never()).invokeStream(anyString(), anyString(), any());
-        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(),
-            eq("TASK_TERMINAL"), anyString());
+        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(), eq("TASK_TERMINAL"), isNull(), anyString());
     }
 
     /** 传输错误不终止监听：随后到达的真实失败照常唤醒 lead 汇总 turn */
@@ -616,8 +608,7 @@ class RemoteConfirmBridgeTest {
         assertEquals(2, decisions.size());
         decisions.forEach(d -> assertFalse(d.isApproved(), "超时自动 DENY"));
         verify(store).consume(SID, CONFIRM_KEY);
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("DENY"), argThat(p -> p.contains("confirm_timeout")));
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("DENY"), isNull(), argThat(p -> p.contains("confirm_timeout")));
     }
 
     @Test
@@ -628,8 +619,7 @@ class RemoteConfirmBridgeTest {
 
         bridge.sweepExpiredRemote();
         verify(store).consume(SID, CONFIRM_KEY);
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("TIMEOUT_RESUME_FAILED"), anyString());
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("TIMEOUT_RESUME_FAILED"), isNull(), anyString());
     }
 
     @Test
@@ -653,8 +643,7 @@ class RemoteConfirmBridgeTest {
         bridge.pollOnce();
 
         verify(store).consumeGhostLocalRows(eq(SID), eq(List.of("call-1")));
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("GHOST_LOCAL_PURGED"), anyString());
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("GHOST_LOCAL_PURGED"), isNull(), anyString());
         // 远程行照常落地（唯一有效决策路由）
         verify(store).put(eq(CONFIRM_KEY), eq(SID), anyList(), isNull(), isNull(),
             isNull(), anyString());
@@ -674,8 +663,7 @@ class RemoteConfirmBridgeTest {
         // 清理调用照常发生（对撞逻辑在 store 侧返回 0），但不落 GHOST_LOCAL_PURGED 审计，
         // 远程行照常落地
         verify(store).consumeGhostLocalRows(eq(SID), eq(List.of("call-1")));
-        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(),
-            eq("GHOST_LOCAL_PURGED"), anyString());
+        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(), eq("GHOST_LOCAL_PURGED"), isNull(), anyString());
         verify(store).put(eq(CONFIRM_KEY), eq(SID), anyList(), isNull(), isNull(),
             isNull(), anyString());
     }

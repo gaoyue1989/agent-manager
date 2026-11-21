@@ -19,7 +19,6 @@ import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionEventTailer;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.SkillInjectionService;
-import io.agentmanager.framework.service.ToolAuditStore;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import io.agentscope.core.event.AgentEndEvent;
 import io.agentscope.core.event.AgentEvent;
@@ -110,7 +109,7 @@ class AguiRunControllerTest {
 
         controller = new AguiRunController(runtimeService, turnLeaseStore, eventBus,
             mock(SessionEventTailer.class), sessionUserStore, skillInjectionService,
-            mock(ToolAuditStore.class), mcpToolRegistrar, codec, props);
+            mcpToolRegistrar, codec, props);
     }
 
     private static HttpHeaders requestHeadersWithAuth() {

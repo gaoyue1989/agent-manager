@@ -241,8 +241,7 @@ class RemoteConfirmBridgeMultiReplicaTest {
         assertEquals(List.of("consume", "resume:" + TASK_ID), taskClient.events,
             "CAS 消费必须先于 DENY resume（治理权唯一）");
         assertEquals(List.of(REGISTRY_ENDPOINT), taskClient.resumeUrls);
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("DENY"), contains("confirm_timeout"));
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("DENY"), isNull(), contains("confirm_timeout"));
     }
 
     @Test
@@ -255,8 +254,7 @@ class RemoteConfirmBridgeMultiReplicaTest {
         bridge.sweepExpiredRemote();
 
         assertTrue(taskClient.resumeUrls.isEmpty(), "治理权在别处时不得 resume");
-        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(),
-            eq("DENY"), anyString());
+        verify(toolAuditStore, never()).record(anyString(), anyString(), anyString(), eq("DENY"), isNull(), anyString());
     }
 
     @Test
@@ -270,8 +268,7 @@ class RemoteConfirmBridgeMultiReplicaTest {
 
         // 与 routeDecision「resume 失败不回滚消费」语义一致：行保持收口，审计可查
         verify(store).consume(SID, CONFIRM_KEY);
-        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
-            eq("TIMEOUT_RESUME_FAILED"), anyString());
+        verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID), eq("TIMEOUT_RESUME_FAILED"), isNull(), anyString());
     }
 
     // ===== G1 残端：传输超限放弃时收口 registry 行 =====

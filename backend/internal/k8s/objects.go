@@ -4,6 +4,7 @@ package k8s
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -45,6 +46,16 @@ const (
 	// 日志规范挂载：/applog/${HOST_NAME}/trace.log 为容器云日志采集唯一来源，logback 写入该目录
 	ApplogVolumeName = "applog"
 	ApplogMountPath  = "/applog"
+
+	// Prometheus 抓取注解（tool-call-observability-design）：Prometheus kubernetes_sd(pod)
+	// 按注解发现业务 agent 的 /actuator/prometheus（framework 管理端口，独立于业务 8100，
+	// Service/Ingress 不暴露）。存量服务 republish 后生效（不自动迁移）。
+	MetricsPort        = 9091
+	AnnPromScrape      = "prometheus.io/scrape"
+	AnnPromPort        = "prometheus.io/port"
+	AnnPromPath        = "prometheus.io/path"
+	AnnPromScrapeValue = "true"
+	AnnPromMetricsPath = "/actuator/prometheus"
 )
 
 // SanitizeK8sName 任意输入转 DNS-1123 label：小写字母数字 '-'，≤63 字符。
@@ -204,7 +215,14 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{LabelKey: p.K8sName}},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels(p.K8sName)},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels(p.K8sName),
+					Annotations: map[string]string{
+						AnnPromScrape: AnnPromScrapeValue,
+						AnnPromPort:   strconv.Itoa(MetricsPort),
+						AnnPromPath:   AnnPromMetricsPath,
+					},
+				},
 				Spec: corev1.PodSpec{
 					// 最小暴露面（issue #232，与 oaf-agent chart 同款）：业务 Pod 无 K8s API
 					// 依赖，显式禁用 SA token 自动投影——pod 级优先于 SA 级，不依赖集群

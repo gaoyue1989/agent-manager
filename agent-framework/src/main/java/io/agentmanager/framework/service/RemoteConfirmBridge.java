@@ -979,7 +979,7 @@ public class RemoteConfirmBridge {
         try {
             toolAuditStore.record(sessionId, toolName,
                 toolCallId != null ? toolCallId : "-", state,
-                payloadJson != null ? payloadJson : "{}");
+                null, payloadJson != null ? payloadJson : "{}");
         } catch (Exception e) {
             log.debug("[RemoteConfirmBridge] audit skipped: {}", e.getMessage());
         }

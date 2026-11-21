@@ -1,0 +1,132 @@
+# Grafana（tool-call-observability-design §三）：观测栈可视化面，预置「工具调用」
+# 仪表盘（与控制台面板同源 PromQL，运维快速视图用；控制台面板经 backend PromQL 聚合，
+# 两者不重复实现查询逻辑）。
+# 访问：未配外部入口（kubectl -n agent-platform port-forward svc/grafana 3000:3000）；
+# admin 凭据经 Secret oaf-grafana-secret 注入（实际值部署时 kubectl create/patch，见 deployment.md）。
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oaf-grafana-secret
+  namespace: agent-platform
+type: Opaque
+stringData:
+  GF_SECURITY_ADMIN_USER: admin
+  GF_SECURITY_ADMIN_PASSWORD: "CHANGE-ME"  # 部署时覆盖为真实随机值（.env.secrets 管理）
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provision-datasource
+  namespace: agent-platform
+data:
+  prometheus.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus.agent-platform.svc.cluster.local:9090
+        isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provision-dashboard
+  namespace: agent-platform
+data:
+  dashboard-provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: oaf
+        folder: OAF
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+  tool-calls.json: |
+    {
+      "title": "OAF 工具调用",
+      "uid": "oaf-tool-calls",
+      "timezone": "browser",
+      "refresh": "30s",
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "工具调用速率（按工具）",
+          "datasource": "Prometheus",
+          "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+          "targets": [{"expr": "sum by (tool) (rate(oaf_tool_calls_total[5m]))", "legendFormat": "{{tool}}"}]
+        },
+        {
+          "type": "timeseries",
+          "title": "工具调用速率（按服务）",
+          "datasource": "Prometheus",
+          "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+          "targets": [{"expr": "sum by (service) (rate(oaf_tool_calls_total[5m]))", "legendFormat": "{{service}}"}]
+        },
+        {
+          "type": "stat",
+          "title": "失败调用速率",
+          "datasource": "Prometheus",
+          "gridPos": {"x": 0, "y": 8, "w": 6, "h": 6},
+          "targets": [{"expr": "sum(rate(oaf_tool_calls_total{result=\"error\"}[5m]))"}]
+        },
+        {
+          "type": "stat",
+          "title": "累计失败次数",
+          "datasource": "Prometheus",
+          "gridPos": {"x": 6, "y": 8, "w": 6, "h": 6},
+          "targets": [{"expr": "sum(oaf_tool_calls_total{result=\"error\"})"}]
+        }
+      ],
+      "schemaVersion": 39
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: grafana }
+  template:
+    metadata:
+      labels: { app: grafana }
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: oaf-grafana-secret }
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /api/health, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { memory: 128Mi, cpu: 100m }
+            limits:   { memory: 512Mi, cpu: 500m }
+          volumeMounts:
+            - { name: datasource, mountPath: /etc/grafana/provisioning/datasources }
+            - { name: dashboards-provider, mountPath: /etc/grafana/provisioning/dashboards }
+            - { name: dashboards, mountPath: /var/lib/grafana/dashboards }
+      volumes:
+        - name: datasource
+          configMap: { name: grafana-provision-datasource }
+        - name: dashboards-provider
+          configMap: { name: grafana-provision-dashboard }
+        - name: dashboards
+          configMap: { name: grafana-provision-dashboard, items: [{ key: tool-calls.json, path: tool-calls.json }] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: agent-platform
+spec:
+  selector: { app: grafana }
+  ports:
+    - { port: 3000, targetPort: 3000 }

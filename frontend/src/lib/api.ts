@@ -58,6 +58,20 @@ export interface PlatformConfigField {
 }
 export interface PlatformConfigGroup { name: string; title: string; fields: PlatformConfigField[]; }
 export interface PlatformConfigView { groups: PlatformConfigGroup[]; updatedAt?: string; }
+// ---- 工具调用观测（tool-call-observability-design）----
+export interface ToolCallTotals { calls: number; errors: number; errorRate: number; toolKinds: number; serviceNum: number; }
+export interface ToolCallToolRow { tool: string; calls: number; errors: number; }
+export interface ToolCallServiceRow { service: string; name: string; status: string; calls: number; errors: number; hasData: boolean; }
+export interface ToolCallTrendPoint { bucket: string; calls: number; errors: number; }
+export interface ToolCallRecent { at: string; service: string; name: string; tool: string; sessionId: string; result: string; }
+export interface ToolCallStatsView {
+  range: string;
+  totals: ToolCallTotals;
+  byTool: ToolCallToolRow[];
+  byService: ToolCallServiceRow[];
+  trend: ToolCallTrendPoint[];
+  recent: ToolCallRecent[];
+}
 
 // ---- 沙箱管理面（sandbox-pool-opensandbox-design §5/§6）----
 // 池容量四键（上游 capacitySpec，int32 全必填；校验链 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax）
@@ -319,6 +333,9 @@ export const api = {
   // ---- 用户侧 console（M2–M8；workspace 以 :ws 路径段指定）----
   console: {
     summary: (ws: number | string) => request<ConsoleSummary>(`/console/workspaces/${ws}/summary`),
+    // 工具调用观测面板（工作空间范围；观测栈不可达 → 503，错误消息直接展示）
+    toolCalls: (ws: number | string, range = "24h") =>
+      request<ToolCallStatsView>(`/console/workspaces/${ws}/observability/tool-calls?range=${encodeURIComponent(range)}`),
     // 沙箱配置总览（只读；修改入口在 Agent 编辑页沙箱区块）
     sandbox: (ws: number | string, keyword = "") =>
       request<SandboxItem[]>(`/console/workspaces/${ws}/sandbox?keyword=${encodeURIComponent(keyword)}`),
@@ -543,6 +560,9 @@ export const api = {
     // 记忆供给聚合总览（全平台）
     memorySupply: (keyword = "") =>
       request<MemorySupplyItem[]>(`/admin/memory-supply${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ""}`),
+    // 工具调用观测面板（全平台范围）
+    toolCalls: (range = "24h") =>
+      request<ToolCallStatsView>(`/admin/observability/tool-calls?range=${encodeURIComponent(range)}`),
     // ---- 沙箱管理面（§6.1；错误映射：未配置 503 / 501→503 / 401→502 / 429、5xx 透传）----
     sandboxes: {
       summary: () => request<SandboxSummary>(`/admin/sandboxes/summary`),
