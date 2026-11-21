@@ -325,6 +325,10 @@ spec:
             # provider=openviking（服务可显式 AGENT_MEMORY_PROVIDER=local 退出）
             - { name: OPENVIKING_ENABLED, value: "false" }
             - { name: OPENVIKING_BASE_URL, value: "" }  # 外部 OpenViking 服务地址,部署时按环境覆盖
+            # 工具调用观测（tool-call-observability-design）：Prometheus 查询入口，
+            # 面板经 backend 聚合 PromQL；空 = 观测栈未部署（面板返回明确错误态）。
+            # prometheus.yaml / grafana.yaml 一并 apply 即启用
+            - { name: PROMETHEUS_URL, value: "http://prometheus.agent-platform.svc.cluster.local:9090" }
           volumeMounts:
             - { name: data, mountPath: /data }
           readinessProbe:
