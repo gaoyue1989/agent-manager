@@ -1,13 +1,14 @@
 package io.agentmanager.framework.service;
 
+import java.util.List;
 import java.util.function.Function;
 
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
-import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.ToolResultState;
+import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentmanager.framework.controller.AgentEventSseSerializer;
@@ -19,9 +20,14 @@ import reactor.core.publisher.Flux;
  * Agent Protocol 全部协议链路）。
  *
  * <p><b>审计单一写点</b>：此前 tool_audit_log 由 ChatStreamController / AguiRunController
- * 在各自 SSE 事件出口分别写入，A2A JSON-RPC 链路无事件出口而漏记；本中间件在
- * onActing 统一按事件流写入（每调用 2 行——TOOL_CALL_START + TOOL_RESULT_END，
- * 后者携带 result_state），controller 侧写入已移除。计数口径 = TOOL_CALL_START 行。
+ * 在各自 SSE 事件出口分别写入，A2A JSON-RPC 链路无事件出口而漏记；本中间件统一写入
+ * （每调用 2 行——TOOL_CALL_START + TOOL_RESULT_END，后者携带 result_state），
+ * controller 侧写入已移除。计数口径 = TOOL_CALL_START 行。
+ * <b>行来源分工</b>（实测约束）：ToolCallStartEvent 在本中间件更外层才汇入事件流
+ * （内层不可见，依赖它会导致 START 行漏记），故 START 行在 onActing 入口直接由
+ * ActingInput.toolCalls() 落（payload 不落——审计仅元信息，工具名/id 已有列）；
+ * ToolResultEndEvent 由工具执行内核发出、全链路可见，RESULT 行仍取事件侧（携带
+ * 终态 result_state）。无终态的中断调用只剩 START 行（明细按「未落终态」展示）。
  *
  * <p><b>指标</b>：Micrometer 计数 {@code oaf.tool.calls}，标签 service（OAF slug）、
  * tool、result（success / error——非 SUCCESS 终态一律按 error 桶，与 Monitor
@@ -58,15 +64,21 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         String sessionId = sessionKeyResolver != null && ctx != null
             ? sessionKeyResolver.canonicalSessionId(ctx)
             : ctx == null ? null : ctx.getSessionId();
+        // START 行：入口直接落（ToolCallStartEvent 在本层外才汇入事件流，内层不可见）
+        List<ToolUseBlock> calls = input.toolCalls();
+        if (calls != null) {
+            for (ToolUseBlock call : calls) {
+                if (call != null && call.getName() != null) {
+                    auditStart(sessionId, call.getName(), call.getId());
+                }
+            }
+        }
         return next.apply(input)
             .doOnNext(evt -> {
-                if (evt instanceof ToolCallStartEvent start) {
-                    audit(start, sessionId, start.getToolCallName(), start.getToolCallId(),
-                        null);
-                } else if (evt instanceof ToolResultEndEvent end) {
+                if (evt instanceof ToolResultEndEvent end) {
                     boolean success = end.getState() == ToolResultState.SUCCESS;
                     count(end.getToolCallName(), success);
-                    audit(end, sessionId, end.getToolCallName(), end.getToolCallId(),
+                    auditResult(end, sessionId, end.getToolCallName(), end.getToolCallId(),
                         success ? "success" : "error");
                 }
             });
@@ -86,15 +98,26 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         }
     }
 
-    private void audit(AgentEvent event, String sessionId, String toolName, String toolCallId,
-                       String resultState) {
+    private void auditStart(String sessionId, String toolName, String toolCallId) {
         if (toolAuditStore == null) {
             return;
         }
         try {
             toolAuditStore.record(sessionId, toolName, toolCallId,
-                event instanceof ToolCallStartEvent ? "TOOL_CALL_START" : "TOOL_RESULT_END",
-                resultState, AgentEventSseSerializer.payload(event));
+                "TOOL_CALL_START", null, null);
+        } catch (Exception e) {
+            // 审计 fail-soft，不影响工具执行
+        }
+    }
+
+    private void auditResult(AgentEvent event, String sessionId, String toolName,
+                             String toolCallId, String resultState) {
+        if (toolAuditStore == null) {
+            return;
+        }
+        try {
+            toolAuditStore.record(sessionId, toolName, toolCallId,
+                "TOOL_RESULT_END", resultState, AgentEventSseSerializer.payload(event));
         } catch (Exception e) {
             // 审计 fail-soft，不影响工具执行
         }

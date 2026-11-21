@@ -102,7 +102,10 @@ type ToolCallStatsView struct {
 
 // ToolCalls 工具调用观测聚合（workspaceID > 0 = 工作空间范围；0 = 全平台）。
 func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView, error) {
-	// range 先行校验（400 语义确定性，不依赖观测栈是否部署）
+	// range 先行校验（400 语义确定性，不依赖观测栈是否部署）；空缺省 24h
+	if rangeKey == "" {
+		rangeKey = "24h"
+	}
 	r, ok := toolCallRanges[rangeKey]
 	if !ok {
 		return nil, fmt.Errorf("%w: %q (supported: 24h, 7d, 30d)", ErrInvalidRange, rangeKey)
@@ -139,7 +142,7 @@ func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView
 		return nil, errors.Join(ErrObservabilityDown, promErr)
 	}
 
-	view := &ToolCallStatsView{Range: rangeKey}
+	view := &ToolCallStatsView{Range: rangeKey, ByTool: []ToolCallToolRow{}, ByService: []ToolCallServiceRow{}}
 	view.Totals.Calls = vectorSum(vectors["totals"])
 	view.Totals.Errors = vectorSum(vectors["errors"])
 	if view.Totals.Calls > 0 {

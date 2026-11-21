@@ -8,8 +8,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
@@ -67,7 +67,7 @@ class ToolCallObservabilityMiddlewareTest {
 
         InOrder order = inOrder(auditStore);
         order.verify(auditStore).record(eq("sess-1"), eq("weather"), eq("call-1"),
-            eq("TOOL_CALL_START"), isNull(), anyString());
+            eq("TOOL_CALL_START"), isNull(), isNull());
         order.verify(auditStore).record(eq("sess-1"), eq("weather"), eq("call-1"),
             eq("TOOL_RESULT_END"), eq("success"), anyString());
 
@@ -159,7 +159,7 @@ class ToolCallObservabilityMiddlewareTest {
             .blockLast();
 
         verify(auditStore).record(eq(ctx.getSessionId()), eq("weather"), eq("call-1"),
-            eq("TOOL_CALL_START"), isNull(), anyString());
+            eq("TOOL_CALL_START"), isNull(), isNull());
     }
 
     @Test
@@ -177,7 +177,7 @@ class ToolCallObservabilityMiddlewareTest {
     }
 
     @Test
-    void shouldRecordNothingOnEmptyStream() {
+    void shouldRecordStartRowOnlyOnEmptyStream() {
         var middleware = new ToolCallObservabilityMiddleware(
             registry, auditStore, resolver, "my-agent");
 
@@ -185,8 +185,33 @@ class ToolCallObservabilityMiddlewareTest {
                 new ActingInput(List.of(toolCall("call-1", "weather"))), i -> Flux.empty())
             .blockLast();
 
-        verifyNoInteractions(auditStore);
+        // START 行在入口落（调用尝试口径）；无终态事件 → 无 RESULT 行、无计数
+        verify(auditStore).record(any(), eq("weather"), eq("call-1"),
+            eq("TOOL_CALL_START"), isNull(), isNull());
         assertEquals(0.0, registry.find("oaf.tool.calls").counters().stream()
             .mapToDouble(c -> c.count()).sum());
+    }
+
+    /** 事件流中的 ToolCallStartEvent 不触发二次写入（START 行唯一来源 = ActingInput 入口） */
+    @Test
+    void shouldNotDoubleRecordOnStartEvent() {
+        when(resolver.canonicalSessionId(any())).thenReturn("sess-1");
+        var middleware = new ToolCallObservabilityMiddleware(
+            registry, auditStore, resolver, "my-agent");
+
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "weather"))),
+                i -> stream(
+                    new ToolCallStartEvent("r1", "call-1", "weather"),
+                    new ToolResultEndEvent("r1", "call-1", "weather", ToolResultState.SUCCESS)))
+            .blockLast();
+
+        InOrder order = inOrder(auditStore);
+        order.verify(auditStore).record(eq("sess-1"), eq("weather"), eq("call-1"),
+            eq("TOOL_CALL_START"), isNull(), isNull());
+        order.verify(auditStore).record(eq("sess-1"), eq("weather"), eq("call-1"),
+            eq("TOOL_RESULT_END"), eq("success"), anyString());
+        verify(auditStore, times(2)).record(anyString(), eq("weather"), eq("call-1"),
+            anyString(), any(), any());
     }
 }

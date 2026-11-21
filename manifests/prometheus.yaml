@@ -52,7 +52,7 @@ data:
       - job_name: prometheus
         static_configs:
           - targets: ['localhost:9090']
-      # 业务 agent（注解发现；指标自带 service/tool/result 标签，无需额外 relabel 注入）
+      # 业务 agent（注解发现；指标自带 service/tool/result 标签）
       - job_name: oaf-agents
         kubernetes_sd_configs:
           - role: pod
@@ -71,11 +71,22 @@ data:
             regex: ([^:]+)(?::\d+)?;(\d+)
             replacement: $1:$2
             target_label: __address__
-          # 便于按 Pod 过滤/排障（不影响指标自身 service 标签语义）
+          # 便于按 Pod 过滤/排障
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
             target_label: k8s_name
+        # 指标层身份归一化（tool-call-observability-design §2）：framework 侧 service
+        # 标签是 OAF slug（vendor/agentKey，含业务自定 vendor 前缀），与 backend
+        # 选择器（DB k8s 名去 oaf- 前缀）无机械映射——在采集层统一改写为 k8s 名派生值，
+        # 原 slug 保留到 service_slug 便于对照。SSOT = 发布链路 k8s 名。
+        metric_relabel_configs:
+          - source_labels: [service]
+            target_label: service_slug
+          - source_labels: [k8s_name]
+            regex: "oaf-(.+)"
+            replacement: "$1"
+            target_label: service
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -83,6 +94,10 @@ metadata:
   name: prometheus
   namespace: agent-platform
 spec:
+  # TSDB 目录锁独占 + 共享 PVC subPath：滚动更新新旧 Pod 会并发持锁 CrashLoop，
+  # 必须先停旧再起新（单副本单写者语义）
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels: { app: prometheus }
