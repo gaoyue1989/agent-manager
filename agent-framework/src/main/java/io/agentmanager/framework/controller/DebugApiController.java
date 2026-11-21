@@ -53,6 +53,8 @@ public class DebugApiController {
     private static final int MONITOR_PROBLEM_SCAN_LIMIT = 2000;
     /** 运营监控：对话日志返回上限（与会话列表同口径） */
     private static final int MONITOR_MESSAGE_MAX_LIMIT = 500;
+    /** 运营监控：工具调用最近明细返回上限（防大库拖垮监控页） */
+    private static final int MONITOR_TOOL_RECENT_MAX_LIMIT = 200;
     /**
      * 对话正文检索的扫描上限：{@code LIKE '%kw%'} 无法走索引，且 JSON 粗筛有误报，
      * 必须在精确过滤前封顶，避免大库拖垮监控页。超出时响应带 {@code scan_capped=true}。
@@ -263,6 +265,7 @@ public class DebugApiController {
             result.put("total_turns", turns);
             result.put("total_answers", answers);
             result.put("messages_today", messagesToday);
+            result.put("tool_calls_today", toolCallsToday(conn));
             // 问题会话：工具失败（error/denied/interrupted）或 HITL 待确认
             var problems = loadMonitorProblems(conn);
             result.put("sessions_with_error", (long) problems.errorCounts().size());
@@ -272,6 +275,97 @@ public class DebugApiController {
             return result;
         } catch (Exception e) {
             log.warn("monitor overview failed: {}", e.getMessage());
+            return Map.of("connected", false, "error", e.getMessage());
+        }
+    }
+
+    /** 今日工具调用数（计数口径 = TOOL_CALL_START 行，与 /monitor/tools 同源） */
+    private long toolCallsToday(Connection conn) {
+        try (var stmt = conn.prepareStatement(
+                 "SELECT COUNT(*) FROM tool_audit_log "
+                     + "WHERE state = 'TOOL_CALL_START' AND created_at >= CURDATE()")) {
+            try (var rs = stmt.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0;
+            }
+        } catch (Exception e) {
+            log.warn("monitor tool_calls_today failed: {}", e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * 运营监控：工具调用轻量统计（每工具聚合 + 最近调用明细）。
+     *
+     * <p>数据源 tool_audit_log（写点 = ToolCallObservabilityMiddleware，覆盖全部协议
+     * 链路）：计数口径 = TOOL_CALL_START 行；失败数 = 同工具 TOOL_RESULT_END 行
+     * {@code result_state='error'}；存量行（result_state 为 NULL 的历史数据）按未失败计。
+     * 最近明细取 TOOL_CALL_START 行 LEFT JOIN 同 tool_call_id 的 TOOL_RESULT_END 行
+     * 带回结果状态。该端点同时是平台观测面板「最近调用」的 fan-out 数据源。
+     *
+     * @param limit 最近明细返回上限（默认 50，钳制在 [1, {@value #MONITOR_TOOL_RECENT_MAX_LIMIT}]）
+     */
+    @GetMapping("/monitor/tools")
+    public Map<String, Object> monitorTools(
+            @RequestParam(value = "limit", required = false, defaultValue = "50") Integer limitParam) {
+        int limit = limitParam == null ? 50
+            : Math.max(1, Math.min(limitParam, MONITOR_TOOL_RECENT_MAX_LIMIT));
+        var result = new LinkedHashMap<String, Object>();
+        try (Connection conn = dataSource.getConnection()) {
+            // 失败数按工具归并（END 行维度），再并入 START 行聚合
+            var errors = new LinkedHashMap<String, Long>();
+            try (var stmt = conn.createStatement();
+                 var rs = stmt.executeQuery(
+                     "SELECT tool_name, SUM(result_state = 'error') AS errors FROM tool_audit_log "
+                         + "WHERE state = 'TOOL_RESULT_END' GROUP BY tool_name")) {
+                while (rs.next()) {
+                    errors.put(rs.getString("tool_name"), rs.getLong("errors"));
+                }
+            }
+            var tools = new ArrayList<Map<String, Object>>();
+            try (var stmt = conn.createStatement();
+                 var rs = stmt.executeQuery(
+                     "SELECT tool_name, COUNT(*) AS calls, SUM(created_at >= CURDATE()) AS today, "
+                         + "MAX(created_at) AS last_call FROM tool_audit_log "
+                         + "WHERE state = 'TOOL_CALL_START' GROUP BY tool_name ORDER BY calls DESC")) {
+                while (rs.next()) {
+                    var m = new LinkedHashMap<String, Object>();
+                    m.put("tool_name", rs.getString("tool_name"));
+                    m.put("calls", rs.getLong("calls"));
+                    m.put("errors", errors.getOrDefault(rs.getString("tool_name"), 0L));
+                    m.put("today", rs.getLong("today"));
+                    m.put("last_call", rs.getTimestamp("last_call") != null
+                        ? rs.getTimestamp("last_call").toString() : null);
+                    tools.add(m);
+                }
+            }
+            var recent = new ArrayList<Map<String, Object>>();
+            try (var stmt = conn.prepareStatement(
+                     "SELECT s.created_at, s.tool_name, s.session_id, s.tool_call_id, e.result_state "
+                         + "FROM tool_audit_log s "
+                         + "LEFT JOIN tool_audit_log e "
+                         + "ON e.tool_call_id = s.tool_call_id AND e.state = 'TOOL_RESULT_END' "
+                         + "WHERE s.state = 'TOOL_CALL_START' "
+                         + "ORDER BY s.created_at DESC LIMIT ?")) {
+                stmt.setInt(1, limit);
+                try (var rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("created_at", rs.getTimestamp("created_at") != null
+                            ? rs.getTimestamp("created_at").toString() : null);
+                        m.put("tool_name", rs.getString("tool_name"));
+                        m.put("session_id", rs.getString("session_id"));
+                        m.put("tool_call_id", rs.getString("tool_call_id"));
+                        m.put("result_state", rs.getString("result_state"));
+                        recent.add(m);
+                    }
+                }
+            }
+            result.put("connected", true);
+            result.put("tools", tools);
+            result.put("recent", recent);
+            return result;
+        } catch (Exception e) {
+            log.warn("monitor tools failed: {}", e.getMessage());
             return Map.of("connected", false, "error", e.getMessage());
         }
     }
