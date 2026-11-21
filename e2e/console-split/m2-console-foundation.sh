@@ -21,6 +21,20 @@ U1=$(seed_user "$TOKEN" "m2-user-$TS" "Pass12345!")
 UT=$(req POST /auth/login "{\"username\":\"m2-user-$TS\",\"password\":\"Pass12345!\"}" | jqr "['data']['token']")
 assert_eq "非成员空间 404（不暴露 403/404 差异）" "$(code GET /console/workspaces/$WS/summary "" "$UT")" "404"
 assert_eq "普通用户 default 404" "$(code GET /console/workspaces/$DEF_WS/summary "" "$UT")" "404"
+# ---- 工具调用观测端点（tool-call-observability-design；200=观测栈在 / 503=未部署均合法）----
+OBS=$(code GET /console/workspaces/$WS/observability/tool-calls "" "$TOKEN")
+if [ "$OBS" = "200" ] || [ "$OBS" = "503" ]; then
+  ok "成员空间 observability 可达（$OBS）"
+else
+  bad "成员空间 observability 应 200/503（got=$OBS）"
+fi
+if [ "$OBS" = "200" ]; then
+  assert_contains "observability 响应含 totals/byTool 结构" \
+    "$(req GET /console/workspaces/$WS/observability/tool-calls "" "$TOKEN")" '"totals"'
+fi
+assert_eq "observability 非法 range 400" "$(code GET "/console/workspaces/$WS/observability/tool-calls?range=1w" "" "$TOKEN")" "400"
+assert_eq "observability 不存在空间 404" "$(code GET /console/workspaces/999999/observability/tool-calls "" "$TOKEN")" "404"
+assert_eq "observability 非成员 404" "$(code GET /console/workspaces/$WS/observability/tool-calls "" "$UT")" "404"
 req POST /admin/workspaces/$WS/members "{\"userId\":$U1,\"role\":\"member\"}" "" "$TOKEN" >/dev/null
 assert_eq "成员访问 200" "$(code GET /console/workspaces/$WS/summary "" "$UT")" "200"
 assert_contains "me 解析默认空间" "$(req GET /console/workspaces/me/summary "" "$UT")" '"agents"'
