@@ -74,6 +74,11 @@ type Config struct {
 	ExportRegistryUsername string
 	ExportRegistryPassword string
 
+	// ---- 工具调用观测（tool-call-observability-design）----
+	// Prometheus 查询入口（http://prometheus...:9090）；空 = 观测栈未部署，
+	// observability 端点返回明确错误态，面板可读
+	PrometheusURL string
+
 	// ---- OpenViking 记忆供给（openviking-memory-integration-design §11.1）----
 	// Enabled=false（默认）发布链路完全不感知 OpenViking；BaseURL/RootKey 任一为空即使
 	// Enabled=true 也视为未配置（VikingAdmin 为 nil，行为等同关闭）
@@ -113,6 +118,7 @@ func Load() (*Config, error) {
 		ExportRegistryUsername: envStr("EXPORT_REGISTRY_USERNAME", ""),
 		ExportRegistryPassword: envStr("EXPORT_REGISTRY_PASSWORD", ""),
 		// OpenViking 记忆供给：root key 仅控制面持有（建/删 account、per-user key 签发）
+		PrometheusURL:     envStr("PROMETHEUS_URL", ""),
 		OpenVikingEnabled: envStr("OPENVIKING_ENABLED", "") == "true",
 		OpenVikingBaseURL: envStr("OPENVIKING_BASE_URL", ""),
 		OpenVikingRootKey: envStr("OPENVIKING_ROOT_API_KEY", ""),

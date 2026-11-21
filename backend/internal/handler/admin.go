@@ -232,7 +232,30 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 		OK(c, gin.H{"userKey": key})
 	})
 
+	// 工具调用观测面板（全平台范围；tool-call-observability-design）
+	ad.GET("/observability/tool-calls", func(c *gin.Context) {
+		view, err := core.ToolCalls(0, c.Query("range"))
+		if err != nil {
+			mapObservabilityError(c, err)
+			return
+		}
+		OK(c, view)
+	})
+
 	registerAdminSandboxes(ad, core)
+}
+
+// mapObservabilityError 观测端点错误映射：观测栈不可达 503（前端展示明确错误态，
+// 而非静默 0）、窗口档位非法 400、其余走通用映射。
+func mapObservabilityError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrObservabilityDown):
+		Fail(c, http.StatusServiceUnavailable, "观测栈不可达（PROMETHEUS_URL 未配置或查询失败）")
+	case errors.Is(err, service.ErrInvalidRange):
+		Fail(c, http.StatusBadRequest, err.Error())
+	default:
+		mapError(c, err)
+	}
 }
 
 // registerAdminSandboxes 沙箱管理面端点（sandbox-pool-opensandbox-design §5.2）：

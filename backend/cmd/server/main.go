@@ -83,6 +83,7 @@ func main() {
 		IngressBuilder:      ingBuilder,
 		PackageDownloadBase: cfg.PackageDownloadBase,
 		OpenVikingEnabled:   cfg.OpenVikingEnabled,
+		PrometheusURL:       cfg.PrometheusURL,
 		OpenVikingBaseURL:   cfg.OpenVikingBaseURL,
 	})
 	// 身份与模型下发装配：introspect JWT 校验密钥 + running 后模型连接异步下发（M5）
