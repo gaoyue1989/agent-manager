@@ -212,9 +212,11 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             return err("metadata write failed: " + e.getMessage());
         }
         log.info("present_file: registered {} ({} bytes, mime={})", norm, size, mime);
-        // 5. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）
-        return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + basename(norm)
-            + "\",\"mime_type\":\"" + mime + "\",\"size\":" + size + "}";
+        // 5. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）；文件名经 escape()
+        //    （issue #424：#344 还原的含引号名不转义即产出非法 JSON，parseFileResult 正则
+        //    兜底在首个引号截断，构造 `a","error":"x` 形名可注入字段使 file_ready 丢失）
+        return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + escape(basename(norm))
+            + "\",\"mime_type\":\"" + escape(mime) + "\",\"size\":" + size + "}";
     }
 
     /**
@@ -305,7 +307,13 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
     }
 
-    /** 路径规范化：拒绝 ../ 逃逸；统一返回工作区相对路径（无前导 /workspace） */
+    /**
+     * 路径规范化：拒绝 ../ 逃逸；统一返回工作区相对路径（无前导 /workspace）。
+     *
+     * <p>剥 /workspace/ 前缀后不得再是绝对路径（issue #424）：/workspace//etc/passwd
+     * 剥前缀得 /etc/passwd，放行即绕过工作区约束——沙箱 execd files API 按绝对路径
+     * 可读容器任意文件，越出禁 shell / shell HITL 策略的边界。
+     */
     private String normalizeWorkspacePath(String filePath) {
         if (filePath == null || filePath.isBlank()) {
             return null;
@@ -317,7 +325,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             // 非 /workspace 绝对路径 → 拒绝
             return null;
         }
-        if (p.contains("..") || p.startsWith("../") || p.contains("/../")) {
+        if (p.isBlank() || p.startsWith("/") || p.contains("..") || p.contains("/../")) {
             return null;
         }
         return p;

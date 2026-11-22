@@ -478,4 +478,55 @@ class FileToolsTest {
             "Channel 链路经 session_user 反查真实用户后应读到 KV（D3 保留）: " + result);
         verify(ws).readWorkspaceFile("alice", "outputs/kv.txt");
     }
+
+    // ===== issue #424：返回 JSON 转义 + /workspace// 双斜杠绝对逃逸 =====
+
+    /**
+     * 含引号文件名（#344 %22→" 还原的真实场景）必须产出合法 JSON：旧实现手拼字符串
+     * 不经 escape()，非法 JSON 使 ChatStreamController.parseFileResult 落入正则兜底、
+     * file_name 在首个引号截断，file_ready 卡片丢失/文件名错误。
+     */
+    @Test
+    void presentFileShouldEscapeQuotesInReturnedJson() throws Exception {
+        var result = tools.presentFile(ctx(), "outputs/report\"final\".txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("report\"final\".txt", node.get("file_name").asText(),
+            "file_name 经转义后可无损往返: " + result);
+    }
+
+    /** 构造 `a","error":"x` 形文件名不得注入 JSON 字段（使控制器丢弃 file_ready） */
+    @Test
+    void presentFileShouldNotAllowFieldNameInjectionViaFileName() throws Exception {
+        var result = tools.presentFile(ctx(), "outputs/a\",\"error\":\"injected.txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("a\",\"error\":\"injected.txt", node.get("file_name").asText(),
+            "注入名应整体作为 file_name 值: " + result);
+        assertTrue(node.get("error") == null, "不得注入额外字段: " + result);
+    }
+
+    /** `/workspace//etc/passwd` 剥前缀后得绝对路径——一律拒绝，不得放行工作区约束 */
+    @Test
+    void presentFileShouldRejectWorkspaceDoubleSlashAbsoluteEscape() {
+        var result = tools.presentFile(ctx(), "/workspace//etc/passwd", null);
+        assertTrue(result.contains("invalid path"),
+            "剥 /workspace/ 前缀后仍为绝对路径应拒绝: " + result);
+    }
+
+    /** 沙箱直读路径同样不得收到剥前缀后的绝对路径（execd files API 可读容器任意文件） */
+    @Test
+    void presentFileSandboxMustNotOpenAbsoluteEscapePath() {
+        when(sandboxRuntime.enabled()).thenReturn(true);
+        var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
+        when(sandbox.getUserKey()).thenReturn("alice");
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
+            mock(WorkspaceReader.class), null);
+
+        var result = t.presentFile(turnCtx(sandbox), "/workspace//etc/passwd", null);
+        assertTrue(result.contains("invalid path"), "双斜杠绝对逃逸应拒绝: " + result);
+        verify(sandbox, never()).statWorkspaceFile(anyString());
+        verify(sandbox, never()).openWorkspaceStream(anyString());
+    }
 }
