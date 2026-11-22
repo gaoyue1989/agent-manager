@@ -665,8 +665,11 @@ public class ChatStreamController {
                     msgMeta.put(io.agentmanager.framework.service.ToolFilterMiddleware.METADATA_TOOLS_KEY,
                         body.tools());
                 }
-                if (body.fileIds() != null && !body.fileIds().isEmpty()) {
-                    msgMeta.put(UploadWorkspaceInjector.METADATA_FILE_IDS, body.fileIds());
+                // 只写过滤后的可注入列表（issue #411）：assignWorkspacePaths 拒绝的他人/
+                // 异 session fileId 若进 metadata，history 回放会把他人附件卡片挂到本消息上；
+                // 全部被拒时不写该键（history 不挂空卡片）。attachUploadedFiles 语义不变
+                if (injectableFileIds != null && !injectableFileIds.isEmpty()) {
+                    msgMeta.put(UploadWorkspaceInjector.METADATA_FILE_IDS, injectableFileIds);
                 }
                 var msg = Msg.builder().role(MsgRole.USER).name(finalUserId)
                     .metadata(msgMeta)

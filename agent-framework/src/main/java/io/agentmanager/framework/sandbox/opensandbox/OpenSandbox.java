@@ -1206,6 +1206,10 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 将本会话（session_id 绑定）名下 status=pending 的上传文件经 execd files API 写入沙箱
      * /workspace/uploads/{workspace_path}，成功后置 injected。
      *
+     * <p>批次过滤 session + user 双条件（issue #411）：注入前比对沙箱 userKey 与
+     * file_asset.user_key，他人行即使绑定同 session 也不得注入（「注入前比对」即
+     * {@link FileAssetStore#listPending(String, String)} 的 SQL 双条件）。
+     *
      * <p>调用时机：OpenSandboxClient.create()/resume() 后立即执行（沙箱文件操作
      * 走 execd 原生 API，不一定经过 doExec——实测 read_file/execute 均不触发）。
      * fail-soft：注入失败仅告警不阻塞（该批文件本轮不可见，下 turn 重试）。
@@ -1233,12 +1237,21 @@ public class OpenSandbox extends AbstractBaseSandbox
             log.debug("[sandbox-open] no session bound, skip pending upload injection");
             return;
         }
+        // 注入前身份齐备校验（issue #411）：注入批次的 user_key 维度取自实例绑定
+        // （OpenSandboxClient.bindUserKey / SandboxUserKeyMiddleware.setUserKey 两处已绑定），
+        // 缺失即无法与 file_asset.user_key 比对——跳过注入（行保持 pending，不置
+        // pendingEmptyChecked，下 turn middleware 身份齐备后重试）。对齐 #345「身份缺失
+        // 跳过注入，绝不回退 user 维度兜底」纪律，与上方 sessionId 缺失分支同形态
+        if (userKey == null || userKey.isBlank()) {
+            log.debug("[sandbox-open] no userKey bound, skip pending upload injection");
+            return;
+        }
         synchronized (uploadsInjected) {
             if (uploadsInjected.get()) {
                 return;
             }
             try {
-                var pending = fileAssetStore.listPending(sessionId);
+                var pending = fileAssetStore.listPending(sessionId, userKey);
                 if (pending.isEmpty()) {
                     // 不设 uploadsInjected=true（上传可能尚未完成）；但本 call 内置「已查无 pending」
                     // 短路，同 call 后续 doExec 不再查——下一 call 新实例自然重查

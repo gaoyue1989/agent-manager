@@ -1,6 +1,6 @@
 # 上传注入会话隔离 + 交付通道加固 一期设计-261114
 
-状态：**已实施（2026-11-14，feat/upload-session-scope-present-harden 分支，issue #345 一期）**；修订记录：v2 —— review 发现 6 项问题并修订：upload sessionId 必填 → bind-at-use（消 e2e 三套件破坏）；状态机统一 pending；spool 目录避开 /tmp；跨 session 引用定语义；delete 路径 sessionId 取数补实。文件名 RFC 7578 解码已由先行 PR #344 更窄实现（仅 `%22` 逆变），不在本期范围。实施偏差见 §6。
+状态：**已实施（2026-11-14，feat/upload-session-scope-present-harden 分支，issue #345 一期）**；修订记录：v2 —— review 发现 6 项问题并修订：upload sessionId 必填 → bind-at-use（消 e2e 三套件破坏）；状态机统一 pending；spool 目录避开 /tmp；跨 session 引用定语义；delete 路径 sessionId 取数补实。文件名 RFC 7578 解码已由先行 PR #344 更窄实现（仅 `%22` 逆变），不在本期范围。实施偏差见 §6。v3（2026-11-23，issue #411）—— 一期 session 化未覆盖 user 维度的三个旁路已修复：① upload 侧缺归属校验（他人可以任意 sessionId 上传挂账，沙箱注入面越权）→ 补 SessionAccessGuard 归属校验 + 空 sessionId 归一 null + PathSafe 命名空间对齐；② `listPending` session 单条件放行「他人行绑定同 session」（upload 侧直传任意 sid 即可触发投递他人沙箱）→ 补 user_key 双条件（`listPending(sessionId, userKey)`，注入前比对沙箱 userKey）；③ chat 把请求原始 `fileIds` 写进用户 Msg.metadata（被拒 fileId 也挂卡片）→ 改写过滤后 injectableFileIds。三缺陷同根：一期只做了 session 维度切割（§3.1 的「归属校验」止步于 chat 引用侧），本修复对齐 §3.1 设计意图；存量脏数据不清洗，由 7 天 pending 保留期自然回收。
 
 ## 1. 背景与问题（均已实测钉死）
 

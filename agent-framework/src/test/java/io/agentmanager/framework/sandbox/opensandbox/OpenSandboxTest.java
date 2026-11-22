@@ -318,7 +318,7 @@ class OpenSandboxTest {
         // 不做 base64 解码——旧实现传 base64 字符串，沙箱内二进制文件全部损坏
         var raw = new byte[]{0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, (byte) 0xFF, 0x10}; // zip magic + 二进制
         var store = mockAssetStore();
-        when(store.listPending("u1")).thenReturn(List.of(asset("f1", "sample.docx")));
+        when(store.listPending("u1", "u1")).thenReturn(List.of(asset("f1", "sample.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(raw));
         sandbox.setUserKey("u1");
@@ -342,7 +342,7 @@ class OpenSandboxTest {
         // 重放即触发）。
         var store = mockAssetStore();
         when(store.listWorkspacePaths("u2")).thenReturn(List.of("uploads/report.docx"));
-        when(store.listPending("u2")).thenReturn(List.of(reserved("f2", "report.docx", "uploads/report.docx")));
+        when(store.listPending("u2", "u2")).thenReturn(List.of(reserved("f2", "report.docx", "uploads/report.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u2");
@@ -364,7 +364,7 @@ class OpenSandboxTest {
         // 保证后续轮次提示路径与磁盘一致
         var store = mockAssetStore();
         when(store.listWorkspacePaths("u3")).thenReturn(List.of("uploads/plan.docx"));
-        when(store.listPending("u3")).thenReturn(List.of(asset("f3", "plan.docx")));
+        when(store.listPending("u3", "u3")).thenReturn(List.of(asset("f3", "plan.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u3");
@@ -384,7 +384,7 @@ class OpenSandboxTest {
         // 同一批次两份无预留的同名文件：第二份也得避开第一份刚分配的路径
         var store = mockAssetStore();
         when(store.listWorkspacePaths("u4")).thenReturn(List.of());
-        when(store.listPending("u4")).thenReturn(List.of(
+        when(store.listPending("u4", "u4")).thenReturn(List.of(
             asset("a", "plan.docx"), asset("b", "plan.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
@@ -413,7 +413,7 @@ class OpenSandboxTest {
 
         sandbox.injectPendingUploads();
 
-        verify(store, never()).listPending(anyString());
+        verify(store, never()).listPending(anyString(), anyString());
         verify(osb.files(), never()).write(anyList());
     }
 
@@ -421,7 +421,7 @@ class OpenSandboxTest {
     void injectUploadsShouldFallBackToSpecPendingSessionId() throws Exception {
         // 实例未绑定（acquire 先于 bindUserKey 的窗口）→ spec ThreadLocal 兜底
         var store = mockAssetStore();
-        when(store.listPending("sess-9")).thenReturn(List.of(asset("f9", "a.txt")));
+        when(store.listPending("sess-9", "u1")).thenReturn(List.of(asset("f9", "a.txt")));
         var spec = new OpenSandboxFilesystemSpec();
         spec.setPendingSessionId("sess-9");
         var osb = mockOsb(mockExecution(0, "", ""));
@@ -430,8 +430,25 @@ class OpenSandboxTest {
 
         sandbox.injectPendingUploads();
 
-        verify(store).listPending("sess-9");
+        verify(store).listPending("sess-9", "u1");
         verify(store).markInjected(List.of("f9"));
+    }
+
+    @Test
+    void injectUploadsShouldSkipWhenNoUserKeyBound() throws Exception {
+        // 注入前身份齐备校验（issue #411）：listPending 双条件的 userKey 维度取自实例绑定
+        // （bindUserKey / middleware setUserKey）——缺失即无法与 file_asset.user_key 比对，
+        // 必须跳过注入（行保持 pending，不置 pendingEmptyChecked，下 turn 身份齐备后重试）。
+        // 与 injectUploadsShouldSkipWhenNoSessionBound 对偶：绝不回退 user 维度兜底
+        var store = mockAssetStore();
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setSessionId("sess-10");
+
+        sandbox.injectPendingUploads();
+
+        verify(store, never()).listPending(anyString(), anyString());
+        verify(osb.files(), never()).write(anyList());
     }
 
     private static FileAssetStore.FileAsset asset(String id, String fileName) {

@@ -9,6 +9,7 @@ import org.springframework.http.HttpStatus;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.service.FileAssetStore;
+import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.storage.FileStorage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,6 +22,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,6 +33,7 @@ public class FileControllerTest {
 
     private FileStorage fileStorage;
     private FileAssetStore fileAssetStore;
+    private SessionUserStore sessionUserStore;
     private AgentManagerProperties props;
     private FileController controller;
 
@@ -38,8 +41,9 @@ public class FileControllerTest {
     void setUp() {
         fileStorage = mock(FileStorage.class);
         fileAssetStore = mock(FileAssetStore.class);
+        sessionUserStore = mock(SessionUserStore.class);
         props = testProps();
-        controller = new FileController(fileStorage, fileAssetStore, props);
+        controller = new FileController(fileStorage, fileAssetStore, sessionUserStore, props);
     }
 
     public static AgentManagerProperties testProps() {
@@ -71,6 +75,56 @@ public class FileControllerTest {
         assertEquals("pending", captor.getValue().status());
         assertEquals("s1", captor.getValue().sessionId());
         verify(fileStorage).write(anyString(), any(), anyLong(), anyString());
+    }
+
+    // ===== 会话归属校验（issue #411：upload 侧杜绝向他人会话沙箱投递文件）=====
+
+    @Test
+    void uploadShouldRejectForeignSession() throws Exception {
+        // 他人会话（session_user 已映射到 bob）→ 404 session_not_found，零落行。
+        // 404 口径对齐 SessionAccessGuard「不泄露会话存在性」惯例（ChatStreamController thread_not_found 同款）
+        when(sessionUserStore.findUserIdBySession("s-bob")).thenReturn("bob");
+        var file = new MockMultipartFile("file", "evil.csv", "text/csv", new byte[]{1});
+        var resp = controller.upload(file, "alice", "s-bob", null);
+        assertEquals(HttpStatus.NOT_FOUND, resp.getStatusCode());
+        assertEquals("session_not_found", resp.getBody().get("error"));
+        verify(fileAssetStore, never()).insert(any(FileAssetStore.FileAsset.class));
+        verify(fileStorage, never()).write(anyString(), any(), anyLong(), anyString());
+    }
+
+    @Test
+    void uploadShouldAcceptOwnSession() {
+        when(sessionUserStore.findUserIdBySession("s1")).thenReturn("alice");
+        var file = new MockMultipartFile("file", "report.csv", "text/csv",
+            "a,b\n1,2".getBytes(StandardCharsets.UTF_8));
+        var resp = controller.upload(file, "alice", "s1", null);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        assertEquals("s1", captor.getValue().sessionId());
+    }
+
+    @Test
+    void uploadShouldAcceptSessionWithoutOwnershipMapping() {
+        // session_user 无映射行（上传先于首聊的真实流）→ 放行（存量语义，与 chat 归属校验同口径）；
+        // 注入侧 listPending user_key 双条件兜底异 user 行
+        when(sessionUserStore.findUserIdBySession("s-new")).thenReturn(null);
+        var file = new MockMultipartFile("file", "report.csv", "text/csv", new byte[]{1});
+        var resp = controller.upload(file, "alice", "s-new", null);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        verify(fileAssetStore).insert(any(FileAssetStore.FileAsset.class));
+    }
+
+    @Test
+    void uploadShouldNormalizeBlankSessionIdToNull() {
+        // 空 sessionId 归一为 null（未绑定，交 bind-at-use）：消「空串 session_id 永久孤儿」——
+        // listPending 按 session_id=? 精确匹配，空串行（sanitize 后永不等值）永不注入
+        var file = new MockMultipartFile("file", "report.csv", "text/csv", new byte[]{1});
+        var resp = controller.upload(file, "alice", "  ", null);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        assertNull(captor.getValue().sessionId());
     }
 
     @Test
@@ -160,7 +214,7 @@ public class FileControllerTest {
                 "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b", ""),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             AgentManagerProperties.HarnessConfig.defaults());
-        var c = new FileController(fileStorage, fileAssetStore, disabled);
+        var c = new FileController(fileStorage, fileAssetStore, sessionUserStore, disabled);
         var file = new MockMultipartFile("file", "a.png", "image/png", new byte[]{1});
         assertEquals(HttpStatus.FORBIDDEN, c.upload(file, null, null, null).getStatusCode());
     }
@@ -456,7 +510,7 @@ public class FileControllerTest {
             var port = server.getAddress().getPort();
             var url = "http://127.0.0.1:" + port + "/pkg/1/download";
             var id = "550e8400-e29b-41d4-a716-446655440010";
-            var c = new FileController(fileStorage, fileAssetStore,
+            var c = new FileController(fileStorage, fileAssetStore, sessionUserStore,
                 propsWithExternalPrefix("http://127.0.0.1:" + port));
             when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id, url, "weather-agent.zip")));
 
@@ -493,7 +547,7 @@ public class FileControllerTest {
         try {
             var port = server.getAddress().getPort();
             var id = "550e8400-e29b-41d4-a716-446655440012";
-            var c = new FileController(fileStorage, fileAssetStore,
+            var c = new FileController(fileStorage, fileAssetStore, sessionUserStore,
                 propsWithExternalPrefix("http://127.0.0.1:" + port));
             when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id,
                 "http://127.0.0.1:" + port + "/pkg/2/download", "a.zip")));
