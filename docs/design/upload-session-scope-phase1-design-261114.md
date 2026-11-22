@@ -29,6 +29,7 @@
 
 **上传侧**
 - `session_id` 保持可选（上传先于会话是真实流）；**首次被 chat 引用时绑定**（bind-at-use）
+- 上传侧归属校验（v3，issue #411）：`sessionId` 非空经 `SessionAccessGuard` 校验归属——已映射他用户 → 404 `session_not_found`（不泄露会话存在性，与 chat 同口径）；无映射行放行（bind-at-use 认领）。blank 归 null；非空经 PathSafe.sanitize 对齐 chat 会话键命名空间（冒号类键经 chat sanitize 后须仍可匹配），userKey 同款对齐 chat finalUserId
 - 上传状态机统一：**两种模式 upload 一律 status=pending**（消非沙箱"upload 即 injected 但文件未落盘"的状态失真）；实际交付时置 injected（非沙箱=chat 写盘后，沙箱=acquire 注入后）
 - pending 配额（uploadMaxPending）**维持 user 维度计数**（防滥用按用户算，与注入作用域解耦）
 - `FileController.isSandboxMode` 依赖随之退役
@@ -42,7 +43,7 @@
 - 提示区块 `buildContentBlocks` 只收 bound 列表（跳过项不出现在提示中）
 
 **注入侧（沙箱）**
-- `OpenSandbox` 新增 `sessionId` 实例绑定（createNew/wrapReused/resume 三路径捕获，middleware 兜底）；`injectPendingUploads` 严格 `listPending(sessionId)` 单条件过滤；**身份缺失跳过注入**（行保持 pending，下 turn 重试）——user 维度兜底是泄漏根源，绝不回退
+- `OpenSandbox` 新增 `sessionId` 实例绑定（createNew/wrapReused/resume 三路径捕获，middleware 兜底）；`injectPendingUploads` 批次过滤 `listPending(sessionId, userKey)` session+user 双条件（v3，issue #411——一期 session 单条件放行「他人行绑定同 session」，upload 直传任意 sid 即可投递他人沙箱；注入前比对实例绑定的沙箱 userKey）；**身份缺失跳过注入**（sessionId 与 userKey 任一缺失均跳过，行保持 pending，下 turn 重试）——user 维度兜底是泄漏根源，绝不回退
 - 写入路径 = 行内 `workspace_path` 原样落盘（#343 语义不变）→ 容器销毁重建后重放路径不变（幂等，`_N` 漂移消失）
 - `resetInjectedToPending(sessionId)` session 单条件：createNew 被动兜底 / delete 主动回滚 / middleware 换代 reset 三处对齐；sid 缺失跳过（createNew 兜底覆盖）
 
@@ -72,12 +73,13 @@
 ## 4. 测试
 
 **单元（2138 例全绿）**
-- FileAssetStoreTest：listPending session 单条件过滤；bindSession 条件写（NULL 绑定成功/被抢绑 false）；resetInjectedToPending session 单条件
+- FileAssetStoreTest：listPending session+user 双条件过滤（v3，issue #411）；bindSession 条件写（NULL 绑定成功/被抢绑 false）；resetInjectedToPending session 单条件
 - UploadWorkspaceInjectorTest：assign 绑定+分配/幂等/同 session 撞名 `_1`/异 session 跳过/userKey 不匹配跳过/抢绑失败跳过；injectToWorkspace injected 跳过/磁盘撞名重分配（@TempDir 隔离）
-- OpenSandboxTest：注入按 session 过滤（原 3 用例改造）+ 无 session 绑定跳过 + ThreadLocal 兜底
+- OpenSandboxTest：注入按 session+user 双条件过滤（v3，issue #411）+ 无 session 绑定跳过 + 无 userKey 绑定跳过（v3）+ ThreadLocal 兜底
 - FileToolsTest：stat 超限快速拒绝（verify 无 readStream）；writeBounded 越限拒绝无落库；流式登记 size 正确；非沙箱 byte[] 回归
 - LocalFileStorageTest：writeBounded 正常返回字节数/越限中止无残留/关源流契约
-- FileControllerTest：upload 恒 pending 断言 + cap 不变量钉子；S3EnvBindingTest 锁 @ConstructorBinding 绑定链路
+- FileControllerTest：upload 恒 pending 断言 + cap 不变量钉子 + 归属校验四用例（他人 session 404 零落行 / 自己 session / 无映射放行 / 空白 sessionId 归一 null，v3，issue #411）；S3EnvBindingTest 锁 @ConstructorBinding 绑定链路
+- ChatStreamControllerTest：Msg.metadata.file_ids 写过滤后 injectableFileIds、全被拒不写键（v3，issue #411）
 
 **e2e（api-sandbox 新增，既有套件零改动通过为显式门禁）**
 - X19 会话隔离：同 uid 双 session，session B 探针 404 session A 的上传件
