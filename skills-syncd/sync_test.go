@@ -734,6 +734,57 @@ func TestRecentlySeenToleranceWindow(t *testing.T) {
 	assertCurrent(t, d.cfg.storeDir, ver1)
 }
 
+// 回归（issue #390）：稳态驻留超过容忍窗后滚发，旧实现 recent[v1] 停在首次拉取时刻——
+// 滚发中命中旧副本 v1 会主动降级回 v1，且滚发完成后被 v2 的容忍窗跳过锁死在旧版
+// （PR-4b 起 SkillsFarm 版本硬校验无回落，锁死期间全部新会话丢包技能）。
+// 修复语义：cycle 稳态命中 current 刷新 recent[current]；pull 切换时记旧版「离开时刻」。
+func TestRollingDeployAfterSteadyStateDwellDoesNotDowngrade(t *testing.T) {
+	src := newFakeSource(t)
+	src.setVersion(ver1)
+	src.setBundleFiles(defaultFixture("v1"))
+	d := newTestDaemon(t, src, nil, nil)
+	ctx := context.Background()
+
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("pull v1: %v", err)
+	}
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("steady-state cycle: %v", err)
+	}
+	if hits := src.stats().bundleHits; hits != 1 {
+		t.Fatalf("steady-state bundle hits = %d, want 1", hits)
+	}
+	// 驻留 150ms > 2×interval(100ms)：此处 recent[v1] 若未被稳态刷新，滚发即复现缺陷
+	time.Sleep(150 * time.Millisecond)
+
+	src.setVersion(ver2)
+	src.setBundleFiles(defaultFixture("v2"))
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("pull v2: %v", err)
+	}
+	assertCurrent(t, d.cfg.storeDir, ver2)
+
+	// 滚发未完成，svc 轮询命中旧副本 v1：v1 的「离开时刻」在窗口内，不得降级
+	src.setVersion(ver1)
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("hit old replica during rollout: %v", err)
+	}
+	if hits := src.stats().bundleHits; hits != 2 {
+		t.Fatalf("bundle hits when hitting old replica = %d, want 2 (must not downgrade during rollout)", hits)
+	}
+	assertCurrent(t, d.cfg.storeDir, ver2)
+
+	// 滚发完成，全副本 v2：稳态保持，不再拉取
+	src.setVersion(ver2)
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("steady cycle after rollout: %v", err)
+	}
+	if hits := src.stats().bundleHits; hits != 2 {
+		t.Fatalf("bundle hits after rollout complete = %d, want 2", hits)
+	}
+	assertCurrent(t, d.cfg.storeDir, ver2)
+}
+
 func TestStagingInterruptLeavesNoReadableState(t *testing.T) {
 	cases := []struct {
 		name  string
