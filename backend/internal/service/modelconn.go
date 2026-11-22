@@ -208,23 +208,25 @@ func (c *Core) UpdateModelConnection(workspaceID, id uint, in PatchModelConnInpu
 	return &v, nil
 }
 
-// DeleteModelConnection 删除保护：仍为某 Agent 默认连接（env LLM_* 匹配）→ 409；
-// 仅下发连接可直接删，同时删 delivery 行。Agent 侧 model_config 不自动删（保守）。
+// DeleteModelConnection 删除保护：仍为某 Agent 默认连接（model_deliveries.is_default
+// 持久标记，issue #387——不再按 env LLM_* 字符串匹配全空间服务，同 modelId+baseUrl
+// 未下发的连接不受牵连）→ 409；仅下发连接可直接删，同时删 delivery 行。Agent 侧
+// model_config 不自动删（保守）。
 func (c *Core) DeleteModelConnection(workspaceID, id uint) error {
 	m, err := c.GetModelConnectionInWorkspace(workspaceID, id)
 	if err != nil {
 		return err
 	}
-	var svcs []store.ServiceEntity
-	if err := c.DB.Where("workspace_id = ?", workspaceID).Find(&svcs).Error; err != nil {
-		return err
+	var svc store.ServiceEntity
+	err = c.DB.Select("services.*").
+		Joins("JOIN model_deliveries md ON md.service_id = services.id").
+		Where("md.connection_id = ? AND md.is_default = ?", id, true).
+		Order("services.id ASC").First(&svc).Error
+	if err == nil {
+		return fmt.Errorf("%w: default_connection_in_use by agent %s", ErrConflict, svc.K8sName)
 	}
-	for _, s := range svcs {
-		env := map[string]string{}
-		_ = json.Unmarshal([]byte(s.EnvJSON), &env)
-		if env["LLM_MODEL"] == m.ModelID && env["LLM_BASE_URL"] == m.BaseURL {
-			return fmt.Errorf("%w: default_connection_in_use by agent %s", ErrConflict, s.K8sName)
-		}
+	if err != gorm.ErrRecordNotFound {
+		return err
 	}
 	return c.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("connection_id = ?", id).Delete(&store.ModelDelivery{}).Error; err != nil {
@@ -297,8 +299,10 @@ func testOpenAIEndpoint(baseURL, apiKey, modelID string, timeoutSec int) *TestRe
 
 // ---- 下发（deliver）----
 
-// registerDeliveries 创建链路：勾选连接 → pending 行（幂等：已有行不重复建）。
-func (c *Core) registerDeliveries(conns []*store.ModelConnection, serviceID uint) error {
+// registerDeliveries 创建链路：勾选连接 → pending 行（幂等：已有行不重复建），
+// def 行 is_default 置 true、其余行置 false（issue #387：两条 UPDATE 归一幂等，
+// 既有行同样收敛）。
+func (c *Core) registerDeliveries(def *store.ModelConnection, conns []*store.ModelConnection, serviceID uint) error {
 	for _, conn := range conns {
 		var cnt int64
 		if err := c.DB.Model(&store.ModelDelivery{}).
@@ -309,7 +313,12 @@ func (c *Core) registerDeliveries(conns []*store.ModelConnection, serviceID uint
 			continue
 		}
 		if err := c.DB.Create(&store.ModelDelivery{ConnectionID: conn.ID,
-			ServiceID: serviceID, Status: "pending"}).Error; err != nil {
+			ServiceID: serviceID, Status: "pending", IsDefault: def != nil && conn.ID == def.ID}).Error; err != nil {
+			return err
+		}
+	}
+	if def != nil {
+		if err := markDeliveryDefault(c.DB, serviceID, def.ID); err != nil {
 			return err
 		}
 	}
@@ -317,8 +326,8 @@ func (c *Core) registerDeliveries(conns []*store.ModelConnection, serviceID uint
 }
 
 // syncDeliveries 编辑链路：勾选集增量重建（新增 pending；移除的行删除——远端 model_config
-// 保留，usage 不再展示）。
-func (c *Core) syncDeliveries(conns []*store.ModelConnection, serviceID uint) error {
+// 保留，usage 不再展示）；def 行 is_default 置 true、其余行置 false（切换默认连接时翻转）。
+func (c *Core) syncDeliveries(def *store.ModelConnection, conns []*store.ModelConnection, serviceID uint) error {
 	keep := map[uint]bool{}
 	for _, conn := range conns {
 		keep[conn.ID] = true
@@ -329,7 +338,7 @@ func (c *Core) syncDeliveries(conns []*store.ModelConnection, serviceID uint) er
 		}
 		if cnt == 0 {
 			if err := c.DB.Create(&store.ModelDelivery{ConnectionID: conn.ID,
-				ServiceID: serviceID, Status: "pending"}).Error; err != nil {
+				ServiceID: serviceID, Status: "pending", IsDefault: def != nil && conn.ID == def.ID}).Error; err != nil {
 				return err
 			}
 		}
@@ -344,6 +353,58 @@ func (c *Core) syncDeliveries(conns []*store.ModelConnection, serviceID uint) er
 				return err
 			}
 		}
+	}
+	if def != nil {
+		return markDeliveryDefault(c.DB, serviceID, def.ID)
+	}
+	return nil
+}
+
+// markDeliveryDefault 默认标记归一（注册/编辑链路的显式 def 口径）：def 行置 true、
+// 本服务其余行置 false。候选 WHERE 含 is_default IS NULL（AutoMigrate 加列存量行 NULL，
+// 三值逻辑下 = false / = true 都不命中，先例 store/migrate.go 步骤 3/4）；已是目标值的行
+// 不命中，重复调用零写入。
+func markDeliveryDefault(db *gorm.DB, serviceID, connectionID uint) error {
+	if err := db.Model(&store.ModelDelivery{}).
+		Where("service_id = ? AND connection_id = ? AND (is_default IS NULL OR is_default = ?)",
+			serviceID, connectionID, false).
+		Update("is_default", true).Error; err != nil {
+		return err
+	}
+	return db.Model(&store.ModelDelivery{}).
+		Where("service_id = ? AND connection_id <> ? AND (is_default IS NULL OR is_default = ?)",
+			serviceID, connectionID, true).
+		Update("is_default", false).Error
+}
+
+// normalizeDeliveryDefaults 手动下发归一（issue #387，规则唯一语义源锚点）：解析服务 env
+// LLM_MODEL+LLM_BASE_URL，在本服务 delivery 行 join connections 范围内匹配 model_id+base_url，
+// 按 connection_id ASC 最小命中行置 true、命中时本服务其余行置 false；env 不匹配则不动
+// （未下发的连接不因 env 撞车被牵连为默认）。store 层 Backfill 第 9 步按同一规则实现
+// （store 不能 import service，规则唯一、实现两处，注释互指）；注册/编辑链路的显式
+// def 口径见 markDeliveryDefault。
+func (c *Core) normalizeDeliveryDefaults(serviceID uint) error {
+	var svc store.ServiceEntity
+	if err := c.DB.First(&svc, serviceID).Error; err != nil {
+		return err
+	}
+	var env map[string]string
+	_ = json.Unmarshal([]byte(svc.EnvJSON), &env)
+	var rows []store.ModelDelivery
+	if err := c.DB.Where("service_id = ?", serviceID).
+		Order("connection_id ASC").Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, r := range rows {
+		conn, err := c.GetModelConnection(r.ConnectionID)
+		if err != nil {
+			continue // 连接已删的悬空行不参与匹配
+		}
+		if conn.ModelID != env["LLM_MODEL"] || conn.BaseURL != env["LLM_BASE_URL"] {
+			continue
+		}
+		// 首个命中行（connection_id ASC）即默认，交 markDeliveryDefault 归一后返回
+		return markDeliveryDefault(c.DB, serviceID, conn.ID)
 	}
 	return nil
 }
@@ -503,13 +564,16 @@ func (c *Core) DeliverConnectionToService(workspaceID, connectionID, serviceID u
 			return nil, err
 		}
 	} else if d.Status == "synced" {
-		// 幂等：已 synced 则跳过（重复下发不产生 Agent 侧重复模型）
+		// 幂等：已 synced 则跳过（重复下发不产生 Agent 侧重复模型），不改默认标记
 		return &d, nil
 	} else {
 		if err := c.DB.Model(&d).Update("status", "pending").Error; err != nil {
 			return nil, err
 		}
 	}
+	// 建行/置 pending 后按服务 env 归一默认标记（issue #387：「行存在但标记错」形态
+	// 在此收敛；标记归一是管理面元数据，失败不阻断下发本体）
+	_ = c.normalizeDeliveryDefaults(serviceID)
 	if err := c.DeliverOne(&d); err != nil {
 		return &d, err
 	}
@@ -559,17 +623,12 @@ func (c *Core) ModelConnectionUsage(workspaceID uint) ([]UsageRow, error) {
 	}
 	out := make([]UsageRow, 0, len(svcs))
 	for _, s := range svcs {
-		env := map[string]string{}
-		_ = json.Unmarshal([]byte(s.EnvJSON), &env)
 		row := UsageRow{ServiceID: s.ID, DisplayName: s.DisplayName}
 		var conns []store.ModelConnection
 		_ = c.DB.Where("workspace_id = ?", workspaceID).Find(&conns).Error
 		connNames := map[uint]string{}
 		for _, mc := range conns {
 			connNames[mc.ID] = mc.Name
-			if env["LLM_MODEL"] == mc.ModelID && env["LLM_BASE_URL"] == mc.BaseURL {
-				row.DefaultConnectionName = mc.Name
-			}
 		}
 		row.Connections = []UsageConnRow{} // 空下发表也序列化 []（nil slice 会出 null，前端崩）
 		var deliveries []store.ModelDelivery
@@ -582,6 +641,10 @@ func (c *Core) ModelConnectionUsage(workspaceID uint) ([]UsageRow, error) {
 			if name == "" {
 				status = "removed" // 连接已删：Agent 侧不自动删（保守），usage 标记
 				name = fmt.Sprintf("#%d", d.ConnectionID)
+			} else if d.IsDefault {
+				// 默认连接名从 is_default 持久标记派生（issue #387，删除守卫同源）；
+				// 无 delivery 行或无 is_default 行的服务该字段为空串，前端兜底「系统默认」
+				row.DefaultConnectionName = name
 			}
 			row.Connections = append(row.Connections, UsageConnRow{
 				ConnectionID: d.ConnectionID, Name: name, Status: status,

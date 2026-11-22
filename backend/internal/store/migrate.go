@@ -142,6 +142,60 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 		if err := alignExportToService(&ExportOrderEntity{}, "export_orders"); err != nil {
 			return err
 		}
+
+		// 9) model_deliveries.is_default 存量回填（issue #387）：默认连接判定从「env
+		// LLM_* 字符串匹配全空间服务」改为 is_default 持久标记后，存量行（AutoMigrate
+		// 加列旧行填 NULL，同 services.workspace_id 坑）需按服务 env 归一。规则与 service
+		// 层手动下发归一（modelconn.go normalizeDeliveryDefaults）唯一同一：解析 svc env
+		// LLM_MODEL+LLM_BASE_URL，在本服务 delivery 行 join connections 范围内匹配
+		// model_id+base_url，按 connection_id ASC 只置首个命中行 true（同 modelId+baseUrl
+		// 多行只标首行，避免编辑回显双 default 触发 marked>1 400）、命中时本服务其余行置
+		// false；env 不匹配（无 LLM_* 或无命中行）则本服务全部行不动。幂等：候选 WHERE 含
+		// is_default IS NULL（三值逻辑下 = false 不命中 NULL 行，先例步骤 3/4），true/false
+		// 行均不命中候选，二轮启动零写入。仅写平台自有表（原则一）。
+		// 先清孤儿行：旧版服务 Delete 事务只清 ServiceEvent+svc、从不清理
+		// model_deliveries，存量库必有孤儿行——下方逐服务 First 回查 services 会对
+		// 孤儿 service_id 报 ErrRecordNotFound 使整个事务回滚（Backfill 错误 → main.go
+		// log.Fatalf 启动即挂）；清理语义与服务删除链路（publish.go Delete）同源
+		if err := tx.Where("service_id NOT IN (SELECT id FROM services)").
+			Delete(&ModelDelivery{}).Error; err != nil {
+			return err
+		}
+		var svcIDs []uint
+		if err := tx.Model(&ModelDelivery{}).Distinct("service_id").Pluck("service_id", &svcIDs).Error; err != nil {
+			return err
+		}
+		for _, sid := range svcIDs {
+			var svc ServiceEntity
+			if err := tx.Select("id, env_json").First(&svc, sid).Error; err != nil {
+				return err
+			}
+			var env map[string]string
+			_ = json.Unmarshal([]byte(svc.EnvJSON), &env)
+			var matched []uint
+			if err := tx.Table("model_deliveries AS md").
+				Joins("JOIN model_connections mc ON mc.id = md.connection_id").
+				Where("md.service_id = ? AND mc.model_id = ? AND mc.base_url = ?",
+					sid, env["LLM_MODEL"], env["LLM_BASE_URL"]).
+				Order("md.connection_id ASC").
+				Pluck("md.id", &matched).Error; err != nil {
+				return err
+			}
+			if len(matched) == 0 {
+				continue
+			}
+			if err := tx.Model(&ModelDelivery{}).
+				Where("id = ? AND (is_default IS NULL OR is_default = ?)", matched[0], false).
+				Update("is_default", true).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&ModelDelivery{}).
+				Where("service_id = ? AND id <> ? AND (is_default IS NULL OR is_default = ?)",
+					sid, matched[0], true).
+				Update("is_default", false).Error; err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }

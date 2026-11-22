@@ -839,8 +839,8 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 		cleanupPkg()
 		return nil, nil, err
 	}
-	// 下发登记：全部勾选连接 pending（running 后 OnServiceRunning 回调逐条 deliver）
-	if err := c.registerDeliveries(conns, svc.ID); err != nil {
+	// 下发登记：全部勾选连接 pending，def 行 is_default 置 true（running 后 OnServiceRunning 回调逐条 deliver）
+	if err := c.registerDeliveries(def, conns, svc.ID); err != nil {
 		return svc, pkg, nil // 下发登记失败不阻断创建（usage 页可手动触发）
 	}
 	return svc, pkg, nil
@@ -910,7 +910,7 @@ func (c *Core) CreateAgentImport(workspaceID, userID uint, form *AgentForm, pack
 	}
 	// 下发登记：勾选了模型连接时同 harness 模式（失败不阻断创建，usage 页可手动触发）
 	if len(conns) > 0 {
-		_ = c.registerDeliveries(conns, svc.ID)
+		_ = c.registerDeliveries(def, conns, svc.ID)
 	}
 	return svc, pkg, nil
 }
@@ -1046,19 +1046,13 @@ func (c *Core) EditForm(workspaceID, serviceID uint) (*EditFormView, error) {
 			view.McpServers = append(view.McpServers, McpServerRef{ConnectorID: conn.ID})
 		}
 	}
-	// 模型连接勾选恢复：delivery 行 + env LLM_* 匹配默认
+	// 模型连接勾选恢复：delivery 行 + is_default 持久标记（issue #387——不再按 env LLM_*
+	// 字符串匹配，同 modelId+baseUrl 的其他连接回显不误标默认）
 	deliveries, err := c.ListServiceDeliveries(serviceID)
 	if err == nil {
-		env := map[string]string{}
-		_ = jsonUnmarshalStrict(svc.EnvJSON, &env)
 		for _, d := range deliveries {
-			ref := ModelConnRef{ConnectionID: d.ConnectionID}
-			if conn, err := c.GetModelConnection(d.ConnectionID); err == nil {
-				if conn.ModelID == env["LLM_MODEL"] && conn.BaseURL == env["LLM_BASE_URL"] {
-					ref.IsDefault = true
-				}
-			}
-			view.ModelConnections = append(view.ModelConnections, ref)
+			view.ModelConnections = append(view.ModelConnections,
+				ModelConnRef{ConnectionID: d.ConnectionID, IsDefault: d.IsDefault})
 		}
 		// env 有 LLM_MODEL 但无 delivery 行（存量手配）→ 不渲染连接勾选
 	}
@@ -1194,8 +1188,9 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 		}
 		updated.DisplayName = form.Name
 	}
-	// 勾选集增量：重建 delivery 行（被移除的连接不自动删 Agent 侧 model_config，保守）
-	_ = c.syncDeliveries(conns, serviceID)
+	// 勾选集增量：重建 delivery 行 + def 行 is_default 归一（被移除的连接不自动删
+	// Agent 侧 model_config，保守）
+	_ = c.syncDeliveries(def, conns, serviceID)
 	if updated.Status == store.StatusRunning {
 		go func(id uint) {
 			defer func() { _ = recover() }()

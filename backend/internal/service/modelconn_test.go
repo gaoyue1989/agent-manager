@@ -67,22 +67,174 @@ func TestModelConnCRUDAndMask(t *testing.T) {
 	if d.Status != "pending" {
 		t.Fatalf("delivery should reset to pending: %+v", d)
 	}
-	// 删除保护：默认连接（env 匹配）409
-	svc := &store.ServiceEntity{K8sName: "oaf-mc", DisplayName: "mc", WorkspaceID: ws.ID,
-		EnvJSON: `{"LLM_MODEL":"qwen-max","LLM_BASE_URL":"https://api.x/v1"}`}
+	// 删除守卫按 is_default 持久标记判定（issue #387），专项用例见 TestModelConnDeleteGuard387
+}
+
+// TestModelConnDeleteGuard387 删除守卫改为 model_deliveries.is_default 持久标记判定
+// （issue #387）：同 modelId+baseUrl 但未下发的连接不再被 env 字符串匹配误拦；
+// 真实默认连接（is_default=true 行）仍 409；仅下发（is_default=false）连接可删且行一并删除。
+func TestModelConnDeleteGuard387(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-1000ddd4", "守卫空间")
+	// Agent 服务 env 指向 m1/b1（存量形态：env 由发布链路写入，与连接解耦）
+	svc := &store.ServiceEntity{K8sName: "oaf-guard", DisplayName: "guard", WorkspaceID: ws.ID,
+		EnvJSON: `{"LLM_MODEL":"m1","LLM_BASE_URL":"http://b1/v1"}`}
 	if err := c.DB.Create(svc).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := c.DeleteModelConnection(ws.ID, view.ID); err == nil || !strings.Contains(err.Error(), "default_connection_in_use") {
-		t.Fatalf("default conn delete: %v", err)
+	// (a) 同 modelId+baseUrl、无 delivery 行 → 删除成功（旧 env 匹配启发式会误拦）
+	sameModel := seedVerifiedConn(t, c, ws.ID, "same-model", "m1", "http://b1/v1")
+	if err := c.DeleteModelConnection(ws.ID, sameModel.ID); err != nil {
+		t.Fatalf("#387 same modelId+baseUrl without delivery must delete: %v", err)
 	}
-	// 改回 baseUrl 使不匹配 → 可删
-	if _, err := c.UpdateModelConnection(ws.ID, view.ID, PatchModelConnInput{
-		BaseURL: strPtr("http://other/v1")}); err != nil {
+	// (b) 默认连接（is_default=true 行）→ 409
+	def := seedVerifiedConn(t, c, ws.ID, "default-conn", "m1", "http://b1/v1")
+	c.DB.Create(&store.ModelDelivery{ConnectionID: def.ID, ServiceID: svc.ID, Status: "synced", IsDefault: true})
+	if err := c.DeleteModelConnection(ws.ID, def.ID); err == nil ||
+		!strings.Contains(err.Error(), "default_connection_in_use by agent oaf-guard") {
+		t.Fatalf("default conn delete must 409: %v", err)
+	}
+	// (c) 仅下发（is_default=false）→ 可删且 delivery 行一并删除
+	delivered := seedVerifiedConn(t, c, ws.ID, "delivered-conn", "m2", "http://b2/v1")
+	c.DB.Create(&store.ModelDelivery{ConnectionID: delivered.ID, ServiceID: svc.ID, Status: "synced"})
+	if err := c.DeleteModelConnection(ws.ID, delivered.ID); err != nil {
+		t.Fatalf("delivered-only conn must delete: %v", err)
+	}
+	var cnt int64
+	c.DB.Model(&store.ModelDelivery{}).Where("connection_id = ?", delivered.ID).Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("delivery rows must be removed with connection: %d", cnt)
+	}
+}
+
+// TestDeliverConnectionNormalizesDefaultFlags 手动下发归一（issue #387）：env 匹配行建行后
+// 即标 true、本服务其余行归 false；非默认连接手动下发不动既有默认标记；synced 幂等跳过
+// 不做归一（标记保持原样）。
+func TestDeliverConnectionNormalizesDefaultFlags(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-1000eee5", "归一空间")
+	var postCnt, patchCnt int32
+	agent := fakeAgentModels(t, &postCnt, &patchCnt, nil)
+	defer agent.Close()
+	svc := &store.ServiceEntity{K8sName: "oaf-norm", DisplayName: "norm", WorkspaceID: ws.ID,
+		Status: store.StatusRunning, ClusterURL: agent.URL,
+		EnvJSON: `{"LLM_MODEL":"m1","LLM_BASE_URL":"http://b1/v1"}`}
+	if err := c.DB.Create(svc).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := c.DeleteModelConnection(ws.ID, view.ID); err != nil {
-		t.Fatalf("delete after unbind: %v", err)
+	def := seedVerifiedConn(t, c, ws.ID, "n1", "m1", "http://b1/v1") // env 匹配 → 默认
+	other := seedVerifiedConn(t, c, ws.ID, "n2", "m2", "http://b2/v1")
+
+	// 手动下发默认连接：建行 → 归一 → is_default=true + synced
+	if _, err := c.DeliverConnectionToService(ws.ID, def.ID, svc.ID); err != nil {
+		t.Fatalf("deliver default: %v", err)
+	}
+	flagOf := func(connID uint) bool {
+		var d store.ModelDelivery
+		if err := c.DB.Where("connection_id = ? AND service_id = ?", connID, svc.ID).First(&d).Error; err != nil {
+			t.Fatal(err)
+		}
+		return d.IsDefault
+	}
+	if !flagOf(def.ID) {
+		t.Fatalf("env-matched manually delivered row must be default: %+v", flagOf(def.ID))
+	}
+	// 非默认连接手动下发：建行 false，不翻转既有默认标记
+	if _, err := c.DeliverConnectionToService(ws.ID, other.ID, svc.ID); err != nil {
+		t.Fatalf("deliver other: %v", err)
+	}
+	if !flagOf(def.ID) || flagOf(other.ID) {
+		t.Fatalf("non-default deliver must not flip flags: def=%v other=%v", flagOf(def.ID), flagOf(other.ID))
+	}
+	// synced 幂等跳过：人为漂移标记后重复下发，跳过路径不做归一
+	if err := c.DB.Model(&store.ModelDelivery{}).
+		Where("service_id = ?", svc.ID).
+		Updates(map[string]interface{}{"is_default": false}).Error; err != nil {
+		t.Fatal(err)
+	}
+	c.DB.Model(&store.ModelDelivery{}).Where("connection_id = ?", other.ID).
+		Update("is_default", true)
+	if _, err := c.DeliverConnectionToService(ws.ID, def.ID, svc.ID); err != nil {
+		t.Fatalf("re-deliver synced: %v", err)
+	}
+	if flagOf(def.ID) || !flagOf(other.ID) {
+		t.Fatalf("synced skip must not normalize flags: def=%v other=%v", flagOf(def.ID), flagOf(other.ID))
+	}
+}
+
+// TestAgentEditDefaultFlagLifecycle 创建→编辑链路的默认标记（issue #387）：创建写入
+// is_default；EditForm 回显按行标记；编辑切换默认连接翻转标记；无关编辑保存不静默切换默认。
+func TestAgentEditDefaultFlagLifecycle(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-1000fff6", "编辑标记空间")
+	owner := seedUserIn(t, c, "flg", "user", ws.ID, "owner")
+	c1 := seedVerifiedConn(t, c, ws.ID, "e1", "m1", "http://b1/v1")
+	c2 := seedVerifiedConn(t, c, ws.ID, "e2", "m2", "http://b2/v1")
+	form := goldenForm()
+	form.Name = "flag-agent"
+	form.ModelConnections = []ModelConnRef{{ConnectionID: c1.ID, IsDefault: true}, {ConnectionID: c2.ID}}
+	form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+	svc, _, err := c.CreateAgent(ws.ID, owner.ID, form)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+	flagOf := func(connID uint) bool {
+		var d store.ModelDelivery
+		if err := c.DB.Where("connection_id = ? AND service_id = ?", connID, svc.ID).First(&d).Error; err != nil {
+			t.Fatal(err)
+		}
+		return d.IsDefault
+	}
+	if !flagOf(c1.ID) || flagOf(c2.ID) {
+		t.Fatalf("create must mark default row: c1=%v c2=%v", flagOf(c1.ID), flagOf(c2.ID))
+	}
+	// 编辑回显按行标记
+	view, err := c.EditForm(ws.ID, svc.ID)
+	if err != nil {
+		t.Fatalf("edit form: %v", err)
+	}
+	if len(view.ModelConnections) != 2 {
+		t.Fatalf("edit refs: %+v", view.ModelConnections)
+	}
+	for _, ref := range view.ModelConnections {
+		if want := ref.ConnectionID == c1.ID; ref.IsDefault != want {
+			t.Fatalf("echo default must follow row flag (conn %d): %+v", ref.ConnectionID, ref)
+		}
+	}
+	// 切换默认：编辑保存 c2 为默认 → c1 翻 false、c2 翻 true
+	edit := *form
+	edit.ModelConnections = []ModelConnRef{{ConnectionID: c1.ID}, {ConnectionID: c2.ID, IsDefault: true}}
+	if _, _, err := c.UpdateAgent(ws.ID, owner.ID, svc.ID, &edit); err != nil {
+		t.Fatalf("edit switch default: %v", err)
+	}
+	if flagOf(c1.ID) || !flagOf(c2.ID) {
+		t.Fatalf("switch must flip default flags: c1=%v c2=%v", flagOf(c1.ID), flagOf(c2.ID))
+	}
+	// 无关编辑保存（仅改 prompt，勾选与默认不变）→ 默认标记不静默切换
+	edit2 := *form
+	edit2.ModelConnections = []ModelConnRef{{ConnectionID: c1.ID}, {ConnectionID: c2.ID, IsDefault: true}}
+	edit2.Prompt = "无关编辑保存的提示词 v3。"
+	if _, _, err := c.UpdateAgent(ws.ID, owner.ID, svc.ID, &edit2); err != nil {
+		t.Fatalf("unrelated edit: %v", err)
+	}
+	if flagOf(c1.ID) || !flagOf(c2.ID) {
+		t.Fatalf("unrelated edit must keep default: c1=%v c2=%v", flagOf(c1.ID), flagOf(c2.ID))
+	}
+	// 删除服务连带清理 delivery 行
+	if err := c.Delete(svc.ID); err != nil {
+		t.Fatalf("service delete: %v", err)
+	}
+	var cnt int64
+	c.DB.Model(&store.ModelDelivery{}).Where("service_id = ?", svc.ID).Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("service delete must clean delivery rows: %d", cnt)
 	}
 }
 
@@ -241,7 +393,7 @@ func TestModelUsageAggregation(t *testing.T) {
 	c.DB.Create(svc)
 	conn1 := seedVerifiedConn(t, c, ws.ID, "c1", "m1", "http://b1/v1")
 	conn2 := seedVerifiedConn(t, c, ws.ID, "c2", "m2", "http://b2/v1")
-	c.DB.Create(&store.ModelDelivery{ConnectionID: conn1.ID, ServiceID: svc.ID, Status: "synced"})
+	c.DB.Create(&store.ModelDelivery{ConnectionID: conn1.ID, ServiceID: svc.ID, Status: "synced", IsDefault: true})
 	c.DB.Create(&store.ModelDelivery{ConnectionID: conn2.ID, ServiceID: svc.ID, Status: "failed", Error: "boom"})
 
 	usage, err := c.ModelConnectionUsage(ws.ID)
