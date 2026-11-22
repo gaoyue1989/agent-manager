@@ -324,6 +324,16 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
   > router_test.go），两种模式外部表现一致。口径修正：**token 门为主控制，业务入口排除
   > （router 内置 + host Ingress 排除表）为纵深防御**；守护消费经 `SKILLSYNC_BASE_URL`
   > 集群内直连 svc，不经业务入口，不受排除影响。
+  > 补记三（2026-11-22，issue #391）：上述段边界排除与 host Prefix 排除均被分号矩阵参数
+  > 绕过——嵌入式 Tomcat 的 CoyoteAdapter 在路由到 MVC/Actuator 之前剥离路径段矩阵参数，
+  > `/agent/{short}/actuator;bypass/metrics` 不命中任何排除规则，落入泛化 location 透传
+  > 业务 Pod 后 200 暴露无鉴权 actuator（`/internal;bypass/**` 同路穿透到 token 门）。
+  > 修复分两层：应用层根治——agent-framework `SemicolonPathRejectFilter`（最高优先级
+  > Filter，原始 URI 含 `;` 一律 404，业务路径无矩阵参数场景）一次封死 router/host/Chart
+  > 全部入口模式与未 republish 的存量服务；入口层加固——router 排除正则扩为
+  > `(/|;|$)`（manifests/platform-router.yaml + charts/oaf-platform + charts/oaf-agent），
+  > host 模式 K8s Ingress Prefix 语义无法表达分号，由应用层 Filter 覆盖。守卫：
+  > backend/internal/k8s/router_test.go 分号变体断言 + framework Filter 单测。
 - 数据源 `/config`（PVC 只读 subPath，多副本天然一致）
 - **版本指纹 singleflight + ≤5s TTL 缓存**（D-4，修订 G2 的绝对化表述）：对包技能目录做 stat 指纹
   （relPath|mtime|size 排序遍历，2000 文件 ≈10-50ms）+ 服务级禁用集（B-2）。新鲜度语义由守护侧
