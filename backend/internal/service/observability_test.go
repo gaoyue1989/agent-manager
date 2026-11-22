@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-manager/backend/internal/store"
 )
@@ -248,5 +249,85 @@ func TestOafSlugForMetricShouldStripPrefix(t *testing.T) {
 	}
 	if oafSlugForMetric("plain") != "plain" {
 		t.Fatalf("无前缀名应原样")
+	}
+}
+
+// issue #427：趋势 query_range 的 end 不得被 Truncate(step) 丢进行中桶（30d 档曾丢当日
+// 00:00 UTC 以来全部数据），且 byTool 不得把窗口内 increase()==0 的过期序列计入排行
+// 与 ToolKinds（与 byService 的 calls>0 口径对齐）。
+func TestToolCallsTrendShouldKeepInProgressBucketAndDropStaleTools(t *testing.T) {
+	core, _, cleanup := newTestCore(t)
+	defer cleanup()
+	var gotStart, gotEnd int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/query", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("query")
+		var result []map[string]any
+		switch {
+		case strings.Contains(q, `sum by (tool)`) && strings.Contains(q, `result="error"`):
+			result = []map[string]any{}
+		case strings.Contains(q, `sum by (tool)`):
+			// active_tool 窗口内有新增；stale_tool 序列仍存活但 increase==0
+			result = []map[string]any{
+				{"metric": map[string]string{"tool": "active_tool"}, "value": []any{1700000000.0, "5"}},
+				{"metric": map[string]string{"tool": "stale_tool_from_3days_ago"}, "value": []any{1700000000.0, "0"}},
+			}
+		case strings.Contains(q, `result="error"`):
+			result = []map[string]any{}
+		default:
+			result = []map[string]any{{"metric": map[string]string{}, "value": []any{1700000000.0, "12"}}}
+		}
+		writeJSON(w, map[string]any{"status": "success", "data": map[string]any{
+			"resultType": "vector", "result": result}})
+	})
+	mux.HandleFunc("/api/v1/query_range", func(w http.ResponseWriter, r *http.Request) {
+		s, _ := strconv.ParseInt(r.URL.Query().Get("start"), 10, 64)
+		e, _ := strconv.ParseInt(r.URL.Query().Get("end"), 10, 64)
+		gotStart, gotEnd = s, e
+		// 进行中桶（最后一个评估点）有 7 次新增调用
+		vals := [][]any{{float64(e), "7"}}
+		writeJSON(w, map[string]any{"status": "success", "data": map[string]any{
+			"resultType": "matrix", "result": []map[string]any{{"metric": map[string]string{}, "values": vals}}}})
+	})
+	prom := httptest.NewServer(mux)
+	t.Cleanup(prom.Close)
+	agent := stubAgentRecent(t, map[string]any{"connected": true, "recent": []map[string]any{}})
+	core.Cfg.PrometheusURL = prom.URL
+	seedObsService(t, core, "oaf-alpha", "Alpha", agent.URL, 1)
+
+	before := time.Now().UTC()
+	view, err := core.ToolCalls(1, "30d")
+	if err != nil {
+		t.Fatalf("ToolCalls: %v", err)
+	}
+	after := time.Now().UTC()
+
+	// end 必须取当下（buggy 版被 Truncate 到当日 00:00 UTC，最多丢 24h）
+	if gotEnd < before.Unix() || gotEnd > after.Unix()+1 {
+		t.Fatalf("query_range end 应≈当下: got %s, call window %s..%s",
+			time.Unix(gotEnd, 0).UTC(), before, after)
+	}
+	// 对齐性不变：end - start == (Points-1)*step（30d → 29 天）
+	if gotEnd-gotStart != int64((30-1)*24*3600) {
+		t.Fatalf("end-start = %ds, want %ds", gotEnd-gotStart, (30-1)*24*3600)
+	}
+	// 进行中桶数据可进趋势（最后一个桶 = 评估点 end）
+	last := view.Trend[len(view.Trend)-1]
+	if last.Calls != 7 {
+		t.Fatalf("趋势最后桶应含进行中 7 calls: %+v", last)
+	}
+	var trendSum float64
+	for _, p := range view.Trend {
+		trendSum += p.Calls
+	}
+	if trendSum != 7 {
+		t.Fatalf("trend 汇总 = %v, want 7", trendSum)
+	}
+	// 0 调用的过期序列不进排行、不计 ToolKinds
+	if len(view.ByTool) != 1 || view.ByTool[0].Tool != "active_tool" {
+		t.Fatalf("byTool 应剔除 increase==0 序列: %+v", view.ByTool)
+	}
+	if view.Totals.ToolKinds != 1 {
+		t.Fatalf("ToolKinds = %d, want 1", view.Totals.ToolKinds)
 	}
 }

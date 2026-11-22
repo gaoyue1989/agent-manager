@@ -149,11 +149,16 @@ func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView
 		view.Totals.ErrorRate = view.Totals.Errors / view.Totals.Calls
 	}
 
-	// byTool：失败数按 tool 名并入（无失败者 0），次数降序
+	// byTool：失败数按 tool 名并入（无失败者 0），次数降序；
+	// 窗口内 increase()==0 的过期序列不进排行、不计 ToolKinds（与 byService 的 calls>0 口径对齐）
 	toolErrByName := vectorByLabel(vectors["byToolErr"], "tool")
 	for _, v := range vectors["byTool"] {
+		calls := promValue(v.Value)
+		if calls <= 0 {
+			continue
+		}
 		view.ByTool = append(view.ByTool, ToolCallToolRow{
-			Tool: v.Metric["tool"], Calls: promValue(v.Value), Errors: toolErrByName[v.Metric["tool"]],
+			Tool: v.Metric["tool"], Calls: calls, Errors: toolErrByName[v.Metric["tool"]],
 		})
 		view.Totals.ToolKinds++
 	}
@@ -175,7 +180,9 @@ func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView
 	sort.SliceStable(view.ByService, func(i, j int) bool { return view.ByService[i].Calls > view.ByService[j].Calls })
 
 	// ---- 趋势：query_range 两发（step 即 rate 窗口），合并成完整桶序列 ----
-	end := time.Now().UTC().Truncate(r.Step)
+	// end 取当下不 Truncate：评估点 start+i*step 恰含进行中桶（Truncate 曾把 30d 档
+	// 当日 00:00 UTC 以来的全部数据丢掉，与 Totals instant 查询口径脱节）
+	end := time.Now().UTC()
 	start := end.Add(-time.Duration(r.Points-1) * r.Step)
 	callsSeries, errsSeries, err := c.trendSeries(ctx, selector, r, start, end)
 	if err != nil {
@@ -496,7 +503,8 @@ func bucketValues(series promMatrixSeries, start time.Time, step time.Duration, 
 
 func emptyToolCallStats(rangeKey string, r toolCallRange) *ToolCallStatsView {
 	v := &ToolCallStatsView{Range: rangeKey}
-	start := time.Now().UTC().Truncate(r.Step).Add(-time.Duration(r.Points-1) * r.Step)
+	// 桶位对齐主路径（end=当下不 Truncate），标签口径一致
+	start := time.Now().UTC().Add(-time.Duration(r.Points-1) * r.Step)
 	v.Trend = make([]ToolCallTrendPoint, r.Points)
 	for i := range v.Trend {
 		v.Trend[i] = ToolCallTrendPoint{Bucket: start.Add(time.Duration(i) * r.Step).Format("01-02 15:04")}
