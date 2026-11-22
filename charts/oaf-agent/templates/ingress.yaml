@@ -81,7 +81,7 @@ spec:
           {{- range $p := $internalBlockPaths }}
           {{/* 排除路径正则与主路径同捕获组序（(/|$)=$1、(.*)=$2，rewrite-target /$2 对全部
               path 统一生效）；ingress-nginx 正则 location 按长度降序，更长先命中 */}}
-          - path: {{ printf "%s%s(/|$)(.*)" $.Values.ingress.pathPrefix $p | quote }}
+          - path: {{ printf "%s%s(/|;|$)(.*)" $.Values.ingress.pathPrefix $p | quote }}
             pathType: ImplementationSpecific
             backend:
               service:
