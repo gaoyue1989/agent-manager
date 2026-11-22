@@ -5,6 +5,7 @@ package k8s_test
 import (
 	"context"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -44,7 +45,7 @@ func TestRouterManifestInternalPathExclusion(t *testing.T) {
 	}
 	conf := platformRouterConfTemplate(t, raw)
 
-	const exclusionLoc = `location ~ ^/agent/[a-z0-9-]+/(internal|actuator)(/|$) {`
+	const exclusionLoc = `location ~ "^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$)" {`
 	const genericLoc = `location ~ ^/agent/(?<short>[a-z0-9-]+) {`
 
 	generic := strings.Index(conf, genericLoc)
@@ -64,6 +65,37 @@ func TestRouterManifestInternalPathExclusion(t *testing.T) {
 	}
 	if strings.Contains(block, "proxy_pass") {
 		t.Fatalf("exclusion location must not proxy, block: %s", block)
+	}
+}
+
+// TestRouterManifestInternalPathExclusionCoversMatrixParam 分号矩阵参数绕过守卫（issue #391）：
+// Tomcat CoyoteAdapter 路由前剥离路径段矩阵参数，/agent/{short}/actuator;bypass/metrics
+// 若不被排除正则命中，会落入泛化 location 透传业务 Pod 并 200 暴露 actuator。
+// 应用层由 agent-framework SemicolonPathRejectFilter 根治（原始 URI 含 ; 即 404），
+// 本测试钉住入口层正则的 ; 分支不得回退（nginx PCRE 与 Go RE2 在此表达式上语义一致）。
+func TestRouterManifestInternalPathExclusionCoversMatrixParam(t *testing.T) {
+	raw, err := os.ReadFile("../../../manifests/platform-router.yaml")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	conf := platformRouterConfTemplate(t, raw)
+
+	const exclusionLoc = `location ~ "^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$)" {`
+	if !strings.Contains(conf, exclusionLoc) {
+		t.Fatalf("exclusion location must cover matrix-param variant: %s", exclusionLoc)
+	}
+
+	re := regexp.MustCompile(`^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$)`)
+	for _, p := range []string{
+		"/agent/demo/actuator/metrics",
+		"/agent/demo/actuator",
+		"/agent/demo/internal/skills/version",
+		"/agent/demo/actuator;bypass/metrics",
+		"/agent/demo/internal;bypass/skills/version",
+	} {
+		if !re.MatchString(p) {
+			t.Fatalf("exclusion regex must match %q", p)
+		}
 	}
 }
 
