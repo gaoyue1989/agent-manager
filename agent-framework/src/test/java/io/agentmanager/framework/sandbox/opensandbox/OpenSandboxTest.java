@@ -832,6 +832,12 @@ class OpenSandboxTest {
             + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
             + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
             + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
+    /** glob 回落命令的 -L 归一化形态（doExec normalizeSymlinkHostileFind 契约：回落真 exec 必带 -L） */
+    private static final String FIND_PROBE_L =
+        "find -L 'tree' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
 
     /** glob 探测模板参数化形态（P_FIND 同形，root/pattern 可指定的根级/子树 glob 用例构造） */
     private static String findProbeForm(String root, String pattern) {
@@ -1011,7 +1017,7 @@ class OpenSandboxTest {
 
         assertTrue(r.ok());
         assertEquals("tree/sub/x.md\t3\t0", r.stdout(), "结果必须取自真 exec stub（回落生效）");
-        verify(osb.commands()).run(FIND_PROBE);
+        verify(osb.commands()).run(FIND_PROBE_L);
     }
 
     @Test
@@ -1143,7 +1149,7 @@ class OpenSandboxTest {
 
     @Test
     void globProbeWithProxySandboxNotFound404ShouldFallBackToRealFind() throws Exception {
-        // 同型：walkFiles 对死沙箱代理 404 不得视作「空目录」输出假空结果
+        // 同型：glob 遍历对死沙箱代理 404 不得视作「空目录」输出假空结果
         var osb = mockOsb(mockExecution(0, "tree/x.md\t3\t0", ""));
         when(osb.files().listDirectory("tree")).thenThrow(sandboxNotFound404());
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);
@@ -1152,7 +1158,7 @@ class OpenSandboxTest {
 
         assertTrue(result.ok());
         assertEquals("tree/x.md\t3\t0", result.stdout(), "死沙箱代理 404 必须回落真 find，不得假空");
-        verify(osb.commands()).run(FIND_PROBE);
+        verify(osb.commands()).run(FIND_PROBE_L);
     }
 
     @Test
@@ -1166,7 +1172,7 @@ class OpenSandboxTest {
 
         assertTrue(result.ok());
         assertEquals("tree/x.md\t3\t0", result.stdout(), "真实形态死沙箱 404 必须回落真 find，不得假空");
-        verify(osb.commands()).run(FIND_PROBE);
+        verify(osb.commands()).run(FIND_PROBE_L);
     }
 
     // ---------- exec→execd 翻译器（P0-12，issue #290 收窄回归） ----------

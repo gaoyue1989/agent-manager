@@ -349,6 +349,9 @@ public class OpenSandbox extends AbstractBaseSandbox
             // 投放改变容器内容 → 探针直供缓存失效（first-reasoning D4 失效不变量）
             invalidateProbeCache();
         }
+        // 软链透明归一化（issue #394）：SDK glob 模板 find 无 -L，软链农场子树恒空——置于
+        // 翻译门之前，翻译开/关（SANDBOX_EXEC_TRANSLATE=false）两路回落均生效
+        command = normalizeSymlinkHostileFind(command);
         // P0-12：SDK 探测/读取类命令翻译为 execd files API 直读（免 exec 固定时延与轮询节拍）。
         // 直读容器实时状态 = 与 shell 命令同源，无缓存无失效问题；模板不匹配/翻译异常一律回落真 exec
         if (EXEC_TRANSLATE_ENABLED) {
@@ -483,9 +486,9 @@ public class OpenSandbox extends AbstractBaseSandbox
     private static final java.util.regex.Pattern P_READ = java.util.regex.Pattern.compile(
         "^if \\[ ! -f '([^']+)' \\]; then echo '__NOT_FOUND__'; elif \\[ ! -s '\\1' \\]; then"
             + " echo '__EMPTY__'; else sed -n '1,(\\d+)p' '\\1'; fi$");
-    /** glob：find 'ROOT' -type f -name 'PAT' 2>/dev/null | sort | while...printf '%s\t%s\t%s'... */
+    /** glob：find [ -L] 'ROOT' -type f -name 'PAT' 2>/dev/null | sort | while...printf '%s\t%s\t%s'...（-L 为归一化兼容形态，见 {@link #normalizeSymlinkHostileFind}） */
     private static final java.util.regex.Pattern P_FIND = java.util.regex.Pattern.compile(
-        "^find '([^']+)' -type f -name '([^']+)' 2>/dev/null \\| sort \\| while IFS= read -r f; do"
+        "^find(?: -L)? '([^']+)' -type f -name '([^']+)' 2>/dev/null \\| sort \\| while IFS= read -r f; do"
             + "\\s+size=\\$\\(stat -c '%s' \"\\$f\" 2>/dev/null \\|\\| echo 0\\);"
             + "\\s+mtime=\\$\\(stat -c '%Y' \"\\$f\" 2>/dev/null \\|\\| echo 0\\);"
             + "\\s+printf '%s\\\\t%s\\\\t%s\\\\n' \"\\$f\" \"\\$size\" \"\\$mtime\"; done$");
@@ -501,6 +504,21 @@ public class OpenSandbox extends AbstractBaseSandbox
     /** bus 轮询：test -e 'P' && echo yes || echo no */
     private static final java.util.regex.Pattern P_TEST_E = java.util.regex.Pattern.compile(
         "^test -e '([^']+)' && echo yes \\|\\| echo no$");
+
+    /**
+     * find 探测模板软链归一化（issue #394，skills-syncd §6.3 A-1）：完整模板锚定匹配
+     * （P_FIND.matches() 含 stat/while 管道尾部——LLM 手写 find 不可能字节级命中，
+     * 杜绝用户命令语义漂移），未带 -L 时前插 {@code -L }（幂等）。GNU find 默认不跟随
+     * 目录软链（软链农场子树无 -L 恒空），-L 语义 = 跟随链接枚举文件（用户预期）；
+     * 环链由 find 环检测告警走 stderr 被模板 2>/dev/null 吞掉，无挂起。
+     */
+    private static String normalizeSymlinkHostileFind(String command) {
+        var m = P_FIND.matcher(command);
+        if (!m.matches() || command.startsWith("find -L ")) {
+            return command;
+        }
+        return "find -L " + command.substring("find ".length());
+    }
 
     /**
      * 尝试把探测/读取类命令翻译为 execd files API 直读。
@@ -523,7 +541,8 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
             var mTestE = P_TEST_E.matcher(command);
             if (mTestE.matches()) {
-                return new ExecResult(0, translateExists(mTestE.group(1)) ? "yes" : "no", "", false);
+                Boolean exists = translateExists(mTestE.group(1));
+                return exists == null ? null : new ExecResult(0, exists ? "yes" : "no", "", false);
             }
             // 工作区根探测快路径（issue #290 收窄为精确等值）：harness
             // AbstractBaseSandbox.probeWorkspaceRootForPreservedResume 经 doExec 下发的
@@ -768,7 +787,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         }
     }
 
-    /** glob 翻译：递归列 ROOT 下匹配 PAT 的 regular file，按路径排序，输出 path\tsize\tmtime 行 */
+    /**
+     * glob 翻译：递归列 ROOT 下匹配 PAT 的 regular file，按路径排序，输出 path\tsize\tmtime 行。
+     * 子树含软链（walk 返回 false）时返回 null 整树回落真 exec find -L——execd files API
+     * 无法解引用（软链根 listDirectory 400 拒绝穿透、EntryInfo 无 link target），且部分
+     * 缓存/读穿合并应答与 find -L 地面真相不一致（skills-syncd §6.3 补记，落实 §13 A-1）。
+     */
     private ExecResult translateGlob(String root, String pattern) throws Exception {
         var files = new java.util.TreeSet<FileEntry>((a, b) -> a.rel().compareTo(b.rel()));
         var truncated = new AtomicBoolean(false);
@@ -780,7 +804,9 @@ public class OpenSandbox extends AbstractBaseSandbox
             // D4：SKILL.md 探针模式下缓存已覆盖的技能目录跳过容器遍历、合并缓存条目；
             // 其余模式照常遍历容器（保持「容器实时状态」语义——物化只写不删，历史残留仍可见）
             var skipDirs = probeCacheCoveredDirs(root, pattern);
-            walkFilesSkippingDirs(root, pattern, files, 0, truncated, skipDirs);
+            if (!walkFilesSkippingDirs(root, pattern, files, 0, truncated, skipDirs)) {
+                return null;
+            }
             fillGlobFromProbeCache(root, pattern, files);
             // D1 读穿（issue #356）：工作区根级 glob 并入 KV 的 MEMORY.md——读穿跳过预热
             // 注入，第一轮探测窗口容器无此文件，与 read 探针的 KV 回落口径对齐；模式预检
@@ -857,7 +883,7 @@ public class OpenSandbox extends AbstractBaseSandbox
     /**
      * D4 缓存覆盖目录集：仅当缓存有效、模式恰为 SKILL.md（系统提示探针模式）且缓存非空时，
      * 返回缓存键（容器绝对路径）中位于 root 子树内的技能一级目录（如 {@code skills/<name>}）——
-     * walkFiles 跳过这些目录的 execd 遍历，由 fillGlobFromProbeCache 以缓存条目补齐。
+     * walkFilesSkippingDirs 跳过这些目录的 execd 遍历，由 fillGlobFromProbeCache 以缓存条目补齐。
      */
     private java.util.Set<String> probeCacheCoveredDirs(String root, String pattern) {
         if (!probeCacheValid.get() || probeContentCache.isEmpty() || !WorkspaceReader.SKILL_FILE.equals(pattern)) {
@@ -899,6 +925,9 @@ public class OpenSandbox extends AbstractBaseSandbox
     /**
      * ls 目录翻译：__NOT_EXISTS__/__NOT_A_DIR__/DIR:path\tmtime + FILE:path\tsize\tmtime。
      * 容器缺失的 memory/ 目录在读穿模式下从 KV 清单应答（first-reasoning D1，mtime=0）。
+     *
+     * @return null = 目录含 type=symlink 条目，翻译层不可裁决（无 link target），整目录
+     *         回落原 P_LS 真 exec——shell [ -d ]/[ -f ] 解引用语义兜底（issue #394）
      */
     private ExecResult translateLs(String dir) throws Exception {
         List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
@@ -917,6 +946,9 @@ public class OpenSandbox extends AbstractBaseSandbox
         }
         var sb = new StringBuilder();
         for (var e : entries) {
+            if ("symlink".equalsIgnoreCase(e.getType())) {
+                return null;
+            }
             String p = e.getPath();
             if (p == null) {
                 continue;
@@ -970,8 +1002,11 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 历史实现「先 readByteArray 再 listDirectory」对目录必付一次 500 异常路径、对不存在
      * 路径付两次 404；父目录列举异常时回落旧两步实现（边角语义不回退）。
      * 记忆路径在读穿模式下先查 KV（容器缺失时父列举会误判不存在）。
+     *
+     * @return null = 父列举命中 type=symlink 条目，存在性由 shell 裁决（悬空链 no、
+     *         有效链 yes/no），回落原 test -e 真 exec（issue #394）
      */
-    private boolean translateExists(String relPath) throws Exception {
+    private Boolean translateExists(String relPath) throws Exception {
         if (runtimeReadThroughEnabled && workspaceReader != null && userKey != null && !userKey.isBlank()) {
             var rel = normalizeRel(relPath);
             if (isMemoryRelPath(rel) && WorkspaceReader.MEMORY_DIR.equals(rel)) {
@@ -1003,6 +1038,9 @@ public class OpenSandbox extends AbstractBaseSandbox
                 if (entries != null) {
                     for (var e : entries) {
                         if (e.getPath() != null && leaf(normalizeRel(e.getPath())).equals(leafPath)) {
+                            if ("symlink".equalsIgnoreCase(e.getType())) {
+                                return null;
+                            }
                             return true;
                         }
                     }
@@ -1058,41 +1096,38 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * 递归收集 relPath 子树内匹配 pattern 的 regular file（含 size/mtime；深度/条目上界防御）。
-     * 截断经 {@code truncated} 出参上报，由 translateGlob 统一告警。
+     * 递归收集 relDir 子树内匹配 pattern 的 regular file（含 size/mtime；深度/条目上界防御），
+     * 跳过 skipDirs 中目录的容器遍历（first-reasoning D4）：这些目录的内容由探针直供缓存
+     * 补齐（fillGlobFromProbeCache），跳过免重复 execd 往返。跳过目录的隐含约束：其内容与
+     * 缓存逐字一致（SKILL.md 模式 + 物化后窗口内），由失效不变量保证。
+     *
+     * @return false = 子树含 type=symlink 条目，需整体回落真 exec find -L（软链不递归不解引用——
+     *         execd 对软链根拒绝穿透、EntryInfo 无 link target，files API 无法枚举，issue #394）；
+     *         true = 完成遍历或截断（截断语义不变：经 {@code truncated} 出参上报，
+     *         由 translateGlob 统一告警，仍算完成）
      *
      * <p>异常语义（issue #296）：listDirectory 404 = 子树在遍历期间不存在，视作空目录
      * （正常边界，与真 find 对缺失目录的「静默空输出」一致）；其余异常向上抛、交
      * tryTranslateExec 回落真 exec——瞬时故障下不得让 glob_files 拿到假空结果
      * （真 find 无上界，故障轮回落恰好消解「翻译上界 vs find 无上界」的静默不一致）。
      */
-    private void walkFiles(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth,
-                           AtomicBoolean truncated) throws Exception {
-        walkFilesSkippingDirs(relDir, pattern, out, depth, truncated, java.util.Set.of());
-    }
-
-    /**
-     * 同 {@link #walkFiles}，但跳过 skipDirs 中目录的容器遍历（first-reasoning D4）：
-     * 这些目录的内容由探针直供缓存补齐（fillGlobFromProbeCache），跳过免重复 execd 往返。
-     * 跳过目录的隐含约束：其内容与缓存逐字一致（SKILL.md 模式 + 物化后窗口内），由失效不变量保证。
-     */
-    private void walkFilesSkippingDirs(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth,
-                                       AtomicBoolean truncated, java.util.Set<String> skipDirs) throws Exception {
+    private boolean walkFilesSkippingDirs(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth,
+                                          AtomicBoolean truncated, java.util.Set<String> skipDirs) throws Exception {
         if (depth > 8 || out.size() > 5000) {
             truncated.set(true);
-            return;
+            return true;
         }
         List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
         try {
             entries = osbSandbox.files().listDirectory(relDir);
         } catch (SandboxApiException e) {
             if (isPathMissing(e)) {
-                return;
+                return true;
             }
             throw e;
         }
         if (entries == null) {
-            return;
+            return true;
         }
         for (var e : entries) {
             String p = e.getPath();
@@ -1107,11 +1142,16 @@ public class OpenSandbox extends AbstractBaseSandbox
                 if (skipDirs.contains(rel)) {
                     continue; // 缓存已覆盖：容器遍历跳过（缓存条目另行补齐）
                 }
-                walkFilesSkippingDirs(rel, pattern, out, depth + 1, truncated, skipDirs);
+                if (!walkFilesSkippingDirs(rel, pattern, out, depth + 1, truncated, skipDirs)) {
+                    return false;
+                }
+            } else if ("symlink".equalsIgnoreCase(e.getType())) {
+                return false;
             } else if (globMatch(pattern, leaf(rel))) {
                 out.add(new FileEntry(rel, Math.max(e.getSize(), 0), epochSeconds(e)));
             }
         }
+        return true;
     }
 
     /** glob 命中条目（rel/size/mtime 三元组，排序按 rel） */
