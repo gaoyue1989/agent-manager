@@ -238,6 +238,7 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
         <div className="mt-3">
           <ChatPane agentBase={`/agent/${shortName}`} persistKey={`oaf-debug-sid-${shortName}`}
             title="会话回放" subtitle={`回放 ${replayTo}`}
+            initialSessionId={replayTo}
             userId={uid} testId="replay-pane" key={replayTo} />
         </div>
       </>
