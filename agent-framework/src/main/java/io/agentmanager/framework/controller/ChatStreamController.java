@@ -1289,9 +1289,6 @@ public class ChatStreamController {
             }
             boolean ok = workspaceReader.writeWorkspaceFile(userKey, relPath, content);
             if (ok) {
-                // 落库登记 (相对路径 → userKey)：present_file 读 KV 需要写入侧命名空间键，
-                // 而工具侧 ctx.userId 在 Channel 链路下是网关 peer（D3）。落库以支持跨副本。
-                fileAssetStore.upsertKvSyncKey(relPath, userKey);
                 log.info("write_file → KV sync: {} ({} chars) for user {}", relPath, content.length(), userKey);
             }
         } catch (Exception e) {
