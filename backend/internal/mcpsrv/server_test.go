@@ -43,7 +43,8 @@ func newMCPClient(t *testing.T) (*mcp.ClientSession, *service.Core, func()) {
 	if sqlDB, e := db.DB(); e == nil {
 		sqlDB.SetMaxOpenConns(1)
 	}
-	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{},
+		&store.ModelDelivery{}); err != nil { // 服务 Delete 事务连带清理 delivery 行（issue #387）
 		t.Fatal(err)
 	}
 	dir, _ := os.MkdirTemp("", "oafmcp-*")

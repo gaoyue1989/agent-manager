@@ -706,6 +706,11 @@ func (c *Core) Delete(id uint) error {
 		if err := tx.Where("service_id = ?", svc.ID).Delete(&store.ServiceEvent{}).Error; err != nil {
 			return err
 		}
+		// 下发关联行随服务删除（issue #387）：孤儿 is_default 行会在服务删除后永久拦截
+		// 其连接删除
+		if err := tx.Where("service_id = ?", svc.ID).Delete(&store.ModelDelivery{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(svc).Error
 	})
 	if err != nil {

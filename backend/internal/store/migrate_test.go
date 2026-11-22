@@ -21,6 +21,7 @@ func newMigrateDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(&OafPackage{}, &ServiceEntity{}, &ServiceEvent{},
 		&PlatformConfigEntity{}, &PlatformConfigEvent{},
 		&User{}, &Workspace{}, &WorkspaceMember{}, &ApiKey{},
+		&ModelConnection{}, &ModelDelivery{},
 		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{},
 		&ExportOrderEntity{}, &ExportPackageMarkEntity{}, &WorkspaceRuntimeDefaultEntity{}); err != nil {
 		t.Fatal(err)
@@ -293,7 +294,8 @@ func TestBackfillAlignsExportAssetsNullWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(&ExportPackageMarkEntity{}, &ExportOrderEntity{}, // 加列，旧行 workspace_id=NULL
-		&User{}, &Workspace{}, &WorkspaceMember{}, &OafPackage{}, &SkillMarketSource{}); err != nil {
+		&User{}, &Workspace{}, &WorkspaceMember{}, &OafPackage{}, &SkillMarketSource{},
+		&ModelConnection{}, &ModelDelivery{}); err != nil { // Backfill 第 9 步触及的模型表
 		t.Fatal(err)
 	}
 	var nullMarks, nullOrders int64
@@ -320,6 +322,100 @@ func TestBackfillAlignsExportAssetsNullWorkspace(t *testing.T) {
 	// 二跑幂等
 	if err := Backfill(db, "admin", "x"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBackfillMarksDefaultModelDeliveries Backfill 第 9 步（issue #387）：存量 NULL 行按
+// 服务 env 归一——首个命中行（connection_id ASC）置 true、同 modelId+baseUrl 双行只标首行、
+// 命中服务的其余行置 false；env 不匹配的服务全部行不动（保持 NULL）；二轮零写入。
+func TestBackfillMarksDefaultModelDeliveries(t *testing.T) {
+	db := newMigrateDB(t)
+	ws := Workspace{Slug: "ws-mdbf0001", Name: "回填空间", Status: "active", QuotaJSON: "{}"}
+	if err := db.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 服务 A：env 指向 m1/b1（与 connA/connB 同 modelId+baseUrl，双行撞车场景）
+	svcA := ServiceEntity{K8sName: "oaf-mdbf-a", DisplayName: "mdbf-a", WorkspaceID: ws.ID,
+		EnvJSON: `{"LLM_MODEL":"m1","LLM_BASE_URL":"http://b1/v1"}`}
+	// 服务 B：env 指向无连接匹配的模型（本服务行全部不动）
+	svcB := ServiceEntity{K8sName: "oaf-mdbf-b", DisplayName: "mdbf-b", WorkspaceID: ws.ID,
+		EnvJSON: `{"LLM_MODEL":"none","LLM_BASE_URL":"http://none/v1"}`}
+	for _, s := range []*ServiceEntity{&svcA, &svcB} {
+		if err := db.Create(s).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	connA := ModelConnection{WorkspaceID: ws.ID, Name: "conn-a", ModelID: "m1", BaseURL: "http://b1/v1"}
+	connB := ModelConnection{WorkspaceID: ws.ID, Name: "conn-b", ModelID: "m1", BaseURL: "http://b1/v1"}
+	connC := ModelConnection{WorkspaceID: ws.ID, Name: "conn-c", ModelID: "m9", BaseURL: "http://b9/v1"}
+	for _, mc := range []*ModelConnection{&connA, &connB, &connC} {
+		if err := db.Create(mc).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 存量形态：AutoMigrate 加列后旧行 is_default 全 NULL（GORM Create 会显式写 0，
+	// 造不出 NULL——裸 SQL INSERT 不含该列，同 TestBackfillHandlesNullWorkspaceColumn 思路）
+	legacy := []struct {
+		connID  uint
+		svcID   uint
+		comment string
+	}{
+		{connB.ID, svcA.ID, "conn_id 大的同模型行"},
+		{connA.ID, svcA.ID, "env 命中行"},
+		{connC.ID, svcA.ID, "非命中行"},
+		{connC.ID, svcB.ID, "env 不匹配服务"},
+	}
+	for _, r := range legacy {
+		if err := db.Exec("INSERT INTO model_deliveries (connection_id, service_id, status, created_at) VALUES (?, ?, 'synced', CURRENT_TIMESTAMP)",
+			r.connID, r.svcID).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	flagOf := func(connID uint) *bool {
+		var d ModelDelivery
+		if err := db.Where("connection_id = ? AND service_id = ?", connID, svcA.ID).First(&d).Error; err != nil {
+			t.Fatal(err)
+		}
+		return &d.IsDefault
+	}
+	if !*flagOf(connA.ID) {
+		t.Fatalf("env-matched row must be marked default (conn_id ASC first): %+v", *flagOf(connA.ID))
+	}
+	if f := flagOf(connB.ID); *f {
+		t.Fatalf("same modelId+baseUrl second row must not be marked: %v", *f)
+	}
+	if f := flagOf(connC.ID); *f {
+		t.Fatalf("non-matched row in matched service must be false: %v", *f)
+	}
+	var dB ModelDelivery
+	if err := db.Where("service_id = ?", svcB.ID).First(&dB).Error; err != nil {
+		t.Fatal(err)
+	}
+	var raw struct{ IsDefault *bool }
+	if err := db.Table("model_deliveries").Select("is_default").
+		Where("id = ?", dB.ID).Scan(&raw).Error; err != nil {
+		t.Fatal(err)
+	}
+	if raw.IsDefault != nil {
+		t.Fatalf("env-mismatched service rows must stay untouched (NULL), got %v", *raw.IsDefault)
+	}
+
+	// 二轮零写入：快照逐字节一致（true 行不命中候选 WHERE，false 行同样不命中）
+	snapshot := func() string {
+		var all []ModelDelivery
+		db.Order("id").Find(&all)
+		b, _ := json.Marshal(all)
+		return string(b)
+	}
+	before := snapshot()
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if after := snapshot(); after != before {
+		t.Fatalf("second backfill must be a no-op: before=%s after=%s", before, after)
 	}
 }
 
