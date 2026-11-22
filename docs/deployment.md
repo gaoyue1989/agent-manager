@@ -236,8 +236,11 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    `{name}-skillsync-token`（data 键 `token`）直落池 workload ns **`opensandbox`**——池模板
    secretKeyRef 在该 ns 内解析，K8s 跨 ns 引用不成立，服务 ns（agent-platform）不产副本。
    前置：deploy-opensandbox.sh 步骤 4.1 已授予 platform-backend 于该 ns 的 Secret 读写删 RBAC
-   （脚本自动，缺授权时发布报错 `skillsync token secret ... forbidden`，重跑脚本即恢复；
-   存量集群需重 apply manifests/platform.yaml 使 ClusterRole 补上 delete 动词）。
+   （脚本自动）；该 RBAC 仅在服务配置或撤销 `SKILLSYNC_TOKEN` 时被触达——服务 env 从未
+   携带该键的发布/改 env/重发布/重新上线零跨 ns 访问，未部署沙箱或缺授权的环境照常可用
+   （issue #409：曾对所有发布无条件探查池 ns，缺授权时报
+   `skillsync token secret ... forbidden`）。仅在轮换/撤销报 forbidden 时重跑脚本恢复；
+   存量集群需重 apply manifests/platform.yaml 使 ClusterRole 补上 delete 动词。
    轮换 = env 表单改 `SKILLSYNC_TOKEN`（单写入口，两处消费自动同值）+ 池 Pod 重建（D-8 契约）；
    撤销 = env 表单把 `SKILLSYNC_TOKEN` 置空串保存（三态语义「空串=删除」）→ 池 ns token
    Secret 同步删除、服务侧内部端点关闭（404）；删服务连带清理（issue #350 修复的静默残留缺口）。
