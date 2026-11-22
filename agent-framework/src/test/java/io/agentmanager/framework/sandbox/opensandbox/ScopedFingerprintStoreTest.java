@@ -114,4 +114,34 @@ class ScopedFingerprintStoreTest {
         assertEquals("v-3|rev-9", store.get("sbx-1", "sess-A"),
             "指纹段可含 |（farm 指纹=version|revision）：get 按首个 | 拆 scope，余段不二拆");
     }
+
+    @Test
+    void slotScopeShouldReturnAuthoritativeScopeSegment() {
+        var data = new HashMap<String, String>();
+        var store = new ScopedFingerprintStore(identityKeyFacade(mapBackedSync(data)));
+
+        assertNull(store.slotScope("sbx-1"), "槽缺失=未知，不得虚构现役 scope");
+
+        store.put("sbx-1", "sess-A", "farm|fp-a");
+        assertEquals("sess-A", store.slotScope("sbx-1"));
+
+        store.put("sbx-1", "sess-B", "farm|fp-b");
+        assertEquals("sess-B", store.slotScope("sbx-1"), "槽覆盖后现役 scope 随之切换（跨副本裁决值）");
+
+        assertNull(store.slotScope("sbx-missing"), "无记录沙箱代=未知");
+        assertNull(ScopedFingerprintStore.NOOP.slotScope("sbx-1"), "未装配=未知");
+    }
+
+    @Test
+    void slotScopeShouldFailOpenOnRedisFailure() {
+        var sync = mock(RedisClusterCommands.class);
+        when(sync.get(anyString())).thenThrow(new RedisException("connection down"));
+        var facade = mock(io.agentmanager.framework.redis.RedisConnectionFacade.class);
+        when(facade.sync()).thenReturn(sync);
+        when(facade.key(anyString())).thenAnswer(inv -> inv.getArgument(0));
+        var store = new ScopedFingerprintStore(facade);
+
+        assertNull(store.slotScope("sbx-1"),
+            "Redis 不可达必须 fail-open 返回 null（未知不动 Pod 级信念，不得清除本地记录）");
+    }
 }

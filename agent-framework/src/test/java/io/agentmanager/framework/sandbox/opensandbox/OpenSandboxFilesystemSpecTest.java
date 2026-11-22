@@ -178,6 +178,44 @@ class OpenSandboxFilesystemSpecTest {
     }
 
     @Test
+    void podLocalStaleHitShouldBeInvalidatedWhenSlotScopeDiffers() {
+        // issue #393 评审 g1（Pod 级表向量）：稳态两操作数均为本 Pod 信念，他副本同代
+        // prune+切 scope 不会失效它们——Pod 级命中也须过单槽 scope 交叉核验，槽现役 scope
+        // 权威否定陈旧记录（清除两表返回 null 重收敛）
+        var spec = new OpenSandboxFilesystemSpec();
+        var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
+        spec.sharedFingerprintStore(shared);
+        spec.recordScopedSkillCacheFingerprint("sbx-g1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-a");
+        org.mockito.Mockito.when(shared.slotScope("sbx-g1")).thenReturn("sess-B");
+
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-g1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "槽现役 scope=B ≠ 请求 scope=A：本 Pod 陈旧记录必须被权威否定");
+        assertNull(spec.hydratedScopedScope("sbx-g1"), "陈旧已投放 scope 记录一并清除");
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-g1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "清除生效不得复活（miss 路径共享 get 无记录）");
+    }
+
+    @Test
+    void podLocalHitShouldStayWhenSlotScopeMatchesOrUnknown() {
+        var spec = new OpenSandboxFilesystemSpec();
+        var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
+        spec.sharedFingerprintStore(shared);
+        spec.recordScopedSkillCacheFingerprint("sbx-g2", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-a");
+        org.mockito.Mockito.when(shared.slotScope("sbx-g2")).thenReturn("sess-A");
+
+        assertEquals("fp-a", spec.scopedSkillCacheFingerprint("sbx-g2", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "槽现役 scope 一致=本 Pod 记录仍可信，稳态短路保持");
+
+        var specUnknown = new OpenSandboxFilesystemSpec();
+        var sharedUnknown = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
+        specUnknown.sharedFingerprintStore(sharedUnknown);
+        specUnknown.recordScopedSkillCacheFingerprint("sbx-g3", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-a");
+
+        assertEquals("fp-a", specUnknown.scopedSkillCacheFingerprint("sbx-g3", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "槽缺失/Redis 不可达（slotScope=null）=未知，fail-open 维持本 Pod 信念不清本地");
+    }
+
+    @Test
     void noopStoreKeepsPurePodLocalBehavior() {
         var spec = new OpenSandboxFilesystemSpec(); // 未注入 → NOOP
         assertNull(spec.scopedSkillCacheFingerprint("sbx-z", "sess-C", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),

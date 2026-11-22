@@ -51,6 +51,36 @@ public class ScopedFingerprintStore {
         return facade.key("sbx:scopedfp:" + sandboxId);
     }
 
+    /** 读单槽原始值（fail-open）：槽缺失/不可用/未装配/入参非法返回 null（未知） */
+    private String slot(String sandboxId) {
+        if (facade == null || sandboxId == null || sandboxId.isBlank()) {
+            return null;
+        }
+        try {
+            return facade.sync().get(key(sandboxId));
+        } catch (RedisException | IllegalStateException e) {
+            // fail-open：共享层不可用回落 Pod 级语义（多付一次慢路径，不出正确性问题）
+            log.debug("[scoped-fp-store] get failed ({}): {}", sandboxId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 读单槽当前记录的 scope 段——「同代现役 scope」的跨副本裁决值：他副本 prune+切 scope
+     * 收敛后本方法即返回新 scope，权威否定其他 Pod 仍持有的陈旧 Pod 级记录（Pod 级两表
+     * 无跨副本失效机制，见 {@code OpenSandboxFilesystemSpec} 交叉核验）。
+     *
+     * @return 现役 scope；槽缺失/不可用/未装配返回 null（未知，调用方不得据此清除本地信念）
+     */
+    public String slotScope(String sandboxId) {
+        String slot = slot(sandboxId);
+        if (slot == null) {
+            return null;
+        }
+        int sep = slot.indexOf('|');
+        return sep < 0 ? null : slot.substring(0, sep);
+    }
+
     /**
      * 读某沙箱代某 scope 的已投放指纹：取单槽值，按首个 {@code |} 拆分——scope 段≠请求 scope
      * 返回 null（槽已被其他 scope 覆盖=陈旧记账），否则返回余段（{@code mode|指纹}）。
@@ -58,24 +88,18 @@ public class ScopedFingerprintStore {
      * @return 记账值；未命中/不可用/未装配返回 null（调用方按「未知走慢路径」处理）
      */
     public String get(String sandboxId, String scope) {
-        if (facade == null || sandboxId == null || sandboxId.isBlank() || scope == null || scope.isBlank()) {
+        if (scope == null || scope.isBlank()) {
             return null;
         }
-        try {
-            String slot = facade.sync().get(key(sandboxId));
-            if (slot == null) {
-                return null;
-            }
-            int sep = slot.indexOf('|');
-            if (sep < 0 || !slot.substring(0, sep).equals(scope)) {
-                return null;
-            }
-            return slot.substring(sep + 1);
-        } catch (RedisException | IllegalStateException e) {
-            // fail-open：共享层不可用回落 Pod 级语义（多付一次慢路径，不出正确性问题）
-            log.debug("[scoped-fp-store] get failed ({}|{}): {}", sandboxId, scope, e.getMessage());
+        String slot = slot(sandboxId);
+        if (slot == null) {
             return null;
         }
+        int sep = slot.indexOf('|');
+        if (sep < 0 || !slot.substring(0, sep).equals(scope)) {
+            return null;
+        }
+        return slot.substring(sep + 1);
     }
 
     /** 记录已投放指纹（投放成功后调用）：单槽 {@code scope|value} 原子覆盖；失败仅告警 */

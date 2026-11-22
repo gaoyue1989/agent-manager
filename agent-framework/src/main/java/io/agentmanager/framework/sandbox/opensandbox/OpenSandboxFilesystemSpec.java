@@ -137,10 +137,12 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     public static final String HYDRATE_MODE_FARM = "farm";
 
     /**
-     * scoped 缓存指纹读取（稳态短路比对值）：Pod 级 miss 时查跨副本共享层（缺口④），均无返回
-     * null=走收敛。记账值含投放模式分量（{@code mode|指纹}）且只返回同模式记录——升级窗口的
-     * 存量无模式/旧模式值（含已退役的 {@code tar|}）永不满足稳态，触发一次重收敛后自然被
-     * farm 值覆盖（D-11 同姿态，无需迁移）。模式不符的共享层命中仍回填 Pod 级两表：
+     * scoped 缓存指纹读取（稳态短路比对值）：Pod 级记录经单槽 scope 交叉核验（缺口④ + issue
+     * #393）——Pod miss 查共享层，命中回填两表；Pod 命中同样读单槽现役 scope 段裁决（稳态两
+     * 操作数均为本 Pod 信念且无跨副本失效机制，他副本同代 prune+切 scope 只会体现在槽上）。
+     * 均无返回 null=走收敛。记账值含投放模式分量（{@code mode|指纹}）且只返回同模式记录——
+     * 升级窗口的存量无模式/旧模式值（含已退役的 {@code tar|}）永不满足稳态，触发一次重收敛
+     * 后自然被 farm 值覆盖（D-11 同姿态，无需迁移）。模式不符的共享层命中仍回填 Pod 级两表：
      * 值即「该沙箱代曾投放」的真实事实，稳态正确性由模式比对承担。
      */
     public String scopedSkillCacheFingerprint(String sandboxId, String scope, String mode) {
@@ -157,6 +159,17 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
                 podLocal = shared;
                 scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, shared);
                 hydratedScopedScopes.put(sandboxId, scope);
+            }
+        } else {
+            // Pod 级命中交叉核验（issue #393 g1）：单槽现役 scope 段是「同代现役 scope」的跨副本
+            // 裁决值，≠请求 scope 即他副本已 prune 掉本 scope——权威否定本 Pod 陈旧两表（清除并
+            // 返回 null 重收敛）。槽缺失/Redis 不可达=未知，fail-open 维持本 Pod 信念不清本地
+            // （旧布局副本窗口内不写槽=维持存量行为）
+            var slotScope = sharedFingerprintStore.slotScope(sandboxId);
+            if (slotScope != null && !slotScope.equals(scope)) {
+                scopedSkillCacheFingerprints.remove(sandboxId + "|" + scope);
+                hydratedScopedScopes.remove(sandboxId, scope);
+                podLocal = null;
             }
         }
         return podLocal != null && podLocal.startsWith(mode + "|")
