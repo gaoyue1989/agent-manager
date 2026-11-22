@@ -34,7 +34,7 @@
 解析顺序：JWT uid → workspace_members 查 (user_id, workspace_id)
   命中   → c.Set("ws", wsID)；role 一并落 context（owner/admin/member，后续模块做写权限裁决）
   未命中 → 404 workspace_not_found（不暴露 403/404 差异细节）
-额外规则：slug=default 的空间仅 admin 角色可解析（决议 2：存量服务对普通用户不可见）
+额外规则：slug=default 的空间仅 admin 角色可解析（决议 2：存量服务对普通用户不可见）（2026-11-22 修订，issue #388：该规则已删除，default 与其他空间同口径经成员关系裁决——显式邀请成员可读、非成员 404、admin 无成员记录隐式放行）
 ```
 
 ### 2.3 端点契约
@@ -63,7 +63,7 @@ GET /api/v1/console/workspaces/:ws/templates
 
 ### 2.4 services 列表过滤
 
-`core.List(status, keyword, packageId)` 追加 `workspaceId uint` 参数（0=不过滤）；console 层强制非 0。**default 空间**：仅 admin 经 console 访问（中间件已裁），agent 列表展示全部归属 default 的服务（= 待纳管视图）。
+`core.List(status, keyword, packageId)` 追加 `workspaceId uint` 参数（0=不过滤）；console 层强制非 0。**default 空间**：仅 admin 经 console 访问（中间件已裁），agent 列表展示全部归属 default 的服务（= 待纳管视图；2026-11-22 修订，issue #388：default 可见性收敛为成员关系裁决，显式邀请成员经 console 可读，「待纳管视图」仅为 admin 视角下的形态）。
 
 ## 3. 前端改动
 

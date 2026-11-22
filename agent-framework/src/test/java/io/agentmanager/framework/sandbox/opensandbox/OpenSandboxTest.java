@@ -1931,6 +1931,13 @@ class OpenSandboxTest {
         return st;
     }
 
+    /** 无投影 entry 形态（SANDBOX_PROJECTION_ENABLED=false）：spec 未装配 __workspace_projection__ */
+    private static OpenSandboxState farmStateNoProjection(String sandboxId) {
+        var st = state();
+        st.setSandboxId(sandboxId);
+        return st;
+    }
+
     private static void bindFarmSession(OpenSandbox sandbox, String scope) {
         sandbox.setUserKey(scope);
         sandbox.setSkillCacheScope(scope);
@@ -1950,6 +1957,56 @@ class OpenSandboxTest {
         assertEquals(0, farmReadlinkCount(osb), "开关（store 路径）为空不得探测 store");
         assertTrue(farmConvergeCommands(osb).isEmpty(), "开关关闭不得收敛建链");
         verify(osb.files(), never()).write(anyList());
+    }
+
+    @Test
+    void farmShouldConvergeWithoutProjectionEntry() throws Exception {
+        // issue #392：SANDBOX_PROJECTION_ENABLED=false（spec 无 __workspace_projection__ entry）
+        // 不再连带关闭软链农场——投影开关只管 AGENTS.md/skills/subagents/knowledge 投影，
+        // 包技能投放唯一路径是农场（PR-4b 后 tar 已退役）。state() 形态 spec（无投影 entry）：
+        // 投影 entry 早退门控在位时本用例密（农场被连带早退、零收敛），门控删除后通
+        var cfg = java.nio.file.Files.createTempDirectory("farm-no-proj-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-" + version);
+
+        var sandbox = new OpenSandbox(farmStateNoProjection("sbx-farm-noproj"), osb,
+            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1, farmConvergeCommands(osb).size(), "无投影 entry 农场仍收敛建链");
+        verify(osb.files(), never()).write(anyList());
+        assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "farm").counter().count(),
+            "farm 判定打点不受投影开关影响");
+    }
+
+    @Test
+    void farmOffSentinelShouldDeliverNoPackageSkills() throws Exception {
+        // issue #392 评审 g1：平台 env 写路径空串=删除（publish.go dropEmptyEnv），「置空关闸」
+        // 平台不可送达——off 哨兵（忽略大小写与首尾空白）是平台表单可送达的显式关闸形态，
+        // 行为须与空串总闸完全一致（零探测/零收敛/零写入）
+        var host = java.nio.file.Files.createTempDirectory("farm-off-sentinel");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var osb = farmOsb("v-anything");
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-off-sentinel"), osb,
+            options().skillsSharedStore("off"), null, null);
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(0, farmReadlinkCount(osb), "off 哨兵不得探测 store");
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "off 哨兵不得收敛建链");
+        verify(osb.files(), never()).write(anyList());
+        // 关闸判定契约（SkillsFarm.enabled 与 AgentScopeConfig 启动 WARN 共用单一谓词）：
+        // 大小写与首尾空白宽限对齐表单人工输入形态；空值恒关闸
+        assertTrue(OpenSandboxClientOptions.skillsSharedStoreOff(" OFF "),
+            "off 哨兵忽略大小写与首尾空白");
+        assertTrue(OpenSandboxClientOptions.skillsSharedStoreOff(null));
+        assertTrue(OpenSandboxClientOptions.skillsSharedStoreOff("  "));
+        assertFalse(OpenSandboxClientOptions.skillsSharedStoreOff("/skills-store"));
     }
 
     @Test

@@ -405,6 +405,8 @@ func TestResolveWorkspaceMatrix(t *testing.T) {
 	if err := c.DB.Create(&store.WorkspaceMember{WorkspaceID: def.ID, UserID: adminU.ID, Role: "member"}).Error; err != nil {
 		t.Fatal(err)
 	}
+	// issue #388：default 显式邀请成员（admin 邀请路径的库内形态）
+	defMember := seedUserIn(t, c, "def-member-u", "user", def.ID, "member")
 
 	// owner / member：me + 数字 id 均可
 	if _, role, err := c.ResolveWorkspace(owner, "me"); err != nil || role != "owner" || ws.ID == 0 {
@@ -422,12 +424,20 @@ func TestResolveWorkspaceMatrix(t *testing.T) {
 	if err != nil || role != "admin" {
 		t.Fatalf("admin implicit membership: %v role=%s", err, role)
 	}
-	// default 空间：admin 可解析，普通用户 404
+	// default 空间：admin 可解析
 	if _, _, err := c.ResolveWorkspace(adminU, itoa(def.ID)); err != nil {
 		t.Fatalf("admin default: %v", err)
 	}
+	// default 非成员普通用户 404（成员关系裁决，不再特判 default）
 	if _, _, err := c.ResolveWorkspace(member, itoa(def.ID)); err != ErrWorkspaceNotFound {
 		t.Fatalf("user default: %v", err)
+	}
+	// issue #388：显式邀请成员可读 default（数字 id 与 slug 两路径均经成员关系裁决）
+	if _, role, err := c.ResolveWorkspace(defMember, itoa(def.ID)); err != nil || role != "member" {
+		t.Fatalf("default member by id: %v role=%s", err, role)
+	}
+	if _, role, err := c.ResolveWorkspace(defMember, "default"); err != nil || role != "member" {
+		t.Fatalf("default member by slug: %v role=%s", err, role)
 	}
 	// 不存在空间 404
 	if _, _, err := c.ResolveWorkspace(member, "999"); err != ErrWorkspaceNotFound {
