@@ -547,6 +547,59 @@ class AgentScopeConfigTest {
         return provider;
     }
 
+    // ===== SDK 遮蔽自检（sdk-stager-shadow-design C-3，issue #426）=====
+
+    @Test
+    void shadowSelfCheckMustPassForRuntimeLoadedShadowClass() {
+        // mvn test 下遮蔽类由 target/classes 加载（classpath 先于依赖 jar），自检必须通过
+        assertDoesNotThrow(() -> AgentScopeConfig.verifyShadowActive(
+            io.agentscope.harness.agent.skill.runtime.MarketplaceStager.class));
+    }
+
+    @Test
+    void shadowSelfCheckMustRejectClassWithoutMarkerField() {
+        // 负分支：原版 SDK 类没有 SHADOW_MARKER 字段——自检必须抛出而非静默放行
+        // （原实现引用编译期常量被 javac 内联，任何加载形态下都恒真放行）
+        var e = assertThrows(IllegalStateException.class,
+            () -> AgentScopeConfig.verifyShadowActive(String.class));
+        assertTrue(e.getMessage().contains("shadow INACTIVE"), e.getMessage());
+    }
+
+    @Test
+    void shadowSelfCheckMustFailFastOnOriginalSdkClassFromJar() throws Exception {
+        // 真实复现（issue #426）：classpath 顺序回归时运行期加载到 SDK jar 原版类——
+        // 旧实现（消费方 ldc 内联常量）对该场景静默放行；对原版类（无 SHADOW_MARKER 字段）
+        // 自检必须硬失败。child-first loader 仅对遮蔽 FQN 强制从 jar 加载，依赖类走标准委派
+        var jarUrl = io.agentscope.harness.agent.skill.WorkspaceSkillRepository.class
+            .getProtectionDomain().getCodeSource().getLocation();
+        var loader = new java.net.URLClassLoader(new java.net.URL[]{jarUrl},
+            AgentScopeConfigTest.class.getClassLoader()) {
+            @Override
+            protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if (!name.equals("io.agentscope.harness.agent.skill.runtime.MarketplaceStager")) {
+                    return super.loadClass(name, resolve);
+                }
+                synchronized (this.getClassLoadingLock(name)) {
+                    var c = findLoadedClass(name);
+                    if (c == null) {
+                        c = findClass(name);
+                    }
+                    if (resolve) {
+                        resolveClass(c);
+                    }
+                    return c;
+                }
+            }
+        };
+        var original = loader.loadClass("io.agentscope.harness.agent.skill.runtime.MarketplaceStager");
+        assertThrows(NoSuchFieldException.class, () -> original.getField("SHADOW_MARKER"),
+            "SDK jar 原版类不得有 SHADOW_MARKER 字段（自检判据前提）");
+        var e = assertThrows(IllegalStateException.class,
+            () -> AgentScopeConfig.verifyShadowActive(original),
+            "自检对 SDK jar 原版类必须 fail-fast（issue #426 复现场景）");
+        assertTrue(e.getMessage().contains("shadow INACTIVE"), e.getMessage());
+    }
+
     private static AgentManagerProperties.ServerConfig emptyServer() {
         return new AgentManagerProperties.ServerConfig("0.0.0.0", 8100);
     }
