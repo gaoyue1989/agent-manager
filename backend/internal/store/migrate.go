@@ -153,6 +153,14 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 		// false；env 不匹配（无 LLM_* 或无命中行）则本服务全部行不动。幂等：候选 WHERE 含
 		// is_default IS NULL（三值逻辑下 = false 不命中 NULL 行，先例步骤 3/4），true/false
 		// 行均不命中候选，二轮启动零写入。仅写平台自有表（原则一）。
+		// 先清孤儿行：旧版服务 Delete 事务只清 ServiceEvent+svc、从不清理
+		// model_deliveries，存量库必有孤儿行——下方逐服务 First 回查 services 会对
+		// 孤儿 service_id 报 ErrRecordNotFound 使整个事务回滚（Backfill 错误 → main.go
+		// log.Fatalf 启动即挂）；清理语义与服务删除链路（publish.go Delete）同源
+		if err := tx.Where("service_id NOT IN (SELECT id FROM services)").
+			Delete(&ModelDelivery{}).Error; err != nil {
+			return err
+		}
 		var svcIDs []uint
 		if err := tx.Model(&ModelDelivery{}).Distinct("service_id").Pluck("service_id", &svcIDs).Error; err != nil {
 			return err

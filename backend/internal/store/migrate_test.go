@@ -501,6 +501,60 @@ func TestBackfillNormalizesPackageNullWorkspace(t *testing.T) {
 	}
 }
 
+// TestBackfillRemovesOrphanModelDeliveries 孤儿下发行（服务已删；master 旧版 Delete 事务
+// 只清 ServiceEvent+svc、从不清理 model_deliveries）不得让 Backfill 第 9 步回查 services
+// 报 ErrRecordNotFound 整体回滚（Backfill 错误 → main.go log.Fatalf，启动即挂 CrashLoop）：
+// 第 9 步先清孤儿行再归一，服务在册行照常标记，二轮零写入。
+func TestBackfillRemovesOrphanModelDeliveries(t *testing.T) {
+	db := newMigrateDB(t)
+	ws := Workspace{Slug: "ws-orphan001", Name: "孤儿空间", Status: "active", QuotaJSON: "{}"}
+	if err := db.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := ServiceEntity{K8sName: "oaf-orphan-t", DisplayName: "orphan-t", WorkspaceID: ws.ID,
+		EnvJSON: `{"LLM_MODEL":"m1","LLM_BASE_URL":"http://b1/v1"}`}
+	if err := db.Create(&svc).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := ModelConnection{WorkspaceID: ws.ID, Name: "c1", ModelID: "m1", BaseURL: "http://b1/v1"}
+	if err := db.Create(&conn).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 在册行 + 孤儿行（service_id 指向已删服务），均为存量 NULL 形态（裸 SQL INSERT）
+	if err := db.Exec("INSERT INTO model_deliveries (connection_id, service_id, status, created_at) VALUES (?, ?, 'synced', CURRENT_TIMESTAMP)",
+		conn.ID, svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO model_deliveries (connection_id, service_id, status, created_at) VALUES (?, 99999, 'synced', CURRENT_TIMESTAMP)",
+		conn.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("backfill must survive orphan delivery rows: %v", err)
+	}
+	var orphans int64
+	db.Model(&ModelDelivery{}).Where("service_id = ?", 99999).Count(&orphans)
+	if orphans != 0 {
+		t.Fatalf("orphan delivery row must be removed: %d", orphans)
+	}
+	var d ModelDelivery
+	if err := db.Where("service_id = ?", svc.ID).First(&d).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !d.IsDefault {
+		t.Fatalf("in-service row must still be marked: %+v", d)
+	}
+	// 二轮幂等：孤儿已清，零报错零写入
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	var d2 ModelDelivery
+	db.First(&d2, d.ID)
+	if !d2.IsDefault {
+		t.Fatalf("second backfill must keep flag: %+v", d2)
+	}
+}
+
 // TestDedupPackageVersions issue #172：(slug, version) 重复行归一——保留最早一行，
 // 后续行加 .fix{N} 后缀；幂等（二跑零变更）；归一后 AutoMigrate 唯一索引可建。
 func TestDedupPackageVersions(t *testing.T) {
