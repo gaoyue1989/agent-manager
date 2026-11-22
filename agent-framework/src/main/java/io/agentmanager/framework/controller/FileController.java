@@ -45,6 +45,8 @@ public class FileController {
 
     /** 存储 key 前缀时间格式：upload/202509/{uuid}-{sanitizedFileName} */
     private static final DateTimeFormatter KEY_MONTH = DateTimeFormatter.ofPattern("yyyyMM");
+    /** 文件名字节预算（issue #425）：落盘末段 {uuid36}-{name}.{uuid8}.tmp ≤ ext4 单段上限 255 */
+    static final int MAX_FILE_NAME_BYTES = 255 - 36 - 1 - 1 - 8 - 4;
     /** fileId 格式：UUID（用于 download 端点入参校验） */
     private static final java.util.regex.Pattern FILE_ID_PATTERN =
         java.util.regex.Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -318,10 +320,29 @@ public class FileController {
             return null;
         }
         var bytes = base.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        if (bytes.length > 255) {
-            base = new String(bytes, 0, 255, java.nio.charset.StandardCharsets.UTF_8);
+        if (bytes.length > MAX_FILE_NAME_BYTES) {
+            // 截 stem 保扩展名（issue #425）：截断名仍须通过 extensionConsistentWithMime
+            // 白名单校验；边界截断回退到完整字符起点——残缺序列经 new String 会被替换为
+            // U+FFFD，再编码字节数反超预算（旧 255 上限即有此缺陷）
+            int dot = base.lastIndexOf('.');
+            var ext = dot > 0 ? truncateUtf8Bytes(base.substring(dot), MAX_FILE_NAME_BYTES) : "";
+            base = truncateUtf8Bytes(dot > 0 ? base.substring(0, dot) : base,
+                MAX_FILE_NAME_BYTES - ext.getBytes(java.nio.charset.StandardCharsets.UTF_8).length) + ext;
         }
         return base;
+    }
+
+    /** UTF-8 字节预算截断：回退到最后一个完整字符边界（残缺序列不得产出替换字符） */
+    static String truncateUtf8Bytes(String s, int maxBytes) {
+        var bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (bytes.length <= maxBytes) {
+            return s;
+        }
+        int cut = maxBytes;
+        while (cut > 0 && (bytes[cut] & 0xC0) == 0x80) {
+            cut--;
+        }
+        return new String(bytes, 0, cut, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**

@@ -212,9 +212,11 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             return err("metadata write failed: " + e.getMessage());
         }
         log.info("present_file: registered {} ({} bytes, mime={})", norm, size, mime);
-        // 5. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）
-        return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + basename(norm)
-            + "\",\"mime_type\":\"" + mime + "\",\"size\":" + size + "}";
+        // 5. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）；文件名经 escape()
+        //    （issue #424：#344 还原的含引号名不转义即产出非法 JSON，parseFileResult 正则
+        //    兜底在首个引号截断，构造 `a","error":"x` 形名可注入字段使 file_ready 丢失）
+        return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + escape(basename(norm))
+            + "\",\"mime_type\":\"" + escape(mime) + "\",\"size\":" + size + "}";
     }
 
     /**
@@ -305,7 +307,13 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
     }
 
-    /** 路径规范化：拒绝 ../ 逃逸；统一返回工作区相对路径（无前导 /workspace） */
+    /**
+     * 路径规范化：拒绝 ../ 逃逸；统一返回工作区相对路径（无前导 /workspace）。
+     *
+     * <p>剥 /workspace/ 前缀后不得再是绝对路径（issue #424）：/workspace//etc/passwd
+     * 剥前缀得 /etc/passwd，放行即绕过工作区约束——沙箱 execd files API 按绝对路径
+     * 可读容器任意文件，越出禁 shell / shell HITL 策略的边界。
+     */
     private String normalizeWorkspacePath(String filePath) {
         if (filePath == null || filePath.isBlank()) {
             return null;
@@ -317,7 +325,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             // 非 /workspace 绝对路径 → 拒绝
             return null;
         }
-        if (p.contains("..") || p.startsWith("../") || p.contains("/../")) {
+        if (p.isBlank() || p.startsWith("/") || p.contains("..") || p.contains("/../")) {
             return null;
         }
         return p;
@@ -326,34 +334,31 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
     /**
      * 非沙箱模式：从 KV 工作区读文件。
      *
-     * <p><b>候选键顺序</b>（e2e-ciplan §11.3 D3 的第三处断裂）：控制器的 write_file→KV 同步
-     * 用的是**请求体 userId**，而工具侧 RuntimeContext 在 Channel 链路下 userId 被网关改写为
-     * peer（=sessionId）。两者不一致时读不到刚写入的文件。这里按 (userId, sessionId) 依次尝试，
-     * 命中任一即返回——两条链路（直接 userId / 网关 peer）都能读到。
+     * <p><b>归属规则（issue #408）</b>：只允许当前主体可证明归属的命名空间键——
+     * RuntimeContext 原值（userId/sessionId，覆盖直接链路 / 网关 peer 两形态）+
+     * session_user 反查的真实用户（Channel 链路 D3：write_file→KV 同步用请求体 userId，
+     * 工具侧 userId 被网关改写为 peer，经 SessionKeyResolver 同源反查弥合）。
+     *
+     * <p>历史上此处的 kv_sync_key（rel_path 全局唯一、无用户维度）与 file_asset 按文件名
+     * 反查会把<b>其他用户</b>的 userKey 带进候选，使任一已认证用户猜中常见路径即可读取
+     * 他人文件——两条全局反查已随本规则删除（登记与查询通道一并移除，见 V18）。
      */
     private byte[] readFromWorkspace(RuntimeContext ctx, String relPath) {
         if (ctx == null) {
             return null;
         }
         var candidates = new java.util.LinkedHashSet<String>();
-        // ① RuntimeContext.userId（直接调用/普通链路即请求体 userId）
         if (ctx.getUserId() != null && !ctx.getUserId().isBlank()) {
             candidates.add(ctx.getUserId());
         }
-        // ② sessionId（网关 peer 即 rawSessionId）
         if (ctx.getSessionId() != null && !ctx.getSessionId().isBlank()) {
             candidates.add(ctx.getSessionId());
         }
-        // ③ kv_sync_key 反查：write_file→KV 同步登记的写入侧 userKey
-        //    （Channel 链路下 ctx.userId 是网关 peer，拿不到请求体 userId——D3 修复）
-        try {
-            fileAssetStore.findKvSyncKey(relPath).ifPresent(candidates::add);
-            // ④ 上传文件：按文件名 + 会话候选反查 file_asset
-            var name = relPath.contains("/") ? relPath.substring(relPath.lastIndexOf('/') + 1) : relPath;
-            fileAssetStore.findUserKeyByFileName(name, candidates.toArray(String[]::new))
-                .ifPresent(candidates::add);
-        } catch (Exception e) {
-            log.debug("present_file: userKey lookup failed for {}: {}", relPath, e.getMessage());
+        if (sessionKeyResolver != null) {
+            var real = sessionKeyResolver.realUserId(ctx);
+            if (real != null && !real.isBlank()) {
+                candidates.add(real);
+            }
         }
         for (var key : candidates) {
             var bytes = workspaceReader.readWorkspaceFile(key, relPath);

@@ -106,11 +106,16 @@ public class LocalFileStorage implements FileStorage {
     public void delete(String key) throws IOException {
         var target = resolve(key);
         Files.deleteIfExists(target);
-        // 顺带清理残留的 .tmp（上次原子写中断）；tmp 名为 {fileName}.{uuid8}.tmp，需 glob 匹配
-        try (var stream = Files.newDirectoryStream(target.getParent(),
-            target.getFileName() + ".*.tmp")) {
-            for (var tmp : stream) {
-                Files.deleteIfExists(tmp);
+        // 顺带清理残留的 .tmp（上次原子写中断）；tmp 名为 {fileName}.{uuid8}.tmp。
+        // 目录遍历 + 字面前后缀匹配（issue #425）：文件名可含 [ ] { } * ? 等 glob 元字符，
+        // newDirectoryStream 的 glob 语法不转义即抛 PatternSyntaxException，回滚/清理中断
+        var prefix = target.getFileName() + ".";
+        try (var stream = Files.newDirectoryStream(target.getParent())) {
+            for (var p : stream) {
+                var name = p.getFileName().toString();
+                if (name.startsWith(prefix) && name.endsWith(".tmp")) {
+                    Files.deleteIfExists(p);
+                }
             }
         } catch (java.nio.file.NoSuchFileException e) {
             // 父目录不存在 → 无残留，忽略
