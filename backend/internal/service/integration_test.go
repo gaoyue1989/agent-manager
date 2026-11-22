@@ -245,6 +245,90 @@ func TestIntrospectApiKeyChannel(t *testing.T) {
 	_ = fresh
 }
 
+// TestIntrospectApiKeyScopeBypass issue #407：单 Agent key 作用域裁决与 nginx 路由同口径、
+// fail-closed。旧判定 `len(uri) >= len(prefix) && uri[:len(prefix)] != prefix` 使比前缀短的
+// 目标 URI 整链短路放行；且 nginx 透传的 $request_uri 未归一化，`../` 穿越时 introspect
+// 看到的前缀与实际路由目标分叉；带 query 的根路径则被误判 403。X-Agent-Short 是 nginx
+// location 归一化匹配的路由捕获（与真实 upstream 一致），非空时与 URI 反解交叉校验。
+func TestIntrospectApiKeyScopeBypass(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-2000bbb4", "作用域空间")
+	demo := &store.ServiceEntity{K8sName: "oaf-scope-demo", DisplayName: "Demo",
+		WorkspaceID: ws.ID, ShortName: "demo"}
+	if err := c.DB.Create(demo).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, plain, err := c.IssueApiKey(IssueApiKeyInput{Name: "k-demo", AgentID: &demo.ID, WorkspaceID: ws.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 长名 Agent 的 key：比本 Agent 前缀短的 URI 正是旧判定 len>=len 短路放行的逃逸面
+	long := &store.ServiceEntity{K8sName: "oaf-scope-sales", DisplayName: "Sales",
+		WorkspaceID: ws.ID, ShortName: "sales-assistant"}
+	if err := c.DB.Create(long).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, longPlain, err := c.IssueApiKey(IssueApiKeyInput{Name: "k-sales", AgentID: &long.ID, WorkspaceID: ws.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 对照组：空间级 key（AgentID nil）不做路由裁决
+	_, wsPlain, err := c.IssueApiKey(IssueApiKeyInput{Name: "k-ws", WorkspaceID: ws.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	probe := func(bearer string, headers map[string]string) *httptest.ResponseRecorder {
+		req, _ := http.NewRequest(http.MethodGet, "http://router/api/v1/auth/introspect", nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		c.Introspect(w, req)
+		return w
+	}
+	type scopeCase struct {
+		name    string
+		headers map[string]string
+		want    int
+	}
+	cases := []scopeCase{
+		{"dotdot-traversal", map[string]string{"X-Original-URI": "/agent/demo/../victim/threads"}, http.StatusForbidden},
+		{"encoded-traversal", map[string]string{"X-Original-URI": "/agent/demo%2e%2e/victim/threads"}, http.StatusForbidden},
+		{"short-header-divergence", map[string]string{"X-Original-URI": "/agent/demo/threads", "X-Agent-Short": "victim"}, http.StatusForbidden},
+		{"short-header-spoof", map[string]string{"X-Original-URI": "/agent/victim/threads", "X-Agent-Short": "demo"}, http.StatusForbidden},
+		{"short-header-agree", map[string]string{"X-Original-URI": "/agent/demo/threads", "X-Agent-Short": "demo"}, http.StatusOK},
+		{"query-root", map[string]string{"X-Original-URI": "/agent/demo?x=1"}, http.StatusOK},
+		{"query-sub", map[string]string{"X-Original-URI": "/agent/demo/threads?x=1"}, http.StatusOK},
+		{"normal", map[string]string{"X-Original-URI": "/agent/demo/threads/chat"}, http.StatusOK},
+		{"double-slash", map[string]string{"X-Original-URI": "//agent/demo/threads"}, http.StatusOK},
+	}
+	for _, tc := range cases {
+		w := probe(plain, tc.headers)
+		if w.Code != tc.want {
+			t.Fatalf("#407 %s: X-Original-URI=%q X-Agent-Short=%q => %d (want %d)",
+				tc.name, tc.headers["X-Original-URI"], tc.headers["X-Agent-Short"], w.Code, tc.want)
+		}
+		if tc.want == http.StatusOK && w.Header().Get("X-User-Id") == "" {
+			t.Fatalf("#407 %s: 200 must carry X-User-Id", tc.name)
+		}
+	}
+	// 长名 key（前缀 /agent/sales-assistant/，23 字节）：更短的目标 URI——含 issue 复现
+	// 的 /agent/ops/threads（18 字节）与空/缺失/畸形——不得落旧判定 len>=len 短路放行
+	for _, uri := range []string{"/agent/ops/threads", "/agent/demo", "/agent", "", "not-a-path"} {
+		h := map[string]string{"X-Original-URI": uri}
+		if w := probe(longPlain, h); w.Code != http.StatusForbidden {
+			t.Fatalf("#407 sales key: X-Original-URI=%q => %d (want 403)", uri, w.Code)
+		}
+	}
+	// 空间级 key 不受裁决约束
+	if w := probe(wsPlain, map[string]string{"X-Original-URI": "/agent/anything/threads"}); w.Code != http.StatusOK {
+		t.Fatalf("#407 workspace key: %d (want 200)", w.Code)
+	}
+}
+
 // TestIntrospectCookieChannel issue #373：introspect 会话 cookie 通道——router off 档
 // 「免鉴权但不免身份」的 backend 前置。浏览器只有 httpOnly cookie 无自报头，auth_request
 // 子请求把 Cookie 带到 upstream，introspect 读回注入 X-User-Id（header 优先、cookie 回落）。

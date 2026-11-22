@@ -31,6 +31,8 @@ export interface ChatPaneProps {
   suggestions?: string[];
   /** chat / files 请求体 userId 字段（业务面身份以 proxy 注入的 X-User-Id 为准） */
   userId?: string;
+  /** 指定挂载初始会话（会话回放）；缺省按 persistKey 从 localStorage 恢复 */
+  initialSessionId?: string;
   testId?: string;
 }
 
@@ -76,6 +78,7 @@ function parseChatThread(sessionId: string): ThreadItem | null {
 export default function ChatPane({
   agentBase, persistKey, persistCookie = false,
   title = "对话助手", subtitle = "", greeting, suggestions = [], userId = "webui", testId = "chat-pane",
+  initialSessionId,
 }: ChatPaneProps) {
   const GREETING = greeting ?? DEFAULT_GREETING;
   const [messages, setMessages] = useState<ChatMsg[]>([{ role: "system", content: GREETING }]);
@@ -487,7 +490,11 @@ export default function ChatPane({
   }, []);
 
   useEffect(() => {
-    const sid = getSessionId(persistKey);
+    const sid = initialSessionId || getSessionId(persistKey);
+    // 指定初始会话时补写 persistKey（与 selectSession 点击历史会话同一持久化语义，
+    // 调试/回放共用「当前会话」单真相源，幂等）：否则回放 mount 会经 getSessionId
+    // 新建残留 sid，正文与回放目标错配且污染调试 Tab 恢复点
+    if (initialSessionId) persistSessionId(persistKey, sid, persistCookie);
     sessionId.current = sid;
     let cancelled = false;
     setHistoryLoading(true);
@@ -503,7 +510,7 @@ export default function ChatPane({
     });
     syncSessionModel(sid);
     return () => { cancelled = true; resumeRef.current?.abort(); };
-  }, [loadHistory, resumeTurn, syncSessionModel, persistKey]);
+  }, [loadHistory, resumeTurn, syncSessionModel, persistKey, initialSessionId, persistCookie]);
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages]);
