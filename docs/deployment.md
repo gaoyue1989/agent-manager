@@ -268,13 +268,16 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 
 **总闸默认值（issue #392，2026-11-22）**：agent-framework 缺省已对齐守护 `SKILLSYNC_STORE_DIR`
 缺省（均为 `/skills-store`）——按本节步骤 1-4 配置即**零手工 env** 开农场（`SANDBOX_SKILLS_SHARED_STORE`
-已入平台 env 模板 sandbox 组，仅表单预填、不经运行时注入）。显式关闭 = 服务 env 置空
-`SANDBOX_SKILLS_SHARED_STORE`（启动期一条 WARN，包技能不投放）；经池 `extraEnv` 覆盖
-`SKILLSYNC_STORE_DIR` 的（白名单 `^SKILLSYNC_[A-Z0-9_]+$`，opensandboxproxy.go）**必须同值改服务 env
+已入平台 env 模板 sandbox 组，仅表单预填、不经运行时注入）。**显式关闭 = 服务 env 填 `off`**（框架哨兵，
+忽略大小写与首尾空白；启动期一条 WARN，包技能不投放）——平台 env 写路径空串=删除（Publish/UpdateEnv/
+Republish 出口 `dropEmptyEnv` 兜底 + UpdateEnv 三态「空串=删除」），**「置空」送不出 CM**：键缺席即回落
+框架缺省 `/skills-store` 农场照开，勿以置空当作关闸；空串=关闸语义仅保留给直改服务 CM/Deployment env
+的部署形态（两者行为一致，共用 `OpenSandboxClientOptions.skillsSharedStoreOff` 判定）。经池 `extraEnv`
+覆盖 `SKILLSYNC_STORE_DIR` 的（白名单 `^SKILLSYNC_[A-Z0-9_]+$`，opensandboxproxy.go）**必须同值改服务 env
 该键**，两键不对齐 → farm 判定 `degraded_store_missing` 降级（会话级 WARN 指根因，不误投、不 crashloop）。
 存量影响（行为不变、可观测性增强）：env 固化不含该键且未配 syncd 的沙箱服务，重启后农场自动尝试开启，
 每会话新增一条 `degraded_store_missing` WARN 与 `skills.farm.decision` 指标（PR-4b 后无 store 本就零包
-技能投放）；不可接受该日志噪音时按上口径显式置空（仅启动期一条 WARN，会话级零噪音）。
+技能投放）；不可接受该日志噪音时服务 env 填 `off` 关闸（仅启动期一条 WARN，会话级零噪音）。
 
 ## 关键端点
 

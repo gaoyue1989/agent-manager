@@ -78,7 +78,9 @@ public record SandboxConfig(
     /**
      * 软链农场总闸（{@code SANDBOX_SKILLS_SHARED_STORE}，issue #392 起缺省 /skills-store）：
      * 与守护 SKILLSYNC_STORE_DIR 缺省对齐（skills-syncd main.go defaultStoreDir），零手工
-     * env 默认开启；空 = 显式关闸（包技能不投放，AgentScopeConfig 装配处启动期 WARN）。
+     * env 默认开启。关闸形态（包技能不投放，AgentScopeConfig 装配处启动期 WARN，判定
+     * 共用 {@link OpenSandboxClientOptions#skillsSharedStoreOff}）：{@code off} = 平台表单
+     * 可送达（平台 env 写路径空串=删除，置空送不出）；空 = 直改 CM/Deployment 场景。
      * 经池 extraEnv 覆盖 SKILLSYNC_STORE_DIR 时必须同值改本键
      */
     @DefaultValue("/skills-store") String skillsSharedStore,

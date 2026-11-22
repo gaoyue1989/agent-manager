@@ -14,6 +14,23 @@ import io.agentscope.harness.agent.sandbox.SandboxClientOptions;
  */
 public class OpenSandboxClientOptions extends SandboxClientOptions {
 
+    /**
+     * 软链农场总闸显式关闸值（issue #392）：平台 env 写路径空串=删除（publish.go dropEmptyEnv
+     * 三路兜底，「置空」送不出 CM），{@code off} 是平台表单可送达的关闸形态；空串语义保留给
+     * 直改 CM/Deployment 的部署形态，两者行为一致（启动期一条 WARN + 包技能不投放）
+     */
+    public static final String SKILLS_SHARED_STORE_OFF = "off";
+
+    /**
+     * 农场总闸关闸判定（§6.4，单一事实源）：null/空白或 {@code off}（忽略大小写与首尾空白，
+     * 对齐表单人工输入与 SkillsFarm 下游既有的 store trim 语义）= 关闸。SkillsFarm.enabled()
+     * 与 AgentScopeConfig 启动 WARN 共用本谓词，禁在两处重复字面量
+     */
+    public static boolean skillsSharedStoreOff(String store) {
+        return store == null || store.isBlank()
+            || SKILLS_SHARED_STORE_OFF.equalsIgnoreCase(store.trim());
+    }
+
     private String serverUrl;
     private String apiKey;
     private String image = "opensandbox/code-interpreter:v1.1.0";
@@ -26,7 +43,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private String workspaceRoot = "/workspace";
     /** 技能禁用判定（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放过滤；null = 不过滤 */
     private SkillDisabledChecker skillDisabledChecker;
-    /** 软链农场开关（skills-syncd §6.4）：沙箱内共享库路径，空 = 农场关闭走现行为 */
+    /** 软链农场开关（skills-syncd §6.4）：沙箱内共享库路径，缺省 /skills-store；关闸形态见 {@link #skillsSharedStoreOff} */
     private String skillsSharedStore;
     /** 端点指纹服务（skills-syncd §7.2 版本硬校验数据源，D-4 短 TTL）；null = 端点不可达 */
     private SkillBundleService skillBundleService;

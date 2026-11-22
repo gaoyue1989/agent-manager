@@ -409,7 +409,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 | 开关 | 默认 | 语义 |
 |---|---|---|
-| `SANDBOX_SKILLS_SHARED_STORE` | `/skills-store`（置空 = 显式关闸） | 沙箱内共享库路径；空 = 包技能不投放（总闸，无 tar 回落） |
+| `SANDBOX_SKILLS_SHARED_STORE` | `/skills-store`（空或 `off` = 显式关闸） | 沙箱内共享库路径；空或 `off` = 包技能不投放（总闸，无 tar 回落；`off` 为平台可送达的关闸形态——平台 env 写路径空串=删除，置空送不出 CM） |
 | `SKILLSYNC_TOKEN` | 空 | agent-framework 端点鉴权；空 = 端点关闭 |
 
 回退 = **会话级二值**（B-1 决议）：判定失败（store 目录缺失 / `CURRENT` 解析失败 / 版本硬校验不一致
@@ -424,8 +424,11 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 > 补记（2026-11-22，issue #392）：`SANDBOX_SKILLS_SHARED_STORE` 框架缺省由空改为 `/skills-store`
 > （application.yml 占位符 + SandboxConfig `@DefaultValue`，与守护 `SKILLSYNC_STORE_DIR` 缺省对齐）——
-> 按部署步骤配置即零手工 env 开农场；显式关闸 = 服务 env 置空该键（AgentScopeConfig 装配处启动期一条
-> WARN，per-call 行为不变；显式空 = 知情选择，无记忆位）。连带删除 `OpenSandbox.hydrateScopedSkillCache`
+> 按部署步骤配置即零手工 env 开农场。显式关闸 = 服务 env 填 `off`（框架哨兵，忽略大小写与首尾空白；
+> AgentScopeConfig 装配处启动期一条 WARN，per-call 行为不变，关闸判定与 SkillsFarm 共用单一谓词
+> `OpenSandboxClientOptions.skillsSharedStoreOff`）：平台 env 写路径空串=删除（Publish/UpdateEnv/
+> Republish 出口 dropEmptyEnv 兜底 + UpdateEnv 三态语义），**置空送不出 CM、键缺席回落缺省农场照开**，
+> 空串=关闸语义仅保留给直改服务 CM/Deployment env 的部署形态。连带删除 `OpenSandbox.hydrateScopedSkillCache`
 > 的投影 entry 早退门控（projectionSourceRoot，全仓唯一调用点即该门控）：`SANDBOX_PROJECTION_ENABLED=false`
 > 只停 AGENTS.md/skills/subagents/knowledge 投影，不再连带关闭农场——该门控防的是 PR-4b 前 tar 投放
 > 语义，farm manifest 制下已死。存量影响（投放结果不变、可观测性增强）：未配 syncd 的沙箱服务重启后

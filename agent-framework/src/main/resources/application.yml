@@ -122,8 +122,9 @@ agent:
     skills-bundle-cache-dir: ${SKILLSYNC_BUNDLE_CACHE_DIR:}
     # 软链农场总闸（sandbox-skills-syncd-design §6.2/§6.4）：沙箱内共享库路径，缺省
     # /skills-store 与守护 SKILLSYNC_STORE_DIR 缺省对齐（skills-syncd main.go defaultStoreDir，
-    # issue #392）——零手工 env 默认开启；置空 = 显式关闸（包技能不投放，启动期 WARN）。
-    # 经池 extraEnv 覆盖 SKILLSYNC_STORE_DIR 时必须同值改本键
+    # issue #392）——零手工 env 默认开启。关闸形态（包技能不投放，启动期 WARN）：off =
+    # 平台表单可送达（平台 env 写路径空串=删除，置空送不出）；空串 = 直改 CM/Deployment
+    # 场景。经池 extraEnv 覆盖 SKILLSYNC_STORE_DIR 时必须同值改本键
     skills-shared-store: ${SANDBOX_SKILLS_SHARED_STORE:/skills-store}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}

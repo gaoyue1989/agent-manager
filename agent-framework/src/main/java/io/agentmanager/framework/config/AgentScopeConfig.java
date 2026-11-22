@@ -61,12 +61,15 @@ public class AgentScopeConfig {
         }
         log.info("Sandbox enabled, assembling OpenSandboxFilesystemSpec (server={}, image={})",
             config.opensandbox().serverUrl(), config.image());
-        // 关闸可观测（issue #392）：总闸缺省已对齐 /skills-store，走到这里仍为空 = 服务 env
-        // 显式置空（知情关闸）——包技能不投放（软链农场总闸关闭，PR-4b 后无回落）。
-        // 知情选择不做 per-call 打点/记忆位，进程级一条 WARN 即可
-        if (config.skillsSharedStore() == null || config.skillsSharedStore().isBlank()) {
-            log.warn("SANDBOX_SKILLS_SHARED_STORE is explicitly empty: skills farm master switch "
-                + "is OFF — package skills will NOT be delivered to sandboxes");
+        // 关闸可观测（issue #392）：总闸缺省已对齐 /skills-store，走到这里仍为关闸形态
+        // （空 = 直改 CM/Deployment 的显式置空；off = 平台表单可送达的显式关闸——平台 env
+        // 写路径空串=删除，置空送不出）——均为知情关闸，包技能不投放（PR-4b 后无回落）。
+        // 知情选择不做 per-call 打点/记忆位，进程级一条 WARN 即可；关闸判定与 SkillsFarm
+        // 共用单一谓词（OpenSandboxClientOptions.skillsSharedStoreOff）
+        if (io.agentmanager.framework.sandbox.opensandbox.OpenSandboxClientOptions
+                .skillsSharedStoreOff(config.skillsSharedStore())) {
+            log.warn("SANDBOX_SKILLS_SHARED_STORE is explicitly disabled (empty or 'off'): skills "
+                + "farm master switch is OFF — package skills will NOT be delivered to sandboxes");
         }
         // 业务规范键解析（issue #52）：Channel 链路 ctx.userId 是网关 peer（=前端 sessionId），
         // 沙箱 userKey 须经 session_user 反查真实用户，否则 per-user 技能物化/回写退化为

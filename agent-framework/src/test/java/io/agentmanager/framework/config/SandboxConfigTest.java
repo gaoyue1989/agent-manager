@@ -66,7 +66,8 @@ class SandboxConfigTest {
      * 绑定层默认翻转回归（issue #392，Binder 范式同 AgentManagerPropertiesBindingTest）：
      * 属性缺失（存量服务 env 固化不含该键）绑得 {@code /skills-store}（与守护
      * SKILLSYNC_STORE_DIR 缺省对齐，农场零手工 env 默认开启）；显式空串绑得空串
-     * （表单置空 = 显式关闸，启动期 WARN）——@DefaultValue 不得吞掉显式置空语义。
+     * （= 关闸形态之一，服务直改 CM/Deployment env 可达；平台 env 写路径空串=删除送不出，
+     * 平台关闸走 off 哨兵）——@DefaultValue 不得吞掉显式置空语义。
      */
     @Test
     void skillsSharedStoreShouldBindStoreDefaultWhenAbsentAndEmptyWhenExplicit() {
