@@ -392,7 +392,7 @@ public class WorkspaceSyncService {
             return false;
         }
         var baselineDir = packageSkillsDir.resolve(name);
-        if (!Files.isDirectory(baselineDir.resolve(WorkspaceReader.SKILL_FILE))) {
+        if (!Files.isRegularFile(baselineDir.resolve(WorkspaceReader.SKILL_FILE))) {
             return false;
         }
         Map<String, Long> baseline = new LinkedHashMap<>();
