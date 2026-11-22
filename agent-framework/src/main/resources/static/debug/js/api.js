@@ -175,6 +175,7 @@ export const api = {
 
   // 运营监控（跨用户会话列表 + 使用概览，供调试页 Monitor 面板）
   getMonitorOverview: () => get('/debug/monitor/overview'),
+  getMonitorTools: (limit = 50) => get('/debug/monitor/tools?limit=' + limit),
   getMonitorSessions: (params = {}) => {
     const qs = Object.entries(params)
       .filter(([, v]) => v !== undefined && v !== null && v !== '')

@@ -94,7 +94,6 @@ public class AguiRunController {
     private final SessionEventTailer tailer;
     private final SessionUserStore sessionUserStore;
     private final SkillInjectionService skillInjectionService;
-    private final ToolAuditStore toolAuditStore;
     private final McpToolRegistrar mcpToolRegistrar;
     private final AguiEventCodec codec;
     private final Duration heartbeatInterval;
@@ -122,7 +121,6 @@ public class AguiRunController {
                              SessionEventTailer tailer,
                              SessionUserStore sessionUserStore,
                              SkillInjectionService skillInjectionService,
-                             ToolAuditStore toolAuditStore,
                              McpToolRegistrar mcpToolRegistrar,
                              AguiEventCodec codec,
                              AgentManagerProperties managerProps) {
@@ -132,7 +130,6 @@ public class AguiRunController {
         this.tailer = tailer;
         this.sessionUserStore = sessionUserStore;
         this.skillInjectionService = skillInjectionService;
-        this.toolAuditStore = toolAuditStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.codec = codec;
         this.heartbeatInterval = Duration.ofSeconds(managerProps.sse().heartbeatSeconds());
@@ -563,8 +560,6 @@ public class AguiRunController {
             return;
         }
 
-        audit(event, sessionId);
-
         if (event instanceof ToolCallStartEvent start
                 && start.getToolCallId() != null && start.getToolCallName() != null) {
             turnBucketKeys.add(start.getToolCallId());
@@ -747,22 +742,6 @@ public class AguiRunController {
         return expected.equals(registered != null ? registered : eventToolName);
     }
 
-    private void audit(AgentEvent event, String sessionId) {
-        try {
-            if (event instanceof ToolCallStartEvent tc) {
-                toolAuditStore.record(sessionId, tc.getToolCallName(), tc.getToolCallId(),
-                    "TOOL_CALL_START", AgentEventSseSerializer.payload(event));
-            } else if (event instanceof ToolCallEndEvent tc) {
-                toolAuditStore.record(sessionId, tc.getToolCallName(), tc.getToolCallId(),
-                    "TOOL_CALL_END", AgentEventSseSerializer.payload(event));
-            } else if (event instanceof ToolResultEndEvent tc) {
-                toolAuditStore.record(sessionId, tc.getToolCallName(), tc.getToolCallId(),
-                    "TOOL_RESULT_END", AgentEventSseSerializer.payload(event));
-            }
-        } catch (Exception e) {
-            log.debug("audit record skipped (sid={}): {}", sessionId, e.getMessage());
-        }
-    }
 
     // ===== SSE 工厂 =====
 

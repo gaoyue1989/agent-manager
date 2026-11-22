@@ -14,9 +14,11 @@
 let ctx = null;
 let refreshTimer = null;
 let autoRefresh = true;
-let mode = 'sessions';      // sessions = 会话列表；messages = 对话日志
+let mode = 'sessions';      // sessions = 会话列表；messages = 对话日志；tools = 工具调用统计
 let sessions = [];
 let messages = [];
+let recentCalls = [];       // 工具调用最近明细（tools 视图）
+let selectedTool = null;    // tools 视图：点击工具行筛选明细，再点取消
 let selectedSid = null;
 let detailSeq = 0;          // 详情请求序号：丢弃过期响应（快速切换会话时）
 let filterDebounce = null;
@@ -60,6 +62,7 @@ function render() {
       <div class="monitor-modes" role="group" aria-label="监控视图">
         <button id="monModeSessions" type="button" class="monitor-mode active">会话列表</button>
         <button id="monModeMessages" type="button" class="monitor-mode">对话日志</button>
+        <button id="monModeTools" type="button" class="monitor-mode">工具调用</button>
       </div>
       <input id="monUser" class="input" type="text" spellcheck="false" placeholder="user_id（精确）">
       <input id="monKeyword" class="input" type="text" spellcheck="false" placeholder="标题 / 会话 id 关键词">
@@ -122,12 +125,16 @@ function bindEvents() {
 
 /** 切换视图：会话列表 / 对话日志（issue #206） */
 function setMode(next) {
-  mode = next === 'messages' ? 'messages' : 'sessions';
+  mode = ['messages', 'tools'].indexOf(next) >= 0 ? next : 'sessions';
   document.getElementById('monModeSessions').classList.toggle('active', mode === 'sessions');
   document.getElementById('monModeMessages').classList.toggle('active', mode === 'messages');
+  document.getElementById('monModeTools').classList.toggle('active', mode === 'tools');
   document.getElementById('monKeyword').style.display = mode === 'sessions' ? '' : 'none';
   document.getElementById('monContent').style.display = mode === 'messages' ? '' : 'none';
   document.getElementById('monProblemLabel').style.display = mode === 'sessions' ? '' : 'none';
+  document.querySelectorAll('.mon-time').forEach((el) => {
+    el.style.display = mode === 'tools' ? 'none' : '';
+  });
   loadActiveList();
 }
 
@@ -135,6 +142,8 @@ function setMode(next) {
 function loadActiveList() {
   if (mode === 'messages') {
     loadMessages();
+  } else if (mode === 'tools') {
+    loadTools();
   } else {
     loadSessions();
   }
@@ -190,6 +199,7 @@ async function loadOverview() {
       + statCard('今日新增会话', data.sessions_today)
       + statCard('今日活跃会话', data.active_sessions_today)
       + statCard('今日消息', data.messages_today)
+      + statCard('今日工具调用', data.tool_calls_today)
       + statCard('异常会话', data.sessions_with_error, data.sessions_with_error > 0 ? 'err' : '')
       + statCard('待确认会话', data.sessions_pending_confirm, data.sessions_pending_confirm > 0 ? 'warn' : '')
       + statCard('问题会话', data.sessions_with_problem, data.sessions_with_problem > 0 ? 'err' : '');
@@ -365,6 +375,98 @@ function bindMessageRows(root) {
   root.querySelectorAll('.mm-group-head').forEach((el) => {
     el.addEventListener('click', () => selectSession(el.dataset.sid));
   });
+}
+
+// ---------- 工具调用统计（轻量：/debug/monitor/tools，多副本下各副本读同一共享库） ----------
+
+async function loadTools() {
+  const listEl = document.getElementById('monitorList');
+  const detailEl = document.getElementById('monitorDetail');
+  if (!listEl || !detailEl) return;
+  try {
+    const data = await ctx.api.getMonitorTools(document.getElementById('monLimit').value);
+    if (!ctx) return;
+    if (data.connected === false) {
+      listEl.innerHTML = '<div class="empty error-text">工具统计读取失败：' + ctx.utils.esc(data.error || '') + '</div>';
+      detailEl.innerHTML = '';
+      return;
+    }
+    const tools = data.tools || [];
+    recentCalls = data.recent || [];
+    const stamp = document.getElementById('monitorUpdated');
+    if (stamp) {
+      stamp.textContent = '工具调用 · ' + tools.length + ' 个工具 · 明细 ' + recentCalls.length + ' 条'
+        + ' · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    }
+    if (tools.length === 0) {
+      listEl.innerHTML = '<div class="empty">暂无工具调用</div>';
+      detailEl.innerHTML = '<div class="empty">暂无调用明细</div>';
+      return;
+    }
+    listEl.innerHTML = tools.map(toolRow).join('');
+    listEl.querySelectorAll('.monitor-session').forEach((el) => {
+      el.addEventListener('click', () => toggleToolFilter(el.dataset.tool));
+    });
+    renderRecent();
+  } catch (e) {
+    if (!ctx) return;
+    listEl.innerHTML = '<div class="empty error-text">工具统计加载失败：' + ctx.utils.esc(e.message) + '</div>';
+  }
+}
+
+/** 单个工具统计行：次数 / 失败徽标 / 今日 / 最近调用时间 */
+function toolRow(t) {
+  const name = t.tool_name || '';
+  const active = selectedTool === name ? ' active' : '';
+  const flagged = (t.errors || 0) > 0 ? ' has-error' : '';
+  let badges = '';
+  if ((t.errors || 0) > 0) {
+    badges += '<span class="ms-badge err" title="失败调用数">✗ ' + t.errors + '</span>';
+  }
+  badges += '<span class="ms-badge">' + (t.today || 0) + ' 今日</span>';
+  return '<div class="monitor-session' + active + flagged + '" data-tool="' + ctx.utils.esc(name) + '">'
+    + '<div class="ms-title" title="' + ctx.utils.esc(name) + '">' + ctx.utils.esc(name) + '</div>'
+    + '<div class="ms-meta"><span>' + (t.calls || 0) + ' 次调用</span>'
+    + (badges ? '<span class="ms-badges">' + badges + '</span>' : '')
+    + '</div>'
+    + '<div class="ms-time" title="最近调用">'
+    + ctx.utils.esc((t.last_call || '').substring(0, 19).replace('T', ' ')) + '</div>'
+    + '</div>';
+}
+
+/** 点击工具行：按该工具筛选右侧明细（再点取消） */
+function toggleToolFilter(name) {
+  selectedTool = selectedTool === name ? null : name;
+  document.querySelectorAll('#monitorList .monitor-session').forEach((el) => {
+    el.classList.toggle('active', el.dataset.tool === selectedTool);
+  });
+  renderRecent();
+}
+
+/** 右侧最近调用明细（随工具筛选联动，自动刷新同刷） */
+function renderRecent() {
+  const detailEl = document.getElementById('monitorDetail');
+  if (!detailEl) return;
+  const rows = selectedTool
+    ? recentCalls.filter((r) => r.tool_name === selectedTool)
+    : recentCalls;
+  if (rows.length === 0) {
+    detailEl.innerHTML = '<div class="empty">' + (selectedTool ? '该工具暂无明细' : '暂无调用明细') + '</div>';
+    return;
+  }
+  detailEl.innerHTML = rows.map(recentRow).join('');
+}
+
+function recentRow(r) {
+  const state = r.result_state || null;
+  const tone = state === 'error' ? 'err' : (state === 'success' ? 'ok' : '');
+  const label = state === 'error' ? '✗ 失败' : (state === 'success' ? '✓ 成功' : '· 未落终态');
+  return '<div class="monitor-msg" title="' + ctx.utils.esc(r.session_id || '') + '">'
+    + '<span class="ms-badge ' + tone + '">' + label + '</span>'
+    + '<span class="mm-content">' + ctx.utils.esc(r.tool_name || '') + '</span>'
+    + '<span class="mm-time">'
+    + ctx.utils.esc((r.created_at || '').substring(0, 19).replace('T', ' ')) + '</span>'
+    + '</div>';
 }
 
 // ---------- 问答回放 ----------

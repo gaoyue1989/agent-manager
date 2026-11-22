@@ -14,6 +14,7 @@ const LINKS = [
   { href: "/admin/users", label: "用户管理" },
   { href: "/admin/sandboxes", label: "沙箱管理" },
   { href: "/admin/memory", label: "记忆管理" },
+  { href: "/admin/observability", label: "工具调用" },
   { href: "/admin/audit", label: "审计日志" },
   { href: "/admin/overview", label: "平台概览" },
   { href: "/admin/settings", label: "平台配置" },

@@ -60,7 +60,7 @@ if [ "${E2E_RESET_DATA:-true}" = "true" ]; then
 fi
 
 # ---------- 0. 清场：杀掉上一轮残留的同端口进程（陈旧 mock/实例会让新进程绑定失败且难以察觉） ----------
-for PORT_CLEAN in "$LLM_MOCK_PORT" "$BENCH_MCP_PORT" "$APPROVAL_MCP_PORT" "$SANDBOX_MOCK_PORT" "$E2E_BASE_PORT" "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 2))"; do
+for PORT_CLEAN in "$LLM_MOCK_PORT" "$BENCH_MCP_PORT" "$APPROVAL_MCP_PORT" "$SANDBOX_MOCK_PORT" "$E2E_BASE_PORT" "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 2))" "$((E2E_BASE_PORT + 100))" "$((E2E_BASE_PORT + 101))" "$((E2E_BASE_PORT + 102))"; do
   PIDS=$(ss -ltnp 2>/dev/null | grep ":${PORT_CLEAN} " | grep -oP 'pid=\K[0-9]+' | sort -u || true)
   for p in $PIDS; do kill -9 "$p" 2>/dev/null || true; done
 done

@@ -73,6 +73,8 @@ type ConfigView struct {
 	// Enabled=false（默认）时发布链路完全不感知 OpenViking
 	OpenVikingEnabled bool
 	OpenVikingBaseURL string
+	// PrometheusURL Prometheus 查询入口（工具调用观测聚合数据源；空=观测栈未部署）
+	PrometheusURL string
 	// DeployBuilder 业务 Deployment 构造门面（内置构造 + 可选环境 overlay）；
 	// nil 视为纯内置构造，模式同 ImageAllowed 函数字段便于测试注入。
 	DeployBuilder *k8s.DeploymentBuilder

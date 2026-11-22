@@ -114,6 +114,14 @@ public class HarnessAgentFactory {
     @Autowired(required = false)
     private VikingMemoryClient vikingMemoryClient;
 
+    /** 工具调用审计存储（观测中间件写点依赖；单测直接 new 时恒 null → 不装配观测中间件） */
+    @Autowired(required = false)
+    private ToolAuditStore toolAuditStore;
+
+    /** Micrometer 注册表（actuator 自动装配；缺失时观测中间件退化为仅审计） */
+    @Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistryProvider;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -266,6 +274,14 @@ public class HarnessAgentFactory {
                 // context.deny_rules 按工具名拦截执行；非协议轮次无该 RuntimeContext 属性，
                 // 零开销直通
                 .middleware(new io.agentmanager.framework.service.protocol.ProtocolDenyRulesMiddleware())
+                // 工具调用观测（指标计数 + 审计单一写点，覆盖全部协议链路）：置于工具过滤链
+                // 内侧（ToolFilter/ProtocolDeny 短路不经过本层），只计真实执行的调用；
+                // sessionKeyResolver 复用上方同一实例（turn 级 memo 共享）
+                .middleware(new ToolCallObservabilityMiddleware(
+                    meterRegistryProvider != null ? meterRegistryProvider.getIfAvailable() : null,
+                    toolAuditStore,
+                    sessionKeyResolver,
+                    oafConfig.slug()))
                 // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
                 // 供 MCP 工具调用走 _meta / userHeaders 双通道（Channel 链路按 session 反查真实 userId）
                 .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))

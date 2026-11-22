@@ -540,6 +540,21 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 		}
 		OK(c, view)
 	})
+	// 工具调用观测面板（工作空间范围；tool-call-observability-design）。
+	// 观测栈不可达 → 503（前端展示明确错误态，而非静默 0）
+	cg.GET("/workspaces/:ws/observability/tool-calls", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		view, err := core.ToolCalls(int64(wsID), c.Query("range"))
+		if err != nil {
+			mapObservabilityError(c, err)
+			return
+		}
+		OK(c, view)
+	})
 	// 沙箱配置总览（只读）：Agent 沙箱状态 + 生效来源 + 资源规格；修改入口在编辑页
 	cg.GET("/workspaces/:ws/sandbox", func(c *gin.Context) {
 		wsID, _, err := wsCtx(c)

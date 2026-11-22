@@ -98,4 +98,21 @@ assert_eq "仅剩 owner 空间直删 200" "$(code DELETE /admin/workspaces/$WS3 
 # 超长空间名 400（#149，原 500 Data too long）
 assert_eq "200 字符空间名 400" "$(code POST /admin/workspaces "{\"name\":\"$(printf 'w%.0s' $(seq 200))\"}" "" "$TOKEN")" "400"
 
+# ---- 工具调用观测端点（tool-call-observability-design；200=观测栈在 / 503=未部署均合法）----
+# 普通用户 JWT（U3 未提权）
+UT1=$(req POST /auth/login "{\"username\":\"m1-u3-$TS\",\"password\":\"Pass12345!\"}" | jqr "['data']['token']")
+OBS_ADMIN=$(code GET /admin/observability/tool-calls "" "$TOKEN")
+if [ "$OBS_ADMIN" = "200" ] || [ "$OBS_ADMIN" = "503" ]; then
+  ok "admin 观测端点可达（$OBS_ADMIN：200=观测栈在 / 503=未部署）"
+else
+  bad "admin 观测端点应 200/503（got=$OBS_ADMIN）"
+fi
+if [ "$OBS_ADMIN" = "200" ]; then
+  assert_contains "admin 观测响应含 totals/byTool 结构" \
+    "$(req GET /admin/observability/tool-calls "" "$TOKEN")" '"totals"'
+fi
+assert_eq "admin 观测端点非法 range 400" "$(code GET "/admin/observability/tool-calls?range=1w" "" "$TOKEN")" "400"
+assert_eq "admin 观测端点匿名 401" "$(code GET /admin/observability/tool-calls)" "401"
+assert_eq "admin 观测端点普通用户 JWT 403" "$(code GET /admin/observability/tool-calls "" "$UT1")" "403"
+
 finish "M1-governance"

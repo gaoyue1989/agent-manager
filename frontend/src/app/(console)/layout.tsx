@@ -9,7 +9,7 @@ import { ConsoleWsContext, ConsoleWsRoleContext, useCurrentWs, useMe } from "@/l
 import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
 
 const NAV: { group?: string; items: { href: string; label: string; soon?: boolean }[] }[] = [
-  { items: [{ href: "/console", label: "概览" }, { href: "/console/observability", label: "观测大盘", soon: true }] },
+  { items: [{ href: "/console", label: "概览" }, { href: "/console/observability", label: "观测大盘" }] },
   {
     group: "AGENT 构建",
     items: [

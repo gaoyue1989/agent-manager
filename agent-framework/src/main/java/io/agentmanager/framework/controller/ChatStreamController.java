@@ -42,7 +42,6 @@ import io.agentscope.core.event.AgentEventType;
 import io.agentscope.core.event.RequireUserConfirmEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
-import io.agentscope.core.event.ToolResultStartEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
@@ -113,7 +112,6 @@ public class ChatStreamController {
     private final boolean perSessionChannel;
     private final AgentRuntimeService runtimeService;
     private final TurnLeaseStore turnLeaseStore;
-    private final ToolAuditStore toolAuditStore;
     private final UploadWorkspaceInjector workspaceInjector;
     private final SandboxConfig sandboxConfig;
     private final SessionEventBus eventBus;
@@ -212,7 +210,6 @@ public class ChatStreamController {
     public ChatStreamController(ChatUiChannel chatChannel,
                                 AgentRuntimeService runtimeService,
                                 TurnLeaseStore turnLeaseStore,
-                                ToolAuditStore toolAuditStore,
                                 UploadWorkspaceInjector workspaceInjector,
                                 SandboxConfig sandboxConfig,
                                 SessionEventBus eventBus,
@@ -225,7 +222,7 @@ public class ChatStreamController {
                                 McpToolRegistrar mcpToolRegistrar,
                                 ModelCatalog modelCatalog,
                                 SessionTitleService sessionTitleService) {
-        this((Supplier<ChatUiChannel>) () -> chatChannel, runtimeService, turnLeaseStore, toolAuditStore, workspaceInjector,
+        this((Supplier<ChatUiChannel>) () -> chatChannel, runtimeService, turnLeaseStore, workspaceInjector,
             sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
             skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService, false);
     }
@@ -235,7 +232,6 @@ public class ChatStreamController {
     public ChatStreamController(ChatUiChannelProvider channelProvider,
                                 AgentRuntimeService runtimeService,
                                 TurnLeaseStore turnLeaseStore,
-                                ToolAuditStore toolAuditStore,
                                 UploadWorkspaceInjector workspaceInjector,
                                 SandboxConfig sandboxConfig,
                                 SessionEventBus eventBus,
@@ -248,7 +244,7 @@ public class ChatStreamController {
                                 McpToolRegistrar mcpToolRegistrar,
                                 ModelCatalog modelCatalog,
                                 SessionTitleService sessionTitleService) {
-        this((Supplier<ChatUiChannel>) channelProvider::current, runtimeService, turnLeaseStore, toolAuditStore, workspaceInjector,
+        this((Supplier<ChatUiChannel>) channelProvider::current, runtimeService, turnLeaseStore, workspaceInjector,
             sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
             skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService, true);
     }
@@ -256,7 +252,6 @@ public class ChatStreamController {
     private ChatStreamController(Supplier<ChatUiChannel> chatChannelSupplier,
                                  AgentRuntimeService runtimeService,
                                  TurnLeaseStore turnLeaseStore,
-                                 ToolAuditStore toolAuditStore,
                                  UploadWorkspaceInjector workspaceInjector,
                                  SandboxConfig sandboxConfig,
                                  SessionEventBus eventBus,
@@ -274,7 +269,6 @@ public class ChatStreamController {
         this.runtimeService = runtimeService;
         this.perSessionChannel = perSessionChannel;
         this.turnLeaseStore = turnLeaseStore;
-        this.toolAuditStore = toolAuditStore;
         this.workspaceInjector = workspaceInjector;
         this.sandboxConfig = sandboxConfig;
         this.eventBus = eventBus;
@@ -896,8 +890,6 @@ public class ChatStreamController {
             return;
         }
 
-        audit(event, sessionId);
-
         // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）。
         // 同点登记 turnBucketKeys（A4）：新增桶 put 点时必须在此同步登记，否则该类残留
         // 回到「异常路径跨 turn 累积」的现状
@@ -1308,27 +1300,6 @@ public class ChatStreamController {
     }
 
     // ===== 审计 =====
-
-    private void audit(AgentEvent event, String sessionId) {
-        if (event instanceof ToolCallStartEvent tc) {
-            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_CALL_START", event);
-        } else if (event instanceof ToolCallEndEvent tc) {
-            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_CALL_END", event);
-        } else if (event instanceof ToolResultStartEvent tc) {
-            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_RESULT_START", event);
-        } else if (event instanceof ToolResultEndEvent tc) {
-            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_RESULT_END", event);
-        }
-    }
-
-    private void recordAudit(String sessionId, String toolName, String toolCallId, String state, AgentEvent event) {
-        try {
-            toolAuditStore.record(sessionId, toolName, toolCallId, state,
-                AgentEventSseSerializer.payload(event));
-        } catch (Exception e) {
-            log.debug("audit record skipped (sid={}): {}", sessionId, e.getMessage());
-        }
-    }
 
     // ===== SSE 工厂方法 =====
 

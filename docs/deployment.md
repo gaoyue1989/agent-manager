@@ -328,6 +328,13 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
    - **OpenViking 由外部提供服务**（与外部 MySQL/Redis 同模式，平台不部署）：接入契约 = 服务可达（业务 Pod 网络）+ `server.auth_mode="api_key"` + root key 交 backend + VLM/embedding 供给由外部运维保障（检索热路径依赖 embedding——免费/限速档不可用，实测 50 次/日即 429）
    - 启用：`kubectl -n agent-platform set env deploy/platform-backend OPENVIKING_ENABLED=true OPENVIKING_BASE_URL=<外部服务地址> OPENVIKING_ROOT_API_KEY=<root-key>` 后 rollout restart；启用后**新发布默认** `AGENT_MEMORY_PROVIDER=openviking`（服务显式 `local` 退出；平台未启用时显式 `openviking` 400 拒绝）
    - 切换：`AGENT_MEMORY_PROVIDER` 发布期固化于服务 env，切换 = PATCH `/services/{id}/env`（含该键）+ 滚动重启；`OVK_SESSION_COMMIT`（会话归档+自动提取，默认 false=逐 turn remember）/`OVK_KNOWLEDGE_IMPORT`/`OVK_SHARED_SKILLS`/`OVK_MCP_SHARED_CONTEXT`（服务级共享检索 MCP）逐服务开关
+
+10. **工具调用观测栈（tool-call-observability-design-261121，可选）**：Prometheus + Grafana 面板（用户侧 /console/observability、运维侧 /admin/observability）。
+   - 部署：预置镜像导入 kind（`docker pull prom/prometheus:v2.53.0 && docker pull grafana/grafana:11.1.0 && docker save <两镜像> | sudo ctr -n k8s.io images import`）→ `kubectl apply -f manifests/prometheus.yaml -f manifests/grafana.yaml`；backend `PROMETHEUS_URL` 已在 platform.yaml（指向集群内 `prometheus:9090`），改过 env 的话重新 apply platform.yaml 或 `set env` 后 rollout restart
+   - Grafana 访问：无外部入口，`kubectl -n agent-platform port-forward svc/grafana 3000:3000` 后开 http://localhost:3000（admin 凭据改 Secret `oaf-grafana-secret`）；预置仪表盘在 OAF 目录「OAF 工具调用」
+   - **抓取发现 = 注解驱动**：业务 Pod 注解由发布链路下发（prometheus.io/scrape/port=9091/path），**存量服务 republish 后才接入**；未接入/离线/零调用在面板「Agent 维度」表显示「无数据」
+   - 指标端点 9091 为 framework 管理端口，Service/Ingress 不暴露、不出数据面；验证：`kubectl -n agent-platform exec <agent-pod> -- wget -qO- localhost:9091/actuator/prometheus | grep oaf_tool_calls`
+   - 回滚：`kubectl delete -f manifests/grafana.yaml -f manifests/prometheus.yaml`（platform-data 的 prometheus/ subPath 数据保留；backend PROMETHEUS_URL 置空后面板 503 错误态，其余功能不受影响）
    - per-user key 签发（Studio/外部 MCP 凭证访问）：`POST /api/v1/admin/services/{id}/memory-keys {"userId":"..."}`（JWT-admin/AUTH_TOKEN），明文一次性返回，同参数幂等；轮换 seed 即作废该服务全部旧 key
    - 存量记忆不迁移（新起点）；服务删除 best-effort 同步删 account（OpenViking 故障不阻断，残留手工清理）；发布期建户失败即发布失败（不留半配置记录）
 

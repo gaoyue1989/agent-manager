@@ -333,6 +333,75 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
         assertEquals(3, turnInterrupt.order());
     }
 
+    /**
+     * 断链回归锚点（工具调用观测）：{@link ToolCallObservabilityMiddleware} 是审计
+     * 单一写点 + 指标计数的唯一执行点（controller 侧写点已移除），缺失即全链路
+     * tool_audit_log 停写、指标归零。
+     */
+    @Test
+    void buildShouldRegisterToolCallObservabilityMiddleware() throws Exception {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("tool-obs-assembly"));
+        var mcp = mock(McpToolRegistrar.class);
+        when(mcp.collectPermissionRules(oaf))
+            .thenReturn(new PermissionRuleResult(
+                io.agentscope.core.permission.PermissionMode.DEFAULT,
+                java.util.Map.of(), java.util.Set.of()));
+
+        var store = mock(DistributedStore.class);
+        when(store.baseStore())
+            .thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        when(store.agentStateStore())
+            .thenReturn(mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var props = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
+            new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
+            new AgentManagerProperties.CheckpointConfig(
+                "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p", "agent_manager_test"),
+            java.nio.file.Files.createTempDirectory("tool-obs-config").toString(),
+            "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
+            new AgentManagerProperties.FileConfig(true, 20, 20,
+                "image/*,text/plain,text/markdown,text/csv,application/pdf",
+                5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+            AgentManagerProperties.HarnessConfig.defaults(),
+            AgentManagerProperties.AgentProtocolSettings.defaults());
+
+        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(),
+            mock(RemoteConfirmBridge.class), null, null,
+            mock(SessionToolScopeService.class));
+        var agent = factory.build(oaf, store, new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+
+        var middlewares = middlewaresOf(agent);
+        assertTrue(middlewares.stream().anyMatch(ToolCallObservabilityMiddleware.class::isInstance),
+            "ToolCallObservabilityMiddleware 必须注册进 builder 链（审计单一写点 + 指标计数）");
+
+        // 位置语义：必须排在 ToolFilterMiddleware / ProtocolDenyRulesMiddleware 之后（更内层）
+        // ——被过滤/DENY 短路的调用不得计入（先注册者更外层）
+        int filterIdx = -1;
+        int denyIdx = -1;
+        int obsIdx = -1;
+        for (int i = 0; i < middlewares.size(); i++) {
+            var mw = middlewares.get(i);
+            if (mw instanceof ToolFilterMiddleware) filterIdx = i;
+            if (mw instanceof io.agentmanager.framework.service.protocol.ProtocolDenyRulesMiddleware) denyIdx = i;
+            if (mw instanceof ToolCallObservabilityMiddleware) obsIdx = i;
+        }
+        assertTrue(obsIdx > filterIdx && obsIdx > denyIdx,
+            "观测中间件必须位于工具过滤链内侧（实际 filter=" + filterIdx + " deny=" + denyIdx
+                + " obs=" + obsIdx + "）");
+    }
+
     @Test
     void skillFilterMiddlewareMustComeBeforeDisabledMiddleware() throws Exception {
         // session-skill-list-design §4 顺序约束：本轮白名单先立，禁用中间件再以
