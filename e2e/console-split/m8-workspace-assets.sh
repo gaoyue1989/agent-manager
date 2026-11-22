@@ -127,4 +127,25 @@ else
   skip "技能探针包上传失败，跳过 #163/#164 断言"
 fi
 
+# ---- issue #388：default 空间成员可读（可见性收敛为成员关系裁决，不再特判 default）----
+DEF_WS=$(req GET /admin/workspaces "" "$TOKEN" | python3 -c "import sys,json;print(next((w['id'] for w in json.load(sys.stdin)['data'] if w['slug']=='default'),''))")
+U388=$(seed_user "$TOKEN" "m8-def-member-$TS" "Pass12345!")
+assert_eq "admin 邀请 default member 201" "$(code POST /console/workspaces/$DEF_WS/members "{\"userId\":$U388,\"role\":\"member\"}" "" "$TOKEN")" "201"
+T388=$(req POST /auth/login "{\"username\":\"m8-def-member-$TS\",\"password\":\"Pass12345!\"}" | jqr "['data']['token']")
+assert_eq "default member summary 200" "$(code GET /console/workspaces/$DEF_WS/summary "" "$T388")" "200"
+assert_eq "default member me/summary 200（default 为其唯一成员空间）" "$(code GET /console/workspaces/me/summary "" "$T388")" "200"
+ME388=$(req GET /auth/me "" "$T388")
+SW388=$(echo "$ME388" | python3 -c "
+import sys,json
+raw=sys.stdin.read()
+d=json.loads(raw[raw.index('{'):])['data']['workspaces']
+m={x['slug']:x['role'] for x in d}
+print(m.get('default',''))")
+assert_eq "switcher 口径 default role=member" "$SW388" "member"
+assert_eq "default member agents 200" "$(code GET /console/workspaces/$DEF_WS/agents "" "$T388")" "200"
+assert_eq "写闸仍关：member 创建 agent 403" "$(code POST /console/workspaces/$DEF_WS/agents '{}' "" "$T388")" "403"
+U388B=$(seed_user "$TOKEN" "m8-def-stranger-$TS" "Pass12345!")
+T388B=$(req POST /auth/login "{\"username\":\"m8-def-stranger-$TS\",\"password\":\"Pass12345!\"}" | jqr "['data']['token']")
+assert_eq "非成员 default summary 404 保持" "$(code GET /console/workspaces/$DEF_WS/summary "" "$T388B")" "404"
+
 finish "M8-workspace-assets"

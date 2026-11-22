@@ -144,7 +144,8 @@ func (c *Core) DefaultWorkspace(u *store.User) (*store.Workspace, error) {
 
 // ResolveWorkspace console :ws 参数裁决（M2 §2.2）：
 //   - "me"：默认 = 该用户第一个成员空间；
-//   - 数字：必须是该用户成员空间；slug=default 的空间仅 admin 可解析（决议 2）；
+//   - 数字/slug：必须是该用户成员空间（含 default，显式邀请成员可读，issue #388）；
+//     非成员一律 404；平台 admin 无成员记录给隐式 admin（设计 §5.1）；
 //   - admin 的虚拟空间（id=0）仅允许命中 admin 语义，console 端点取其真实成员空间 → 404。
 //
 // 返回空间与本人成员角色（owner/admin/member）。
@@ -168,9 +169,6 @@ func (c *Core) ResolveWorkspace(u *store.User, wsParam string) (*store.Workspace
 	}
 	if ws.ID == 0 {
 		return nil, "", ErrWorkspaceNotFound // admin 虚拟空间无 console 语义
-	}
-	if ws.Slug == "default" && u.Role != "admin" {
-		return nil, "", ErrWorkspaceNotFound // 存量空间对普通用户不可见
 	}
 	if ws.Status != "active" {
 		return nil, "", fmt.Errorf("%w: workspace disabled", ErrWorkspaceNotFound)

@@ -29,7 +29,7 @@ func splitTags(s string) []string {
 }
 
 // resolveWorkspace :ws 参数裁决（M2 §2.2）：JWT uid → workspace_members 查询；
-// 未命中 404（不暴露 403/404 差异）；default 空间仅 admin 可解析。
+// 未命中 404（不暴露 403/404 差异，含 default——可见性收敛为成员关系裁决，issue #388）。
 func resolveWorkspace(core *service.Core) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid := c.GetUint("uid")
