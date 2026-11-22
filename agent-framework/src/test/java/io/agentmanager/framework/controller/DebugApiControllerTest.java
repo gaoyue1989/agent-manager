@@ -455,6 +455,42 @@ class DebugApiControllerTest {
             .andExpect(status().isOk());
     }
 
+    /**
+     * issue #428 SQL 回归：最近明细的 END 行匹配必须限定同会话 + START 之后最早
+     * （供应商短 id 如 call_0 跨会话/跨轮复用，否则状态串扰且行数翻倍）。
+     */
+    @Test
+    void monitorToolsRecentSqlShouldScopeJoinBySession() throws Exception {
+        stubConfirmTtl();
+        var conn = mock(Connection.class);
+        var errStmt = mock(Statement.class);
+        var errRs = mock(ResultSet.class);
+        var aggStmt = mock(Statement.class);
+        var aggRs = mock(ResultSet.class);
+        var psRecent = mock(PreparedStatement.class);
+        var recentRs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.createStatement()).thenReturn(errStmt, aggStmt);
+        when(errStmt.executeQuery(anyString())).thenReturn(errRs);
+        when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
+        when(conn.prepareStatement(anyString())).thenReturn(psRecent);
+        when(psRecent.executeQuery()).thenReturn(recentRs);
+        when(errRs.next()).thenReturn(false);
+        when(aggRs.next()).thenReturn(false);
+        when(recentRs.next()).thenReturn(false);
+
+        mockMvc.perform(get("/debug/monitor/tools"))
+            .andExpect(status().isOk());
+
+        org.mockito.ArgumentCaptor<String> sql =
+            org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(conn).prepareStatement(sql.capture());
+        assertTrue(sql.getValue().contains("e2.session_id = s.session_id"),
+            "END 行匹配必须限定同会话: " + sql.getValue());
+        assertTrue(sql.getValue().contains("e2.created_at >= s.created_at"),
+            "END 行匹配必须限定 START 之后（同会话短 id 跨轮复用取最早 END）: " + sql.getValue());
+    }
+
     @Test
     void monitorOverviewShouldReportConnectionError() throws Exception {
         when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));

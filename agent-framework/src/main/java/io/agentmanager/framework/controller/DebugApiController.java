@@ -299,8 +299,10 @@ public class DebugApiController {
      * <p>数据源 tool_audit_log（写点 = ToolCallObservabilityMiddleware，覆盖全部协议
      * 链路）：计数口径 = TOOL_CALL_START 行；失败数 = 同工具 TOOL_RESULT_END 行
      * {@code result_state='error'}；存量行（result_state 为 NULL 的历史数据）按未失败计。
-     * 最近明细取 TOOL_CALL_START 行 LEFT JOIN 同 tool_call_id 的 TOOL_RESULT_END 行
-     * 带回结果状态。该端点同时是平台观测面板「最近调用」的 fan-out 数据源。
+     * 最近明细取 TOOL_CALL_START 行 LEFT JOIN 结果行带回终态——部分模型供应商的
+     * tool_call_id 只在单次响应内唯一（如 call_0 跨会话/跨轮复用），匹配限定同会话内
+     * START 之后最早的 END 行（否则状态串扰且行数翻倍）。该端点同时是平台观测面板
+     * 「最近调用」的 fan-out 数据源。
      *
      * @param limit 最近明细返回上限（默认 50，钳制在 [1, {@value #MONITOR_TOOL_RECENT_MAX_LIMIT}]）
      */
@@ -342,8 +344,11 @@ public class DebugApiController {
             try (var stmt = conn.prepareStatement(
                      "SELECT s.created_at, s.tool_name, s.session_id, s.tool_call_id, e.result_state "
                          + "FROM tool_audit_log s "
-                         + "LEFT JOIN tool_audit_log e "
-                         + "ON e.tool_call_id = s.tool_call_id AND e.state = 'TOOL_RESULT_END' "
+                         + "LEFT JOIN tool_audit_log e ON e.id = ("
+                         + "SELECT e2.id FROM tool_audit_log e2 "
+                         + "WHERE e2.tool_call_id = s.tool_call_id AND e2.session_id = s.session_id "
+                         + "AND e2.state = 'TOOL_RESULT_END' AND e2.created_at >= s.created_at "
+                         + "ORDER BY e2.created_at ASC, e2.id ASC LIMIT 1) "
                          + "WHERE s.state = 'TOOL_CALL_START' "
                          + "ORDER BY s.created_at DESC LIMIT ?")) {
                 stmt.setInt(1, limit);
