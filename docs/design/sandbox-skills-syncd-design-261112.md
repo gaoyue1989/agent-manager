@@ -175,6 +175,8 @@ for {
     jitterSleep(rand(0, min(30s, INTERVAL/2)))  // 轮询错峰（issue #400：受 INTERVAL 封顶，
                                                 // 小 INTERVAL 配置真实生效；默认 1m 时仍 30s）
     ver, err := fetchVersion()          // 失败 → 退避重试（1m 起指数，上限 = INTERVAL），fail-open
+                                        // currentVersion：readlink CURRENT + 目标目录 os.Stat 校验，
+                                        // 缺失/悬空归一为 ""（无现役版本，issue #429）
     if err == nil && ver != currentVersion(storeDir) {
         if currentVersion(storeDir) != "" {   // 冷启动（无任何版本）跳过退避（issue #400）：
             sleep(rand(0, INTERVAL))          // 新 warm pod 秒级就绪，兑现 ≤INTERVAL 承诺；
@@ -498,6 +500,14 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
   > 锁死期间全部新会话丢包技能）。修正为：「当前版本在每次稳态命中时刷新 recent；切换时
   > 对被替换版本记「离开时刻」」——滚发抖动窗内旧副本命中不回退、滚发完成后立即稳态收敛，
   > 容忍窗语义不变（回归 TestRollingDeployAfterSteadyStateDwellDoesNotDowngrade）。
+  > 补记（2026-11-24，issue #429）：稳态命中每轮刷新 recent（上一条补记）之后，CURRENT 被
+  > 外部删除时「当前版本」仍在 recent 集内且时间戳刚刷新，容忍窗判定会把恢复拉取挡住最长
+  > 2×INTERVAL（新会话零包技能）；CURRENT 悬空（版本目录被外部删除）时 `readlink CURRENT`
+  > 仍成功、`ver == current` 恒成立，被当作稳态永不重拉，持续到 Pod 重建。修正：CURRENT
+  > 缺失与悬空归一为「无现役版本」（`currentVersion` 补目标目录 os.Stat 校验，悬空/非目录
+  > ⇒ ""），容忍窗跳过仅限 `current != ""`——窗口语义只对本地确有现役版本的回退生效，
+  > 无现役版本时拉取幂等、下一轮立即收敛（守卫 TestMissingCurrentRecoversNextCycle /
+  > TestDanglingCurrentRecoversNextCycle）。
 
 ### 7.2 版本硬校验与对账观测
 

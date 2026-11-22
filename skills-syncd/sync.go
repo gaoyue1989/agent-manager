@@ -131,7 +131,9 @@ func (d *daemon) cycle(ctx context.Context) error {
 		d.recordRecent(current)
 		return nil
 	}
-	if d.withinTolerance(info.Version) {
+	// 容忍窗只对「本地确有现役版本」的回退生效：CURRENT 丢失（current==""）时窗口刚被
+	// 稳态刷新（PR #404），不得跳过拉取——否则自愈被挡最长 2×interval（issue #429）
+	if current != "" && d.withinTolerance(info.Version) {
 		d.log.Printf("ver=%s recently pulled, skipping re-pull within tolerance window", info.Version)
 		return nil
 	}
@@ -489,6 +491,11 @@ func (d *daemon) cleanupStore() error {
 func currentVersion(storeDir string) string {
 	target, err := os.Readlink(filepath.Join(storeDir, currentLink))
 	if err != nil {
+		return ""
+	}
+	// CURRENT 悬空（目标版本目录被外部删除）视为无现役版本：Readlink 只验链接本身，
+	// 不校验目标存在——悬空时 info.Version == current 恒成立、永不重拉（issue #429）
+	if info, err := os.Stat(filepath.Join(storeDir, target)); err != nil || !info.IsDir() {
 		return ""
 	}
 	return strings.TrimPrefix(target, versionPrefix)
