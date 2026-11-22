@@ -45,7 +45,7 @@ func TestRouterManifestInternalPathExclusion(t *testing.T) {
 	}
 	conf := platformRouterConfTemplate(t, raw)
 
-	const exclusionLoc = `location ~ ^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$) {`
+	const exclusionLoc = `location ~ "^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$)" {`
 	const genericLoc = `location ~ ^/agent/(?<short>[a-z0-9-]+) {`
 
 	generic := strings.Index(conf, genericLoc)
@@ -80,7 +80,7 @@ func TestRouterManifestInternalPathExclusionCoversMatrixParam(t *testing.T) {
 	}
 	conf := platformRouterConfTemplate(t, raw)
 
-	const exclusionLoc = `location ~ ^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$) {`
+	const exclusionLoc = `location ~ "^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$)" {`
 	if !strings.Contains(conf, exclusionLoc) {
 		t.Fatalf("exclusion location must cover matrix-param variant: %s", exclusionLoc)
 	}
