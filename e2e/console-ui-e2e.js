@@ -459,10 +459,11 @@ console.log("seeded");`);
       const detail = await api("GET", `/console/workspaces/${ctx.wsId}/agents/${ctx.svcId}`, undefined, ctx.token);
       const me = await api("GET", "/auth/me", undefined, ctx.token);
       const debugUid = `u-${me.user.id}`;
-      // 会话清单经浏览器上下文拉取（/agent/* 同源带 console 会话 cookie，与 ThreadsTab 同链路）
+      // 会话清单经浏览器上下文拉取（/agent/* 同源带 console 会话 cookie，与 ThreadsTab 同链路）；
+      // 不过滤前缀：new-session 建的会话 sid 为 <userId>-…（ChatPane.resetSession），与 ThreadsTab 展示口径一致
       const listSids = () => page.evaluate(async (p) => {
         const list = await fetch(p).then((r) => r.json()).catch(() => []);
-        return (Array.isArray(list) ? list : []).map((t) => String(t.session_id)).filter((s) => s.startsWith("webui-"));
+        return (Array.isArray(list) ? list : []).map((t) => String(t.session_id));
       }, `/agent/${detail.shortName}/threads?userId=${encodeURIComponent(debugUid)}`);
       // 用户气泡契约选择器（MessageItem 结构约定，file-support-ui 同源）：会话回放侧栏含全部
       // 会话标题，正文断言必须圈定在消息流用户气泡内，不能用整 pane textContent
@@ -497,8 +498,8 @@ console.log("seeded");`);
       await waitFor(async () => (await listSids()).length >= 2, 30000, 1000);
       const sids = await listSids();
       check("会话 Tab 列表含新建两会话", sids.length >= 2, `sids=${sids.length}`);
-      // 本 Agent 为本次运行全新创建，会话仅此两个；webui-<base36 毫秒>- 前缀即创建时刻，定序不依赖列表排序
-      const sidTs = (s) => parseInt(s.slice("webui-".length).split("-")[0], 36);
+      // 本 Agent 为本次运行全新创建，会话仅此两个；sid 尾两段恒为 <毫秒36>-<rand>（webui- 与 <userId>- 两种前缀皆然），定序不依赖列表排序
+      const sidTs = (s) => parseInt(s.split("-").at(-2), 36);
       const [sidA, sidB] = [...sids].sort((a, b) => sidTs(a) - sidTs(b));
 
       // 回放 → 断言正文为所选会话历史 + 顶部条 id 与目标一致（副标题「回放 <sid>」同源）→ 返回列表
