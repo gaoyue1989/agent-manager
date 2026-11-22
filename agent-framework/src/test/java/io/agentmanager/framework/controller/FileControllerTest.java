@@ -12,11 +12,10 @@ import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.storage.FileStorage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -304,6 +303,32 @@ public class FileControllerTest {
         assertEquals("it's-a-test.txt", FileController.sanitizeFileName("it's-a-test.txt"));
         assertEquals("a%2Fb.txt", FileController.sanitizeFileName("a%2Fb.txt"));
         assertEquals("a%2fb.txt", FileController.sanitizeFileName("a%2fb.txt"));
+    }
+
+    /**
+     * 存储末段字节预算（issue #425）：落盘名形如 {uuid36}-{name}.{uuid8}.tmp，
+     * ext4 单段上限 255 → name ≤ 205 字节。旧 255 上限内的合法长名（214 字节中文名）
+     * 落盘即 File name too long 500。
+     */
+    @Test
+    void sanitizeFileNameShouldCapToStorageLayoutBudget() {
+        var capped = FileController.sanitizeFileName("测".repeat(70) + ".txt"); // 210+4=214 字节
+        var len = capped.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        assertTrue(len <= FileController.MAX_FILE_NAME_BYTES,
+            "存储末段预算 " + FileController.MAX_FILE_NAME_BYTES + " 字节内，实际 " + len);
+        assertTrue(capped.endsWith(".txt"), "截断保扩展名（下游 extensionConsistentWithMime 依赖）: " + capped);
+        assertFalse(capped.contains("\uFFFD"), "字符边界截断不产生替换字符: " + capped);
+    }
+
+    /** 预算边界落在多字节字符中间：整字符回退，残缺序列不得经 new String 变 U+FFFD 反超预算 */
+    @Test
+    void sanitizeFileNameShouldTruncateAtUtf8CharBoundary() {
+        // stem 预算 201 字节落在"测"（3 字节）的第 2 字节上：须回退到字符起点
+        var capped = FileController.sanitizeFileName("a".repeat(200) + "测".repeat(10) + ".png");
+        var bytes = capped.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(bytes.length <= FileController.MAX_FILE_NAME_BYTES, "预算内: " + bytes.length);
+        assertTrue(capped.endsWith(".png"), "扩展名保留: " + capped);
+        assertEquals(capped, new String(bytes, java.nio.charset.StandardCharsets.UTF_8), "可无损往返解码");
     }
 
     @Test

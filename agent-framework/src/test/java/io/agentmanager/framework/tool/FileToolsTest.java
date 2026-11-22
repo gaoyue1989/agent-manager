@@ -18,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -412,5 +413,120 @@ class FileToolsTest {
         verify(fileAssetStore).insert(captor.capture());
         assertEquals("alice", captor.getValue().userKey(),
             "反查未命中时回落 ctx.userId 原值（A2A/invoke 行为不变）");
+    }
+
+    // ===== issue #408：非沙箱 present_file 跨用户隔离 =====
+
+    /**
+     * 非沙箱 present_file 只允许当前主体可证明归属的命名空间键（ctx.userId / ctx.sessionId /
+     * session_user 反查的真实用户）。kv_sync_key 按 rel_path 全局唯一、无用户维度——B 用同路径
+     * 反查出 A 的 userKey 并以 B 的身份交付 A 的文件（P0 跨用户泄露），该通道必须不存在。
+     */
+    @Test
+    void presentFileMustNotReadForeignNamespaceViaKvSyncKeyLookup() {
+        var ws = mock(WorkspaceReader.class);
+        when(ws.readWorkspaceFile(eq("alice"), eq("outputs/secret.txt")))
+            .thenReturn("alice-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws);
+
+        var bob = RuntimeContext.builder().userId("bob").sessionId("s-bob").build();
+        var result = t.presentFile(bob, "outputs/secret.txt", null);
+
+        assertTrue(result.contains("not readable"),
+            "B 调 present_file 不得读到 A 的同路径 KV 文件: " + result);
+        verify(ws, never()).readWorkspaceFile(eq("alice"), anyString());
+    }
+
+    /** file_asset 按 file_name 反查（session_id IS NULL 分支命中任意用户的未绑定上传行）同属跨用户通道 */
+    @Test
+    void presentFileMustNotReadForeignUploadViaFileNameLookup() {
+        var ws = mock(WorkspaceReader.class);
+        when(ws.readWorkspaceFile(eq("alice"), eq("uploads/notes.md")))
+            .thenReturn("alice-notes".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws);
+
+        var bob = RuntimeContext.builder().userId("bob").sessionId("s-bob").build();
+        var result = t.presentFile(bob, "uploads/notes.md", null);
+
+        assertTrue(result.contains("not readable"),
+            "B 按文件名不得读到 A 的上传文件命名空间: " + result);
+        verify(ws, never()).readWorkspaceFile(eq("alice"), anyString());
+    }
+
+    /**
+     * 替代通道（D3 保留）：Channel 链路 ctx.userId=前端 sid、sessionId=gw-hash，经 session_user
+     * 反查出真实用户 alice 后读其 KV——同一主体的两个身份，归属可证明，非跨用户。
+     */
+    @Test
+    void presentFileNonSandboxResolvesRealUserFromSessionForKvRead() {
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(store.findUserIdBySession("front-sid")).thenReturn("alice");
+        var ws = mock(WorkspaceReader.class);
+        when(ws.readWorkspaceFile(eq("alice"), eq("outputs/kv.txt")))
+            .thenReturn("from-kv".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws,
+            new io.agentmanager.framework.service.SessionKeyResolver(store));
+
+        var channelCtx = RuntimeContext.builder().sessionId("gw-hash").userId("front-sid").build();
+        var result = t.presentFile(channelCtx, "outputs/kv.txt", null);
+
+        assertTrue(result.contains("\"file_id\""),
+            "Channel 链路经 session_user 反查真实用户后应读到 KV（D3 保留）: " + result);
+        verify(ws).readWorkspaceFile("alice", "outputs/kv.txt");
+    }
+
+    // ===== issue #424：返回 JSON 转义 + /workspace// 双斜杠绝对逃逸 =====
+
+    /**
+     * 含引号文件名（#344 %22→" 还原的真实场景）必须产出合法 JSON：旧实现手拼字符串
+     * 不经 escape()，非法 JSON 使 ChatStreamController.parseFileResult 落入正则兜底、
+     * file_name 在首个引号截断，file_ready 卡片丢失/文件名错误。
+     */
+    @Test
+    void presentFileShouldEscapeQuotesInReturnedJson() throws Exception {
+        var result = tools.presentFile(ctx(), "outputs/report\"final\".txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("report\"final\".txt", node.get("file_name").asText(),
+            "file_name 经转义后可无损往返: " + result);
+    }
+
+    /** 构造 `a","error":"x` 形文件名不得注入 JSON 字段（使控制器丢弃 file_ready） */
+    @Test
+    void presentFileShouldNotAllowFieldNameInjectionViaFileName() throws Exception {
+        var result = tools.presentFile(ctx(), "outputs/a\",\"error\":\"injected.txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("a\",\"error\":\"injected.txt", node.get("file_name").asText(),
+            "注入名应整体作为 file_name 值: " + result);
+        assertTrue(node.get("error") == null, "不得注入额外字段: " + result);
+    }
+
+    /** `/workspace//etc/passwd` 剥前缀后得绝对路径——一律拒绝，不得放行工作区约束 */
+    @Test
+    void presentFileShouldRejectWorkspaceDoubleSlashAbsoluteEscape() {
+        var result = tools.presentFile(ctx(), "/workspace//etc/passwd", null);
+        assertTrue(result.contains("invalid path"),
+            "剥 /workspace/ 前缀后仍为绝对路径应拒绝: " + result);
+    }
+
+    /** 沙箱直读路径同样不得收到剥前缀后的绝对路径（execd files API 可读容器任意文件） */
+    @Test
+    void presentFileSandboxMustNotOpenAbsoluteEscapePath() {
+        when(sandboxRuntime.enabled()).thenReturn(true);
+        var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
+        when(sandbox.getUserKey()).thenReturn("alice");
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
+            mock(WorkspaceReader.class), null);
+
+        var result = t.presentFile(turnCtx(sandbox), "/workspace//etc/passwd", null);
+        assertTrue(result.contains("invalid path"), "双斜杠绝对逃逸应拒绝: " + result);
+        verify(sandbox, never()).statWorkspaceFile(anyString());
+        verify(sandbox, never()).openWorkspaceStream(anyString());
     }
 }
