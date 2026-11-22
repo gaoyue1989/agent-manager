@@ -18,6 +18,7 @@ import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.ModelCatalog;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionTitleService;
@@ -84,6 +85,7 @@ class ChatStreamControllerTest {
     private TurnLeaseStore turnLeaseStore;
     private UploadWorkspaceInjector workspaceInjector;
     private SandboxConfig sandboxConfig;
+    private SandboxRuntime sandboxRuntime;
     private SessionEventBus eventBus;
     private SessionEventStore eventStore;
     private SessionUserStore sessionUserStore;
@@ -100,6 +102,8 @@ class ChatStreamControllerTest {
         turnLeaseStore = mock(TurnLeaseStore.class);
         workspaceInjector = mock(UploadWorkspaceInjector.class);
         sandboxConfig = mock(SandboxConfig.class);
+        // forced=false = 默认非沙箱档（对齐原 when(sandboxConfig.enabled()).thenReturn(false) 语义）
+        sandboxRuntime = new SandboxRuntime(sandboxConfig, false);
         eventStore = mock(SessionEventStore.class);
         workspaceReader = mock(WorkspaceReader.class);
         props = mock(AgentManagerProperties.class);
@@ -117,7 +121,6 @@ class ChatStreamControllerTest {
         lenient().when(chatChannel.channelId()).thenReturn("chatui");
         // TurnLeaseGuard 构造时就要算「到必须停手」的时长，ttl() 缺了会 NPE
         lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
-        when(sandboxConfig.enabled()).thenReturn(false);
         when(props.file()).thenReturn(FileControllerTest.testProps().file());
         when(runtimeService.findPendingConfirm(anyString())).thenReturn(null);
         when(workspaceInjector.buildContentBlocks(any(), any(), any())).thenAnswer(inv -> {
@@ -137,7 +140,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         controller = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, eventBus, eventStore,
+            workspaceInjector, sandboxRuntime, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -730,7 +733,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, modelCatalog, sessionTitleService);
 
@@ -780,7 +783,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, modelCatalog, sessionTitleService);
 
@@ -818,7 +821,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -859,7 +862,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -899,7 +902,7 @@ class ChatStreamControllerTest {
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var fileAssetStore = mock(io.agentmanager.framework.service.FileAssetStore.class);
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService);
 
@@ -942,7 +945,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -1006,7 +1009,7 @@ class ChatStreamControllerTest {
         when(registrar.resolveUiRef("show_form"))
             .thenReturn(new McpToolRegistrar.UiRef("ui://approval/form.html", "approval"));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), registrar, modelCatalog, sessionTitleService);
 
@@ -1040,7 +1043,7 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, spyBus, eventStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);
@@ -1064,14 +1067,63 @@ class ChatStreamControllerTest {
             "AGENT_END 载荷为 turn 汇总（非 ui 覆写）: " + endPayload);
     }
 
+    // ===== 上传注入沙箱档判定（issue #412：收敛 SandboxRuntime 三层裁决）=====
+
+    /** 以指定沙箱生效档构建独立控制器（复用 @BeforeEach 字段 mock）；forced 即 SandboxRuntime 裁决终值 */
+    private ChatStreamController controllerWithSandbox(boolean forcedEnabled) {
+        var injection = mock(SkillInjectionService.class);
+        when(injection.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        return new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            workspaceInjector, new SandboxRuntime(sandboxConfig, forcedEnabled), eventBus, eventStore,
+            sessionUserStore, workspaceReader, props, injection,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            modelCatalog, sessionTitleService);
+    }
+
+    @Test
+    void chatShouldKeepUploadsPendingWhenSandboxRuntimeEnabledDespiteYmlDisabled() {
+        // 回归（issue #412）：包声明启用沙箱（env 未设，SandboxRuntime 三层裁决终值=true）时，
+        // 上传文件必须保持 pending、由沙箱 acquire 时注入容器，不得误写宿主 emptyDir 并置
+        // injected（否则沙箱内 listPending 查不到 → file_not_found）。sandboxConfig mock
+        // 未打桩即 yml 绑定值=false——若判定回归读 yml，此用例会因注入被执行而失败
+        var sessionId = "test-user-pkg-sbx";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-pkg-sbx");
+        when(workspaceInjector.assignWorkspacePaths(eq(List.of("f-412")), anyString(), anyString()))
+            .thenReturn(List.of("f-412"));
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-412a")));
+
+        controllerWithSandbox(true).chat(
+                new ChatStreamController.ChatRequest("分析文件", "alice", sessionId, List.of("f-412"), null, null, null),
+                null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(workspaceInjector, never()).injectToWorkspace(anyString(), anyString());
+    }
+
+    @Test
+    void chatShouldInjectUploadsToWorkspaceWhenSandboxRuntimeDisabled() {
+        // 对称档：非沙箱档（forced=false，与 setUp 默认控制器一致）上传文件立即写盘交付，
+        // 按批逐个注入会话工作区
+        var sessionId = "test-user-no-sbx";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-no-sbx");
+        when(workspaceInjector.assignWorkspacePaths(eq(List.of("f-a", "f-b")), anyString(), anyString()))
+            .thenReturn(List.of("f-a", "f-b"));
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-412b")));
+
+        collect(sessionId, "分析文件", "alice", List.of("f-a", "f-b"));
+
+        verify(workspaceInjector).injectToWorkspace("f-a", sessionId);
+        verify(workspaceInjector).injectToWorkspace("f-b", sessionId);
+    }
+
     // ===== write_file → KV sync 测试 =====
 
     @Test
     void chatShouldSyncWriteFileToKvWhenSandboxDisabled() {
         var sessionId = "test-user-wf1";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf1");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         // 模拟 write_file 工具调用流程：ToolCallStart → ToolCallDelta(输入参数) → ToolCallEnd
         var replyId = "r-wf1";
         var callId = "c-wf1";
@@ -1107,8 +1159,6 @@ class ChatStreamControllerTest {
     void chatShouldSyncWriteFileToKvWhenDeltaCarriesFragmentPlaceholderName() {
         var sessionId = "test-user-wf3";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf3");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         var replyId = "r-wf3";
         var callId = "c-wf3";
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent(replyId, callId, "write_file");
@@ -1136,7 +1186,10 @@ class ChatStreamControllerTest {
     void chatShouldNotSyncWriteFileToKvWhenSandboxEnabled() {
         var sessionId = "test-user-wf2";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf2");
-        when(sandboxConfig.enabled()).thenReturn(true);
+        // issue #412：沙箱档判定收敛 SandboxRuntime，用例走沙箱生效档（forced=true）。
+        // sandboxConfig mock 未打桩（enabled() 默认 false）——若判定回归读 yml 绑定值，
+        // KV 同步会被执行，下方 never 断言即失败
+        var ctrl = controllerWithSandbox(true);
 
         var replyId = "r-wf2";
         var callId = "c-wf2";
@@ -1153,7 +1206,9 @@ class ChatStreamControllerTest {
                 (AgentEvent) tcEnd,
                 (AgentEvent) agentEnd));
 
-        collect(sessionId, "write secret", "bob");
+        ctrl.chat(new ChatStreamController.ChatRequest("write secret", "bob", sessionId, null, null, null, null),
+                null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
 
         // 沙箱模式下不应同步 KV
         verify(workspaceReader, org.mockito.Mockito.never())
@@ -1164,8 +1219,6 @@ class ChatStreamControllerTest {
     void chatShouldSkipKvSyncWhenWriteFileInputMissingPath() {
         var sessionId = "test-user-wf3";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf3");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         var replyId = "r-wf3";
         var callId = "c-wf3";
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent(replyId, callId, "write_file");
@@ -1193,8 +1246,6 @@ class ChatStreamControllerTest {
     void chatShouldStripWorkspacePrefixFromWriteFilePath() {
         var sessionId = "test-user-wf4";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf4");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         var replyId = "r-wf4";
         var callId = "c-wf4";
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent(replyId, callId, "write_file");
@@ -1223,8 +1274,6 @@ class ChatStreamControllerTest {
     void chatShouldUseUserIdNotSessionIdAsKvKeyForWriteFile() {
         var sessionId = "test-user-wf5";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf5");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         var replyId = "r-wf5";
         var callId = "c-wf5";
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent(replyId, callId, "write_file");
@@ -1256,8 +1305,6 @@ class ChatStreamControllerTest {
     void chatShouldDefaultToDebugUserWhenUserIdIsNullForWriteFile() {
         var sessionId = "test-user-wf6";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf6");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         var replyId = "r-wf6";
         var callId = "c-wf6";
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent(replyId, callId, "write_file");
@@ -1290,8 +1337,6 @@ class ChatStreamControllerTest {
         // （End/合成路径本就 remove，收尾清桶的 remove 幂等，不双删报错）
         var sessionId = "test-user-bk1";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-bk1");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         var replyId = "r-bk1";
         var wfCall = "c-bk1-wf";
         var pfCall = "c-bk1-pf";
@@ -1324,8 +1369,6 @@ class ChatStreamControllerTest {
         // 收尾清桶兜底，条目不得跨 turn 存活
         var sessionId = "test-user-bk2";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-bk2");
-        when(sandboxConfig.enabled()).thenReturn(false);
-
         var callA = "call-bk2";
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-bk2", callA, "write_file");
         var tcDelta = new io.agentscope.core.event.ToolCallDeltaEvent(
@@ -1348,7 +1391,6 @@ class ChatStreamControllerTest {
         // 并行 turn 防误删（顺序两 turn 共用同一 session）：turn A 异常收尾只清 A 的 key；
         // turn B 进行中 B 的在用 key 必须仍在、A 的 key 不得复活；B 收尾后同样清空
         var sessionId = "test-user-bk3";
-        when(sandboxConfig.enabled()).thenReturn(false);
         var tokens = new java.util.concurrent.atomic.AtomicInteger();
         when(turnLeaseStore.tryAcquire(sessionId)).thenAnswer(inv ->
             "tok-bk3-" + tokens.incrementAndGet());
@@ -1709,7 +1751,7 @@ class ChatStreamControllerTest {
     /** 以显式注入服务构建独立控制器（复用 @BeforeEach 的字段 mock） */
     private ChatStreamController controllerWithInjection(SkillInjectionService injection) {
         return new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
-            workspaceInjector, sandboxConfig, eventBus, eventStore,
+            workspaceInjector, sandboxRuntime, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, injection,
             mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
             modelCatalog, sessionTitleService);

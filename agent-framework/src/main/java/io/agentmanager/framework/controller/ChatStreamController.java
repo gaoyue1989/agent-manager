@@ -21,10 +21,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.ChatUiChannelProvider;
-import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.ModelCatalog;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionTitleService;
@@ -113,7 +113,7 @@ public class ChatStreamController {
     private final AgentRuntimeService runtimeService;
     private final TurnLeaseStore turnLeaseStore;
     private final UploadWorkspaceInjector workspaceInjector;
-    private final SandboxConfig sandboxConfig;
+    private final SandboxRuntime sandboxRuntime;
     private final SessionEventBus eventBus;
     private final SessionEventStore eventStore;
     private final SessionUserStore sessionUserStore;
@@ -211,7 +211,7 @@ public class ChatStreamController {
                                 AgentRuntimeService runtimeService,
                                 TurnLeaseStore turnLeaseStore,
                                 UploadWorkspaceInjector workspaceInjector,
-                                SandboxConfig sandboxConfig,
+                                SandboxRuntime sandboxRuntime,
                                 SessionEventBus eventBus,
                                 SessionEventStore eventStore,
                                 SessionUserStore sessionUserStore,
@@ -223,7 +223,7 @@ public class ChatStreamController {
                                 ModelCatalog modelCatalog,
                                 SessionTitleService sessionTitleService) {
         this((Supplier<ChatUiChannel>) () -> chatChannel, runtimeService, turnLeaseStore, workspaceInjector,
-            sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
+            sandboxRuntime, eventBus, eventStore, sessionUserStore, workspaceReader, props,
             skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService, false);
     }
 
@@ -233,7 +233,7 @@ public class ChatStreamController {
                                 AgentRuntimeService runtimeService,
                                 TurnLeaseStore turnLeaseStore,
                                 UploadWorkspaceInjector workspaceInjector,
-                                SandboxConfig sandboxConfig,
+                                SandboxRuntime sandboxRuntime,
                                 SessionEventBus eventBus,
                                 SessionEventStore eventStore,
                                 SessionUserStore sessionUserStore,
@@ -245,7 +245,7 @@ public class ChatStreamController {
                                 ModelCatalog modelCatalog,
                                 SessionTitleService sessionTitleService) {
         this((Supplier<ChatUiChannel>) channelProvider::current, runtimeService, turnLeaseStore, workspaceInjector,
-            sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
+            sandboxRuntime, eventBus, eventStore, sessionUserStore, workspaceReader, props,
             skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService, true);
     }
 
@@ -253,7 +253,7 @@ public class ChatStreamController {
                                  AgentRuntimeService runtimeService,
                                  TurnLeaseStore turnLeaseStore,
                                  UploadWorkspaceInjector workspaceInjector,
-                                 SandboxConfig sandboxConfig,
+                                 SandboxRuntime sandboxRuntime,
                                  SessionEventBus eventBus,
                                  SessionEventStore eventStore,
                                  SessionUserStore sessionUserStore,
@@ -270,7 +270,7 @@ public class ChatStreamController {
         this.perSessionChannel = perSessionChannel;
         this.turnLeaseStore = turnLeaseStore;
         this.workspaceInjector = workspaceInjector;
-        this.sandboxConfig = sandboxConfig;
+        this.sandboxRuntime = sandboxRuntime;
         this.eventBus = eventBus;
         this.eventStore = eventStore;
         this.sessionUserStore = sessionUserStore;
@@ -639,7 +639,7 @@ public class ChatStreamController {
                 if (body.fileIds() != null && !body.fileIds().isEmpty()) {
                     injectableFileIds = workspaceInjector.assignWorkspacePaths(
                         body.fileIds(), finalUserId, finalSessionId);
-                    if (!(sandboxConfig != null && sandboxConfig.enabled())) {
+                    if (!sandboxRuntime.enabled()) {
                         for (var fileId : injectableFileIds) {
                             workspaceInjector.injectToWorkspace(fileId, finalSessionId);
                         }
@@ -900,7 +900,7 @@ public class ChatStreamController {
         }
 
         // write_file 输入参数截获（按登记的真实工具名判定，不能读 delta.getToolCallName()）
-        if (!sandboxConfig.enabled()) {
+        if (!sandboxRuntime.enabled()) {
             if (event instanceof ToolCallDeltaEvent delta
                     && isTool(delta.getToolCallId(), "write_file")) {
                 turnBucketKeys.add(delta.getToolCallId());
