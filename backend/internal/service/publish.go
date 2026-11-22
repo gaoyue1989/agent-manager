@@ -69,10 +69,6 @@ type ConfigView struct {
 	RegisterRetry                  int
 	// PackageDownloadBase create_oaf_zip 返回 download_url 的基地址（空则取 DefaultPackageDownloadBase）
 	PackageDownloadBase string
-	// OpenViking 记忆供给配置（openviking-memory-integration-design §11.1）：
-	// Enabled=false（默认）时发布链路完全不感知 OpenViking
-	OpenVikingEnabled bool
-	OpenVikingBaseURL string
 	// PrometheusURL Prometheus 查询入口（工具调用观测聚合数据源；空=观测栈未部署）
 	PrometheusURL string
 	// DeployBuilder 业务 Deployment 构造门面（内置构造 + 可选环境 overlay）；

@@ -347,7 +347,7 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
 8. **skills-syncd（沙箱技能同步，可选）**：镜像构建/导入 `./scripts/build-skillsync-image.sh`；部署前提与回滚见「五之二 → 4. 技能同步」，排障 runbook 见设计文档 §10.4（docs/design/sandbox-skills-syncd-design-261112.md）。
 9. **OpenViking 记忆供给（openviking-memory-integration-design-261116，可选）**：长期记忆/知识/技能迁至 OpenViking 上下文数据库。三凭证分层——root key 仅 backend（建/删 account、per-user key 签发）、account ADMIN key + user seed 经服务 Secret 下发（`OVK_ADMIN_KEY`/`OVK_USER_SEED`，保留键用户不可设）、per-user user key 业务面本地推导（免存储表，Go/Java 同公式同测试向量）。
    - **OpenViking 由外部提供服务**（与外部 MySQL/Redis 同模式，平台不部署）：接入契约 = 服务可达（业务 Pod 网络）+ `server.auth_mode="api_key"` + root key 交 backend + VLM/embedding 供给由外部运维保障（检索热路径依赖 embedding——免费/限速档不可用，实测 50 次/日即 429）
-   - 启用：`kubectl -n agent-platform set env deploy/platform-backend OPENVIKING_ENABLED=true OPENVIKING_BASE_URL=<外部服务地址> OPENVIKING_ROOT_API_KEY=<root-key>` 后 rollout restart；启用后**新发布默认** `AGENT_MEMORY_PROVIDER=openviking`（服务显式 `local` 退出；平台未启用时显式 `openviking` 400 拒绝）
+   - 启用：`kubectl -n agent-platform set env deploy/platform-backend OPENVIKING_ENABLED=true OPENVIKING_BASE_URL=<外部服务地址> OPENVIKING_ROOT_API_KEY=<root-key>` 后 rollout restart；三个变量同时配置才生效——`OPENVIKING_ENABLED=false` 即总开关关闭（issue #414：紧急回退/灰度手段，此时即使 URL/RootKey 在位发布链路也完全不感知 OpenViking）；启用后**新发布默认** `AGENT_MEMORY_PROVIDER=openviking`（服务显式 `local` 退出；平台未启用时显式 `openviking` 400 拒绝）
    - 切换：`AGENT_MEMORY_PROVIDER` 发布期固化于服务 env，切换 = PATCH `/services/{id}/env`（含该键）+ 滚动重启；`OVK_SESSION_COMMIT`（会话归档+自动提取，默认 false=逐 turn remember）/`OVK_KNOWLEDGE_IMPORT`/`OVK_SHARED_SKILLS`/`OVK_MCP_SHARED_CONTEXT`（服务级共享检索 MCP）逐服务开关
 
 10. **工具调用观测栈（tool-call-observability-design-261121，可选）**：Prometheus + Grafana 面板（用户侧 /console/observability、运维侧 /admin/observability）。

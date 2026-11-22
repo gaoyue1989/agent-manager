@@ -239,6 +239,8 @@ MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permi
 
 > 首推理注入缓存 + 本地记忆关闸实现现状(2026-11-23 回填,issue #419):首推理注入缓存键 = slot 复合会话键 `userId:sessionId`(§4.6 缓解①「session 内缓存」语义落地,实现期曾误为 per-user 键——同用户 5 分钟内新会话直接复用上一会话检索结果,与当前问题无关的旧记忆被注入、刚写入的记忆不可见);`AGENT_MEMORY_PROVIDER=openviking`(VikingMemoryClient 在位)时 `AgentScopeConfig.workspaceReader` 装配 `memoryEnabled = AGENT_MEMORY_ENABLED && VikingMemoryClient 不在位`——沙箱对 `MEMORY.md`/`memory/` 不注入(`readRuntimeFiles` 空集)、不回写(`WorkspaceSyncService.syncBack` 同一开关),与 SDK hooks/tools 双关共同消除双记忆源。
 
+> `OPENVIKING_ENABLED` 总开关接线实现现状(2026-11-24 回填,issue #414):上表「false 时发布链路完全不感知 OpenViking」在 261122 前仅为设计意图——`OpenVikingEnabled` 读入后全仓无读取点,backend 启动仅凭 `OPENVIKING_BASE_URL`/`OPENVIKING_ROOT_API_KEY` 在位即无条件装配 VikingAdmin,发布/Republish/UpdateEnv 默认建户并切 provider=openviking,总开关作为紧急回退/灰度手段失效。现接线语义 = 装配点门控:`service.NewVikingAdmin(enabled, baseURL, rootKey)` 开关关闭或 URL/RootKey 缺任一返回 nil,`Viking==nil` 是发布链路唯一信号(`applyOpenVikingEnv` 零接触,服务显式 `openviking` 400 拒绝);运维语义见 docs/deployment.md 运维备忘 9。
+
 ### 11.2 实施拆分(单分支多 commit,一个 PR)
 
 1. **backend**:VikingAdminClient(建/删户、注册用户、知识/技能导入)+ 发布/删除生命周期挂钩(OPENVIKING_ENABLED 门控)+ 服务 env/Secret 注入 + per-user key 签发端点

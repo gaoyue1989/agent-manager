@@ -82,9 +82,11 @@ type VikingAdmin struct {
 	http    *http.Client
 }
 
-// NewVikingAdmin 组装 Admin API 客户端；baseURL/rootKey 任一为空返回 nil（平台未配置）。
-func NewVikingAdmin(baseURL, rootKey string) *VikingAdmin {
-	if baseURL == "" || rootKey == "" {
+// NewVikingAdmin 组装 Admin API 客户端；总开关关闭（enabled=false）或 baseURL/rootKey
+// 任一为空返回 nil（平台未启用 OpenViking，发布链路零接触，issue #414：总开关是
+// 紧急回退/灰度手段，仅配置 URL/key 不构成启用）。
+func NewVikingAdmin(enabled bool, baseURL, rootKey string) *VikingAdmin {
+	if !enabled || baseURL == "" || rootKey == "" {
 		return nil
 	}
 	return &VikingAdmin{
