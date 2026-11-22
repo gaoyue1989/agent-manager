@@ -67,6 +67,10 @@ data:
         proxy_set_header Authorization $http_authorization;
         proxy_set_header Cookie $http_cookie;
         proxy_set_header X-Original-URI $request_uri;
+        # API Key 作用域裁决输入（issue #407）：$short 是下方 location 归一化匹配出的路由
+        # 捕获（与实际 upstream 同源）；backend 以它与 X-Original-URI 反解结果交叉校验。
+        # 不可改传 $uri——auth 子请求内恒为 /_auth。
+        proxy_set_header X-Agent-Short $short;
         proxy_connect_timeout 5s;
         proxy_read_timeout 5s;
       }
