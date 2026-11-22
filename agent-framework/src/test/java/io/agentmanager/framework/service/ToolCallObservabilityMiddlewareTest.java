@@ -13,6 +13,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
@@ -58,7 +59,7 @@ class ToolCallObservabilityMiddlewareTest {
     void shouldAuditStartAndEndRowsWithResultStateAndCountMetric() {
         when(resolver.canonicalSessionId(any())).thenReturn("sess-1");
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "weather"))),
@@ -83,7 +84,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldCountErrorResultAsError() {
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "shell"))),
@@ -100,7 +101,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldCountNonSuccessTerminalStatesAsError() {
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "write_file"))),
@@ -117,7 +118,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldHandleParallelBatchCalls() {
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "weather"), toolCall("call-2", "stock"))),
@@ -137,7 +138,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldPassEventsThroughUnchanged() {
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         var events = List.of(
             new ToolCallStartEvent("r1", "call-1", "weather"),
@@ -152,7 +153,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldFallBackToRawSessionIdWithoutResolver() {
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, null, "my-agent");
+            registry, auditStore, null, "my-agent", null);
         var ctx = ctx();
 
         middleware.onActing(mock(Agent.class), ctx,
@@ -167,7 +168,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldNotFailWithoutMeterRegistry() {
         var middleware = new ToolCallObservabilityMiddleware(
-            null, auditStore, resolver, "my-agent");
+            null, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "weather"))),
@@ -181,7 +182,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldRecordStartRowOnlyOnEmptyStream() {
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "weather"))), i -> Flux.empty())
@@ -203,7 +204,7 @@ class ToolCallObservabilityMiddlewareTest {
     void shouldNotDoubleWriteStartRowOnHitlApproveResumePass() {
         when(resolver.canonicalSessionId(any())).thenReturn("sess-1");
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         // 第 1 轮：挂起询问——入口落 START，流内无 ToolResultEndEvent
         middleware.onActing(mock(Agent.class), ctx(),
@@ -235,7 +236,7 @@ class ToolCallObservabilityMiddlewareTest {
     void shouldRecordResultAndCountOnAllToolsDeniedResumePass() {
         when(resolver.canonicalSessionId(any())).thenReturn("sess-1");
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         // 第 1 轮：挂起询问——START 已落
         middleware.onActing(mock(Agent.class), ctx(),
@@ -262,7 +263,7 @@ class ToolCallObservabilityMiddlewareTest {
     @Test
     void shouldRecordResultRowPerDeniedCallOnAllToolsDenied() {
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "shell"), toolCall("call-2", "read_file"))),
@@ -285,7 +286,7 @@ class ToolCallObservabilityMiddlewareTest {
     void shouldNotDoubleRecordOnStartEvent() {
         when(resolver.canonicalSessionId(any())).thenReturn("sess-1");
         var middleware = new ToolCallObservabilityMiddleware(
-            registry, auditStore, resolver, "my-agent");
+            registry, auditStore, resolver, "my-agent", null);
 
         middleware.onActing(mock(Agent.class), ctx(),
                 new ActingInput(List.of(toolCall("call-1", "weather"))),
@@ -301,5 +302,68 @@ class ToolCallObservabilityMiddlewareTest {
             eq("TOOL_RESULT_END"), eq("success"), anyString());
         verify(auditStore, times(2)).record(anyString(), eq("weather"), eq("call-1"),
             anyString(), any(), any());
+    }
+
+    // ===== issue #422：指标 tool 标签只认已注册工具名，未注册/幻觉名归 __unknown__ 桶 =====
+
+    private ToolCallObservabilityMiddleware middlewareWithRegisteredTools(String... tools) {
+        return new ToolCallObservabilityMiddleware(
+            registry, auditStore, resolver, "my-agent", () -> Set.of(tools));
+    }
+
+    /**
+     * 未注册/幻觉工具名（SDK 对不存在工具返回 Tool not found 的 ERROR 终态，事件携带
+     * 模型输出的任意字符串）必须归入单一 __unknown__ 桶——Micrometer Meter 不回收，
+     * 原样做标签会让序列数随模型输出无界增长；审计行保留真实名字便于排查。
+     */
+    @Test
+    void shouldBucketUnregisteredToolNameIntoUnknownLabel() {
+        var middleware = middlewareWithRegisteredTools("weather", "shell");
+
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "hallucinated_tool_0"))),
+                i -> stream(new ToolResultEndEvent("r1", "call-1", "hallucinated_tool_0",
+                    ToolResultState.ERROR)))
+            .blockLast();
+
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "__unknown__").tag("result", "error").counter().count());
+        assertEquals(0L, registry.find("oaf.tool.calls").counters().stream()
+                .filter(c -> !"__unknown__".equals(c.getId().getTag("tool")))
+                .mapToDouble(c -> c.count()).sum(),
+            "不得以未注册名新建时间序列");
+        verify(auditStore).record(any(), eq("hallucinated_tool_0"), eq("call-1"),
+            eq("TOOL_RESULT_END"), eq("error"), anyString());
+    }
+
+    /** 已注册工具名保持原样标签（归桶不影响正常面板 byTool 维度） */
+    @Test
+    void shouldKeepRegisteredToolNameAsMetricLabel() {
+        var middleware = middlewareWithRegisteredTools("weather", "shell");
+
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "weather"))),
+                i -> stream(new ToolResultEndEvent("r1", "call-1", "weather",
+                    ToolResultState.SUCCESS)))
+            .blockLast();
+
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "weather").tag("result", "success").counter().count());
+    }
+
+    /** 未装配注册名单供给时 fail-soft 保持原样标签（现网未传 toolkit 引用的装配路径） */
+    @Test
+    void shouldPassThroughToolLabelWithoutRegisteredNamesSupplier() {
+        var middleware = new ToolCallObservabilityMiddleware(
+            registry, auditStore, resolver, "my-agent", null);
+
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "hallucinated_tool_0"))),
+                i -> stream(new ToolResultEndEvent("r1", "call-1", "hallucinated_tool_0",
+                    ToolResultState.ERROR)))
+            .blockLast();
+
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "hallucinated_tool_0").tag("result", "error").counter().count());
     }
 }

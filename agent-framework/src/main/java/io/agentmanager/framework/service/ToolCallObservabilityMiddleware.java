@@ -1,7 +1,9 @@
 package io.agentmanager.framework.service;
 
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
@@ -36,7 +38,9 @@ import reactor.core.publisher.Flux;
  *
  * <p><b>指标</b>：Micrometer 计数 {@code oaf.tool.calls}，标签 service（OAF slug）、
  * tool、result（success / error——非 SUCCESS 终态一律按 error 桶，与 Monitor
- * 问题口径一致）。Prometheus 暴露为 oaf_tool_calls_total，平台观测面板经 PromQL 聚合。
+ * 问题口径一致）。tool 标签只认 toolkit 已注册工具名，未注册/幻觉名归 __unknown__
+ * 桶（Meter 不回收，模型输出任意字符串不能无界新增序列）。Prometheus 暴露为
+ * oaf_tool_calls_total，平台观测面板经 PromQL 聚合。
  *
  * <p><b>执行位置</b>：注册于 ToolFilterMiddleware / ProtocolDenyRulesMiddleware 内侧
  * （先注册者更外层），被过滤/DENY 短路的调用不经过本层——只计真实执行的调用。
@@ -50,17 +54,24 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
     /** Micrometer 计数名（Prometheus：oaf_tool_calls_total） */
     static final String METRIC_NAME = "oaf.tool.calls";
 
+    /** 未注册/幻觉工具名的指标标签归桶（Micrometer Meter 不回收，原样标签会无界增长序列） */
+    static final String UNKNOWN_TOOL_LABEL = "__unknown__";
+
     private final MeterRegistry meterRegistry;
     private final ToolAuditStore toolAuditStore;
     private final SessionKeyResolver sessionKeyResolver;
     private final String serviceSlug;
+    /** toolkit 已注册工具名（懒取——构造时 harness 内置工具尚未注册完）；null = 不归桶 */
+    private final Supplier<Set<String>> registeredToolNames;
 
     public ToolCallObservabilityMiddleware(MeterRegistry meterRegistry, ToolAuditStore toolAuditStore,
-                                          SessionKeyResolver sessionKeyResolver, String serviceSlug) {
+                                          SessionKeyResolver sessionKeyResolver, String serviceSlug,
+                                          Supplier<Set<String>> registeredToolNames) {
         this.meterRegistry = meterRegistry;
         this.toolAuditStore = toolAuditStore;
         this.sessionKeyResolver = sessionKeyResolver;
         this.serviceSlug = serviceSlug;
+        this.registeredToolNames = registeredToolNames;
     }
 
     @Override
@@ -113,11 +124,27 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         try {
             meterRegistry.counter(METRIC_NAME,
                 "service", serviceSlug == null ? "unknown" : serviceSlug,
-                "tool", toolName,
+                "tool", metricToolLabel(toolName),
                 "result", success ? "success" : "error").increment();
         } catch (Exception e) {
             // 指标 best-effort，不影响工具执行
         }
+    }
+
+    /** 指标 tool 标签只认 toolkit 已注册工具名，未注册/幻觉名归 __unknown__ 桶（审计行保留实名） */
+    private String metricToolLabel(String toolName) {
+        if (registeredToolNames == null) {
+            return toolName;
+        }
+        try {
+            Set<String> names = registeredToolNames.get();
+            if (names != null && !names.contains(toolName)) {
+                return UNKNOWN_TOOL_LABEL;
+            }
+        } catch (Exception e) {
+            // 名单供给失败 fail-soft：保持原样标签
+        }
+        return toolName;
     }
 
     private void auditStart(String sessionId, String toolName, String toolCallId) {
