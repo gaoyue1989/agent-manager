@@ -105,6 +105,7 @@ func (d *daemon) cycle(ctx context.Context) error {
 		d.log.Printf("serverProtocol=%s", info.ServerProtocol)
 	}
 	if info.Version == current {
+		d.recordRecent(current)
 		return nil
 	}
 	if d.withinTolerance(info.Version) {
@@ -192,8 +193,15 @@ func validVersion(v string) bool {
 }
 
 func (d *daemon) pull(ver string) error {
+	old := currentVersion(d.cfg.storeDir)
 	if err := d.install(ver); err != nil {
 		return err
+	}
+	if old != "" && old != ver {
+		// 记旧版「离开时刻」而非首次拉取时刻：滚发抖动窗内 svc 命中旧副本时
+		// withinTolerance 为真，不主动降级回旧版（issue #390——旧实现稳态不刷新
+		// recent，长驻留版本的旧时间戳会使滚发触发降级-锁死序列）
+		d.recordRecent(old)
 	}
 	d.recordRecent(ver)
 	d.deleteSuperseded(ver)
