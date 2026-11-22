@@ -2,7 +2,7 @@
 /**
  * 控制台浏览器 E2E（Puppeteer）：登录 → 工作空间 → Agent 列表/创建/详情/编辑 →
  * 模型连接 → 工具（MCP）→ 技能中心 → 沙箱配置总览 → 沙箱管理（admin）+ 分页回归（issue #298）
- * → 沙箱实例（console）。
+ * → 沙箱实例（console）→ 会话回放（issue #386 回归：回放初始会话取 replayTo 而非调试 persistKey 残留）。
  *
  * 设计：
  *  - 数据准备走 API（登录/建空间/模型连接/工具/技能/导入包/沙箱 Agent），浏览器只驱动 UI；
@@ -448,6 +448,83 @@ console.log("seeded");`);
     await page.waitForSelector(testid("marks-table"), { timeout: 30000 }).catch(() => {});
     check("发布标记列表区块渲染", !!(await page.$(testid("marks-table"))));
     check("生产环境变量表渲染", !!(await page.$(testid("env-table"))));
+
+    // ---- 会话回放（issue #386 回归：回放面板初始会话必须取 replayTo，而非调试 persistKey 残留——
+    // 修复前回放 B 渲染上一次持久化会话内容，「滞后一次」错配必现）----
+    // 走带模型连接的沙箱 Agent（seed 创建时已挂 verified 连接 → LLM env 注入，导入模式 Agent 无 LLM 不可对话）
+    console.log("== UI：会话回放（Agent 详情）==");
+    if (RUNTIME === "mock") {
+      console.log("  ⏭️ SKIP：E2E_AGENT_RUNTIME=mock——会话/调试类断言跳过");
+    } else {
+      const detail = await api("GET", `/console/workspaces/${ctx.wsId}/agents/${ctx.svcId}`, undefined, ctx.token);
+      const me = await api("GET", "/auth/me", undefined, ctx.token);
+      const debugUid = `u-${me.user.id}`;
+      // 会话清单经浏览器上下文拉取（/agent/* 同源带 console 会话 cookie，与 ThreadsTab 同链路）
+      const listSids = () => page.evaluate(async (p) => {
+        const list = await fetch(p).then((r) => r.json()).catch(() => []);
+        return (Array.isArray(list) ? list : []).map((t) => String(t.session_id)).filter((s) => s.startsWith("webui-"));
+      }, `/agent/${detail.shortName}/threads?userId=${encodeURIComponent(debugUid)}`);
+      // 用户气泡契约选择器（MessageItem 结构约定，file-support-ui 同源）：会话回放侧栏含全部
+      // 会话标题，正文断言必须圈定在消息流用户气泡内，不能用整 pane textContent
+      const userMsgs = (pane) => page.$$eval(`${testid(pane)} .justify-end > div`,
+        (els) => els.map((el) => (el.textContent || "").trim())).catch(() => []);
+      // 输入框可用 ⇔ sessionLocked 复位（busy/historyLoading/uploading 均锁定；chat-send 空输入恒 disabled，不能当就绪信号）
+      const waitReady = (timeoutMs) => page.waitForFunction(() => {
+        const el = document.querySelector('[data-testid="chat-input"]');
+        return !!el && !el.disabled;
+      }, { timeout: timeoutMs });
+      // 调试 Tab 建会话：等就绪 → 发送 → 等用户气泡上屏（本轮已开始）→ 等 busy 复位 → checkpoint 落库余量
+      const sendAndSettle = async (msg) => {
+        await waitReady(60000);
+        await page.$eval(testid("chat-input"), (el) => { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
+        await page.type(testid("chat-input"), msg);
+        await page.click(testid("chat-send"));
+        await waitFor(async () => (await userMsgs("debug-pane")).some((t) => t.includes(msg)), 30000, 1000);
+        await waitReady(300000);
+        await sleep(5000);
+      };
+
+      const markerA = `E2E 回放标记甲 ${TS}`;
+      const markerB = `E2E 回放标记乙 ${TS}`;
+      await goto(`/console/agents/${ctx.svcId}?tab=debug`, testid("debug-pane"));
+      await sendAndSettle(markerA);
+      await click("new-session");
+      await sleep(3000); // 两会话创建时刻错秒，sid 前缀定序不致并列
+      await sendAndSettle(markerB);
+
+      await goto(`/console/agents/${ctx.svcId}?tab=threads`, testid("threads-table"));
+      await page.waitForSelector(testid("threads-table"), { timeout: 30000 });
+      await waitFor(async () => (await listSids()).length >= 2, 30000, 1000);
+      const sids = await listSids();
+      check("会话 Tab 列表含新建两会话", sids.length >= 2, `sids=${sids.length}`);
+      // 本 Agent 为本次运行全新创建，会话仅此两个；webui-<base36 毫秒>- 前缀即创建时刻，定序不依赖列表排序
+      const sidTs = (s) => parseInt(s.slice("webui-".length).split("-")[0], 36);
+      const [sidA, sidB] = [...sids].sort((a, b) => sidTs(a) - sidTs(b));
+
+      // 回放 → 断言正文为所选会话历史 + 顶部条 id 与目标一致（副标题「回放 <sid>」同源）→ 返回列表
+      const replayAndCheck = async (sid, marker, other, label) => {
+        await click(`thread-replay-${sid}`);
+        await page.waitForSelector(testid("replay-pane"), { timeout: 20000 });
+        await waitFor(async () => (await userMsgs("replay-pane")).some((t) => t.includes(marker)), 60000, 2000);
+        const msgs = await userMsgs("replay-pane");
+        check(`${label}：正文为所选会话历史（含标记、无另一会话标记）`,
+          msgs.some((t) => t.includes(marker)) && msgs.every((t) => !t.includes(other)),
+          msgs.join(" | ").slice(0, 120));
+        const topId = await page.$eval(`${testid("replay-pane")} .font-mono`, (el) => (el.textContent || "").trim());
+        check(`${label}：顶部条会话 id === 回放目标`, topId === sid, `top=${topId} want=${sid}`);
+        await click("threads-back");
+        await page.waitForSelector(testid("threads-table"), { timeout: 20000 });
+      };
+      await replayAndCheck(sidA, markerA, markerB, "回放会话 A");
+      // 切换目标回放 B：修复前此处必渲染 A 的内容（persistKey 残留），为错配回归的核心断言
+      await replayAndCheck(sidB, markerB, markerA, "回放会话 B（切换目标）");
+
+      // 回归：回放把「当前会话」补写进 persistKey（与 selectSession 同语义）→ 调试 Tab 恢复点 = 最后回放的 B
+      await goto(`/console/agents/${ctx.svcId}?tab=debug`, testid("debug-pane"));
+      await waitFor(async () => (await userMsgs("debug-pane")).some((t) => t.includes(markerB)), 60000, 2000);
+      const dbgTop = await page.$eval(`${testid("debug-pane")} .font-mono`, (el) => (el.textContent || "").trim());
+      check("调试 Tab 恢复点随回放切换（persistKey 单真相源）", dbgTop === sidB, `top=${dbgTop} want=${sidB}`);
+    }
 
     if (RUNTIME === "mock") {
       console.log("  ⏭️  E2E_AGENT_RUNTIME=mock：跳过会话/调试类 UI 断言");
