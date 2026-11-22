@@ -266,6 +266,16 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 （空 = 包技能不投放，**不是**「回退旧投影」）；farm 判定降级（端点不可达/版本不一致/store 缺失）=
 降级会话无包技能投放。agent-framework 回滚 = 回滚整个 release（旧投影路径已删，拨开关不可回退）。
 
+**总闸默认值（issue #392，2026-11-22）**：agent-framework 缺省已对齐守护 `SKILLSYNC_STORE_DIR`
+缺省（均为 `/skills-store`）——按本节步骤 1-4 配置即**零手工 env** 开农场（`SANDBOX_SKILLS_SHARED_STORE`
+已入平台 env 模板 sandbox 组，仅表单预填、不经运行时注入）。显式关闭 = 服务 env 置空
+`SANDBOX_SKILLS_SHARED_STORE`（启动期一条 WARN，包技能不投放）；经池 `extraEnv` 覆盖
+`SKILLSYNC_STORE_DIR` 的（白名单 `^SKILLSYNC_[A-Z0-9_]+$`，opensandboxproxy.go）**必须同值改服务 env
+该键**，两键不对齐 → farm 判定 `degraded_store_missing` 降级（会话级 WARN 指根因，不误投、不 crashloop）。
+存量影响（行为不变、可观测性增强）：env 固化不含该键且未配 syncd 的沙箱服务，重启后农场自动尝试开启，
+每会话新增一条 `degraded_store_missing` WARN 与 `skills.farm.decision` 指标（PR-4b 后无 store 本就零包
+技能投放）；不可接受该日志噪音时按上口径显式置空（仅启动期一条 WARN，会话级零噪音）。
+
 ## 关键端点
 
 对外入口：

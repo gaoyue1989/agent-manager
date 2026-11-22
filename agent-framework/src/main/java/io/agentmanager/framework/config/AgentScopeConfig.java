@@ -61,6 +61,13 @@ public class AgentScopeConfig {
         }
         log.info("Sandbox enabled, assembling OpenSandboxFilesystemSpec (server={}, image={})",
             config.opensandbox().serverUrl(), config.image());
+        // 关闸可观测（issue #392）：总闸缺省已对齐 /skills-store，走到这里仍为空 = 服务 env
+        // 显式置空（知情关闸）——包技能不投放（软链农场总闸关闭，PR-4b 后无回落）。
+        // 知情选择不做 per-call 打点/记忆位，进程级一条 WARN 即可
+        if (config.skillsSharedStore() == null || config.skillsSharedStore().isBlank()) {
+            log.warn("SANDBOX_SKILLS_SHARED_STORE is explicitly empty: skills farm master switch "
+                + "is OFF — package skills will NOT be delivered to sandboxes");
+        }
         // 业务规范键解析（issue #52）：Channel 链路 ctx.userId 是网关 peer（=前端 sessionId），
         // 沙箱 userKey 须经 session_user 反查真实用户，否则 per-user 技能物化/回写退化为
         // per-session 命名空间。与 HarnessAgentFactory 的 LLM 记录/span 翻译同一实现（memo 共享）。

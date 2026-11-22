@@ -82,6 +82,12 @@ var template = []Group{
 			// 池 Pod secretKeyRef 解析失败卡 CreateContainerConfigError。
 			{EnvKey: "SKILLSYNC_TOKEN", Label: "技能同步 Token", Sensitive: true,
 				Placeholder: "池化沙箱 skills-syncd 拉取鉴权（空 = 内部端点关闭 404，撤销 = 池 ns token Secret 同步删除）"},
+			// SANDBOX_SKILLS_SHARED_STORE（issue #392）：软链农场总闸，框架缺省 /skills-store
+			// （与守护 SKILLSYNC_STORE_DIR 缺省对齐）。入模板仅为表单预填/显式关闸入口——非敏感、
+			// 不经运行时注入（R3 语义）；置空 = 关闭包技能投放。经池 extraEnv 改守护
+			// SKILLSYNC_STORE_DIR 时必须同值改本键（白名单见 opensandboxproxy.go）
+			{EnvKey: "SANDBOX_SKILLS_SHARED_STORE", Label: "沙箱共享技能库路径",
+				Placeholder: "默认 /skills-store（与池守护 SKILLSYNC_STORE_DIR 缺省对齐）；置空 = 关闭包技能投放；经池 extraEnv 改 SKILLSYNC_STORE_DIR 时须同值改此键"},
 		},
 	},
 	{
