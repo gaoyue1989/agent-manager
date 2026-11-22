@@ -60,11 +60,13 @@ public class UploadWorkspaceInjector {
             return null;
         }
         var asset = meta.get();
-        if ("injected".equals(asset.status())) {
+        if ("injected".equals(asset.status()) && asset.workspacePath() != null) {
             // 幂等跳过的前提是工作区文件仍在磁盘（issue #354）：oaf-agent 工作区卷为
             // emptyDir，Pod 重建清空后 file_asset 行（injected）在 MySQL 存活——只看 DB
             // 会早退、提示路径永久指向已消失文件。磁盘缺失 → 落回写盘路径重物化（S3 后端
-            // 字节仍在，下次引用即自愈；local 后端 storage read 失败走既有降级）
+            // 字节仍在，下次引用即自愈；local 后端 storage read 失败走既有降级）。
+            // workspace_path 为 NULL 的存量行（#346 之前的 injected 行）视为未落盘，
+            // 直接走重物化分支（issue #431：resolve(null) 会 NPE）
             var existing = workspaceRoot(workspaceKey).resolve(asset.workspacePath());
             if (Files.exists(existing)) {
                 return asset.workspacePath();
