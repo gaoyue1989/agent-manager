@@ -71,12 +71,19 @@ public record SandboxConfig(
      * skills-syncd 内部端点鉴权 token（{@code SKILLSYNC_TOKEN}，空 = 端点关闭 404）；
      * bundle 磁盘缓存目录（{@code SKILLSYNC_BUNDLE_CACHE_DIR}，空 = 运行时解析 workspace 卷内
      * {@code {workspaceBase}/tmp/skills-bundle-cache}，业务 Pod /tmp 不可写实测 issue #358，
-     * 解析在 SkillBundleService.resolveBundleCacheDir）；
-     * 沙箱内共享技能库路径（{@code SANDBOX_SKILLS_SHARED_STORE}，空 = 软链农场整体关闭走现行为）
+     * 解析在 SkillBundleService.resolveBundleCacheDir）
      */
     @DefaultValue("") String skillsSyncToken,
     @DefaultValue("") String skillsBundleCacheDir,
-    @DefaultValue("") String skillsSharedStore,
+    /**
+     * 软链农场总闸（{@code SANDBOX_SKILLS_SHARED_STORE}，issue #392 起缺省 /skills-store）：
+     * 与守护 SKILLSYNC_STORE_DIR 缺省对齐（skills-syncd main.go defaultStoreDir），零手工
+     * env 默认开启。关闸形态（包技能不投放，AgentScopeConfig 装配处启动期 WARN，判定
+     * 共用 {@link OpenSandboxClientOptions#skillsSharedStoreOff}）：{@code off} = 平台表单
+     * 可送达（平台 env 写路径空串=删除，置空送不出）；空 = 直改 CM/Deployment 场景。
+     * 经池 extraEnv 覆盖 SKILLSYNC_STORE_DIR 时必须同值改本键
+     */
+    @DefaultValue("/skills-store") String skillsSharedStore,
     OpenSandboxConfig opensandbox
 ) {
     /** 绑定入口消歧：record 出现双构造器时 Binder 要求显式指定（与 AgentManagerProperties 同款） */

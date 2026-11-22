@@ -4,8 +4,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 
 class SandboxConfigTest {
 
@@ -44,7 +48,7 @@ class SandboxConfigTest {
             true, true, false, 500, 30,
             new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
         assertEquals("", off.skillsSharedStore(),
-            "SANDBOX_SKILLS_SHARED_STORE 默认空 = 软链农场整体关闭（skills-syncd §6.4）");
+            "positional 兼容构造器保持置空形态（绑定层缺省已翻转 /skills-store，issue #392）");
 
         var on = new SandboxConfig(
             true, "img", 30, 30, 512, 1, List.of("sh"),
@@ -56,6 +60,31 @@ class SandboxConfigTest {
         assertEquals("/skills-store", on.skillsSharedStore());
         assertEquals("tok", on.skillsSyncToken());
         assertEquals("/tmp/skills-bundle-cache", on.skillsBundleCacheDir());
+    }
+
+    /**
+     * 绑定层默认翻转回归（issue #392，Binder 范式同 AgentManagerPropertiesBindingTest）：
+     * 属性缺失（存量服务 env 固化不含该键）绑得 {@code /skills-store}（与守护
+     * SKILLSYNC_STORE_DIR 缺省对齐，农场零手工 env 默认开启）；显式空串绑得空串
+     * （= 关闸形态之一，服务直改 CM/Deployment env 可达；平台 env 写路径空串=删除送不出，
+     * 平台关闸走 off 哨兵）——@DefaultValue 不得吞掉显式置空语义。
+     */
+    @Test
+    void skillsSharedStoreShouldBindStoreDefaultWhenAbsentAndEmptyWhenExplicit() {
+        var boundDefault = new Binder(new MapConfigurationPropertySource(Map.of(
+            "agent.sandbox.enabled", "true")))
+            .bind("agent.sandbox", Bindable.of(SandboxConfig.class))
+            .get();
+        assertEquals("/skills-store", boundDefault.skillsSharedStore(),
+            "属性缺失须绑得 /skills-store（守护 defaultStoreDir 对齐，issue #392）");
+
+        var boundEmpty = new Binder(new MapConfigurationPropertySource(Map.of(
+            "agent.sandbox.enabled", "true",
+            "agent.sandbox.skills-shared-store", "")))
+            .bind("agent.sandbox", Bindable.of(SandboxConfig.class))
+            .get();
+        assertEquals("", boundEmpty.skillsSharedStore(),
+            "显式空串须保持空串 = 显式关闸（软链农场总闸关闭）");
     }
 
     @Test

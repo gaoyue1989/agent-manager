@@ -234,10 +234,11 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
   if (replayTo) {
     return (
       <>
-        <Btn onClick={() => setReplayTo("")}>返回会话列表</Btn>
+        <Btn data-testid="threads-back" onClick={() => setReplayTo("")}>返回会话列表</Btn>
         <div className="mt-3">
           <ChatPane agentBase={`/agent/${shortName}`} persistKey={`oaf-debug-sid-${shortName}`}
             title="会话回放" subtitle={`回放 ${replayTo}`}
+            initialSessionId={replayTo}
             userId={uid} testId="replay-pane" key={replayTo} />
         </div>
       </>
@@ -262,7 +263,7 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
               <td className="p-2.5 text-xs text-gray-500">{(t.updated_at ?? "").replace("T", " ").slice(0, 19)}</td>
               <td className="p-2.5 text-right">
                 <span className="inline-flex gap-1">
-                  <Btn sm onClick={() => setReplayTo(t.session_id)}>回放</Btn>
+                  <Btn sm data-testid={`thread-replay-${t.session_id}`} onClick={() => setReplayTo(t.session_id)}>回放</Btn>
                   <Btn sm kind="danger" onClick={() => removeThread(t.session_id)}>删除</Btn>
                 </span>
               </td>

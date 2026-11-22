@@ -23,8 +23,6 @@ import io.agentscope.harness.agent.sandbox.AbstractBaseSandbox;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
-import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
-import io.agentscope.harness.agent.sandbox.layout.WorkspaceProjectionEntry;
 
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
 
@@ -1432,6 +1430,11 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 不再回落 tar（回滚 = 回滚整个 release）；判定/收敛/稳态记账见 {@link SkillsFarm}
      * （D-10 稳态短路 + D-11 模式分量）。收敛 exec 失败经 CAS 复位，下次触发重试。
      *
+     * <p>投影开关（{@code SANDBOX_PROJECTION_ENABLED}）与农场解耦（issue #392）：本方法不再
+     * 检查 workspace 投影 entry（原早退门控防的是 PR-4b 前 tar 投放语义，farm manifest 制下
+     * 已死）——投影关闭只停 AGENTS.md/skills/subagents/knowledge 投影，包技能投放唯一路径
+     * =农场，开关状态不影响收敛。
+     *
      * <p>包级可见（非 private）：供测试 spy 验证 D6 补投开关行为。
      */
     void hydrateScopedSkillCache() {
@@ -1439,12 +1442,6 @@ public class OpenSandbox extends AbstractBaseSandbox
             return;
         }
         try {
-            var spec = state.getWorkspaceSpec();
-            String sourceRoot = projectionSourceRoot(spec);
-            if (sourceRoot == null) {
-                // 投影未启用/未装配：无可投放
-                return;
-            }
             String scope = skillCacheScope;
             if (scope == null || scope.isBlank()) {
                 // 身份未知（middleware/exec ctx 均未提供）：跳过，下次 exec 重试
@@ -1459,20 +1456,6 @@ public class OpenSandbox extends AbstractBaseSandbox
             skillCacheRefreshed.set(false);
             log.warn("[sandbox-open] scoped .skills-cache hydrate failed: {}", e.getMessage());
         }
-    }
-
-    /** 取投影 entry 的宿主机工作区根（sourceRoot）；无投影 entry 返回 null。 */
-    private static String projectionSourceRoot(WorkspaceSpec spec) {
-        if (spec == null || spec.getEntries() == null) {
-            return null;
-        }
-        for (var entryObj : spec.getEntries().values()) {
-            if (entryObj instanceof WorkspaceProjectionEntry entry
-                    && entry.getSourceRoot() != null && !entry.getSourceRoot().isBlank()) {
-                return entry.getSourceRoot();
-            }
-        }
-        return null;
     }
 
     @Override

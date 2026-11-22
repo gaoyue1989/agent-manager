@@ -10,6 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,10 +129,33 @@ var introspectThrottle = struct {
 	last map[uint]time.Time
 }{last: map[uint]time.Time{}}
 
+// agentShortFromURI 从 X-Original-URI 反解目标 Agent short：剥离 query、按 nginx 归一化
+// 口径（百分号解码 + path.Clean 消解 ../ 与多余斜杠）取 /agent/{short} 首段；空/畸形/
+// 非 /agent/ 前缀返回空串（调用方 fail-closed），与 nginx 归一化路由保持同口径无分叉。
+func agentShortFromURI(raw string) string {
+	// 前导多斜杠与 nginx merge_slashes 同口径收敛为单斜杠：url.Parse 会把 //x 解析成
+	// authority 形态（x 成 host）而非路径
+	if strings.HasPrefix(raw, "//") {
+		raw = "/" + strings.TrimLeft(raw, "/")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	p := path.Clean("/" + u.Path)
+	rest, ok := strings.CutPrefix(p, "/agent/")
+	if !ok {
+		return ""
+	}
+	short, _, _ := strings.Cut(rest, "/")
+	return short
+}
+
 // Introspect 处理 GET /api/v1/auth/introspect：
 //   - Authorization: Bearer <JWT> → 校验签名/过期（不验空间，M9 回填决议）；
 //   - Authorization: Bearer ak-… → sha256 查 api_keys（active+未过期）；
-//     agentId 作用域经 X-Original-URI 的 /agent/{short}/ 前缀裁决；
+//     agentId 作用域按 X-Original-URI 归一化反解 /agent/{short} 裁决，并以 router 路由
+//     捕获 X-Agent-Short 交叉校验（issue #407）；
 //   - Authorization 缺失时回落 oaf_session cookie（JWT 通道，issue #373）。
 //
 // 200 回写 X-User-Id 响应头（nginx auth_request_set 取用）；401/403 fail-closed。
@@ -169,17 +195,22 @@ func (c *Core) Introspect(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"code":403,"message":"key expired"}`, http.StatusForbidden)
 			return
 		}
-		// 作用域裁决：绑定单 Agent 的 key 仅放行该 Agent 路由（X-Original-URI 由 nginx 附带）
+		// 作用域裁决（issue #407，fail-closed）：X-Original-URI 是 nginx 透传的原始请求
+		// URI（未归一化，可含 query/穿越段），按 nginx 同口径反解目标 short 后裁决；
+		// X-Agent-Short 是 router 归一化匹配出的路由捕获，非空时与反解交叉校验，
+		// 不一致（穿越/篡改/口径分叉）一律拒绝。
 		if key.AgentID != nil {
 			svc, err := c.Get(*key.AgentID)
 			if err != nil {
 				http.Error(w, `{"code":403,"message":"agent not found"}`, http.StatusForbidden)
 				return
 			}
-			prefix := "/agent/" + svc.ShortName + "/"
-			uri := r.Header.Get("X-Original-URI")
-			if uri != "" && uri != prefix && len(uri) >= len(prefix) && uri[:len(prefix)] != prefix &&
-				uri != "/agent/"+svc.ShortName {
+			target := agentShortFromURI(r.Header.Get("X-Original-URI"))
+			if hs := r.Header.Get("X-Agent-Short"); hs != "" && hs != target {
+				http.Error(w, `{"code":403,"message":"key scope mismatch"}`, http.StatusForbidden)
+				return
+			}
+			if target == "" || target != svc.ShortName {
 				http.Error(w, `{"code":403,"message":"key scope mismatch"}`, http.StatusForbidden)
 				return
 			}

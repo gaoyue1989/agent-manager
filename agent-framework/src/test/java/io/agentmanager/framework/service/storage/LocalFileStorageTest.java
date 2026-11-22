@@ -120,6 +120,24 @@ class LocalFileStorageTest {
         assertFalse(Files.exists(target.resolveSibling("b.txt.def67890.tmp")), "tmp 残留 2 已清理");
     }
 
+    /**
+     * 文件名含 glob 元字符（[ ] { } * ?）时残留 tmp 清理不得抛 PatternSyntaxException
+     * （issue #425：newDirectoryStream 第二参数是 glob 语法，`report[1.txt` 未转义即炸）。
+     */
+    @Test
+    void deleteShouldCleanupTmpFilesWithGlobMetacharFilename() throws IOException {
+        var s = storage();
+        var content = "x".getBytes(StandardCharsets.UTF_8);
+        s.write("a/report[1.txt", new ByteArrayInputStream(content), 1, "text/plain");
+        var target = tempDir.resolve("a/report[1.txt");
+        Files.writeString(target.resolveSibling("report[1.txt.abc12345.tmp"), "stale");
+
+        s.delete("a/report[1.txt");
+        assertFalse(s.exists("a/report[1.txt"), "目标文件已删");
+        assertFalse(Files.exists(target.resolveSibling("report[1.txt.abc12345.tmp")),
+            "含 glob 元字符的残留 tmp 也应清理");
+    }
+
     @Test
     void blankKeyShouldBeRejected() {
         var s = storage();

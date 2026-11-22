@@ -1,19 +1,20 @@
 -- =============================================================================
 -- agent-framework 全量建表语句（MySQL 8.0）
 -- =============================================================================
--- 来源：db/migration/V1..V15 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
+-- 来源：db/migration/V1..V18 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
 --       存量库自动 baseline；本文件为快照式全量参考，以迁移脚本为权威）
 -- 生成日期：2026-09-28（对应 commit 60dd006）；2026-10-25 增补 V10 turn_intent、
 --           V11/V12 model_config.is_default/is_fallback（对应 commit e729a67）；
 --           2026-10-27 增补 V13 turn_stop（单轮停止请求）；2026-10-29 增补
 --           V14 session_message.trace_id（Monitor 回放 ↔ Jaeger trace，issue #205）；
 --           2026-11-09 增补 V15 沙箱生命周期簿记两表 sandbox_user/sandbox_binding
---           （sandbox-pool-opensandbox-design PR-D §4.1，docs/design/ 在仓库根目录）
+--           （sandbox-pool-opensandbox-design PR-D §4.1，docs/design/ 在仓库根目录）；
+--           2026-11-22 V18 删除 kv_sync_key（issue #408 跨用户隔离修复）
 --
 -- 数据库：CHECKPOINT_JDBC_URL 指向的库（默认 agent_manager_test）
 --         CHECKPOINT_DB_NAME 可显式指定 agent_state 所在库名（未设时从 JDBC URL 解析）
 --
--- 表清单（13 张本工程表 + 2 张 SDK 表）：
+-- 表清单（12 张本工程表 + 2 张 SDK 表）：
 --   ① agent_state      SDK MysqlAgentStateStore   —— AgentState（会话状态，权威）
 --   ② agent_fs         SDK JdbcStore              —— 分布式文件系统（工作区文件）
 --   ③ session_user     会话→用户映射 + 标题(remark) + 会话模型(model)
@@ -22,13 +23,12 @@
 --   ⑥ turn_lease       turn 执行权租约（互斥）
 --   ⑦ tool_audit_log   工具调用审计日志
 --   ⑧ file_asset       上传/交付文件元数据
---   ⑨ kv_sync_key      agent_fs key → user_key 反查表
---   ⑩ model_config     托管模型配置（V11/V12 增默认/备用标记）
---   ⑪ ui_context       MCP Apps 4.7 UI 上下文
---   ⑫ turn_intent      排队 turn 意图（多副本可续传，V10）
---   ⑬ turn_stop        单轮停止请求（跨副本投递，V13）
---   ⑭ sandbox_user     单用户沙箱配额计数锚（binding_count 不变量，V15）
---   ⑮ sandbox_binding  沙箱借出簿记（uk_sandbox/uk_session + PENDING 占额行，V15）
+--   ⑨ model_config     托管模型配置（V11/V12 增默认/备用标记）
+--   ⑩ ui_context       MCP Apps 4.7 UI 上下文
+--   ⑪ turn_intent      排队 turn 意图（多副本可续传，V10）
+--   ⑫ turn_stop        单轮停止请求（跨副本投递，V13）
+--   ⑬ sandbox_user     单用户沙箱配额计数锚（binding_count 不变量，V15）
+--   ⑭ sandbox_binding  沙箱借出簿记（uk_sandbox/uk_session + PENDING 占额行，V15）
 --
 -- 非 MySQL：session_event（会话事件）已整体迁至 Redis Streams，不再建表。
 -- 未使用：agentscope-extensions-mysql 的 JdbcRemoteSnapshotClient 快照表
@@ -187,19 +187,7 @@ CREATE TABLE IF NOT EXISTS file_asset (
 
 
 -- -----------------------------------------------------------------------------
--- ⑨ kv_sync_key —— agent_fs rel_path → user_key 反查（文件权限/归属用）
--- 来源：service/FileAssetStore.java
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS kv_sync_key (
-    rel_path   VARCHAR(512) NOT NULL,
-    user_key   VARCHAR(255) NOT NULL,
-    updated_at DATETIME     NOT NULL,
-    PRIMARY KEY (rel_path)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
--- -----------------------------------------------------------------------------
--- ⑩ model_config —— 托管模型配置（/models CRUD）
+-- ⑨ model_config —— 托管模型配置（/models CRUD）
 -- 来源：service/ModelConfigStore.java + V3/V4/V11/V12 迁移
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS model_config (
@@ -228,7 +216,7 @@ CREATE TABLE IF NOT EXISTS model_config (
 
 
 -- -----------------------------------------------------------------------------
--- ⑪ ui_context —— MCP Apps 4.7 静默 UI 上下文（按会话覆盖写）
+-- ⑩ ui_context —— MCP Apps 4.7 静默 UI 上下文（按会话覆盖写）
 -- 来源：service/UiContextStore.java
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ui_context (
@@ -241,7 +229,7 @@ CREATE TABLE IF NOT EXISTS ui_context (
 
 
 -- -----------------------------------------------------------------------------
--- ⑫ turn_intent —— 排队 turn 意图（多副本可续传，V10）
+-- ⑪ turn_intent —— 排队 turn 意图（多副本可续传，V10）
 -- 来源：db/migration/V10__turn_intent.sql（SessionIntentStore）
 -- POST /threads/chat 抢 turn_lease 前登记本轮 turn id，排队等待期间刷新的客户端
 -- 经 GET /status 拿到 turn id 后用 GET /subscribe?replyId= 续传。
@@ -261,7 +249,7 @@ CREATE TABLE IF NOT EXISTS turn_intent (
 
 
 -- -----------------------------------------------------------------------------
--- ⑬ turn_stop —— 单轮停止请求（跨副本投递，V13）
+-- ⑫ turn_stop —— 单轮停止请求（跨副本投递，V13）
 -- 来源：db/migration/V13__turn_stop.sql（TurnStopStore）
 -- POST /threads/{sessionId}/stop 写行；持有该 turn 的副本每秒全量读取并按
 -- reply_id 匹配本地活跃 turn，再调 SDK 按会话 interrupt。reply_id 是栅栏：
@@ -281,7 +269,7 @@ CREATE TABLE IF NOT EXISTS turn_stop (
 
 
 -- -----------------------------------------------------------------------------
--- ⑭ sandbox_user —— 用户沙箱配额计数锚（V15）
+-- ⑬ sandbox_user —— 用户沙箱配额计数锚（V15）
 -- 来源：db/migration/V15__sandbox_binding.sql（sandbox-pool-opensandbox-design §4.1，PR-D）。
 -- 职责边界：TTL 真相在 OpenSandbox 服务端（expiresAt + 到期 GC），本表仅是
 -- LRU 排序缓存 + 单用户配额仲裁锚点；「执行中 turn」事实源仍是 turn_lease
@@ -300,7 +288,7 @@ CREATE TABLE IF NOT EXISTS sandbox_user (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- -----------------------------------------------------------------------------
--- ⑮ sandbox_binding —— 沙箱借出簿记（V15，同上来源）
+-- ⑭ sandbox_binding —— 沙箱借出簿记（V15，同上来源）
 -- 绑定表：user/session ↔ sandbox 簿记。绑定行不会在会话结束时删除（框架无会话结束信号），
 -- 沙箱到期后行仍在，由 acquire 懒剔除（正确性）+ SessionCleanupService 定时清理（容量）双轨回收。
 -- -----------------------------------------------------------------------------

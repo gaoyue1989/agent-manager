@@ -1,12 +1,16 @@
 package io.agentmanager.framework.service;
 
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AllToolsDeniedEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.message.ToolCallState;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
@@ -28,10 +32,15 @@ import reactor.core.publisher.Flux;
  * ActingInput.toolCalls() 落（payload 不落——审计仅元信息，工具名/id 已有列）；
  * ToolResultEndEvent 由工具执行内核发出、全链路可见，RESULT 行仍取事件侧（携带
  * 终态 result_state）。无终态的中断调用只剩 START 行（明细按「未落终态」展示）。
+ * HITL 场景同一调用经两次 onActing（挂起询问轮 + 确认恢复轮）：恢复轮调用携带
+ * ALLOWED/ASKING 状态，START 行跳过防双写；用户拒绝时 SDK 在本中间件之外合成
+ * DENIED 结果、链内只发 AllToolsDeniedEvent——据此补写 RESULT 行与 error 计数。
  *
  * <p><b>指标</b>：Micrometer 计数 {@code oaf.tool.calls}，标签 service（OAF slug）、
  * tool、result（success / error——非 SUCCESS 终态一律按 error 桶，与 Monitor
- * 问题口径一致）。Prometheus 暴露为 oaf_tool_calls_total，平台观测面板经 PromQL 聚合。
+ * 问题口径一致）。tool 标签只认 toolkit 已注册工具名，未注册/幻觉名归 __unknown__
+ * 桶（Meter 不回收，模型输出任意字符串不能无界新增序列）。Prometheus 暴露为
+ * oaf_tool_calls_total，平台观测面板经 PromQL 聚合。
  *
  * <p><b>执行位置</b>：注册于 ToolFilterMiddleware / ProtocolDenyRulesMiddleware 内侧
  * （先注册者更外层），被过滤/DENY 短路的调用不经过本层——只计真实执行的调用。
@@ -45,17 +54,24 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
     /** Micrometer 计数名（Prometheus：oaf_tool_calls_total） */
     static final String METRIC_NAME = "oaf.tool.calls";
 
+    /** 未注册/幻觉工具名的指标标签归桶（Micrometer Meter 不回收，原样标签会无界增长序列） */
+    static final String UNKNOWN_TOOL_LABEL = "__unknown__";
+
     private final MeterRegistry meterRegistry;
     private final ToolAuditStore toolAuditStore;
     private final SessionKeyResolver sessionKeyResolver;
     private final String serviceSlug;
+    /** toolkit 已注册工具名（懒取——构造时 harness 内置工具尚未注册完）；null = 不归桶 */
+    private final Supplier<Set<String>> registeredToolNames;
 
     public ToolCallObservabilityMiddleware(MeterRegistry meterRegistry, ToolAuditStore toolAuditStore,
-                                          SessionKeyResolver sessionKeyResolver, String serviceSlug) {
+                                          SessionKeyResolver sessionKeyResolver, String serviceSlug,
+                                          Supplier<Set<String>> registeredToolNames) {
         this.meterRegistry = meterRegistry;
         this.toolAuditStore = toolAuditStore;
         this.sessionKeyResolver = sessionKeyResolver;
         this.serviceSlug = serviceSlug;
+        this.registeredToolNames = registeredToolNames;
     }
 
     @Override
@@ -64,11 +80,12 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         String sessionId = sessionKeyResolver != null && ctx != null
             ? sessionKeyResolver.canonicalSessionId(ctx)
             : ctx == null ? null : ctx.getSessionId();
-        // START 行：入口直接落（ToolCallStartEvent 在本层外才汇入事件流，内层不可见）
+        // START 行：入口直接落（ToolCallStartEvent 在本层外才汇入事件流，内层不可见）；
+        // HITL 恢复轮（ALLOWED=确认放行 / ASKING=确认拒绝）已在挂起询问轮落过，跳过防双写
         List<ToolUseBlock> calls = input.toolCalls();
         if (calls != null) {
             for (ToolUseBlock call : calls) {
-                if (call != null && call.getName() != null) {
+                if (call != null && call.getName() != null && !isResumedCall(call)) {
                     auditStart(sessionId, call.getName(), call.getId());
                 }
             }
@@ -80,8 +97,24 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
                     count(end.getToolCallName(), success);
                     auditResult(end, sessionId, end.getToolCallName(), end.getToolCallId(),
                         success ? "success" : "error");
+                } else if (evt instanceof AllToolsDeniedEvent denied) {
+                    // HITL 拒绝：SDK 在本中间件之外合成 DENIED 结果，链内只发本事件——
+                    // 据此补写 RESULT 行与计数（非 SUCCESS 终态按 error 桶，口径同上）
+                    for (ToolUseBlock call : denied.getDeniedToolCalls()) {
+                        if (call == null || call.getName() == null) {
+                            continue;
+                        }
+                        count(call.getName(), false);
+                        auditResult(evt, sessionId, call.getName(), call.getId(), "error");
+                    }
                 }
             });
+    }
+
+    /** HITL 恢复轮的调用（挂起询问轮已落过 START 行）：SDK 确认放行置 ALLOWED、拒绝保持 ASKING */
+    private static boolean isResumedCall(ToolUseBlock call) {
+        var state = call.getState();
+        return state == ToolCallState.ALLOWED || state == ToolCallState.ASKING;
     }
 
     private void count(String toolName, boolean success) {
@@ -91,11 +124,27 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         try {
             meterRegistry.counter(METRIC_NAME,
                 "service", serviceSlug == null ? "unknown" : serviceSlug,
-                "tool", toolName,
+                "tool", metricToolLabel(toolName),
                 "result", success ? "success" : "error").increment();
         } catch (Exception e) {
             // 指标 best-effort，不影响工具执行
         }
+    }
+
+    /** 指标 tool 标签只认 toolkit 已注册工具名，未注册/幻觉名归 __unknown__ 桶（审计行保留实名） */
+    private String metricToolLabel(String toolName) {
+        if (registeredToolNames == null) {
+            return toolName;
+        }
+        try {
+            Set<String> names = registeredToolNames.get();
+            if (names != null && !names.contains(toolName)) {
+                return UNKNOWN_TOOL_LABEL;
+            }
+        } catch (Exception e) {
+            // 名单供给失败 fail-soft：保持原样标签
+        }
+        return toolName;
     }
 
     private void auditStart(String sessionId, String toolName, String toolCallId) {
