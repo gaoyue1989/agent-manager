@@ -7,6 +7,8 @@
 > ② **新增跨副本 Redis 共享层 `ScopedFingerprintStore`**（键 `<agentRedisPrefix>sbx:scopedfp:{sandboxId}|{scope}`，TTL 7 天，读/写 fail-open，`ScopedFingerprintStore.java`）：**Pod 级三表仍为主读路径**，Pod miss 才回落共享层、命中时回填 Pod 指纹/scope 两表，投放成功后 Pod 级 + 共享层双写（`OpenSandboxFilesystemSpec.java:152-176`）——并非「Pod 三表降级为回填层」。
 > ③ **scoped 投放移出首推理关键路径**：不再随每 call `hydrateForCall` 同步执行（`OpenSandbox.java:358-363`「不再在此处跑」），改为 doExec/readWorkspaceFile/downloadFile 命中 `.skills-cache` 时同步投放（CAS 每 call 一次；downloadFile 补漏）+ `stop()` 收尾若本 call 从未投放则补投。
 
+> **键布局演进（2026-11-22，issue #393）**——②的共享层键从 per-scope 独立 key `sbx:scopedfp:{sandboxId}|{scope}` 改为**沙箱代单槽** `sbx:scopedfp:{sandboxId}`，值=`{scope}|{mode}|{指纹}`，put 原子覆盖（`ScopedFingerprintStore`）：容器内 prune「同代只存一个有效 scope」（SkillsFarm 收敛 exec 尾段清其它 scope 目录）的物理事实在 per-scope key 布局下不反映到记账——Pod 切 scope 后其他副本仍能凭被 prune scope 的陈旧共享记录命中稳态并回填 Pod 级表伪造短路，技能执行面全废；单槽覆盖使旧 scope 记账随新 scope 投放自然失效。**Pod 级命中路径同步闭合（同日评审 g1）**：Pod 级两表（`scopedSkillCacheFingerprints`/`hydratedScopedScopes`）同为无跨副本失效机制的本 Pod 信念，同代 A→B→A 序列回落原 Pod 仍可凭陈旧本地记录伪造稳态——`scopedSkillCacheFingerprint` 的 Pod 命中分支现读单槽 scope 段交叉核验（`ScopedFingerprintStore.slotScope`，+1 次 Redis GET/稳态 call，D-10 的 0-exec 稳态保持：GET 亚毫秒级 vs 被替代的 ≈1s 收敛 exec），槽 scope≠请求 scope 即权威否定（清除本 Pod 该 scope 两表记录并返回 null 重收敛）；槽缺失/Redis 不可达=未知，fail-open 维持本 Pod 信念不清本地（滚动窗口内旧布局副本不写槽=维持存量行为）。键收口到 `facade.key` 统一前缀（旧布局本就漏 `AGENT_REDIS_PREFIX`，违反门面契约）；存量旧布局 key 永不被新布局读取（新键无 `|` 且带前缀），≤7 天 TTL 自然消亡，无迁移。
+
 ## 1. 问题清单（66MB/2000f 真实环境基准，2026-11-09）
 
 每 call（turn）技能同步链路实测分布（改造前）：
