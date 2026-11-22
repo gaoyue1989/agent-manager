@@ -6,7 +6,9 @@ import java.util.function.Function;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AllToolsDeniedEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.message.ToolCallState;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
@@ -28,6 +30,9 @@ import reactor.core.publisher.Flux;
  * ActingInput.toolCalls() 落（payload 不落——审计仅元信息，工具名/id 已有列）；
  * ToolResultEndEvent 由工具执行内核发出、全链路可见，RESULT 行仍取事件侧（携带
  * 终态 result_state）。无终态的中断调用只剩 START 行（明细按「未落终态」展示）。
+ * HITL 场景同一调用经两次 onActing（挂起询问轮 + 确认恢复轮）：恢复轮调用携带
+ * ALLOWED/ASKING 状态，START 行跳过防双写；用户拒绝时 SDK 在本中间件之外合成
+ * DENIED 结果、链内只发 AllToolsDeniedEvent——据此补写 RESULT 行与 error 计数。
  *
  * <p><b>指标</b>：Micrometer 计数 {@code oaf.tool.calls}，标签 service（OAF slug）、
  * tool、result（success / error——非 SUCCESS 终态一律按 error 桶，与 Monitor
@@ -64,11 +69,12 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         String sessionId = sessionKeyResolver != null && ctx != null
             ? sessionKeyResolver.canonicalSessionId(ctx)
             : ctx == null ? null : ctx.getSessionId();
-        // START 行：入口直接落（ToolCallStartEvent 在本层外才汇入事件流，内层不可见）
+        // START 行：入口直接落（ToolCallStartEvent 在本层外才汇入事件流，内层不可见）；
+        // HITL 恢复轮（ALLOWED=确认放行 / ASKING=确认拒绝）已在挂起询问轮落过，跳过防双写
         List<ToolUseBlock> calls = input.toolCalls();
         if (calls != null) {
             for (ToolUseBlock call : calls) {
-                if (call != null && call.getName() != null) {
+                if (call != null && call.getName() != null && !isResumedCall(call)) {
                     auditStart(sessionId, call.getName(), call.getId());
                 }
             }
@@ -80,8 +86,24 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
                     count(end.getToolCallName(), success);
                     auditResult(end, sessionId, end.getToolCallName(), end.getToolCallId(),
                         success ? "success" : "error");
+                } else if (evt instanceof AllToolsDeniedEvent denied) {
+                    // HITL 拒绝：SDK 在本中间件之外合成 DENIED 结果，链内只发本事件——
+                    // 据此补写 RESULT 行与计数（非 SUCCESS 终态按 error 桶，口径同上）
+                    for (ToolUseBlock call : denied.getDeniedToolCalls()) {
+                        if (call == null || call.getName() == null) {
+                            continue;
+                        }
+                        count(call.getName(), false);
+                        auditResult(evt, sessionId, call.getName(), call.getId(), "error");
+                    }
                 }
             });
+    }
+
+    /** HITL 恢复轮的调用（挂起询问轮已落过 START 行）：SDK 确认放行置 ALLOWED、拒绝保持 ASKING */
+    private static boolean isResumedCall(ToolUseBlock call) {
+        var state = call.getState();
+        return state == ToolCallState.ALLOWED || state == ToolCallState.ASKING;
     }
 
     private void count(String toolName, boolean success) {

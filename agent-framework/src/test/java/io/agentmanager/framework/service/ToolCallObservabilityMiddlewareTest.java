@@ -21,8 +21,10 @@ import org.mockito.InOrder;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AllToolsDeniedEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.message.ToolCallState;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
@@ -190,6 +192,92 @@ class ToolCallObservabilityMiddlewareTest {
             eq("TOOL_CALL_START"), isNull(), isNull());
         assertEquals(0.0, registry.find("oaf.tool.calls").counters().stream()
             .mapToDouble(c -> c.count()).sum());
+    }
+
+    /**
+     * HITL 确认放行（issue #421）：同一 tool call 经两次 onActing——挂起询问轮（fresh
+     * 调用，state 未置）与确认恢复轮（SDK 已在上下文把它标为 ALLOWED）。START 行只允许
+     * 在询问轮落一次，恢复轮不得双写。
+     */
+    @Test
+    void shouldNotDoubleWriteStartRowOnHitlApproveResumePass() {
+        when(resolver.canonicalSessionId(any())).thenReturn("sess-1");
+        var middleware = new ToolCallObservabilityMiddleware(
+            registry, auditStore, resolver, "my-agent");
+
+        // 第 1 轮：挂起询问——入口落 START，流内无 ToolResultEndEvent
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "shell"))),
+                i -> Flux.empty())
+            .blockLast();
+        // 第 2 轮：确认放行恢复——SDK 把调用标为 ALLOWED 后重新进入 acting 并真实执行
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "shell")
+                    .withState(ToolCallState.ALLOWED))),
+                i -> stream(new ToolResultEndEvent("r1", "call-1", "shell",
+                    ToolResultState.SUCCESS)))
+            .blockLast();
+
+        verify(auditStore, times(1)).record(eq("sess-1"), eq("shell"), eq("call-1"),
+            eq("TOOL_CALL_START"), isNull(), isNull());
+        verify(auditStore, times(1)).record(eq("sess-1"), eq("shell"), eq("call-1"),
+            eq("TOOL_RESULT_END"), eq("success"), anyString());
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "shell").tag("result", "success").counter().count());
+    }
+
+    /**
+     * HITL 全量拒绝（issue #421）：恢复轮 SDK 在本中间件之外合成 DENIED 结果，链内只发
+     * AllToolsDeniedEvent（ASKING 状态调用重进 acting）——必须据此补写 RESULT 行并计数
+     * （非 SUCCESS 终态按 error 桶，与既有口径一致），且 START 行不因恢复轮双写。
+     */
+    @Test
+    void shouldRecordResultAndCountOnAllToolsDeniedResumePass() {
+        when(resolver.canonicalSessionId(any())).thenReturn("sess-1");
+        var middleware = new ToolCallObservabilityMiddleware(
+            registry, auditStore, resolver, "my-agent");
+
+        // 第 1 轮：挂起询问——START 已落
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "shell"))),
+                i -> Flux.empty())
+            .blockLast();
+        // 第 2 轮：用户拒绝恢复——ASKING 状态重进 acting，链内只有 AllToolsDeniedEvent
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "shell")
+                    .withState(ToolCallState.ASKING))),
+                i -> stream(new AllToolsDeniedEvent(List.of(
+                    toolCall("call-1", "shell").withState(ToolCallState.ASKING)))))
+            .blockLast();
+
+        verify(auditStore, times(1)).record(eq("sess-1"), eq("shell"), eq("call-1"),
+            eq("TOOL_CALL_START"), isNull(), isNull());
+        verify(auditStore, times(1)).record(eq("sess-1"), eq("shell"), eq("call-1"),
+            eq("TOOL_RESULT_END"), eq("error"), anyString());
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "shell").tag("result", "error").counter().count());
+    }
+
+    /** 拒绝恢复轮的 RESULT 行按 denied 调用逐个落（批量拒绝各自可见、各自计数） */
+    @Test
+    void shouldRecordResultRowPerDeniedCallOnAllToolsDenied() {
+        var middleware = new ToolCallObservabilityMiddleware(
+            registry, auditStore, resolver, "my-agent");
+
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "shell"), toolCall("call-2", "read_file"))),
+                i -> stream(new AllToolsDeniedEvent(List.of(
+                    toolCall("call-1", "shell"), toolCall("call-2", "read_file")))))
+            .blockLast();
+
+        verify(auditStore).record(any(), eq("shell"), eq("call-1"),
+            eq("TOOL_RESULT_END"), eq("error"), anyString());
+        verify(auditStore).record(any(), eq("read_file"), eq("call-2"),
+            eq("TOOL_RESULT_END"), eq("error"), anyString());
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "shell").tag("result", "error").counter().count());
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "read_file").tag("result", "error").counter().count());
     }
 
     /** 事件流中的 ToolCallStartEvent 不触发二次写入（START 行唯一来源 = ActingInput 入口） */
