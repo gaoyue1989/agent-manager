@@ -2609,8 +2609,9 @@ class OpenSandboxTest {
 
     @Test
     void farmFingerprintUnknownShouldPreserveLinksAndSkipOrphanDiff() throws Exception {
-        // issue #355：端点 skills 目录瞬时 I/O 异常（此处以删除目录模拟 walk 抛错）→ ERR-
-        // 版本 + 空清单 → 指纹未知仍收敛。收敛执行孤儿差集的空候选形态（case '|'）会把
+        // issue #355：端点 skills 目录瞬时 I/O 异常（端点 version 计算失败 → ERR-
+        // 版本 + 空清单，issue #397 后目录缺失=健康空源故以端点故障注入模拟）→ 指纹未知仍收敛。
+        // 收敛执行孤儿差集的空候选形态（case '|'）会把
         // scope 内全部有效软链删光且 exit 0 记账旧指纹、稳态短路吞掉恢复收敛——指纹未知
         // 时必须跳过孤儿差集段（保留现状等恢复），prune/禁用清理语义不变
         var host = java.nio.file.Files.createTempDirectory("farm-err");
@@ -2640,12 +2641,15 @@ class OpenSandboxTest {
         verify(osb.commands(), atLeastOnce()).run(beforeCaptor.capture());
         var beforeCall2 = beforeCaptor.getAllValues().size();
 
-        // 指纹源损坏（同会话后续 call）：gate 已记忆 farm，收敛照常触发，但端点 ERR-
-        try (var walk = java.nio.file.Files.walk(cfg.resolve("skills"))) {
-            walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
-        }
+        // 端点真实 I/O 故障（同会话后续 call）：gate 已记忆 farm，收敛照常触发，但端点 ERR-。
+        // issue #397 后删除/缺失 skills 目录 = 健康空源（稳定空版本），不再是指纹未知——
+        // 故障注入改为端点 version 计算失败（同 ERR-* 输出约定）
+        var brokenSvc = org.mockito.Mockito.mock(SkillBundleService.class);
+        org.mockito.Mockito.when(brokenSvc.currentVersion())
+            .thenReturn(new SkillBundleService.SkillVersion(
+                SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, java.util.List.of()));
         var call2 = new OpenSandbox(farmState(host, "sbx-farm-err"), osb,
-            farmOptions(svc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            farmOptions(brokenSvc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
             null, null, spec);
         bindFarmSession(call2, "sess-A");
         call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
