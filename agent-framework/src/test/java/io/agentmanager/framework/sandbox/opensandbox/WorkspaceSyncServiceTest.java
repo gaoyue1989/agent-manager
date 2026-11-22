@@ -941,11 +941,9 @@ class WorkspaceSyncServiceTest {
         java.nio.file.Files.createDirectories(baselineSkillDir);
         java.nio.file.Files.writeString(baselineSkillDir.resolve("SKILL.md"), baselineMd);
         java.nio.file.Files.writeString(baselineSkillDir.resolve("ref.txt"), baselineRef);
-        // 修改版技能：同布局，SKILL.md 内容不同（size 不同）
-        var modifiedSkillDir = packageDir.resolve("modified-skill");
-        java.nio.file.Files.createDirectories(modifiedSkillDir);
-        java.nio.file.Files.writeString(modifiedSkillDir.resolve("SKILL.md"), "---\nname: modified-skill\n---\nbase");
-        byte[] modifiedBytes = java.nio.file.Files.readAllBytes(modifiedSkillDir.resolve("SKILL.md"));
+        // 用户改过的技能：只存在于容器（包内无此技能目录，基线比对天然不命中 → 必须回写）；
+        // 若放进包目录且与容器内容一致，isPurePackageBaseline 正确判纯基线跳过（曾致本测试假红）
+        var modifiedBytes = "---\nname: modified-skill\n---\nuser-edited".getBytes(StandardCharsets.UTF_8);
 
         var files = mock(Filesystem.class);
         var baselineSkillEntry = dirEntry("/workspace/skills/baseline-skill");
@@ -963,12 +961,14 @@ class WorkspaceSyncServiceTest {
             .thenReturn(List.of(modifiedMdEntry));
         when(files.readFile("/workspace/skills/modified-skill/SKILL.md"))
             .thenReturn(new String(modifiedBytes, StandardCharsets.UTF_8));
+        when(files.readFile("/workspace/skills/baseline-skill/SKILL.md")).thenReturn(baselineMd);
         var osb = mock(Sandbox.class);
         when(osb.files()).thenReturn(files);
 
         var svc = new WorkspaceSyncService(new WorkspaceReader(distributedStore(store), AGENT),
             true, packageDir, true);
         svc.syncBack(USER, osb);
+        verify(files, never()).readFile("/workspace/skills/baseline-skill/SKILL.md");
 
         var fs = new RemoteFilesystem(store, List.of("agents", AGENT, "users", USER, "skills"));
         var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
