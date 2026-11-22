@@ -333,6 +333,44 @@ public final class SkillZipSupport {
         return null;
     }
 
+    /**
+     * 技能目录的打包规范名（issue #398）：SKILL.md frontmatter {@code name} 优先——SDK 提示词
+     * 渲染（MarketplaceStager Cached → ShellPathPolicy）按 {@code skill.getName()}（frontmatter
+     * name）推导容器内路径 {@code /workspace/.skills-cache/<scope>/<ns>/<name>}，farm 建链
+     * （version.skills 清单）与 bundle 解包顶层（{@code /skills-store/CURRENT/<name>}）必须以
+     * 同一规范名对齐，否则按提示词路径访问 404。
+     *
+     * <p>回落目录名：SKILL.md 缺失 / 无 frontmatter / 无 name / 解析抛异常（二进制 SKILL.md，
+     * {@link #extractSkillName} 契约）；以及规范名不 shell-safe（含 {@code ..}、引号、空白、
+     * {@code /}、以 {@code /} 开头——与 SkillsFarm 链名防线同规则，规范名进 tar rel 与容器
+     * 命令拼接，不得改写名字，改写会再次与 SDK 渲染口径错位）。禁用集键保持目录名口径
+     * （toggleSkill 按目录 resolve 校验），不受本规范名影响。
+     */
+    public static String canonicalSkillName(Path skillDir) {
+        var dirName = skillDir.getFileName().toString();
+        String frontmatter;
+        try {
+            frontmatter = extractSkillName(skillDir.resolve("SKILL.md"));
+        } catch (IOException | RuntimeException e) {
+            return dirName;
+        }
+        if (frontmatter == null || frontmatter.isBlank()) {
+            return dirName;
+        }
+        return isShellSafeSegment(frontmatter) ? frontmatter : dirName;
+    }
+
+    /** 单路径段 shell-safe（不含 {@code ..} / 引号 / 空白 / {@code /} / 以 {@code /} 开头） */
+    private static boolean isShellSafeSegment(String name) {
+        if (name == null || name.isBlank() || name.startsWith("/")) {
+            return false;
+        }
+        if (name.contains("'") || name.contains("..") || name.contains("/")) {
+            return false;
+        }
+        return name.chars().allMatch(c -> c > 32);
+    }
+
     /** 技能名安全化：只允许字母、数字、中文、下划线、连字符、点；不允许以 . 开头 */
     public static String sanitizeSkillName(String name) {
         if (name == null || name.isBlank()) {
