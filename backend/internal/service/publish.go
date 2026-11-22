@@ -364,8 +364,25 @@ func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 // 引用不成立，服务 ns 无消费方；轮换=本入口同值更新 + 池 Pod 重建，单写入口即服务
 // env 表单）；无该键不产出对象，且存量 token Secret 同步撤销（不变量：池 ns token
 // Secret 存在 ⇔ env 携带非空 SKILLSYNC_TOKEN，issue #350——先 SecretExists 确认存在
-// 再删，无该键的常规发布零 delete 调用、不依赖 RBAC delete 授权）。
+// 再删，无该键的常规发布零 delete 调用、不依赖 RBAC delete 授权）。撤销意图分支在写
+// 服务两级对象之前复核绑定池（issue #396）：池模板 secretKeyRef 引用该 Secret，绑定池
+// 在运行/管理面不可达时拒绝撤销（ErrConflict → 409）——守卫前移保证拒绝零副作用
+// （EnsureSecret 整体替换 Data，若先写后拒，UpdateEnv 的 K8s 与 DB env_secret_json
+// 静默漂移）；轮换/常规发布调用序列不变，零新增上游调用。
 func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
+	revoke := false
+	if p.EnvSecret[k8s.SkillsyncTokenEnvKey] == "" {
+		exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
+		if err != nil {
+			return fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
+		}
+		if exists {
+			if err := c.guardBoundSandboxPool(p.K8sName, "撤销技能同步 token"); err != nil {
+				return err
+			}
+			revoke = true
+		}
+	}
 	if err := c.K8s.EnsureConfigMap(k8s.EnvConfigMap(p)); err != nil {
 		return fmt.Errorf("configmap: %w", err)
 	}
@@ -379,11 +396,7 @@ func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
 		}
 		return nil
 	}
-	exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
-	if err != nil {
-		return fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
-	}
-	if !exists {
+	if !revoke {
 		return nil
 	}
 	if err := c.K8s.DeleteSecret(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName)); err != nil {
@@ -684,7 +697,7 @@ func (c *Core) Delete(id uint) error {
 	// 删除守卫（issue #359）：绑定池 {k8sName}-pool 仍在上游运行时拒绝——本函数下方
 	// 连带删除的池 ns token Secret 被池模板 secretKeyRef 引用，池新 Pod 会卡
 	// CreateContainerConfigError、池容量静默退化；建池门只护建池，Delete 复核同一前提。
-	if err := c.guardBoundSandboxPool(svc.K8sName); err != nil {
+	if err := c.guardBoundSandboxPool(svc.K8sName, "删除服务"); err != nil {
 		return err
 	}
 	ns := c.Cfg.Namespace
