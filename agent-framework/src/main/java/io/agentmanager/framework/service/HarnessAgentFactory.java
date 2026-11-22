@@ -276,12 +276,14 @@ public class HarnessAgentFactory {
                 .middleware(new io.agentmanager.framework.service.protocol.ProtocolDenyRulesMiddleware())
                 // 工具调用观测（指标计数 + 审计单一写点，覆盖全部协议链路）：置于工具过滤链
                 // 内侧（ToolFilter/ProtocolDeny 短路不经过本层），只计真实执行的调用；
-                // sessionKeyResolver 复用上方同一实例（turn 级 memo 共享）
+                // sessionKeyResolver 复用上方同一实例（turn 级 memo 共享）；toolkit 名单
+                // 懒取（harness 内置工具构造后才注册），未注册/幻觉工具名指标归 __unknown__
                 .middleware(new ToolCallObservabilityMiddleware(
                     meterRegistryProvider != null ? meterRegistryProvider.getIfAvailable() : null,
                     toolAuditStore,
                     sessionKeyResolver,
-                    oafConfig.slug()))
+                    oafConfig.slug(),
+                    toolkit::getToolNames))
                 // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
                 // 供 MCP 工具调用走 _meta / userHeaders 双通道（Channel 链路按 session 反查真实 userId）
                 .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))
