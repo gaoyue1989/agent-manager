@@ -79,10 +79,10 @@ final class SkillsFarm {
         return true;
     }
 
-    /** 农场开关（§6.4，PR-4b 语义）：SANDBOX_SKILLS_SHARED_STORE 空 = 包技能不投放（总闸，无 tar 回落） */
+    /** 农场开关（§6.4，PR-4b 语义；issue #392 起空或 off = 关闸，off 为平台可送达形态）：包技能不投放（总闸，无 tar 回落） */
     private boolean enabled() {
-        var store = options != null ? options.getSkillsSharedStore() : null;
-        return store != null && !store.isBlank();
+        return !OpenSandboxClientOptions.skillsSharedStoreOff(
+            options != null ? options.getSkillsSharedStore() : null);
     }
 
     /** 农场会话键（与 session_user 规范键同源）：middleware/ctx 已解析的 userKey，缺失时 spec ThreadLocal 兜底 */
