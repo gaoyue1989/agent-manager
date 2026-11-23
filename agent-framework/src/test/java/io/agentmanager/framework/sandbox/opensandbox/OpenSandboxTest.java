@@ -1623,6 +1623,68 @@ class OpenSandboxTest {
             "read 侧同口径 __EMPTY__");
     }
 
+    /** issue #423 回归：容器内本轮新写、尚未回写 KV 的记忆文件，read 能读而 test -e 不得答 no */
+    @Test
+    void readThroughContainerFreshMemoryShouldAnswerConsistentlyAcrossReadAndTestExists() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var ctx = RuntimeContext.builder().userId("u1").build();
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        when(filesMock.readByteArray("/workspace/MEMORY.md"))
+            .thenReturn("fresh memory".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(filesMock.readByteArray("/workspace/memory/insight.md"))
+            .thenReturn("fresh insight".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(filesMock.readByteArray("/workspace/memory")).thenThrow(sandboxApi404());
+        when(filesMock.listDirectory("/workspace/memory"))
+            .thenReturn(List.of(fileEntry("/workspace/memory/insight.md")));
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var readRoot = sandbox.exec(ctx, probeRead("/workspace/MEMORY.md", 10), 30);
+        assertEquals("fresh memory", readRoot.stdout(), "容器优先：read 读到本轮新写内容");
+
+        var existsRoot = sandbox.exec(ctx, "test -e '/workspace/MEMORY.md' && echo yes || echo no", 30);
+        assertEquals("yes", existsRoot.stdout(),
+            "test -e 必须与 read 同口径（容器存在 || KV 存在，issue #423）");
+
+        var readLeaf = sandbox.exec(ctx, probeRead("/workspace/memory/insight.md", 10), 30);
+        assertEquals("fresh insight", readLeaf.stdout(), "容器优先：read 读到本轮新写内容");
+
+        var existsLeaf = sandbox.exec(ctx, "test -e '/workspace/memory/insight.md' && echo yes || echo no", 30);
+        assertEquals("yes", existsLeaf.stdout(),
+            "memory/ 一级 .md 容器新写时 test -e 必须与 read 同口径（issue #423）");
+
+        var existsDir = sandbox.exec(ctx, "test -e '/workspace/memory' && echo yes || echo no", 30);
+        assertEquals("yes", existsDir.stdout(),
+            "memory/ 目录容器存在时 test -e 不得只凭 KV 清单判 no（issue #423）");
+    }
+
+    /** issue #423 对照组：容器缺失时 KV 回落仍生效——test -e memory/ 依 KV 清单答 yes */
+    @Test
+    void readThroughTestExistsMemoryDirShouldFallBackToKvWhenContainerMissing() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "memory/insight.md", "# kv insight\n");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).readByteArray(org.mockito.ArgumentMatchers.anyString());
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).listDirectory(org.mockito.ArgumentMatchers.anyString());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        assertEquals("yes", sandbox.exec(ctx, "test -e '/workspace/memory' && echo yes || echo no", 30).stdout(),
+            "容器全缺失 + KV 清单有 memory/ 文件 → 目录探测 yes（回落语义保持）");
+    }
+
     /** D1：SDK edit_file 形态（python3 -c + base64 载荷，路径不可见）的真实 exec 也要触发补注入 */
     @Test
     @SuppressWarnings("unchecked")

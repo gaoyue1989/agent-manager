@@ -999,30 +999,14 @@ public class OpenSandbox extends AbstractBaseSandbox
      * test -e 翻译（first-reasoning D5）：一次<b>父目录列举</b>判存在（文件/目录通吃）——
      * 历史实现「先 readByteArray 再 listDirectory」对目录必付一次 500 异常路径、对不存在
      * 路径付两次 404；父目录列举异常时回落旧两步实现（边角语义不回退）。
-     * 记忆路径在读穿模式下先查 KV（容器缺失时父列举会误判不存在）。
+     * 记忆路径在读穿模式下与 {@link #translateRead} 同口径：容器优先判定，容器确定缺失
+     * 才回落 KV（issue #423）——KV 优先会让容器内本轮新写、尚未回写 KV 的文件被 test -e
+     * 判 no，与 read 的容器命中自相矛盾。
      *
      * @return null = 父列举命中 type=symlink 条目，存在性由 shell 裁决（悬空链 no、
      *         有效链 yes/no），回落原 test -e 真 exec（issue #394）
      */
     private Boolean translateExists(String relPath) throws Exception {
-        if (runtimeReadThroughEnabled && workspaceReader != null && userKey != null && !userKey.isBlank()) {
-            var rel = normalizeRel(relPath);
-            if (isMemoryRelPath(rel) && WorkspaceReader.MEMORY_DIR.equals(rel)) {
-                return workspaceReader.listRuntimeFiles(userKey).keySet().stream()
-                    .anyMatch(k -> k.startsWith(WorkspaceReader.MEMORY_DIR + "/"));
-            }
-            if (WorkspaceReader.MEMORY_FILE.equals(rel)) {
-                // 根级 MEMORY.md（issue #356）：read 探针同路径经 isMemoryRelPath 回落 KV，
-                // 存在性判定必须同口径——KV 点查非 null 即存在（空内容 → yes，与 read 的
-                // __EMPTY__ 一致）
-                return workspaceReader.readMemoryFile(userKey, rel) != null;
-            }
-            if (rel != null && rel.startsWith(WorkspaceReader.MEMORY_DIR + "/")
-                    && rel.endsWith(".md") && rel.indexOf('/', WorkspaceReader.MEMORY_DIR.length() + 1) < 0) {
-                // memory/ 一级 .md 文件：容器缺失（未注入）时父列举必误判，先查 KV 点查
-                return workspaceReader.readMemoryFile(userKey, rel) != null;
-            }
-        }
         var normalized = normalizeRel(relPath);
         // 父目录列举仅对工作区相对路径/工作区内绝对路径生效：非工作区绝对路径（/etc/hosts 等）
         // 不得改写成 /workspace 镜像路径判存在，直接回落旧两步实现
@@ -1042,7 +1026,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                             return true;
                         }
                     }
-                    return false;
+                    return memoryKvExists(relPath);
                 }
             } catch (Exception ignoreParent) {
                 // 父目录列举失败（适配器差异等）→ 回落旧两步实现
@@ -1059,14 +1043,36 @@ public class OpenSandbox extends AbstractBaseSandbox
         }
         try {
             var entries = osbSandbox.files().listDirectory(relPath);
-            return entries != null;
+            return entries != null ? Boolean.TRUE : memoryKvExists(relPath);
         } catch (SandboxApiException e) {
-            // 两层均 404 = 确定缺失（false）；其余异常向上抛回落真 exec（test -e / test -d）
+            // 两层均 404 = 确定缺失 → 记忆路径回落 KV；其余异常向上抛回落真 exec（test -e / test -d）
             if (isPathMissing(e)) {
-                return false;
+                return memoryKvExists(relPath);
             }
             throw e;
         }
+    }
+
+    /**
+     * 容器判定缺失后的读穿 KV 回落（issue #423）：{@code 容器存在 || KV 存在} 与 translateRead
+     * 的 404 回落同口径。命中范围 = KV 运行时键形态（WorkspaceReader.isRuntimeFileKey 同形）：
+     * memory/ 目录按运行时清单判存在，MEMORY.md 与 memory/ 一级 .md 按点查判存在
+     * （KV 空内容 → yes，与 read 的 __EMPTY__ 一致，issue #356）；非记忆路径、读穿关闭、
+     * 用户未绑定 → false。
+     */
+    private boolean memoryKvExists(String relPath) {
+        if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()) {
+            return false;
+        }
+        var rel = normalizeRel(relPath);
+        if (WorkspaceReader.MEMORY_DIR.equals(rel)) {
+            return workspaceReader.listRuntimeFiles(userKey).keySet().stream()
+                .anyMatch(k -> k.startsWith(WorkspaceReader.MEMORY_DIR + "/"));
+        }
+        var isKvRuntimeKey = WorkspaceReader.MEMORY_FILE.equals(rel)
+            || (rel.startsWith(WorkspaceReader.MEMORY_DIR + "/") && rel.endsWith(".md")
+                && rel.indexOf('/', WorkspaceReader.MEMORY_DIR.length() + 1) < 0);
+        return isKvRuntimeKey && workspaceReader.readMemoryFile(userKey, rel) != null;
     }
 
     /**
