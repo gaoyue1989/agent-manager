@@ -409,6 +409,20 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 可疑条目补 exec `test -L` 探测——per-entry exec 常态化被 D-10 否决，仅在实测失真时启用，
 不做预防性实现。
 
+> 补记（2026-11-22，issue #394）：exec→execd 翻译层软链透明性落地，落实 §13 A-1
+> 「失败回退 exec 读」决议（OpenSandbox.java）——`translateLs` 遇 `type=symlink` 条目
+> （与 WorkspaceSyncService.isSymlinkEntry 同判据）返回 null 整目录回落原 P_LS 真 exec；
+> `translateExists` 父目录列举命中软链条目返回 null 回落原 test -e（悬空链 shell 判 no、
+> 有效链由 shell 裁决）；`translateGlob` 递归遇软链（含软链根 listDirectory 400 拒绝穿透的
+> 异常回落路径）返回 null 整树回落 `find -L`——doExec 在翻译门之前对完整 P_FIND 模板
+> 锚定归一化补 `-L`（幂等，SANDBOX_EXEC_TRANSLATE=false 路径同样生效），GNU find 默认
+> 不跟随目录软链（无尾斜杠恒空）。**已接受的连带影响（如实披露）**：读穿模式
+> （SANDBOX_RUNTIME_READ_THROUGH，默认 false）下 glob 回落跳过根级 MEMORY.md KV 合并
+> （issue #356）——仅影响 pattern 文本不含 MEMORY.md/memory 字样而 globMatch 命中的根级
+> glob（回落命令不含记忆字样，不触发 onRealExecBeforeRun 懒注入触发判据），同 turn 内
+> read 探测（KV 应答有）与 glob 回落应答短暂矛盾，懒注入后自愈；爆炸半径有限且与
+> §6.2-4 已接受的容器态盲点同姿态，显式接受，不为 KV-真 exec 结果合并增加复杂度。
+
 ### 6.4 回退与开关
 
 | 开关 | 默认 | 语义 |
