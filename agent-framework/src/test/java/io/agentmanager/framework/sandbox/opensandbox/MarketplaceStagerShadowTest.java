@@ -160,8 +160,32 @@ class MarketplaceStagerShadowTest {
 
     @Test
     void shadowMarkerMustExistForStartupSelfCheck() {
-        // 启动自检依据：原类没有此字段——缺失即遮蔽失效（jar 原版被加载）
+        // 启动自检依据：原类没有此字段——缺失即遮蔽失效（jar 原版被加载）。
+        // 断言两侧都经运行期字段读取：SHADOW_MARKER 为 String.valueOf 非常量表达式，
+        // javac 不会内联（issue #426：原字面量常量形态下本断言被内联为恒真）
         assertEquals("agent-framework", MarketplaceStager.SHADOW_MARKER);
+    }
+
+    @Test
+    void shadowClassMustNotLoadFromSdkJar() {
+        // 设计 C-3 CodeSource 判据：遮蔽类必须由本仓库 classes（BOOT-INF/classes 或
+        // target/classes）加载；classpath 顺序回归时 agentscope-harness jar 胜出
+        var cs = MarketplaceStager.class.getProtectionDomain().getCodeSource();
+        var location = cs != null ? cs.getLocation().toString() : "";
+        assertFalse(location.contains("agentscope-harness"),
+            "遮蔽类必须由本仓库 classes 加载而非 SDK jar: " + location);
+    }
+
+    @Test
+    void sdkVersionMustStayPinnedForShadowDerive() {
+        // 设计 §5.2-2 版本 pin：pom agentscope.version 升级必须重 derive 遮蔽类（decompile
+        // 对比 + 本组回归全绿后才可更新此 pin）。版本取自非遮蔽 SDK 类的 jar manifest
+        // （遮蔽类来自本仓库 classes，无 manifest 版本）
+        var version = io.agentscope.harness.agent.skill.WorkspaceSkillRepository.class
+            .getPackage().getImplementationVersion();
+        assertNotNull(version, "SDK jar manifest 缺 Implementation-Version，无法校验 pin");
+        assertEquals("2.0.4", version,
+            "agentscope SDK 版本变更必须重 derive 遮蔽类（sdk-stager-shadow-design §5.2）");
     }
 
     @Test
