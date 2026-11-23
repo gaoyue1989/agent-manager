@@ -3,10 +3,10 @@
 // 新建连接器走右侧抽屉（slide-over，与模型连接页同交互——评审反馈统一弹出形态）。
 import { useCallback, useEffect, useState } from "react";
 import { api, type BuiltinPlatformDecl, type McpConnectorView } from "@/lib/api";
-import { parseSnapshotTools, parseToolPerms } from "@/lib/connectors";
+import { parseDirectReturn, parseSnapshotTools, parseToolPerms } from "@/lib/connectors";
 import { PERM_STYLE } from "@/lib/status";
 import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
-import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
+import { Badge, Btn, Note, PageHead, Tag } from "@/components/ui";
 import Drawer from "@/components/Drawer";
 
 type ToolSel = { kind: "connector"; cn: McpConnectorView } | { kind: "platform" };
@@ -91,6 +91,7 @@ export default function ToolsPage() {
   const [builtin, setBuiltin] = useState<BuiltinPlatformDecl | null>(null);
   const [sel, setSel] = useState<ToolSel | null>(null);
   const [draft, setDraft] = useState<Record<string, string> | null>(null);
+  const [directDraft, setDirectDraft] = useState<string[] | null>(null);
   const [msg, setMsg] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -113,7 +114,7 @@ export default function ToolsPage() {
     load();
     api.console.tools.builtinPlatform(ws).then(setBuiltin).catch(() => {});
   }, [ws, load]);
-  useEffect(() => { setDraft(null); }, [sel]);
+  useEffect(() => { setDraft(null); setDirectDraft(null); }, [sel]);
 
   const verify = async (id: number) => {
     try {
@@ -137,21 +138,32 @@ export default function ToolsPage() {
   const selCn = sel?.kind === "connector" ? sel.cn : null;
   const snapTools = selCn ? parseSnapshotTools(selCn) : [];
   const declared = selCn ? parseToolPerms(selCn) : (builtin?.tools ?? {});
+  const declaredDirect = selCn ? parseDirectReturn(selCn) : [];
   const rowNames = selCn
-    ? [...new Set([...snapTools, ...Object.keys(declared)])]
+    ? [...new Set([...snapTools, ...Object.keys(declared), ...declaredDirect])]
     : Object.keys(builtin?.tools ?? {});
   const effective: Record<string, string> = draft
     ?? Object.fromEntries(rowNames.map((n) => [n, declared[n] ?? "allow"]));
+  const effectiveDirect = directDraft ?? declaredDirect;
   const dirty = selCn !== null
     && (Object.keys(effective).length !== Object.keys(declared).length
-      || rowNames.some((n) => effective[n] !== declared[n]));
+      || rowNames.some((n) => effective[n] !== declared[n])
+      || effectiveDirect.length !== declaredDirect.length
+      || effectiveDirect.some((n) => !declaredDirect.includes(n)));
+
+  const toggleDirect = (tool: string) => setDirectDraft(
+    effectiveDirect.includes(tool) ? effectiveDirect.filter((n) => n !== tool) : [...effectiveDirect, tool]);
 
   const savePerms = async () => {
     if (!selCn) return;
     const tools = Object.fromEntries(rowNames.map((n) => [n, effective[n] ?? "allow"]));
     try {
-      await api.console.tools.patch(ws, selCn.id, { permissions: { tools } });
+      await api.console.tools.patch(ws, selCn.id, {
+        permissions: { tools },
+        directReturn: { tools: rowNames.filter((n) => effectiveDirect.includes(n)) },
+      });
       setDraft(null);
+      setDirectDraft(null);
       await load();
       setMsg("权限策略已保存");
     } catch (e: any) { setMsg(`保存失败: ${e.message}`); }
@@ -221,11 +233,16 @@ export default function ToolsPage() {
         )}
       </div>
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="perm-table">
-        <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500"><th className="p-2.5">工具</th><th className="p-2.5">权限</th><th className="p-2.5">说明</th></tr></thead>
+        <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
+          <th className="p-2.5">工具</th><th className="p-2.5">权限</th>
+          <th className="p-2.5" title="工具成功后把返回内容原样交给前端，并立即结束本轮（不再调用模型）">结果直返</th>
+          <th className="p-2.5">说明</th>
+        </tr></thead>
         <tbody>
           {rowNames.map((tool) => {
             const act = effective[tool] ?? "allow";
             const outOfSnap = selCn !== null && !snapTools.includes(tool);
+            const direct = effectiveDirect.includes(tool);
             return (
               <tr key={tool} className="border-b last:border-0">
                 <td className="p-2.5 font-mono text-xs">{tool}{outOfSnap && <Tag>快照外</Tag>}</td>
@@ -242,6 +259,12 @@ export default function ToolsPage() {
                     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${PERM_STYLE[act] ?? "bg-gray-100 text-gray-500"}`}>{act}</span>
                   )}
                 </td>
+                <td className="p-2.5">
+                  {selCn && writable ? (
+                    <input type="checkbox" checked={direct} data-testid={`direct-toggle-${tool}`}
+                      onChange={() => toggleDirect(tool)} />
+                  ) : (direct && <Tag>直返</Tag>)}
+                </td>
                 <td className="p-2.5 text-xs text-gray-500">
                   {act === "ask" ? "执行前经 HITL 确认卡" : act === "deny" ? "拒绝调用" : "直接执行"}
                   {selCn && !declared[tool] && " · 未声明，运行时默认"}
@@ -250,7 +273,7 @@ export default function ToolsPage() {
             );
           })}
           {rowNames.length === 0 && (
-            <tr><td colSpan={3} className="p-4 text-xs text-gray-400">
+            <tr><td colSpan={4} className="p-4 text-xs text-gray-400">
               {selCn ? "无工具快照且未声明策略（运行时按未声明自动放行）——验证通过后按工具清单回填" : "平台内置声明策略加载中…"}
             </td></tr>
           )}

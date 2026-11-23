@@ -133,7 +133,7 @@ export interface ModelConnUsageRow {
 }
 export interface McpConnectorView {
   id: number; workspaceId: number; name: string; transport: string; endpoint: string;
-  authType: string; timeoutSec: number; toolScope: string; permissions: string;
+  authType: string; timeoutSec: number; toolScope: string; permissions: string; directReturn: string;
   status: string; lastVerifyError?: string | null; lastVerifiedAt?: string | null; refCount: number;
 }
 export interface BuiltinPlatformDecl {

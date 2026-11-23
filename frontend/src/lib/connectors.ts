@@ -15,3 +15,15 @@ export function parseSnapshotTools(cn: Pick<McpConnectorView, "toolScope">): str
   } catch { /* 非 JSON（历史脏数据）按无快照处理 */ }
   return [];
 }
+
+export function parseDirectReturn(cn: Pick<McpConnectorView, "directReturn">): string[] {
+  try {
+    const tools: unknown = JSON.parse(cn.directReturn || "{}")?.tools;
+    if (Array.isArray(tools)) {
+      return tools.filter((tool): tool is string => typeof tool === "string" && tool.trim() !== "");
+    }
+  } catch {
+    return [];
+  }
+  return [];
+}
