@@ -2198,4 +2198,10 @@ test('DR8 /tools 的 directReturn 标记与 config.yaml 声明一致', async ({ 
   for (const name of ['lookup_order', 'notify_warehouse']) {
     expect(order.get(name), `${name} 不应标记直返`).not.toHaveProperty('directReturn');
   }
+  const full = await (await request.get('/tools?includeInternal=true')).json() as {
+    tools: Array<Record<string, unknown>>; sdkInternal: Array<Record<string, unknown>>;
+  };
+  expect(full.sdkInternal.map(t => String(t.name)).filter(name => name.startsWith('mcp__order__')),
+    '直返工具以装饰器注册，仍须按注册名归入 MCP 段而非 SDK 内置段').toEqual([]);
+  expect(full.tools.filter(t => t.server === 'order'), 'MCP 段不应重复列出').toHaveLength(6);
 });
