@@ -149,9 +149,17 @@ public class OafReloadService {
         }
         var detail = new ArrayList<Map<String, Object>>();
         var declaredNames = freshConfig.mcpServers().stream().map(OafConfig.McpServerConfig::server).toList();
+        var syntheticNames = mcpToolRegistrar.syntheticServers().keySet();
 
-        // ① 声明中已删除的 server：摘除（工具下线 + 连接关闭，含共享句柄定向驱逐）
+        // ① 声明中已删除的 server：摘除（工具下线 + 连接关闭，含共享句柄定向驱逐）。
+        //    合成 server（openviking 等，issue #415）豁免——其生命周期属构建期/B 路径重建
+        //    （不由 frontmatter 声明/撤销，下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更
+        //    + rollout），A 路径 mcp-configs 变更与其无关，不得误判「已声明删除」摘工具
+        //    或驱逐句柄（修复前 openviking 每次被误杀且永不重注册）
         for (var registered : mcpToolRegistrar.getRegisteredServerNames()) {
+            if (syntheticNames.contains(registered)) {
+                continue;
+            }
             if (!declaredNames.contains(registered)) {
                 var entry = new LinkedHashMap<String, Object>();
                 entry.put("server", registered);
@@ -265,6 +273,17 @@ public class OafReloadService {
             distributedStore, llmLogger, uiContextStore, sessionUserStore, modelCatalog,
             sandboxSpecProvider.getIfAvailable()));
         agentRuntimeService.evictAllSessionAgents();
+
+        // 4.6 合成注册表代际收口（issue #415 评审 g1）：上一代合成注入、本代 frontmatter
+        //     同名声明的名，移除其残留注册表项——该名此后完全归属 declared 链路（rebuild/
+        //     补偿/探测不再被注册表优先分流到 viking 工厂）。必须在 swap 成功之后：build
+        //     失败回滚（抛在第 3 步）不达此点，回滚窗口内旧 agent 的合成句柄仍有看门狗
+        //     自愈（评审 P2）；reloadAgent synchronized + 看门狗让位，清理与代际切换原子
+        var cleaned = mcpToolRegistrar.removeSyntheticServers(
+            newConfig.mcpServers().stream().map(OafConfig.McpServerConfig::server).toList());
+        if (!cleaned.isEmpty()) {
+            log.info("[Reload] synthetic registry cleaned for names now declared in frontmatter: {}", cleaned);
+        }
 
         // 5. 旧 agent 的 MCP 连接收尾（旧 toolkit 无公开 closeMcpClients）：按 build 前
         //    捕获的旧 wrapper 对象直接 close，旧 toolkit 侧再 removeMcpClient 摘标准路径工具；

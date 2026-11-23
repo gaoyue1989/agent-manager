@@ -86,14 +86,23 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
                 }
                 var store = spec.getFileAssetStore();
                 var sandboxId = sandbox.getOsbState().getSandboxId();
-                if (store != null && userKey != null && !userKey.isBlank()
-                        && pendingSessionId != null && !pendingSessionId.isBlank()) {
+                if (store != null && pendingSessionId != null && !pendingSessionId.isBlank()) {
                     // reset 仅在新沙箱代执行（每次 create 即换代）：旧容器注入状态回滚 pending →
                     // 本 turn 重新注入；按会话单条件回滚（issue #345，user 维度会波及他 session 行）。
-                    // 同沙箱代重复 onAgent（多实例竞争）不再 reset，防循环。
-                    if (!spec.isInjectedOnSandbox(userKey, sandboxId)) {
-                        store.resetInjectedToPending(pendingSessionId);
-                        spec.markInjectedOnSandbox(userKey, sandboxId);
+                    // 同沙箱代重复 onAgent（多实例竞争）不再 reset，防循环；换代索引按会话键
+                    // （issue #413：旧 userKey 键被同用户他会话翻转 → 回原会话误判换代冗余 reset）。
+                    // 误判换代的代价不是幂等覆写而是数据丢失（原始字节覆盖容器内已修改上传件），
+                    // 跨副本/重启/LRU 淘汰的裁决由 isInjectedOnSandbox 内部经 ResetMarkStore
+                    // 共享层兜住（评审 g1）：命中=同代已 reset，此处整块跳过
+                    if (!spec.isInjectedOnSandbox(pendingSessionId, sandboxId)) {
+                        var rolledBack = store.resetInjectedToPending(pendingSessionId);
+                        // 确有行回滚才失效实例注入备忘（issue #413 B-13a）：wrapReused/resume 换代后
+                        // pendingEmptyChecked/uploadsInjected 短路会吞掉重注入批次；n=0 不失效，
+                        // 保住 P2-16 每 call 一次 file_asset 查询的稳态节流
+                        if (rolledBack > 0) {
+                            sandbox.invalidatePendingUploadMemo();
+                        }
+                        spec.markInjectedOnSandbox(pendingSessionId, sandboxId);
                     }
                 }
                 sandbox.injectPendingUploads();

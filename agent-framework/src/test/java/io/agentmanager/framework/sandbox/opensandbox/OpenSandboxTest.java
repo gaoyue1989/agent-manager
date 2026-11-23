@@ -435,6 +435,37 @@ class OpenSandboxTest {
     }
 
     @Test
+    void invalidatePendingUploadMemoShouldForceRecheckAndSteadyStateStaysShortCircuited() throws Exception {
+        // issue #413 语义钉子：查无 pending 置位备忘（pendingEmptyChecked）后——
+        // ① 不失效备忘：同实例重复调用不重查（P2-16 稳态短路，实例存活期=单 call 的
+        //   file_asset 查询节流不得回归）；
+        // ② 失效备忘（middleware 换代 reset 确有行回滚后调用）：下一次调用真实重查重注
+        //   （wrapReused/resume 换代后历史上传件必须重新注入）
+        var store = mockAssetStore();
+        when(store.listPending("u9", "u9")).thenReturn(List.of());
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setUserKey("u9");
+        sandbox.setSessionId("u9");
+
+        sandbox.injectPendingUploads();
+        verify(store, times(1)).listPending("u9", "u9");
+
+        // 对照组：不 invalidate，稳态短路保持
+        sandbox.injectPendingUploads();
+        verify(store, times(1)).listPending("u9", "u9");
+        verify(osb.files(), never()).write(anyList());
+
+        // 换代 reset 有行回滚 → invalidate → 真实重查重注
+        when(store.listPending("u9", "u9")).thenReturn(List.of(asset("f9", "memo.txt")));
+        sandbox.invalidatePendingUploadMemo();
+        sandbox.injectPendingUploads();
+        verify(store, times(2)).listPending("u9", "u9");
+        verify(osb.files()).write(anyList());
+        verify(store).markInjected(List.of("f9"));
+    }
+
+    @Test
     void injectUploadsShouldSkipWhenNoUserKeyBound() throws Exception {
         // 注入前身份齐备校验（issue #411）：listPending 双条件的 userKey 维度取自实例绑定
         // （bindUserKey / middleware setUserKey）——缺失即无法与 file_asset.user_key 比对，
@@ -2585,6 +2616,98 @@ class OpenSandboxTest {
         assertFalse(cmd.contains("'" + scopeRoot + "/demo-a'"), "同名 L4 用户技能优先：包技能跳过且路径不触碰：" + cmd);
         assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-b' '" + scopeRoot + "/demo-b'"),
             "非同名包技能正常建链（与 L4 共存）：" + cmd);
+    }
+
+    @Test
+    void farmL4DeleteShouldRelinkPackageSkillOnReconverge() throws Exception {
+        // issue #399-1：l4Names 冻结于 gate（首判定快照整个沙箱代复用）——用户删除同名 L4 覆盖
+        // （revision bump → farmFingerprint 变化触发重收敛）后，hydrate 仍用冻结快照跳过该名
+        // 建链，包技能直到换沙箱代都不可达。非稳态重收敛必须重新 capture L4 名单（稳态短路
+        // 路径零开销、零 KV 枚举不变）
+        var host = java.nio.file.Files.createTempDirectory("farm-l4-del");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-A", "demo-b");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-l4-del-cfg");
+        bundleSkill(cfg, "demo-a");
+        bundleSkill(cfg, "demo-b");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-" + version);
+        var reader = mock(WorkspaceReader.class);
+        // 轮 1：L4 存在同名 demo-a（revision rev-1）
+        when(reader.listUserSkills("sess-A")).thenReturn(java.util.Map.of("demo-a", List.of("SKILL.md")));
+        when(reader.readUserSkillRevision("sess-A")).thenReturn("rev-1");
+        when(reader.materializeUserSkills(any(), eq("sess-A"), any())).thenReturn(1);
+        var spec = new OpenSandboxFilesystemSpec();
+
+        var call1 = new OpenSandbox(farmState(host, "sbx-farm-399"), osb,
+            farmOptions(svc, registry, null), reader, null, spec);
+        bindFarmSession(call1, "sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        String scopeRoot = "/workspace/.skills-cache/sess-A/oaf-package";
+        var cmd1 = farmConvergeCommands(osb).get(0);
+        assertFalse(cmd1.contains("'" + scopeRoot + "/demo-a'"), "轮 1 同名 L4 优先跳过包技能建链：" + cmd1);
+        assertTrue(cmd1.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-b' '" + scopeRoot + "/demo-b'"),
+            "轮 1 非同名包技能正常建链：" + cmd1);
+
+        // 用户删除 L4 demo-a：名单变空 + revision bump → 指纹变化 → 非稳态重收敛
+        when(reader.listUserSkills("sess-A")).thenReturn(java.util.Map.of());
+        when(reader.readUserSkillRevision("sess-A")).thenReturn("rev-2");
+
+        var call2 = new OpenSandbox(farmState(host, "sbx-farm-399"), osb,
+            farmOptions(svc, registry, null), reader, null, spec);
+        bindFarmSession(call2, "sess-A");
+        call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var cmd2 = farmConvergeCommands(osb).get(1);
+        assertTrue(cmd2.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a' '" + scopeRoot + "/demo-a'"),
+            "issue #399：删除 L4 覆盖后重收敛必须为包技能 demo-a 补建链（l4Names 快照刷新）：" + cmd2);
+    }
+
+    @Test
+    void farmPendingUserKeyShouldHonorUserDisabledAndRevision() throws Exception {
+        // issue #399-2：tryHydrate 解析的 uid（userKey 缺失时回退 pendingUserKey）未传入
+        // hydrate——延迟投放场景（downloadFile/statWorkspaceFile/doExec(null)，userKey 未绑定）
+        // hydrate 内直接读 userKey.get()=null：用户级禁用判定恒 false（禁用技能照常建链）且
+        // farmFingerprint 丢 L4 revision 分量。uid 必须整链路传递，身份口径唯一
+        var host = java.nio.file.Files.createTempDirectory("farm-pending");
+        writeHostSkill(host, "alice", "secret-skill");
+        writeHostSkill(host, "alice", "open-skill");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-pending-cfg");
+        bundleSkill(cfg, "secret-skill");
+        bundleSkill(cfg, "open-skill");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-" + version);
+        var reader = mock(WorkspaceReader.class);
+        when(reader.readUserSkillRevision("alice")).thenReturn("rev-alice");
+        when(reader.materializeUserSkills(any(), eq("alice"), any())).thenReturn(1);
+        var checker = mock(io.agentmanager.framework.sandbox.opensandbox.SkillDisabledChecker.class);
+        when(checker.packageDisabled()).thenReturn(java.util.Set.of());
+        when(checker.isUserDisabled(eq("alice"), eq("secret-skill"))).thenReturn(true);
+        var spec = new OpenSandboxFilesystemSpec();
+        spec.setPendingUserKey("alice");
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-399b"), osb,
+            farmOptions(svc, registry, checker), reader, null, spec);
+        // 不 setUserKey（模拟 userKey 未绑定的延迟投放），仅设 scope + pendingUserKey 兜底
+        sandbox.setSkillCacheScope("alice");
+        sandbox.exec(RuntimeContext.builder().build(), "ls /workspace/.skills-cache", 30);
+
+        String scopeRoot = "/workspace/.skills-cache/alice/oaf-package";
+        var cmd = farmConvergeCommands(osb).get(0);
+        assertFalse(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/secret-skill' '" + scopeRoot + "/secret-skill'"),
+            "issue #399：pendingUserKey 场景用户级禁用必须生效（uid 传入 hydrate），禁用名不建链：" + cmd);
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/open-skill'"),
+            "未禁用技能正常建链：" + cmd);
+        // farmFingerprint/materialize 门控都以 uid（而非 null）读 revision——身份口径唯一
+        org.mockito.Mockito.verify(reader, org.mockito.Mockito.atLeastOnce())
+            .readUserSkillRevision("alice");
+        org.mockito.Mockito.verify(reader, org.mockito.Mockito.never())
+            .readUserSkillRevision(org.mockito.Mockito.isNull());
     }
 
     @Test
