@@ -246,6 +246,9 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    轮换 = env 表单改 `SKILLSYNC_TOKEN`（单写入口，两处消费自动同值）+ 池 Pod 重建（D-8 契约）；
    撤销 = env 表单把 `SKILLSYNC_TOKEN` 置空串保存（三态语义「空串=删除」）→ 池 ns token
    Secret 同步删除、服务侧内部端点关闭（404）；删服务连带清理（issue #350 修复的静默残留缺口）。
+   撤销守卫（issue #396）：绑定池仍在运行或管理面不可达时撤销被拒（409）；唯一可行顺序
+   为**先删池 → 撤销 →（可选）重建池**——撤销后 token Secret 已删，重建池缺 token 自动按
+   无守护旧行为建（`disableSyncd` 重建不行：守卫只看池是否存在，重建后池仍在仍被拒）。
    存量集群 agent-platform ns 的同名 Secret 为无消费方遗留物，可手工删除。
 4. **建池**（PR-4a 默认开启）：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag——
    token Secret 在位（服务 env 携带 `SKILLSYNC_TOKEN`）时建池请求缺省即注入三键
@@ -254,9 +257,9 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    服务未配 token Secret → 该池按旧行为建（补配后重建池即默认开启）；`disableSyncd: true`
    显式关闭（与 extraEnv 互斥）。镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不
    crashloop（D-1）。
-   删除顺序守卫（issue #359）：绑定池在运行时删除服务被拒（409 提示先删池）——池模板
-   secretKeyRef 引用服务 token Secret，先删服务会使池新 Pod 卡 CreateContainerConfigError；
-   管理面不可达时同样拒绝（池状态未知即不动）。
+   删除/撤销守卫（issue #359/#396）：绑定池在运行时删除服务或撤销 token Secret 均被拒
+   （409 提示先删池）——池模板 secretKeyRef 引用服务 token Secret，先删会使池新 Pod 卡
+   CreateContainerConfigError；管理面不可达时同样拒绝（池状态未知即不动）。
 
 **升级**：重跑 `./scripts/build-skillsync-image.sh`（同 tag 覆盖）→ 直建新沙箱即用新镜像；池化 Pod
 须重建才换镜像（沙箱管理页销毁 warm 实例，或删池重建——上游改模板必须删池重建）。
