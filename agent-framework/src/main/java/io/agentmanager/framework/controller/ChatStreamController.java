@@ -832,17 +832,16 @@ public class ChatStreamController {
     // ===== 事件处理 =====
 
     /**
-     * TOOL_CALL_START 命中 MCP App ui 映射时，序列化携带 ui 元数据
+     * TOOL_CALL_START 命中工具配置（MCP App ui 映射 / direct_return 直返）时，序列化携带对应元数据
      * （mcp-apps-extension-plan §4：发源地查 {@link McpToolRegistrar} 后传入；
      * 前端 chat.js 据此把工具行渲染为 iframe 内嵌的 MCP App 卡片）。
-     * 非 ui 工具（含内置工具）返回 null，payload 保持原词表。
+     * 无 ui、非直返的工具（含内置工具）返回 null，payload 保持原词表。
      */
     private String payloadForEvent(AgentEvent event, String sessionId) {
         if (event instanceof ToolCallStartEvent tc) {
-            var uiRef = mcpToolRegistrar.resolveUiRef(tc.getToolCallName());
-            if (uiRef != null) {
-                return AgentEventSseSerializer.payload(event, sessionId,
-                    uiRef.resourceUri(), uiRef.serverName());
+            var meta = mcpToolRegistrar.resolveToolCallMeta(tc.getToolCallName());
+            if (meta != null) {
+                return AgentEventSseSerializer.payload(event, sessionId, meta);
             }
         }
         return null;

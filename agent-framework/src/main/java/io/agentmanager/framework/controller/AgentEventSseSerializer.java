@@ -7,6 +7,7 @@ import org.springframework.http.codec.ServerSentEvent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentStartEvent;
@@ -36,7 +37,7 @@ public final class AgentEventSseSerializer {
 
     /** 将 AgentEvent 序列化为 SSE data 的 JSON 字符串（不带会话归属；审计留痕等旁路面使用） */
     public static String payload(AgentEvent event) {
-        return payload(event, null, null, null);
+        return payload(event, null, null);
     }
 
     /**
@@ -46,28 +47,23 @@ public final class AgentEventSseSerializer {
      * 版本逐字节一致。
      */
     public static String payload(AgentEvent event, String sessionId) {
-        return payload(event, sessionId, null, null);
-    }
-
-    /** 不带会话归属的 ui 元数据覆写（向后兼容保留；对话链路请用 4 参版本） */
-    public static String payload(AgentEvent event, String uiResourceUri, String uiServer) {
-        return payload(event, null, uiResourceUri, uiServer);
+        return payload(event, sessionId, null);
     }
 
     /**
      * 将 AgentEvent 序列化为 SSE data 的 JSON 字符串。
-     * MCP Apps 扩展：TOOL_CALL_START 可携带 ui 元数据（{resourceUri, server}），
-     * 由事件发源地（ChatStream/Confirm 控制器）查 McpToolRegistrar.resolveUiRef 后传入
+     * MCP Apps 扩展：TOOL_CALL_START 可携带 ui 元数据（{resourceUri, server}）与直返标记
+     * （directReturn，MCP 工具结果原样直返前端），由事件发源地（ChatStream/Confirm/Agui
+     * 控制器）查 McpToolRegistrar.resolveToolCallMeta 后传入
      * （见 ChatStreamController.payloadForEvent，2026-09-17 经 approval-forms e2e 钉住）；
-     * 无 UI 的工具传 null 保持原词表（向后兼容）。
+     * 无 UI、非直返的工具传 null 保持原词表（向后兼容）。
      *
      * @param sessionId     会话归属（chat-trace-observability-design §3：每帧顶层恒带
      *                      session_id）；null 表示不携带（审计等旁路面）
-     * @param uiResourceUri ui:// 资源 URI；null 表示不带 UI 元数据
-     * @param uiServer      资源所属 MCP server 名（供前端调代理端点）
+     * @param toolCallMeta  工具配置在调用帧上的投影（ui 资源引用 + 是否直返）；null 表示不带
      */
     public static String payload(AgentEvent event, String sessionId,
-                                 String uiResourceUri, String uiServer) {
+                                 McpToolRegistrar.ToolCallMeta toolCallMeta) {
         var payload = new LinkedHashMap<String, Object>();
         payload.put("type", event.getType().name());
         payload.put("id", event.getId());
@@ -81,6 +77,9 @@ public final class AgentEventSseSerializer {
             putIfNotBlank(payload, "created_at", event.getCreatedAt());
         } else if (event instanceof TextBlockDeltaEvent delta) {
             payload.put("delta", delta.getDelta());
+            Object generateReason = event.getMetadata() != null
+                ? event.getMetadata().get(AgentEvent.METADATA_GENERATE_REASON) : null;
+            putIfNotBlank(payload, "generateReason", generateReason instanceof String reason ? reason : null);
         } else if (event instanceof ThinkingBlockDeltaEvent delta) {
             payload.put("delta", delta.getDelta());
         } else if (event instanceof DataBlockStartEvent) {
@@ -90,8 +89,14 @@ public final class AgentEventSseSerializer {
         } else if (event instanceof ToolCallStartEvent tc) {
             payload.put("toolName", tc.getToolCallName());
             payload.put("toolCallId", tc.getToolCallId());
-            if (uiResourceUri != null && uiServer != null) {
-                payload.put("ui", Map.of("resourceUri", uiResourceUri, "server", uiServer));
+            if (toolCallMeta != null) {
+                if (toolCallMeta.uiResourceUri() != null && toolCallMeta.uiServer() != null) {
+                    payload.put("ui", Map.of("resourceUri", toolCallMeta.uiResourceUri(),
+                        "server", toolCallMeta.uiServer()));
+                }
+                if (toolCallMeta.directReturn()) {
+                    payload.put("directReturn", true);
+                }
             }
         } else if (event instanceof ToolCallDeltaEvent delta) {
             payload.put("delta", delta.getDelta());

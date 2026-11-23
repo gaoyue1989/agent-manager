@@ -226,6 +226,9 @@ public class ToolController {
                     if (tool.appOnly()) {
                         item.put("appOnly", true);
                     }
+                    if (tool.directReturn()) {
+                        item.put("directReturn", true);
+                    }
                     return item;
                 })
                 .forEach(result::add);

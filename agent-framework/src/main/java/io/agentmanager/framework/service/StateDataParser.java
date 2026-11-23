@@ -432,8 +432,10 @@ public final class StateDataParser {
             // 用户主动停止后的 SDK 恢复消息（generateReason=INTERRUPTED，文案固定为
             // "I noticed that you have interrupted me…"）：不是模型输出，history 展示层
             // 换成本地化提示并打 stopped 标记，与实时流的 cancelled 终态帧对齐。
-            var stopped = m.path("metadata").path("agentscope_generate_reason")
-                .asText("").equals("INTERRUPTED");
+            var generateReason = m.path("metadata")
+                .path(io.agentscope.core.message.Msg.METADATA_GENERATE_REASON).asText("");
+            boolean stopped = generateReason.equals(
+                io.agentscope.core.message.GenerateReason.INTERRUPTED.name());
             if (stopped) {
                 content = "（本次回复已被用户停止）";
             }
@@ -451,6 +453,9 @@ public final class StateDataParser {
             if (stopped) {
                 // 附加字段（只增不改）：history 客户端可据此渲染「已停止」徽标
                 msg.put("stopped", true);
+            }
+            if (!generateReason.isBlank()) {
+                msg.put("generate_reason", generateReason);
             }
             if (!fileIds.isEmpty()) {
                 msg.put("file_ids", fileIds);

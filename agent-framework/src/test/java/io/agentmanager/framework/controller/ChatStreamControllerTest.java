@@ -1020,7 +1020,8 @@ class ChatStreamControllerTest {
     @Test
     void serializerShouldIncludeUiMetadataOnToolCallStart() {
         var tc = new io.agentscope.core.event.ToolCallStartEvent("reply-u", "call-u", "get_weather");
-        String json = AgentEventSseSerializer.payload(tc, "ui://weather/mcp-app.html", "weather");
+        String json = AgentEventSseSerializer.payload(tc, null,
+            new McpToolRegistrar.ToolCallMeta("ui://weather/mcp-app.html", "weather", false));
         assertTrue(json.contains("\"ui\""), "TOOL_CALL_START 应携带 ui 字段: " + json);
         assertTrue(json.contains("\"resourceUri\":\"ui://weather/mcp-app.html\""), "应携带 resourceUri: " + json);
         assertTrue(json.contains("\"server\":\"weather\""), "应携带 server: " + json);
@@ -1029,7 +1030,7 @@ class ChatStreamControllerTest {
     @Test
     void serializerShouldNotIncludeUiWhenNull() {
         var tc = new io.agentscope.core.event.ToolCallStartEvent("reply-u", "call-u", "echo");
-        String json = AgentEventSseSerializer.payload(tc, null, null);
+        String json = AgentEventSseSerializer.payload(tc, null, new McpToolRegistrar.ToolCallMeta(null, null, false));
         assertTrue(!json.contains("\"ui\""), "无 UI 工具不应携带 ui 字段: " + json);
         assertTrue(json.contains("\"toolName\":\"echo\""), "原词表字段保持: " + json);
     }
@@ -1045,8 +1046,8 @@ class ChatStreamControllerTest {
         var skillInjectionService = mock(SkillInjectionService.class);
         when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var registrar = mock(McpToolRegistrar.class);
-        when(registrar.resolveUiRef("show_form"))
-            .thenReturn(new McpToolRegistrar.UiRef("ui://approval/form.html", "approval"));
+        when(registrar.resolveToolCallMeta("show_form"))
+            .thenReturn(new McpToolRegistrar.ToolCallMeta("ui://approval/form.html", "approval", false));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             workspaceInjector, sandboxRuntime, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -1104,6 +1105,41 @@ class ChatStreamControllerTest {
         assertTrue(endPayload != null && endPayload.contains("\"type\":\"AGENT_END\"")
                 && !endPayload.contains("\"ui\""),
             "AGENT_END 载荷为 turn 汇总（非 ui 覆写）: " + endPayload);
+    }
+
+    @Test
+    void chatShouldAttachDirectReturnFlagForDirectReturnTool() {
+        var sessionId = "test-user-dr1";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        var registrar = mock(McpToolRegistrar.class);
+        when(registrar.resolveToolCallMeta("mcp__order__render_confirm_card"))
+            .thenReturn(new McpToolRegistrar.ToolCallMeta(null, null, true));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            workspaceInjector, sandboxRuntime, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), registrar, modelCatalog, sessionTitleService);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-dr1");
+        var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-dr1", "c-dr1",
+            "mcp__order__render_confirm_card");
+        var agentEnd = new AgentEndEvent("r-dr1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null, null), null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus, times(2)).emit(eq(sessionId), any(AgentEvent.class), anyString(), payloadCap.capture());
+        var payloads = payloadCap.getAllValues();
+        assertTrue(payloads.get(0) != null && payloads.get(0).contains("\"directReturn\":true")
+                && !payloads.get(0).contains("\"ui\""),
+            "直返工具的 TOOL_CALL_START 应携带 directReturn 且不带 ui: " + payloads.get(0));
+        assertTrue(payloads.get(1) != null && payloads.get(1).contains("\"type\":\"AGENT_END\"")
+                && !payloads.get(1).contains("directReturn"),
+            "AGENT_END 载荷为 turn 汇总: " + payloads.get(1));
     }
 
     // ===== 上传注入沙箱档判定（issue #412：收敛 SandboxRuntime 三层裁决）=====

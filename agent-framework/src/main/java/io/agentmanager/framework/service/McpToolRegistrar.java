@@ -22,6 +22,7 @@ import org.yaml.snakeyaml.Yaml;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentmanager.framework.mcp.ChatRequestHeaders;
+import io.agentmanager.framework.mcp.DirectReturnMcpTool;
 import io.agentmanager.framework.mcp.McpUserHeaderCustomizer;
 import io.agentmanager.framework.mcp.ReconnectableMcpClientWrapper;
 import io.agentmanager.framework.mcp.UserHeaderRule;
@@ -389,10 +390,12 @@ public class McpToolRegistrar {
             var activeMcpConfig = loadActiveMcpConfig(mcp);
             boolean forceReadOnly = Boolean.TRUE.equals(readOnlyServers.get(mcp.server()));
             boolean hasAppOnly = !uiMapping.appOnly().isEmpty();
-            if (forceReadOnly || activeMcpConfig != null || hasAppOnly) {
-                // 手动注册路径（支持 app_only/子集过滤）。readOnlyHint 只跟随 permissions.read_only，
-                // 否则会短路 ask 权限（D6）。
-                registerFiltered(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping, forceReadOnly);
+            var directReturn = loadDirectReturnTools(mcp);
+            if (forceReadOnly || activeMcpConfig != null || hasAppOnly || !directReturn.isEmpty()) {
+                // 手动注册路径（支持 app_only/子集过滤/direct_return）。readOnlyHint 只跟随
+                // permissions.read_only，否则会短路 ask 权限（D6）。
+                registerFiltered(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping,
+                    forceReadOnly, directReturn);
             } else {
                 registerStandard(toolkit, wrapper, mcp.server());
                 // 标准注册：记录已注册工具信息
@@ -626,7 +629,7 @@ public class McpToolRegistrar {
                 return;
             }
             for (var tool : tools) {
-                var info = buildToolInfo(serverName, tool, uiMapping);
+                var info = buildToolInfo(serverName, tool, uiMapping, false);
                 registeredTools.put(serverName + ":" + tool.name(), info);
             }
             // app_only 工具不注册 Toolkit（对 LLM 隐藏），但必须记录 ToolInfo（供代理校验 + /tools 标记）
@@ -656,7 +659,7 @@ public class McpToolRegistrar {
                     serverTool.annotations() != null && Boolean.TRUE.equals(serverTool.annotations().destructiveHint()));
             }
             var info = new ToolInfo(toolName, mcpNamePrefix(serverName) + toolName,
-                description, serverName, uri, "config", true);
+                description, serverName, uri, "config", true, false);
             registeredTools.put(serverName + ":" + toolName, info);
             log.info("MCP app-only tool '{}' recorded (display: {}, not registered to Toolkit)",
                 toolName, info.displayName());
@@ -667,7 +670,8 @@ public class McpToolRegistrar {
      * 构造 ToolInfo：config.yaml ui 声明优先，其次 Tool._meta.ui.resourceUri 自动发现（0.17.0 meta() 可读）。
      * app_only 由调用方决定（普通工具注册路径不可能是 app_only）。
      */
-    private ToolInfo buildToolInfo(String serverName, McpSchema.Tool tool, UiMapping uiMapping) {
+    private ToolInfo buildToolInfo(String serverName, McpSchema.Tool tool, UiMapping uiMapping,
+                                   boolean directReturn) {
         var displayName = mcpNamePrefix(serverName) + tool.name();
         var description = tool.description() != null ? tool.description() : "";
         // 记录 destructiveHint（read_only server 的 UI 调用拒绝写工具用）
@@ -675,14 +679,16 @@ public class McpToolRegistrar {
             tool.annotations() != null && Boolean.TRUE.equals(tool.annotations().destructiveHint()));
         var declared = uiMapping.tools().get(tool.name());
         if (declared != null) {
-            return new ToolInfo(tool.name(), displayName, description, serverName, declared, "config", false);
+            return new ToolInfo(tool.name(), displayName, description, serverName, declared, "config", false,
+                directReturn);
         }
         var discovered = discoverUiResourceUri(tool);
         if (discovered != null) {
             log.info("MCP tool '{}' ui auto-discovered from _meta.ui: {}", tool.name(), discovered);
-            return new ToolInfo(tool.name(), displayName, description, serverName, discovered, "auto", false);
+            return new ToolInfo(tool.name(), displayName, description, serverName, discovered, "auto", false,
+                directReturn);
         }
-        return new ToolInfo(tool.name(), displayName, description, serverName);
+        return new ToolInfo(tool.name(), displayName, description, serverName, null, null, false, directReturn);
     }
 
     /**
@@ -909,32 +915,42 @@ public class McpToolRegistrar {
     }
 
     /**
-     * 按工具名查询 ui:// 资源 URI（SSE 词表扩展用）。入参接受两种形态：注册名
+     * 按工具名查询随工具配置下发的调用元数据（TOOL_CALL_START 帧扩展用）：ui:// 资源引用与
+     * 是否直返（config.yaml direct_return）。入参接受两种形态：注册名
      * （mcp__{server}__{tool}，SSE 事件携带的模型侧名）或远端裸名（代理等 wire 面）。
-     * 跨 server 同名工具（裸名相同）时：多个 ToolInfo 的 uiResourceUri 相同 → 可正常携带；
-     * 不同 → 不携带 ui 字段（安全降级为普通工具行，并记 WARN 提示管理员消歧）。
+     * 跨 server 同名工具（裸名相同）时：带 UI 者的 uiResourceUri 相同且全部同名工具的
+     * 直返标记一致 → 可正常携带；否则不携带（安全降级为普通工具行，并记 WARN 提示管理员消歧）。
      *
-     * @return {resourceUri, serverName}；无 UI 或歧义冲突返回 null
+     * @return {uiResourceUri, uiServer, directReturn}；无 UI、非直返或歧义冲突返回 null
      */
-    public UiRef resolveUiRef(String toolName) {
+    public ToolCallMeta resolveToolCallMeta(String toolName) {
         var matches = registeredTools.values().stream()
-            .filter(i -> (i.name().equals(toolName) || i.displayName().equals(toolName))
-                && i.uiResourceUri() != null)
+            .filter(i -> i.name().equals(toolName) || i.displayName().equals(toolName))
             .toList();
         if (matches.isEmpty()) {
             return null;
         }
-        var distinctUris = matches.stream().map(ToolInfo::uiResourceUri).distinct().toList();
-        if (distinctUris.size() > 1) {
-            log.warn("MCP tool '{}' has conflicting uiResourceUri across servers ({}), ui metadata omitted",
-                toolName, distinctUris);
+        var withUi = matches.stream().filter(i -> i.uiResourceUri() != null).toList();
+        var distinctUris = withUi.stream().map(ToolInfo::uiResourceUri).distinct().toList();
+        boolean directReturn = matches.get(0).directReturn();
+        if (distinctUris.size() > 1 || matches.stream().anyMatch(i -> i.directReturn() != directReturn)) {
+            log.warn("MCP tool '{}' has conflicting uiResourceUri/direct_return across servers ({}), "
+                + "call metadata omitted", toolName, distinctUris);
             return null;
         }
-        return new UiRef(distinctUris.get(0), matches.get(0).serverName());
+        if (withUi.isEmpty() && !directReturn) {
+            return null;
+        }
+        return new ToolCallMeta(distinctUris.isEmpty() ? null : distinctUris.get(0),
+            withUi.isEmpty() ? null : withUi.get(0).serverName(), directReturn);
     }
 
-    /** 裸名 → UI 资源引用（SSE 词表扩展用） */
-    public record UiRef(String resourceUri, String serverName) {}
+    public record ToolCallMeta(String uiResourceUri, String uiServer, boolean directReturn) {}
+
+    public boolean isDirectReturn(String toolName) {
+        var meta = resolveToolCallMeta(toolName);
+        return meta != null && meta.directReturn();
+    }
 
     /**
      * 按裸名查询已注册工具（app_only 工具亦在内）。
@@ -995,6 +1011,27 @@ public class McpToolRegistrar {
             result.put(name, behavior);
         }
         return result;
+    }
+
+    Set<String> loadDirectReturnTools(OafConfig.McpServerConfig mcp) {
+        var data = loadConfigYaml(mcp);
+        if (data == null || !(data.get("direct_return") instanceof Map<?, ?> section)) {
+            return Set.of();
+        }
+        if (!(section.get("tools") instanceof List<?> declared)) {
+            log.warn("MCP {}: direct_return.tools must be a list of tool names, ignored: {}",
+                mcp.server(), section.get("tools"));
+            return Set.of();
+        }
+        var result = new LinkedHashSet<String>();
+        for (var item : declared) {
+            if (item instanceof String name && !name.isBlank()) {
+                result.add(name);
+            } else {
+                log.warn("MCP {}: invalid direct_return.tools entry ignored: {}", mcp.server(), item);
+            }
+        }
+        return Collections.unmodifiableSet(result);
     }
 
     /**
@@ -1148,7 +1185,7 @@ public class McpToolRegistrar {
      */
     private void registerReadOnly(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
                                   Map<String, Boolean> activeMcpConfig, UiMapping uiMapping) {
-        registerFiltered(toolkit, wrapper, serverName, activeMcpConfig, uiMapping, true);
+        registerFiltered(toolkit, wrapper, serverName, activeMcpConfig, uiMapping, true, Set.of());
     }
 
     /** MCP 工具模型侧可见名前缀（{@code mcp__{server}__}，wire 名保持远端裸名） */
@@ -1175,13 +1212,14 @@ public class McpToolRegistrar {
      */
     private void registerFiltered(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
                                   Map<String, Boolean> activeMcpConfig, UiMapping uiMapping,
-                                  boolean readOnlyHint) {
+                                  boolean readOnlyHint, Set<String> directReturn) {
         wrapper.initialize().block();
         var tools = wrapper.listTools().block();
         if (tools == null) {
             log.warn("MCP {} listTools returned null", serverName);
             return;
         }
+        var directRegistered = new LinkedHashSet<String>();
         for (var tool : tools) {
             // app_only 工具：不注册 Toolkit，仅记录 ToolInfo（对 LLM 隐藏）
             if (uiMapping.appOnly().containsKey(tool.name())) {
@@ -1197,7 +1235,7 @@ public class McpToolRegistrar {
             }
             // 双名注册：模型侧可见名 = mcp__{server}__{tool}（跨 server 同名可区分），
             // callAsync 经 remoteToolName 用远端裸名执行（上游 #3080 双名构造器）
-            var agentTool = new io.agentscope.core.tool.mcp.McpTool(
+            var mcpTool = new io.agentscope.core.tool.mcp.McpTool(
                 mcpNamePrefix(serverName) + tool.name(),
                 tool.name(),
                 tool.description() != null ? tool.description() : "",
@@ -1209,10 +1247,22 @@ public class McpToolRegistrar {
                 serverName,
                 readOnlyHint
             );
-            toolkit.registerTool(agentTool);
-            registeredTools.put(serverName + ":" + tool.name(), buildToolInfo(serverName, tool, uiMapping));
-            log.info("MCP tool '{}' registered as '{}' ({})", tool.name(),
-                mcpNamePrefix(serverName) + tool.name(), readOnlyHint ? "read-only" : "permission-evaluated");
+            boolean direct = directReturn.contains(tool.name());
+            toolkit.registerTool(direct ? new DirectReturnMcpTool(mcpTool) : mcpTool);
+            if (direct) {
+                directRegistered.add(tool.name());
+            }
+            registeredTools.put(serverName + ":" + tool.name(),
+                buildToolInfo(serverName, tool, uiMapping, direct));
+            log.info("MCP tool '{}' registered as '{}' ({}{})", tool.name(),
+                mcpNamePrefix(serverName) + tool.name(), readOnlyHint ? "read-only" : "permission-evaluated",
+                direct ? ", direct_return" : "");
+        }
+        for (var name : directReturn) {
+            if (!directRegistered.contains(name)) {
+                log.warn("MCP {}: direct_return for '{}' has no effect (tool not registered: app_only, "
+                    + "disabled by ActiveMCP, or not offered by the server)", serverName, name);
+            }
         }
         // app_only 工具记录 ToolInfo（供代理校验 + /tools 标记）
         recordAppOnlyTools(serverName, uiMapping, tools);
@@ -1224,11 +1274,11 @@ public class McpToolRegistrar {
         registerReadOnly(toolkit, wrapper, serverName, activeMcpConfig, uiMapping);
     }
 
-    /** 测试桥接：按显式 readOnlyHint 走手动注册路径（验证 D6：app_only 不应强制只读） */
+    /** 测试桥接：按显式 readOnlyHint / directReturn 走手动注册路径（验证 D6 与直返注册） */
     void registerFilteredForTest(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
                                  Map<String, Boolean> activeMcpConfig, UiMapping uiMapping,
-                                 boolean readOnlyHint) {
-        registerFiltered(toolkit, wrapper, serverName, activeMcpConfig, uiMapping, readOnlyHint);
+                                 boolean readOnlyHint, Set<String> directReturn) {
+        registerFiltered(toolkit, wrapper, serverName, activeMcpConfig, uiMapping, readOnlyHint, directReturn);
     }
 
     /** 测试桥接：以桩 wrapper 直接置注册跟踪（模拟 registerOne 成功后的缓存状态）。 */
@@ -1613,6 +1663,7 @@ public class McpToolRegistrar {
      * @param uiResourceUri UI 资源 URI（"ui://..."），无 UI 为 null
      * @param uiSource      UI 元数据来源："config"（config.yaml 声明）/ "auto"（_meta.ui 自动发现）；无 UI 为 null
      * @param appOnly       是否 app_only 工具（仅卡片可调，对 LLM 隐藏）
+     * @param directReturn  是否直返工具（config.yaml direct_return.tools；执行成功后结果原样作为本轮最终输出并终止本轮）
      */
     public record ToolInfo(
         String name,
@@ -1621,11 +1672,12 @@ public class McpToolRegistrar {
         String serverName,
         String uiResourceUri,
         String uiSource,
-        boolean appOnly
+        boolean appOnly,
+        boolean directReturn
     ) {
         /** 无 UI 元数据的旧构造（保持兼容） */
         public ToolInfo(String name, String displayName, String description, String serverName) {
-            this(name, displayName, description, serverName, null, null, false);
+            this(name, displayName, description, serverName, null, null, false, false);
         }
     }
 

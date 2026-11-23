@@ -317,6 +317,29 @@ class ConfirmControllerTest {
     }
 
     @Test
+    void confirmStreamShouldAttachDirectReturnFlagForDirectReturnTool() {
+        stubPendingStoreRow();
+        when(mcpToolRegistrar.resolveToolCallMeta("mcp__order__render_confirm_card"))
+            .thenReturn(new io.agentmanager.framework.service.McpToolRegistrar.ToolCallMeta(null, null, true));
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(reactor.core.publisher.Flux.just(
+                (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.ToolCallStartEvent(
+                    "reply-dr", "c-dr", "mcp__order__render_confirm_card"),
+                (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.AgentEndEvent("reply-dr")));
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-dr");
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+
+        var payloads = controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(List.of(
+                Map.of("tool_call_id", "call-1", "confirmed", true))))
+            .map(ServerSentEvent::data).collectList().block();
+
+        assertNotNull(payloads);
+        assertTrue(payloads.stream().anyMatch(p -> p != null && p.contains("\"directReturn\":true")),
+            "HITL 恢复流的 TOOL_CALL_START 应携带 directReturn: " + payloads);
+    }
+
+    @Test
     void confirmStreamShouldUnregisterLifecycleOnSetupFailure() {
         // 4a34a41 回滚回归钉子（confirm 形态）：恢复流构建是同步的且会因用户输入抛
         // （未知 tool_call_id → buildResumeMsg IllegalArgumentException；对 confirmContextStore
