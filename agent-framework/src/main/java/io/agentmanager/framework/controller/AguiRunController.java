@@ -669,12 +669,12 @@ public class AguiRunController {
         return true;
     }
 
-    /** MCP Apps ui 元数据（native payloadOverride，与 /chat 同源数据） */
+    /** MCP Apps ui 元数据 / direct_return 直返标记（native payloadOverride，与 /chat 同源数据） */
     private String payloadForEvent(AgentEvent event) {
         if (event instanceof ToolCallStartEvent tc) {
-            var uiRef = mcpToolRegistrar.resolveUiRef(tc.getToolCallName());
-            if (uiRef != null) {
-                return AgentEventSseSerializer.payload(event, uiRef.resourceUri(), uiRef.serverName());
+            var meta = mcpToolRegistrar.resolveToolCallMeta(tc.getToolCallName());
+            if (meta != null) {
+                return AgentEventSseSerializer.payload(event, null, meta);
             }
         }
         return null;

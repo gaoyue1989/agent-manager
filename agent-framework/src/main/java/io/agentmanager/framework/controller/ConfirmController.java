@@ -121,15 +121,14 @@ public class ConfirmController {
     }
 
     /**
-     * TOOL_CALL_START 命中 MCP App ui 映射时，序列化携带 ui 元数据（同 ChatStreamController）。
-     * 非 ui 工具返回 null，payload 保持原词表。
+     * TOOL_CALL_START 命中工具配置（MCP App ui 映射 / direct_return 直返）时，序列化携带对应元数据
+     * （同 ChatStreamController）。无 ui、非直返的工具返回 null，payload 保持原词表。
      */
     private String payloadForEvent(io.agentscope.core.event.AgentEvent event, String sessionId) {
         if (event instanceof io.agentscope.core.event.ToolCallStartEvent tc) {
-            var uiRef = mcpToolRegistrar.resolveUiRef(tc.getToolCallName());
-            if (uiRef != null) {
-                return AgentEventSseSerializer.payload(event, sessionId,
-                    uiRef.resourceUri(), uiRef.serverName());
+            var meta = mcpToolRegistrar.resolveToolCallMeta(tc.getToolCallName());
+            if (meta != null) {
+                return AgentEventSseSerializer.payload(event, sessionId, meta);
             }
         }
         return null;

@@ -1,0 +1,68 @@
+package io.agentmanager.framework.mcp;
+
+import java.util.EnumSet;
+import java.util.Map;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultState;
+import io.agentscope.core.permission.PermissionContextState;
+import io.agentscope.core.permission.PermissionDecision;
+import io.agentscope.core.tool.ToolBase;
+import io.agentscope.core.tool.ToolCallParam;
+import io.agentscope.core.tool.mcp.McpTool;
+import reactor.core.publisher.Mono;
+
+public final class DirectReturnMcpTool extends ToolBase {
+
+    private static final Logger log = LoggerFactory.getLogger(DirectReturnMcpTool.class);
+
+    private static final EnumSet<ToolResultState> FAILED_STATES = EnumSet.of(
+        ToolResultState.ERROR, ToolResultState.DENIED, ToolResultState.INTERRUPTED);
+
+    private final McpTool delegate;
+
+    public DirectReturnMcpTool(McpTool delegate) {
+        super(ToolBase.builder()
+            .name(delegate.getName())
+            .description(delegate.getDescription())
+            .inputSchema(delegate.getParameters())
+            .readOnly(delegate.isReadOnly())
+            .concurrencySafe(delegate.isConcurrencySafe())
+            .mcp(delegate.getMcpName())
+            .returnDirect(true));
+        this.delegate = delegate;
+    }
+
+    @Override
+    public Map<String, Object> getOutputSchema() {
+        return delegate.getOutputSchema();
+    }
+
+    @Override
+    public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+        return delegate.callAsync(param).map(result -> {
+            boolean failed = result.isSuspended() || FAILED_STATES.contains(result.getState());
+            boolean presentable = result.getOutput() != null && result.getOutput().stream()
+                .anyMatch(block -> !(block instanceof TextBlock text)
+                    || (text.getText() != null && !text.getText().isBlank()));
+            if (failed || presentable) {
+                return result;
+            }
+            log.warn("[MCP] direct_return tool '{}' returned empty content, "
+                + "short-circuit skipped so the model handles it", getName());
+            return ToolResultBlock.error("MCP tool '" + getName()
+                + "' is configured as direct_return but returned empty content; "
+                + "nothing was presented to the user");
+        });
+    }
+
+    @Override
+    public Mono<PermissionDecision> checkPermissions(Map<String, Object> toolInput,
+                                                     PermissionContextState context) {
+        return delegate.checkPermissions(toolInput, context);
+    }
+}

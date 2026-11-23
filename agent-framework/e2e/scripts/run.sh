@@ -7,6 +7,7 @@ GROUP="${1:-${E2E_GROUP:-core}}"
 export E2E_GROUP="$GROUP"
 export E2E_BASE="${E2E_BASE:-http://127.0.0.1:${E2E_BASE_PORT:-8100}}"
 export E2E_LLM_MOCK="${E2E_LLM_MOCK:-http://127.0.0.1:${LLM_MOCK_PORT:-18081}}"
+export E2E_DIRECT_MCP="${E2E_DIRECT_MCP:-http://127.0.0.1:${DIRECT_MCP_PORT:-8814}}"
 export E2E_RUN_ID="${E2E_RUN_ID:-ci-$GROUP-$(date +%s)-$RANDOM}"
 
 FAILED=0

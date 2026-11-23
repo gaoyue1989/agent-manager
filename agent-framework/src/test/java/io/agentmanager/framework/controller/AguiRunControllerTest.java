@@ -147,6 +147,34 @@ class AguiRunControllerTest {
     }
 
     @Test
+    void runsShouldPersistDirectReturnFlagInNativeToolCallStartPayload() {
+        var threadId = "agui-dr-t1";
+        when(mcpToolRegistrar.resolveToolCallMeta("mcp__order__render_confirm_card"))
+            .thenReturn(new McpToolRegistrar.ToolCallMeta(null, null, true));
+        when(turnLeaseStore.tryAcquire(threadId)).thenReturn("tok-1");
+        when(runtimeService.getAgent(threadId)).thenReturn(agent);
+        lenient().when(agent.channel(any(ChatUiChannel.class))).thenReturn(chatChannel);
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just(
+                (AgentEvent) new io.agentscope.core.event.ToolCallStartEvent("reply-dr", "c-dr",
+                    "mcp__order__render_confirm_card"),
+                (AgentEvent) new AgentEndEvent("reply-dr")));
+
+        controller.runs(
+                new AguiRunController.AguiRunRequest(threadId, null,
+                    List.of(new AguiRunController.AguiMessageDTO("m1", "user", "hello")), null),
+                null, new HttpHeaders())
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = ArgumentCaptor.forClass(String.class);
+        verify(eventStore, org.mockito.Mockito.atLeastOnce())
+            .append(eq(threadId), anyString(), anyString(), payloadCap.capture(), any());
+        assertTrue(payloadCap.getAllValues().stream()
+                .anyMatch(payload -> payload != null && payload.contains("\"directReturn\":true")),
+            "AG-UI 面落库的 native TOOL_CALL_START 载荷应携带 directReturn: " + payloadCap.getAllValues());
+    }
+
+    @Test
     void resumeRunsShouldPassForwardHeadersToResumeService() {
         // 恢复轮：resume[] → translateResumes → resumeWithConfirmEvents 4 参重载，
         // 捕获的透传头随恢复上下文进 RuntimeContext（恢复轮的 MCP 调用同样按声明注入）

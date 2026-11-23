@@ -131,7 +131,7 @@ class SessionToolScopeServiceTest {
         // 真实 registrar 链路：app_only 工具登记了 ToolInfo，但注册名集与裸名别名都必须排除
         var registrar = new McpToolRegistrar(props());
         registrar.putToolInfoForTest(new ToolInfo("card_ui", "mcp__ui__card_ui", "d", "ui",
-            "ui://x", "config", true));
+            "ui://x", "config", true, false));
         registrar.putToolInfoForTest(new ToolInfo("query", "mcp__db__query", "d", "db"));
 
         var s = new SessionToolScopeService(registrar, null) {

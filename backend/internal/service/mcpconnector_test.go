@@ -140,3 +140,109 @@ func TestMcpConnectorVerifyErrorLifecycle(t *testing.T) {
 		t.Fatalf("success must clear lastVerifyError: status=%s err=%q", m.Status, m.LastVerifyError)
 	}
 }
+
+func TestValidateDirectReturn(t *testing.T) {
+	valid := []string{
+		`{}`,
+		`{"tools":[]}`,
+		`{"tools":["render_confirm_card","submit_order"]}`,
+		`{"tools":["a"],"extra":1}`,
+	}
+	for _, raw := range valid {
+		if err := validateDirectReturn(json.RawMessage(raw)); err != nil {
+			t.Fatalf("valid %q rejected: %v", raw, err)
+		}
+	}
+	invalid := []string{
+		`"{\"tools\":[\"a\"]}"`,
+		`"{}"`,
+		`[]`,
+		`42`,
+		`{"tools":"a"}`,
+		`{"tools":{"a":true}}`,
+		`{"tools":[1]}`,
+		`{"tools":[""]}`,
+		`{"tools":["  "]}`,
+		`{"tools":["a","a"]}`,
+	}
+	for _, raw := range invalid {
+		err := validateDirectReturn(json.RawMessage(raw))
+		if err == nil {
+			t.Fatalf("invalid %q accepted", raw)
+		}
+		if !errors.Is(err, ErrInvalidForm) {
+			t.Fatalf("invalid %q wrong error: %v", raw, err)
+		}
+	}
+}
+
+func TestMcpConnectorDirectReturnEntryValidation(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-454a", "直返空间")
+
+	if _, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name: "d1", Endpoint: "http://x/mcp",
+		DirectReturn: json.RawMessage(`{"tools":"a"}`)}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("create invalid directReturn: %v", err)
+	}
+
+	view, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name: "d1", Endpoint: "http://x/mcp", DirectReturn: json.RawMessage(`{"tools":["render_confirm_card"]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.DirectReturn != `{"tools":["render_confirm_card"]}` {
+		t.Fatalf("create response directReturn: %q", view.DirectReturn)
+	}
+
+	bad := json.RawMessage(`"{\"tools\":[\"a\"]}"`)
+	if _, err := c.UpdateMcpConnector(ws.ID, view.ID, PatchMcpConnectorInput{DirectReturn: &bad}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("patch double-encoded directReturn: %v", err)
+	}
+	cleared := json.RawMessage(`{}`)
+	if _, err := c.UpdateMcpConnector(ws.ID, view.ID, PatchMcpConnectorInput{DirectReturn: &cleared}); err != nil {
+		t.Fatalf("patch cleared directReturn: %v", err)
+	}
+	endpoint := "http://y/mcp"
+	v3, err := c.UpdateMcpConnector(ws.ID, view.ID, PatchMcpConnectorInput{Endpoint: &endpoint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v3.DirectReturn != `{}` {
+		t.Fatalf("patch without directReturn must keep it: %q", v3.DirectReturn)
+	}
+
+	var m store.McpConnector
+	if err := c.DB.First(&m, view.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if m.DirectReturn != `{}` {
+		t.Fatalf("persisted directReturn: %q", m.DirectReturn)
+	}
+}
+
+func TestMcpConnectorDirectReturnDefaultsAndLegacyNull(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-454b", "直返默认空间")
+
+	view, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{Name: "d2", Endpoint: "http://x/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.DirectReturn != "{}" {
+		t.Fatalf("default directReturn: %q", view.DirectReturn)
+	}
+
+	if err := c.DB.Exec("UPDATE mcp_connectors SET direct_return = NULL WHERE id = ?", view.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := c.ListMcpConnectors(ws.ID)
+	if err != nil {
+		t.Fatalf("legacy NULL direct_return must not break listing: %v", err)
+	}
+	if len(legacy) != 1 || legacy[0].DirectReturn != "" {
+		t.Fatalf("legacy row directReturn: %+v", legacy)
+	}
+}

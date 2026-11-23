@@ -508,7 +508,7 @@ ui:
 ```
 
 - `resource_uri` 静态声明优先；无声明时回退工具 `meta()` 的 `_meta` 动态发现（渲染前预检）
-- TOOL_CALL_START 事件经 `resolveUiRef` 解析，SSE payload 携带 `ui.resourceUri/ui.server` → 前端渲染卡片
+- TOOL_CALL_START 事件经 `resolveToolCallMeta` 解析，SSE payload 携带 `ui.resourceUri/ui.server` → 前端渲染卡片
 - `app_only` 工具不注册到 Toolkit（LLM 不可见），仅 `/tools` 接口展示（供 Debug 页预检）
 
 ### 7.2 permissions.read_only 权限控制

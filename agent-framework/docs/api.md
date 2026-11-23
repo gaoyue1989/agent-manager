@@ -469,6 +469,7 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 |------|------|
 | `msg_id` | SDK Msg.id（toRoleContentList 透传；tool_calls 内层的 `id` 是工具调用 id，勿混淆） |
 | `origin` | `archive`（来自消息轨归档，压缩前原文）/ `state`（来自 agent_state 当前上下文） |
+| `generate_reason` | 仅 SDK 写入了生成原因的 assistant 消息携带（只增不改）：`TOOL_RETURN_DIRECT` = 直返工具结果的收尾消息，`content` 即原样内容（见 [mcp-direct-return-design-261123.md](../../docs/design/mcp-direct-return-design-261123.md)）；`INTERRUPTED` = 用户停止后的恢复消息 |
 | `role=compaction` 项 | 压缩分隔条合成项：`type=compaction_summary`，`content` 为摘要文本；老前端忽略即可 |
 | `reply_id` | 仅 assistant 携带；**按轮分配**——同一轮的多条 assistant 消息共享同一个 turn replyId（ReAct 一轮可产生多条 assistant）。取值优先级：归档行 > 消息 metadata 锚点（`/threads/chat`、AG-UI 写入的 user 消息 turn id；SDK ASKING 消息的 confirm replyId）> Redis reply 索引顺序兜底（按首个事件 seq，逐轮消费一个 id）。与 `files[].reply_id` 同源，可直接对应 |
 | `hasMore` / `nextBeforeId` | 归档分页游标；`nextBeforeId` 传回 `beforeId` 取更早一页 |
@@ -629,10 +630,10 @@ data: {"type":"AGENT_END","session_id":"...","replyId":"...","usage":{"input_tok
 |------|------|
 | `session_created` | 新会话创建（仅当请求未传 `sessionId`，作为首个事件下发） |
 | `waiting` | 排队等待（同 session 有活跃 turn 时，每 15s 一帧） |
-| `TEXT_BLOCK_DELTA` | 文本 token（流式累加） |
+| `TEXT_BLOCK_DELTA` | 文本 token（流式累加）。直返收尾文本（`direct_return` 工具结果原样作为本轮最终输出）额外携带 `generateReason: "TOOL_RETURN_DIRECT"`，前端据此与模型正文区分 |
 | `THINKING_BLOCK_DELTA` | 深度思考内容增量（`LLM_ENABLE_THINKING=true` 时出现） |
 | `MODEL_CALL_END` | 模型调用结束，携带 `inputTokens`/`outputTokens`/`totalTokens`（usage 为 null 时三字段缺省） |
-| `TOOL_CALL_START` | 工具调用开始（MCP Apps 工具携带 `ui` 元数据） |
+| `TOOL_CALL_START` | 工具调用开始（MCP Apps 工具携带 `ui` 元数据；`direct_return` 工具携带 `directReturn: true`） |
 | `TOOL_RESULT_END` | 工具返回结果，`state` ∈ `SUCCESS`/`ERROR`/`INTERRUPTED`/`DENIED`/`RUNNING` |
 | `tool_call_summary` | **合成帧**：工具调用中文摘要（`summary`/`toolCallId`/`toolName`），HITL 恢复段兜底补发 |
 | `tool_result_preview` | **合成帧**：工具结果预览（`preview`/`toolCallId`/`toolName`） |
