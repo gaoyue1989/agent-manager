@@ -78,4 +78,36 @@ class VikingMemoryInjectionMiddlewareTest {
         ctx.put(VikingMemoryInjectionMiddleware.CTX_QUERY_KEY, "q");
         assertEquals("base", mw.onSystemPrompt(null, ctx, "base").block());
     }
+
+    /**
+     * 缓存键必须含会话维度（issue #419 B-07a）：同用户新会话不得复用上一会话的检索结果，
+     * 否则新会话注入与当前问题无关的旧记忆、刚写入的记忆 5 分钟内不可见。
+     */
+    @Test
+    void differentSessionsOfSameUserSearchIndependently() {
+        var mw = new VikingMemoryInjectionMiddleware(client, resolver, cfg);
+        Mockito.when(client.searchContext("u-1", "q")).thenReturn("mem-a", "mem-b");
+        var ctx1 = ctxWith("u-1", "s-1");
+        ctx1.put(VikingMemoryInjectionMiddleware.CTX_QUERY_KEY, "q");
+        var ctx2 = ctxWith("u-1", "s-2");
+        ctx2.put(VikingMemoryInjectionMiddleware.CTX_QUERY_KEY, "q");
+        mw.onSystemPrompt(null, ctx1, "p").block();
+        mw.onSystemPrompt(null, ctx2, "p").block();
+        Mockito.verify(client, Mockito.times(2)).searchContext(Mockito.eq("u-1"), Mockito.eq("q"));
+        assertTrue(mw.onSystemPrompt(null, ctx1, "p").block().contains("mem-a"));
+        assertTrue(mw.onSystemPrompt(null, ctx2, "p").block().contains("mem-b"));
+    }
+
+    @Test
+    void sameSessionReusesCacheAcrossTurns() {
+        var mw = new VikingMemoryInjectionMiddleware(client, resolver, cfg);
+        Mockito.when(client.searchContext("u-1", "q")).thenReturn("mem");
+        var ctxTurn1 = ctxWith("u-1", "s-1");
+        ctxTurn1.put(VikingMemoryInjectionMiddleware.CTX_QUERY_KEY, "q");
+        var ctxTurn2 = ctxWith("u-1", "s-1");
+        ctxTurn2.put(VikingMemoryInjectionMiddleware.CTX_QUERY_KEY, "q");
+        mw.onSystemPrompt(null, ctxTurn1, "p").block();
+        mw.onSystemPrompt(null, ctxTurn2, "p").block();
+        Mockito.verify(client, Mockito.times(1)).searchContext(Mockito.eq("u-1"), Mockito.eq("q"));
+    }
 }

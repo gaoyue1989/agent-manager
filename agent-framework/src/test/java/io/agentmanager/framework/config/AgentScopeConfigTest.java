@@ -506,6 +506,47 @@ class AgentScopeConfigTest {
             "三条件齐备才装配");
     }
 
+    /**
+     * WorkspaceReader 本地记忆门控（issue #419 B-07b）：provider=openviking（VikingMemoryClient
+     * bean 在位）时必须关闭本地文件记忆注入/回写，消除双记忆源；provider=local 保持现状；
+     * AGENT_MEMORY_ENABLED=false 时无论 provider 均关闭（既有语义不变）。
+     */
+    @Test
+    void workspaceReaderShouldDisableLocalMemoryUnderVikingProvider() {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        var store = mock(DistributedStore.class);
+        when(store.baseStore()).thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+
+        var harnessOff = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, false, 10, 8000, 60,
+            30, 80000, 20000, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+        var propsOff = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
+            emptyServer(), emptyCheckpoint(), "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300), harnessOff);
+
+        var withClient = providerOf(mock(io.agentmanager.framework.service.VikingMemoryClient.class));
+        var noClient = providerOf(null);
+
+        assertFalse(config.workspaceReader(store, oaf, propsForLlm(), withClient).isMemoryEnabled(),
+            "provider=openviking 时本地文件记忆必须关闭（issue #419 双记忆源）");
+        assertTrue(config.workspaceReader(store, oaf, propsForLlm(), noClient).isMemoryEnabled(),
+            "provider=local 时本地文件记忆保持现状");
+        assertFalse(config.workspaceReader(store, oaf, propsOff, withClient).isMemoryEnabled(),
+            "AGENT_MEMORY_ENABLED=false 时无论 provider 均关闭");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient> providerOf(
+            io.agentmanager.framework.service.VikingMemoryClient client) {
+        var provider = (org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient>)
+            mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(client);
+        return provider;
+    }
+
     private static AgentManagerProperties.ServerConfig emptyServer() {
         return new AgentManagerProperties.ServerConfig("0.0.0.0", 8100);
     }
