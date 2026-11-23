@@ -103,7 +103,8 @@ public class McpToolRegistrar {
      * 注册的都是同一句柄实例，服务端重启后看门狗对句柄 swap 换芯即全员自愈，免重注册。
      * 句柄是无状态引用（initialize 幂等、底层 McpAsyncClient 线程安全，字节码核对），
      * 多个 toolkit 注册同一句柄安全——一次物理连接服务 N 个会话实例。
-     * 生命周期：只增不主动关；注册失败路径 CAS 驱逐死句柄（不 close，防误伤其他 toolkit）；
+     * 生命周期：只增不主动关；注册失败句柄毒化留缓存（sharedClient/看门狗原地换芯，
+     * issue #417），仅 closed 终态句柄移出缓存；
      * {@link #evictSharedWrappers()}（reload build 前）清缓存后旧句柄仅被旧 toolkit 引用，
      * 由既有 reload 清理路径关闭。
      */
@@ -121,8 +122,8 @@ public class McpToolRegistrar {
      * 单一真相源。env 派生的可重建元数据（等同 rebuildInFlight 簿记，Pod 内存允许）；
      * 多副本各自持连接与「共享连接池 per-Pod」既有语义一致。
      *
-     * <p>生命周期：registerSyntheticClient 无条件登记（注册失败驱逐句柄但保留工厂，
-     * 看门狗下周期补偿复活）；{@link #evictSharedWrappers()}（B 路径 build 前）不清本表
+     * <p>生命周期：registerSyntheticClient 无条件登记（注册失败毒化句柄但保留工厂，
+     * 看门狗换芯/补偿复活）；{@link #evictSharedWrappers()}（B 路径 build 前）不清本表
      * ——build 失败回滚窗口内旧 agent 的合成句柄仍可被看门狗自愈，与 declared 的
      * compensate 兜底对称；同名未声明时工厂闭包 env 派生、世代间等价，残留无害。
      * 名字被 frontmatter 转为声明时由 reloadAgent 代际收口移除（{@link
@@ -155,26 +156,26 @@ public class McpToolRegistrar {
     }
 
     /**
-     * 共享连接获取结果（issue #353）：{@code freshOwner=true} 表示句柄为本次新建且刚 CAS
-     * 入缓存——在获取返回前从未交付任何 toolkit，注册失败驱逐时唯一持有者即调用方，
-     * 可安全 close（close 竞态窗口内另一线程经缓存命中拿到同句柄，其注册同样因死连接
-     * 失败且 close 为尽力而为，无放大风险）；false = 缓存命中复用，可能正被其他 toolkit
-     * 引用，生命周期归缓存统一管理（驱逐不 close）。
+     * 共享连接入口：命中缓存直接复用；毒化句柄（注册失败标记，issue #417）先原地换芯
+     * 再复用（{@link #rebuildSharedWrapper} per-server 单飞，失败留缓存走 fail-soft，
+     * 下会话/看门狗重试）；closed 终态句柄移出缓存走全新构建；未命中构建并缓存
+     * （并发同 server 只建一次）。包内开放（看门狗 compensate 复用同一构建/缓存/竞态语义）。
+     * 注册失败路径（registerOne/registerSyntheticClient catch）只毒化不驱逐不 close——
+     * 句柄可能正被存量会话 toolkit 引用，驱逐会脱管（看门狗自愈断链）且被后续
+     * registeredWrappers.put 强杀（issue #417）。
      */
-    record SharedHandle(McpClientWrapper wrapper, boolean freshOwner) {}
-
-    /**
-     * 共享连接入口：命中缓存直接复用；未命中构建并缓存（并发同 server 只建一次）。
-     * 包内开放（看门狗 compensate 复用同一构建/缓存/竞态语义）。
-     * 注册失败路径（registerOne catch）对**复用句柄**不 close——它可能正被其他
-     * toolkit 引用，生命周期归本缓存统一管理（仅 CAS 驱逐，evict/reload 时统一关）；
-     * 对 **fresh 句柄**驱逐即 close（issue #353：驱逐后句柄脱缓存，所有关闭路径不可达）。
-     */
-    SharedHandle sharedClient(OafConfig.McpServerConfig mcp) {
+    McpClientWrapper sharedClient(OafConfig.McpServerConfig mcp) {
         var existing = sharedWrappers.get(mcp.server());
-        if (existing != null) {
+        if (existing instanceof ReconnectableMcpClientWrapper reconnectable && reconnectable.poisoned()) {
+            if (reconnectable.isClosed()) {
+                sharedWrappers.remove(mcp.server(), existing);
+            } else if (rebuildSharedWrapper(mcp.server(), mcp)) {
+                log.info("[MCP] poisoned shared client for '{}' rebuilt in place", mcp.server());
+            }
+        }
+        if (existing != null && sharedWrappers.get(mcp.server()) == existing) {
             log.info("[MCP] reusing shared client for server '{}'", mcp.server());
-            return new SharedHandle(existing, false);
+            return existing;
         }
         var built = buildClient(mcp);
         if (built == null) {
@@ -184,9 +185,9 @@ public class McpToolRegistrar {
         if (prev != null) {
             // 并发构建竞态：用先到者，后到者立即关闭（尚未被任何 toolkit 引用，close 安全）
             closeQuietly(built);
-            return new SharedHandle(prev, false);
+            return prev;
         }
-        return new SharedHandle(built, true);
+        return built;
     }
 
     /** 清空共享连接缓存（reload build 前调用）：旧 wrapper 仅被旧 toolkit 引用，随旧实例清理路径关闭 */
@@ -230,7 +231,7 @@ public class McpToolRegistrar {
      * 缓存（看门狗可换芯）、标准路径注册（mcp__{server}__ 前缀）、fail-soft（失败仅告警
      * 返回 null）。
      *
-     * <p>注册失败驱逐句柄但工厂保留在合成注册表（看门狗下周期补偿复活）；
+     * <p>注册失败句柄毒化留缓存（工厂保留在合成注册表，看门狗换芯/下周期补偿复活）；
      * frontmatter 已声明同名 server 时不应调用本方法（HarnessAgentFactory 注入守卫，
      * declared 声明优先）。
      *
@@ -248,9 +249,10 @@ public class McpToolRegistrar {
         startupRequired.put(mcp.server(), false);
         // 注册表无条件登记（含注册失败路径）：看门狗探测/补偿的单一真相源
         syntheticRegistry.put(mcp.server(), new SyntheticServer(mcp, baseFactory));
+        McpClientWrapper base;
         McpClientWrapper wrapper;
         try {
-            var base = baseFactory.get();
+            base = baseFactory.get();
             if (base == null) {
                 log.warn("[MCP] synthetic server '{}' base client build returned empty, skipped (fail-soft)",
                     mcp.server());
@@ -263,13 +265,24 @@ public class McpToolRegistrar {
             return null;
         }
         var prev = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
-        var freshOwner = prev == null;
         if (prev != null) {
-            // 缓存已有句柄：被拒 wrapper 从未入缓存即无任何持有者，即刻关闭
-            // （sharedClient 竞态败者 closeQuietly 同款先例），注册走既有句柄
-            log.info("[MCP] synthetic server '{}' already has a shared handle, reusing (rejected wrapper closed)",
-                mcp.server());
-            closeQuietly(wrapper);
+            if (prev instanceof ReconnectableMcpClientWrapper reconnectable
+                    && reconnectable.poisoned() && !reconnectable.isClosed()) {
+                // 毒化句柄换芯（issue #417）：本会话手握工厂新连接，直接 swap 进既有句柄
+                // 复用（随后的注册过程即握手验证），不走 rebuildSharedWrapper 多建一次；
+                // 被拒 wrapper 不 close——其 delegate 已被换入既有句柄
+                if (reconnectable.swap(base)) {
+                    log.info("[MCP] synthetic server '{}' poisoned shared handle rebuilt in place", mcp.server());
+                } else {
+                    closeQuietly(base);
+                }
+            } else {
+                // 缓存已有句柄：被拒 wrapper 从未入缓存即无任何持有者，即刻关闭
+                // （sharedClient 竞态败者 closeQuietly 同款先例），注册走既有句柄
+                log.info("[MCP] synthetic server '{}' already has a shared handle, reusing (rejected wrapper closed)",
+                    mcp.server());
+                closeQuietly(wrapper);
+            }
             wrapper = prev;
         }
         try {
@@ -279,14 +292,15 @@ public class McpToolRegistrar {
             log.info("[MCP] synthetic client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
         } catch (Exception e) {
-            var evicted = sharedWrappers.remove(mcp.server(), wrapper);
-            if (evicted) {
-                log.warn("[MCP] synthetic server '{}' registration failed, evicted shared handle: {}",
-                    mcp.server(), e.getMessage());
-                if (freshOwner) {
-                    // fresh 句柄（issue #353 同型）：驱逐后脱缓存且从未交付任何 toolkit，
-                    // 不 close 即无持有者孤儿（泄漏子进程/HttpClient）
-                    closeQuietly(wrapper);
+            // 驱逐改毒化（issue #417，同 registerOne）：句柄留缓存原地换芯，不再驱逐脱管
+            // /泄漏（#353 同型的 fresh 孤儿随毒化语义消失——留缓存的句柄由看门狗换芯接管）
+            if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
+                if (reconnectable.isClosed()) {
+                    sharedWrappers.remove(mcp.server(), wrapper);
+                } else {
+                    reconnectable.markPoisoned();
+                    log.warn("[MCP] synthetic server '{}' registration failed, poisoned shared client for in-place rebuild: {}",
+                        mcp.server(), e.getMessage());
                 }
             }
             log.warn("[MCP] synthetic server '{}' registration failed, skipped (fail-soft): {}",
@@ -366,7 +380,7 @@ public class McpToolRegistrar {
      * 注册单个 MCP server 到 Toolkit（registerAll 循环体提取，供运行时 reload 复用）。
      * 语义与启动期注册完全一致：ui/权限/只读/required 配置即时装载，
      * fail-soft（连接失败仅告警跳过），startup.required=true 时抛异常；
-     * 注册失败时 CAS 驱逐共享缓存死句柄（P0 自愈口，issue #348）。
+     * 注册失败句柄毒化留缓存原地换芯（自愈口，issue #348/#417）。
      *
      * @return 本次注册的 server 名（构建失败返回 null）
      */
@@ -377,12 +391,11 @@ public class McpToolRegistrar {
         readOnlyServers.put(mcp.server(), isReadOnlyConfigured(mcp));
         startupRequired.put(mcp.server(), isStartupRequired(mcp));
         userHeaderRules.put(mcp.server(), loadUserHeaderRule(mcp));
-        var handle = sharedClient(mcp);
-        if (handle == null) {
+        var wrapper = sharedClient(mcp);
+        if (wrapper == null) {
             log.warn("[MCP] skipped server '{}': client build failed", mcp.server());
             return null;
         }
-        var wrapper = handle.wrapper();
         // MCP 是外部依赖：默认 fail-soft（连接失败仅告警并跳过该 server 的工具，
         // 不阻断 agent 启动）；config.yaml 声明 startup.required=true 时才严格失败
         try {
@@ -402,33 +415,29 @@ public class McpToolRegistrar {
                 recordRegisteredTools(wrapper, mcp.server(), uiMapping);
             }
             var prev = registeredWrappers.put(mcp.server(), wrapper);
-            if (prev != null && prev != wrapper) {
+            if (prev != null && prev != wrapper && sharedWrappers.get(mcp.server()) != prev) {
                 // 重注册路径（reload 换连接）：旧专属连接已由调用方 clearServer 关闭，
-                // 此处兜底防泄漏。prev 是旧专属连接（非共享缓存成员，共享句柄永不在此出现）
+                // 此处兜底防泄漏。prev 属共享缓存（含毒化句柄，issue #417：其仍可能被存量
+                // 会话持有且生命周期归缓存）时不得 close——close 会强杀存活句柄
                 closeQuietly(prev);
             }
             log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
         } catch (Exception e) {
-            // 复用句柄不得在此 close：它可能正被其他 toolkit 引用，
-            // 生命周期归 sharedWrappers 缓存统一管理（evict 时经 reload 清理路径关闭）。
-            // 但必须 CAS 驱逐出缓存（issue #348 P0）：注册失败意味着该连接不可用
-            // （典型：服务端重启毒化缓存的死会话），不驱逐会让后续所有新会话
-            // 命中同一死连接、故障永不自愈；驱逐后下一会话自然重建全新连接。
-            var evicted = sharedWrappers.remove(mcp.server(), wrapper);
-            if (evicted) {
-                log.warn("[MCP] server '{}' registration failed, evicted poisoned shared client for rebuild: {}",
-                    mcp.server(), e.getMessage());
-                if (handle.freshOwner()) {
-                    // fresh 句柄（本次新建且从未交付任何 toolkit，失败发生在 registerStandard/
-                    // registerFiltered 的 initialize().block()，先于 toolkit 注册）：驱逐后
-                    // 脱缓存，evictSharedWrapper/reload 收尾/toolkit 清理全部不可达——不 close
-                    // 即无持有者孤儿，server 持续宕机时看门狗每 30s 补偿一次泄漏一个连接
-                    // （issue #353：stdio 泄漏子进程、HTTP 泄漏 HttpClient）。竞态窗口内
-                    // 另一线程经缓存命中拿到同句柄，其注册同样因死连接失败且 close 尽力而为。
-                    closeQuietly(wrapper);
-                    log.warn("[MCP] fresh shared client for server '{}' closed after registration failure "
-                        + "(no toolkit holder)", mcp.server());
+            // 注册失败的句柄处置（issue #417 修订 #348 P0 驱逐语义）：驱逐出缓存会让存量
+            // 会话句柄脱管——看门狗不再探测（恢复后丢工具且永不自愈），且后续
+            // registeredWrappers.put 的 closeQuietly(prev) 会把存活句柄强杀。改为毒化标记：
+            // 句柄留缓存原地换芯（sharedClient/看门狗对毒化句柄 swap 新连接，#348 的自愈
+            // 语义经换芯达成），毒化清除换芯成功即自愈。fresh 与复用句柄同型处理（复用句柄
+            // 失败同样可能是死连接毒化）；仅 closed 终态句柄（无法再换芯）移出缓存防无限
+            // 复用死对象
+            if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
+                if (reconnectable.isClosed()) {
+                    sharedWrappers.remove(mcp.server(), wrapper);
+                } else {
+                    reconnectable.markPoisoned();
+                    log.warn("[MCP] server '{}' registration failed, poisoned shared client for in-place rebuild: {}",
+                        mcp.server(), e.getMessage());
                 }
             }
             if (Boolean.TRUE.equals(startupRequired.get(mcp.server()))) {
@@ -802,7 +811,8 @@ public class McpToolRegistrar {
 
     /**
      * 查询共享连接缓存中的可换芯句柄（看门狗探测入口，issue #348）。
-     * 注册失败路径已驱逐死句柄，null 即「无共享连接」——由 compensate 补建。
+     * 注册失败句柄毒化留缓存（closed 终态除外，issue #417），null 即「无共享连接」
+     * ——由 compensate 补建。
      */
     McpClientWrapper sharedWrapper(String serverName) {
         return sharedWrappers.get(serverName);

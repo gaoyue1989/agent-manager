@@ -209,7 +209,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 模型集成 | ✅ | OpenAI 兼容 API；多托管模型（`/models`）+ 会话级切换 + 全局默认模型（`PUT /models/{id}/default`）+ 可配置备用模型（`PUT /models/{id}/fallback`，DB 优先于 `LLM_FALLBACK_MODEL_ID`；见 [docs/model-fallback-design.md](docs/model-fallback-design.md)） |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
 | MCP 启动容错 | ✅ | 默认 fail-soft：server 不可达仅告警跳过不阻断启动；config.yaml `startup.required: true` 可声明严格失败 |
-| MCP 断联恢复 | ✅ | 共享连接缓存句柄化（ReconnectableMcpClientWrapper，issue #348）：注册失败 CAS 驱逐死句柄（下会话重建）；McpConnectionWatchdog 对共享句柄探活（listTools）+ 原地换芯（build+握手成功才 swap，全部 toolkit 持有同一句柄实例免重注册自愈）；缓存无句柄时 compensate 复用 registerOne 补建；独立懒连接 McpResourceProxy 由看门狗联动 evictClient。合成 server（openviking，issue #415）纳入同一链路：句柄 Reconnectable(UserScoped(base))、探测名单含 registrar 合成注册表、换芯走注册表工厂（与注册同源防形态漂移）、无句柄按 agent 有无分流补注册/仅入缓存；A 路径 reload「声明已删除」循环豁免合成 server（其下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更 + rollout） |
+| MCP 断联恢复 | ✅ | 共享连接缓存句柄化（ReconnectableMcpClientWrapper，issue #348/#417）：注册失败句柄毒化留缓存原地换芯（驱逐会让存量会话句柄脱管失去看门狗自愈、fresh 句柄成无持有者孤儿，毒化标志换芯成功即清除，仅 closed 终态句柄移出缓存）；McpConnectionWatchdog 对共享句柄探活（listTools）+ 原地换芯（build+握手成功才 swap，全部 toolkit 持有同一句柄实例免重注册自愈）；缓存无句柄时 compensate 复用 registerOne 补建；独立懒连接 McpResourceProxy 由看门狗联动 evictClient。合成 server（openviking，issue #415）纳入同一链路：句柄 Reconnectable(UserScoped(base))、探测名单含 registrar 合成注册表、换芯走注册表工厂（与注册同源防形态漂移）、无句柄按 agent 有无分流补注册/仅入缓存；A 路径 reload「声明已删除」循环豁免合成 server（其下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更 + rollout） |
 | A2A 协议 | ✅ | AgentScopeA2aServer + HarnessAgentRunner |
 | 多租户 | ✅ | IsolationScope.USER (按 userId 隔离) |
 

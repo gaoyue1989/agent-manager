@@ -25,12 +25,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.when;
 
 /**
- * 共享连接缓存断联恢复单测（issue #348）：注册失败 CAS 驱逐死句柄（P0 新会话自愈）、
- * rebuildSharedWrapper 原地换芯（句柄实例稳定，持有方免重注册）、无句柄拒绝换芯、
- * 定向驱逐关闭。
+ * 共享连接缓存断联恢复单测（issue #348）：注册失败句柄毒化留缓存原地换芯（issue #417
+ * 修订驱逐语义，不驱逐不 close）、rebuildSharedWrapper 原地换芯（句柄实例稳定，持有方
+ * 免重注册）、无句柄拒绝换芯、定向驱逐关闭。
  */
 class McpToolRegistrarSharedClientTest {
 
@@ -98,19 +99,58 @@ class McpToolRegistrarSharedClientTest {
     }
 
     @Test
-    void registerOneFailureShouldEvictSharedClientSoNextSessionRebuilds() {
+    void registerOneFailureShouldPoisonHandleForInPlaceRebuild() {
+        // issue #417：注册失败的驱逐改为毒化标记——句柄实例留缓存（看门狗持续管理、存量
+        // 引用方免脱管），下一会话 sharedClient 见毒化原地换芯复用同一实例
         registrar.bases.add(deadBase());
 
         assertNull(registrar.registerOne(toolkit, mcp));
-        assertNull(registrar.sharedWrapper(mcp.server()), "死句柄必须被驱逐，否则后续会话复用同一死连接");
+        var handle = registrar.sharedWrapper(mcp.server());
+        assertNotNull(handle, "毒化句柄必须留缓存（驱逐脱管会让存量会话失去看门狗自愈）");
+        assertTrue(((ReconnectableMcpClientWrapper) handle).poisoned(), "注册失败句柄必须标记毒化");
 
-        // 下一会话重建：新 base 可用 → 注册成功且缓存装入全新句柄
+        // 下一会话：毒化句柄原地换芯（新 base swap 进同一实例）→ 注册成功
         var freshBase = healthyBase("fresh");
         registrar.bases.add(freshBase);
         assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
-        var handle = registrar.sharedWrapper(mcp.server());
-        assertNotNull(handle);
+        assertSame(handle, registrar.sharedWrapper(mcp.server()),
+            "原地换芯：句柄实例稳定，持有方免重注册");
         assertSame(freshBase, ((ReconnectableMcpClientWrapper) handle).delegate());
+        assertFalse(((ReconnectableMcpClientWrapper) handle).poisoned(), "换芯成功毒化清除");
+    }
+
+    @Test
+    void reusedHandleRegistrationFailureShouldNotEvictNorCloseSharedHandle() {
+        // issue #417 根因 1：复用句柄（freshOwner=false）注册失败被 CAS 驱逐出缓存——存量
+        // 会话句柄脱管（看门狗不再探测，恢复后丢工具），后续 registeredWrappers.put 的
+        // closeQuietly(prev) 还会把存活句柄强杀。修复：复用句柄失败只毒化，不驱逐不关闭
+        var base = healthyBase("shared");
+        registrar.bases.add(base);
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var handle = registrar.sharedWrapper(mcp.server());
+
+        // 故障期第二会话：复用同一句柄 + 注册环节失败（ActiveMCP 过滤路径内 listTools 抛）
+        when(base.listTools()).thenThrow(new RuntimeException("server restarted"));
+        registrar.activeMcpOverride = Map.of("t1", true);
+        assertNull(registrar.registerOne(new Toolkit(), mcp));
+
+        assertSame(handle, registrar.sharedWrapper(mcp.server()),
+            "复用句柄注册失败不得驱逐出缓存（脱管即自愈断链）");
+        verify(base, never()).close();
+        assertTrue(((ReconnectableMcpClientWrapper) handle).poisoned());
+
+        // 恢复期第三会话：毒化句柄原地换芯成功。旧死连接由 swap 装新关旧关闭（times(1)
+        // 即换芯的正规关闭路径，非注册失败路径误杀）；句柄实例本身从未 close（closed 会
+        // 拒绝后续 swap，等价强杀）
+        // doReturn 形式重设：when(base.listTools()) 语法会实际调用抛异常的 stub 立刻炸
+        doReturn(Mono.just(List.<McpSchema.Tool>of())).when(base).listTools();
+        var freshBase = healthyBase("recovered");
+        registrar.bases.add(freshBase);
+        assertEquals(mcp.server(), registrar.registerOne(new Toolkit(), mcp));
+        assertSame(handle, registrar.sharedWrapper(mcp.server()));
+        assertSame(freshBase, ((ReconnectableMcpClientWrapper) handle).delegate());
+        verify(base, times(1)).close();
+        assertFalse(((ReconnectableMcpClientWrapper) handle).isClosed());
     }
 
     @Test
@@ -169,7 +209,7 @@ class McpToolRegistrarSharedClientTest {
 
     @Test
     void rebuildShouldRefuseWhenNoSharedClient() {
-        // 缓存无句柄（从未注册成功/已被 P0 驱逐）：换芯无目标，走 compensate 补建
+        // 缓存无句柄（从未注册成功/已被定向驱逐）：换芯无目标，走 compensate 补建
         assertFalse(registrar.rebuildSharedWrapper(mcp.server(), mcp));
         assertTrue(registrar.bases.isEmpty());
     }
@@ -186,20 +226,22 @@ class McpToolRegistrarSharedClientTest {
         assertFalse(registrar.evictSharedWrapper(mcp.server()), "重复驱逐幂等返回 false");
     }
 
-    // ---------- 注册失败驱逐即关闭 fresh 句柄（issue #353 防泄漏） ----------
-    // fresh 句柄（本次新建且刚 CAS 入缓存，注册失败发生在交付任何 toolkit 之前）被 CAS
-    // 驱逐后即脱离缓存，evictSharedWrapper/reload 收尾/toolkit 清理全部不可达——不 close
-    // 即无持有者孤儿，server 持续宕机时看门狗每 30s 补偿一次泄漏一个连接（stdio 泄漏
-    // 子进程、HTTP 泄漏 HttpClient）。
+    // ---------- 注册失败毒化处置（issue #417 修订 #353 驱逐即 close） ----------
+    // fresh / 复用句柄注册失败一律毒化留缓存：驱逐会让句柄脱管（看门狗自愈断链、后续
+    // registeredWrappers.put 强杀存活句柄），驱逐即 close 会让 fresh 句柄成无持有者孤儿
+    // （#353：stdio 泄漏子进程、HTTP 泄漏 HttpClient）。毒化后由 sharedClient/看门狗对
+    // 句柄原地换芯，脱管与连接泄漏随驱逐语义一同消失。
 
     @Test
-    void registerOneFailureShouldCloseFreshlyBuiltHandle() {
+    void registerOneFreshHandleFailureShouldPoisonAndStayUnclosed() {
         var base = deadBase();
         registrar.bases.add(base);
 
         assertNull(registrar.registerOne(toolkit, mcp));
-        assertNull(registrar.sharedWrapper(mcp.server()), "死句柄仍须驱逐（自愈语义不变）");
-        verify(base, times(1)).close();
+        var handle = registrar.sharedWrapper(mcp.server());
+        assertNotNull(handle, "fresh 失败句柄必须留缓存（驱逐/close 即孤儿或脱管）");
+        assertTrue(((ReconnectableMcpClientWrapper) handle).poisoned());
+        verify(base, never()).close();
     }
 
     @Test
@@ -213,22 +255,27 @@ class McpToolRegistrarSharedClientTest {
         registrar.activeMcpOverride = Map.of("tool-x", true);
         registrar.bases.add(base);
         assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var handle = registrar.sharedWrapper(mcp.server());
 
         assertNull(registrar.registerOne(new Toolkit(), mcp));
-        assertNull(registrar.sharedWrapper(mcp.server()), "失败句柄仍须驱逐");
-        // 复用句柄可能被其他 toolkit 引用（首注册 toolkit 在持），生命周期归缓存统一管理
+        assertSame(handle, registrar.sharedWrapper(mcp.server()),
+            "失败句柄留缓存（驱逐即存量会话脱管，issue #417）");
+        assertTrue(((ReconnectableMcpClientWrapper) handle).poisoned());
+        // 复用句柄可能被其他 toolkit 引用（首注册 toolkit 在持），毒化处置同样不 close
         verify(base, never()).close();
     }
 
     @Test
-    void syntheticRegistrationFailureShouldCloseFreshWrapper() {
+    void syntheticRegistrationFailureShouldPoisonHandleWithoutClose() {
         var base = deadBase();
         registrar.bases.add(base);
         var synthetic = syntheticConfig();
 
         assertNull(registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
-        assertNull(registrar.sharedWrapper(synthetic.server()), "注册失败死句柄必须被驱逐");
-        verify(base, times(1)).close();
+        var handle = registrar.sharedWrapper(synthetic.server());
+        assertNotNull(handle, "注册失败句柄毒化留缓存（驱逐即脱管，issue #417）");
+        assertTrue(((ReconnectableMcpClientWrapper) handle).poisoned());
+        verify(base, never()).close();
     }
 
     @Test
@@ -329,24 +376,31 @@ class McpToolRegistrarSharedClientTest {
     }
 
     @Test
-    void syntheticRegistrationFailureShouldEvictHandleButKeepFactoryForCompensation() {
+    void syntheticRegistrationFailureShouldPoisonHandleAndReviveByInPlaceSwap() {
         var base = deadBase();
         registrar.bases.add(base);
         var synthetic = syntheticConfig();
 
         assertNull(registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
-        assertNull(registrar.sharedWrapper(synthetic.server()));
-        verify(base, times(1)).close();
+        var handle = registrar.sharedWrapper(synthetic.server());
+        assertNotNull(handle, "失败句柄毒化留缓存（驱逐即脱管，issue #417）");
+        assertTrue(((ReconnectableMcpClientWrapper) handle).poisoned());
+        verify(base, never()).close();
         // 工厂保留在注册表：看门狗下周期可补偿复活（agent!=null 补注册 / agent==null 入缓存）
         var registry = registrar.syntheticServers();
         assertTrue(registry.containsKey(synthetic.server()));
 
-        // 复活：同一工厂产出健康连接 → 补注册成功且句柄入缓存
+        // 复活（issue #417 新会话换芯）：同一工厂产出健康连接 → putIfAbsent 命中毒化句柄
+        // → 本会话新连接直接 swap 换芯 → 注册成功、句柄实例稳定
         registrar.bases.add(healthyBase("revived"));
         assertEquals(synthetic.server(),
             registrar.registerSyntheticClient(new Toolkit(), synthetic,
                 registry.get(synthetic.server()).factory()));
-        assertNotNull(registrar.sharedWrapper(synthetic.server()));
+        assertSame(handle, registrar.sharedWrapper(synthetic.server()), "换芯复用：句柄实例稳定");
+        assertFalse(((ReconnectableMcpClientWrapper) handle).poisoned(), "换芯成功毒化清除");
+        var delegate = ((ReconnectableMcpClientWrapper) handle).delegate();
+        assertInstanceOf(io.agentmanager.framework.mcp.UserScopedMcpClientWrapper.class, delegate);
+        assertEquals("revived", delegate.getName());
     }
 
     @Test

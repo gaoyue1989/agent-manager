@@ -95,4 +95,49 @@ class ReconnectableMcpClientWrapperTest {
     void nullDelegateShouldBeRejected() {
         assertThrows(IllegalArgumentException.class, () -> new ReconnectableMcpClientWrapper("s", null));
     }
+
+    @Test
+    void poisonedFlagShouldExposeAndClearOnSuccessfulSwap() {
+        // issue #417：注册失败的驱逐改为毒化标记（句柄留缓存原地换芯）——毒化标志可读、
+        // 成功换芯即自愈清除；拒绝型 swap（closed/null/同实例）不清毒化
+        var old = stubBase("old");
+        var fresh = stubBase("fresh");
+        var handle = new ReconnectableMcpClientWrapper("s", old);
+        assertFalse(handle.poisoned());
+        handle.markPoisoned();
+        assertTrue(handle.poisoned());
+        assertTrue(handle.swap(fresh));
+        assertFalse(handle.poisoned(), "成功换芯 = 连接已重建，毒化应清除");
+    }
+
+    @Test
+    void closeShouldRaceSafelyWithSwap() throws Exception {
+        // issue #417：close 未与 swap 同步——close 在 swap 装新关旧之间进入会关掉刚装的
+        // next 而 swap 仍返回 true（调用方误以为换芯成功，使用死连接）。close 加锁后两段
+        // 串行化，并发压测下关闭次数守恒：每个 delegate 桩的 close 至多一次（swap 成功关旧
+        // 1 次，或 handle.close 关当时 delegate；重复 close 是误杀直接证据）
+        for (int round = 0; round < 300; round++) {
+            var first = stubBase("d" + round + "-0");
+            var handle = new ReconnectableMcpClientWrapper("s", first);
+            var bases = new java.util.ArrayList<McpClientWrapper>();
+            for (int i = 1; i <= 6; i++) {
+                bases.add(stubBase("d" + round + "-" + i));
+            }
+            var closer = new Thread(handle::close);
+            var swapper = new Thread(() -> {
+                for (var next : bases) {
+                    handle.swap(next);
+                }
+            });
+            closer.start();
+            swapper.start();
+            closer.join();
+            swapper.join();
+            org.mockito.Mockito.verify(first, org.mockito.Mockito.atMostOnce()).close();
+            for (var next : bases) {
+                org.mockito.Mockito.verify(next, org.mockito.Mockito.atMostOnce()).close();
+            }
+            assertTrue(handle.isClosed(), "句柄终态必须 closed");
+        }
+    }
 }
