@@ -225,17 +225,13 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// 会话隔离派生（issue #142）：k8sName 定型后按服务派生独立 checkpoint 库名与
 	// Redis key 前缀——仅 env 未显式配置时生效，用户显式值优先
 	c.applyIsolationEnv(k8sName, plain, secret)
-	// OpenViking 记忆供给派生（同 issue #142 模式）：平台启用即默认 provider=openviking，
-	// 建户 + env/Secret 注入 + 包内知识导入（显式 local 退出；失败即发布失败，不留半配置记录）
-	if err := c.applyOpenVikingEnv(k8sName, pkg, plain, secret); err != nil {
-		return nil, err
-	}
 	params := applySpec(c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath), req.Spec)
 	params.EnvSecret = secret
 	// 展示 endpoint 派生 + Ingress overlay 纯函数前置（host 模式）：非法 overlay 直接
 	// 拒绝且不落库（与 image 校验同级，模板违规属平台配置错误，不产生 deploying/error
 	// 垃圾记录）；模板可改 host/TLS，公式随合并后 Ingress 走。router 模式无
-	// per-service Ingress，纯配置拼装（RouterEndpoint）。
+	// per-service Ingress，纯配置拼装（RouterEndpoint）。派生只依赖 K8s 名与路由配置，
+	// 与 env 内容无关，可安全前置于 OpenViking 供给。
 	endpoint, err := c.deriveEndpoint(params)
 	if err != nil {
 		return nil, err
@@ -267,6 +263,8 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	}
 
 	svc.Status = store.StatusDeploying // 落库即为 deploying（事件保留 created→deploying 审计）
+	// 占位事务先行（issue #430）：先占 DB k8s_name 唯一键再建 OpenViking account——并发
+	// 同名发布败者在唯一键冲突处失败，EnsureAccount 零调用，不再轮换胜者在线 ADMIN key
 	err = c.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(svc).Error; err != nil {
 			// 唯一键冲突（并发同名发布竞态）等存储错误翻译为业务哨兵（issue #151：
@@ -282,6 +280,20 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	if err != nil {
 		return nil, err
 	}
+	// OpenViking 记忆供给派生（issue #142 模式）：建户 + env/Secret 注入 + 包内知识导入
+	// （显式 local 退出）。供给/回写任一失败即发布失败，回滚新建 account 与占位行，
+	// 不留半配置记录与外部孤儿 account
+	if err := c.applyOpenVikingEnv(k8sName, pkg, plain, secret); err != nil {
+		c.rollbackPublishPlaceholder(svc)
+		return nil, err
+	}
+	svc.EnvJSON, svc.EnvSecretJSON = mustJSON(plain), mustJSON(secret)
+	if err := c.DB.Model(svc).Updates(map[string]interface{}{
+		"env_json": svc.EnvJSON, "env_secret_json": svc.EnvSecretJSON,
+	}).Error; err != nil {
+		c.rollbackPublishPlaceholder(svc)
+		return nil, err
+	}
 
 	if _, err := c.applyAllPublic(params, public, nil); err != nil { // nil：新服务无上一版 env
 		c.transition(svc, store.StatusError, "apply failed: "+err.Error())
@@ -289,6 +301,24 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	}
 	c.asyncWaitAndRegister(svc.ID)
 	return svc, nil
+}
+
+// rollbackPublishPlaceholder 发布占位行清理（issue #430）：占位事务成功后、apply 之前的
+// 任一失败路径调用——删服务行与事件、复原包引用计数；K8s 对象尚未创建，无需清理。
+func (c *Core) rollbackPublishPlaceholder(svc *store.ServiceEntity) {
+	err := c.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&store.OafPackage{}).Where("id = ?", svc.PackageID).
+			UpdateColumn("ref_count", gorm.Expr("CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END")).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("service_id = ?", svc.ID).Delete(&store.ServiceEvent{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(svc).Error
+	})
+	if err != nil {
+		log.Printf("[publish] rollback placeholder svc=%d (%s) failed: %v", svc.ID, svc.K8sName, err)
+	}
 }
 
 // applyAllPublic 公共入口开关包装：public=false 时 host 模式跳过 Ingress 创建
