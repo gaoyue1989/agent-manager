@@ -126,6 +126,12 @@ fi
 fi
 
 # ---- 删除保护：默认连接 409；非默认连接可删 ----
+# #387 回归：与已发布 agent env 同 modelId+baseUrl 但未勾选下发的连接 → 可删（200）；
+# 旧逻辑按 env LLM_* 字符串匹配全空间服务会误拦本形态
+C3=$(req POST /console/workspaces/$WS/model-connections \
+  "{\"name\":\"conn-same-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN" | jqr "['data']['id']")
+assert_eq "#387 同 modelId+baseUrl 未下发连接删除 200" \
+  "$(code DELETE /console/workspaces/$WS/model-connections/$C3 "" "$TOKEN")" "200"
 assert_eq "默认连接删除 409" "$(code DELETE /console/workspaces/$WS/model-connections/$C1_ID "" "$TOKEN")" "409"
 assert_eq "非默认连接删除 200" "$(code DELETE /console/workspaces/$WS/model-connections/$C2 "" "$TOKEN")" "200"
 

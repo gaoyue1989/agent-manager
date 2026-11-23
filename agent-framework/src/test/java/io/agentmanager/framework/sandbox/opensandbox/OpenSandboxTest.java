@@ -1231,6 +1231,7 @@ class OpenSandboxTest {
         }).when(sync).setex(anyString(), anyLong(), anyString());
         var facade = mock(io.agentmanager.framework.redis.RedisConnectionFacade.class);
         when(facade.sync()).thenReturn(sync);
+        when(facade.key(anyString())).thenAnswer(inv -> inv.getArgument(0));
         return facade;
     }
 
@@ -1281,6 +1282,103 @@ class OpenSandboxTest {
         call2.stop();
         assertEquals(1, farmConvergeCommands(osb).size(),
             "同端点版本+同 revision（stage mtime 不同）→ 共享层指纹命中 → 副本2 不得重收敛（重收敛即指纹源退化为 stage stat）");
+    }
+
+    @Test
+    void farmScopedFpSlotOverwriteShouldForceCrossReplicaReconverge() throws Exception {
+        // 回归钉子（issue #393）：共享层键布局 = 沙箱代单槽 sbx:scopedfp:{sandboxId}，值=
+        // {scope}|{记账值}，put 新 scope 原子覆盖旧 scope——与容器内 prune「同代只存一个有效
+        // scope」的物理事实对齐。修复前 per-scope key 布局下：Pod1 切 scope-B prune 掉容器内
+        // scope-A 后，Pod2（Pod 级表空）仍凭 scope-A 陈旧共享记录命中稳态 + 回填伪造
+        // hydratedScopedScopes 而短路（converge=2）——但容器 .skills-cache 已无 scope-A，
+        // 技能执行面全废。单槽覆盖后 Pod2 读 scope-A 必视为未知 → 重收敛（converge=3）。
+        var host = java.nio.file.Files.createTempDirectory("farm-slot");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-slot-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var data = new java.util.HashMap<String, String>();
+        var store = new ScopedFingerprintStore(fakeScopedFpFacade(data));
+        var osb = farmOsbTracking(svc);
+
+        // Pod1：scope-A 收敛（converge=1），共享槽记录 sess-A
+        var spec1 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
+        var st1 = projectedStateNoSkillCache(host);
+        st1.setSandboxId("sbx-slot-1");
+        var call1 = new OpenSandbox(st1, osb, farmOptions(svc, null, null), null, null, spec1);
+        bindFarmSession(call1, "sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        call1.stop();
+        assertEquals(1, farmConvergeCommands(osb).size(), "Pod1 scope-A 首轮收敛");
+
+        // Pod1 同代切 scope-B：收敛（converge=2，prune 掉容器内 scope-A），共享槽被 scope-B 原子覆盖
+        var st2 = projectedStateNoSkillCache(host);
+        st2.setSandboxId("sbx-slot-1");
+        var call2 = new OpenSandbox(st2, osb, farmOptions(svc, null, null), null, null, spec1);
+        bindFarmSession(call2, "sess-B");
+        call2.exec(RuntimeContext.builder().userId("sess-B").build(), "echo 2", 30);
+        call2.stop();
+        assertEquals(2, farmConvergeCommands(osb).size(), "同代 scope 切换必须重收敛（prune 旧 scope）");
+
+        // Pod2（全新 spec，Pod 级表全空）读 scope-A：容器内已被 prune，共享槽=scope-B
+        // → scope-A 必须重收敛（converge=3）；修复前陈旧命中短路（converge=2）必红
+        var spec2 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
+        var st3 = projectedStateNoSkillCache(host);
+        st3.setSandboxId("sbx-slot-1");
+        var call3 = new OpenSandbox(st3, osb, farmOptions(svc, null, null), null, null, spec2);
+        bindFarmSession(call3, "sess-A");
+        call3.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 3", 30);
+        call3.stop();
+        assertEquals(3, farmConvergeCommands(osb).size(),
+            "Pod2 的 scope-A 在 Pod1 prune+槽覆盖后必须重收敛（共享槽已记 scope-B，陈旧命中即伪造稳态）");
+    }
+
+    @Test
+    void farmPodLocalStaleHitShouldBeInvalidatedBySlotScopeCrossCheck() throws Exception {
+        // 回归钉子（issue #393 评审 g1，Pod 级表向量）：稳态门两操作数（Pod 级指纹 +
+        // hydratedScopedScope）均为本 Pod 信念且无跨副本失效机制——单槽修复只封住「Pod 级
+        // miss → 共享层」一条路径，Pod 级命中仍绕过共享槽。同代 A(Pod2)→B(Pod1，prune 容器内
+        // A、单槽覆盖为 B)→A 回落 Pod2：Pod2 两表仍记 A，Pod 级命中若不做槽 scope 交叉核验
+        // 即伪造稳态短路（converge=2），容器内已无 A、技能执行面全废。
+        var host = java.nio.file.Files.createTempDirectory("farm-slot-pod");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-slot-pod-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var data = new java.util.HashMap<String, String>();
+        var store = new ScopedFingerprintStore(fakeScopedFpFacade(data));
+        var osb = farmOsbTracking(svc);
+
+        // Pod2：scope-A 收敛（converge=1），Pod 级两表与共享槽均记 sess-A
+        var specPod2 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
+        var st1 = projectedStateNoSkillCache(host);
+        st1.setSandboxId("sbx-slot-pod");
+        var callPod2A = new OpenSandbox(st1, osb, farmOptions(svc, null, null), null, null, specPod2);
+        bindFarmSession(callPod2A, "sess-A");
+        callPod2A.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        callPod2A.stop();
+        assertEquals(1, farmConvergeCommands(osb).size(), "Pod2 scope-A 首轮收敛");
+
+        // Pod1：同代切 scope-B → 收敛（converge=2，prune 掉容器内 A），单槽被覆盖为 sess-B
+        var specPod1 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
+        var st2 = projectedStateNoSkillCache(host);
+        st2.setSandboxId("sbx-slot-pod");
+        var callPod1B = new OpenSandbox(st2, osb, farmOptions(svc, null, null), null, null, specPod1);
+        bindFarmSession(callPod1B, "sess-B");
+        callPod1B.exec(RuntimeContext.builder().userId("sess-B").build(), "echo 2", 30);
+        callPod1B.stop();
+        assertEquals(2, farmConvergeCommands(osb).size(), "Pod1 切 scope-B 重收敛并 prune 容器内 A");
+
+        // A 回落 Pod2（复用同一 spec 实例=Pod 级两表仍记 A）：槽现役 scope=B ≠ A → 权威否定
+        // 陈旧两表 → 必须重收敛（converge=3）；修复前 Pod 级命中绕过共享槽伪造稳态（=2）必红
+        var st3 = projectedStateNoSkillCache(host);
+        st3.setSandboxId("sbx-slot-pod");
+        var callPod2Again = new OpenSandbox(st3, osb, farmOptions(svc, null, null), null, null, specPod2);
+        bindFarmSession(callPod2Again, "sess-A");
+        callPod2Again.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 3", 30);
+        callPod2Again.stop();
+        assertEquals(3, farmConvergeCommands(osb).size(),
+            "Pod 级表命中也须过共享槽 scope 交叉核验：槽已记 scope-B，Pod2 的陈旧 A 记录不得伪造稳态");
     }
 
     @Test
@@ -1839,6 +1937,13 @@ class OpenSandboxTest {
         return st;
     }
 
+    /** 无投影 entry 形态（SANDBOX_PROJECTION_ENABLED=false）：spec 未装配 __workspace_projection__ */
+    private static OpenSandboxState farmStateNoProjection(String sandboxId) {
+        var st = state();
+        st.setSandboxId(sandboxId);
+        return st;
+    }
+
     private static void bindFarmSession(OpenSandbox sandbox, String scope) {
         sandbox.setUserKey(scope);
         sandbox.setSkillCacheScope(scope);
@@ -1858,6 +1963,56 @@ class OpenSandboxTest {
         assertEquals(0, farmReadlinkCount(osb), "开关（store 路径）为空不得探测 store");
         assertTrue(farmConvergeCommands(osb).isEmpty(), "开关关闭不得收敛建链");
         verify(osb.files(), never()).write(anyList());
+    }
+
+    @Test
+    void farmShouldConvergeWithoutProjectionEntry() throws Exception {
+        // issue #392：SANDBOX_PROJECTION_ENABLED=false（spec 无 __workspace_projection__ entry）
+        // 不再连带关闭软链农场——投影开关只管 AGENTS.md/skills/subagents/knowledge 投影，
+        // 包技能投放唯一路径是农场（PR-4b 后 tar 已退役）。state() 形态 spec（无投影 entry）：
+        // 投影 entry 早退门控在位时本用例密（农场被连带早退、零收敛），门控删除后通
+        var cfg = java.nio.file.Files.createTempDirectory("farm-no-proj-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-" + version);
+
+        var sandbox = new OpenSandbox(farmStateNoProjection("sbx-farm-noproj"), osb,
+            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1, farmConvergeCommands(osb).size(), "无投影 entry 农场仍收敛建链");
+        verify(osb.files(), never()).write(anyList());
+        assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "farm").counter().count(),
+            "farm 判定打点不受投影开关影响");
+    }
+
+    @Test
+    void farmOffSentinelShouldDeliverNoPackageSkills() throws Exception {
+        // issue #392 评审 g1：平台 env 写路径空串=删除（publish.go dropEmptyEnv），「置空关闸」
+        // 平台不可送达——off 哨兵（忽略大小写与首尾空白）是平台表单可送达的显式关闸形态，
+        // 行为须与空串总闸完全一致（零探测/零收敛/零写入）
+        var host = java.nio.file.Files.createTempDirectory("farm-off-sentinel");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var osb = farmOsb("v-anything");
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-off-sentinel"), osb,
+            options().skillsSharedStore("off"), null, null);
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(0, farmReadlinkCount(osb), "off 哨兵不得探测 store");
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "off 哨兵不得收敛建链");
+        verify(osb.files(), never()).write(anyList());
+        // 关闸判定契约（SkillsFarm.enabled 与 AgentScopeConfig 启动 WARN 共用单一谓词）：
+        // 大小写与首尾空白宽限对齐表单人工输入形态；空值恒关闸
+        assertTrue(OpenSandboxClientOptions.skillsSharedStoreOff(" OFF "),
+            "off 哨兵忽略大小写与首尾空白");
+        assertTrue(OpenSandboxClientOptions.skillsSharedStoreOff(null));
+        assertTrue(OpenSandboxClientOptions.skillsSharedStoreOff("  "));
+        assertFalse(OpenSandboxClientOptions.skillsSharedStoreOff("/skills-store"));
     }
 
     @Test
@@ -2460,8 +2615,9 @@ class OpenSandboxTest {
 
     @Test
     void farmFingerprintUnknownShouldPreserveLinksAndSkipOrphanDiff() throws Exception {
-        // issue #355：端点 skills 目录瞬时 I/O 异常（此处以删除目录模拟 walk 抛错）→ ERR-
-        // 版本 + 空清单 → 指纹未知仍收敛。收敛执行孤儿差集的空候选形态（case '|'）会把
+        // issue #355：端点 skills 目录瞬时 I/O 异常（端点 version 计算失败 → ERR-
+        // 版本 + 空清单，issue #397 后目录缺失=健康空源故以端点故障注入模拟）→ 指纹未知仍收敛。
+        // 收敛执行孤儿差集的空候选形态（case '|'）会把
         // scope 内全部有效软链删光且 exit 0 记账旧指纹、稳态短路吞掉恢复收敛——指纹未知
         // 时必须跳过孤儿差集段（保留现状等恢复），prune/禁用清理语义不变
         var host = java.nio.file.Files.createTempDirectory("farm-err");
@@ -2491,12 +2647,15 @@ class OpenSandboxTest {
         verify(osb.commands(), atLeastOnce()).run(beforeCaptor.capture());
         var beforeCall2 = beforeCaptor.getAllValues().size();
 
-        // 指纹源损坏（同会话后续 call）：gate 已记忆 farm，收敛照常触发，但端点 ERR-
-        try (var walk = java.nio.file.Files.walk(cfg.resolve("skills"))) {
-            walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
-        }
+        // 端点真实 I/O 故障（同会话后续 call）：gate 已记忆 farm，收敛照常触发，但端点 ERR-。
+        // issue #397 后删除/缺失 skills 目录 = 健康空源（稳定空版本），不再是指纹未知——
+        // 故障注入改为端点 version 计算失败（同 ERR-* 输出约定）
+        var brokenSvc = org.mockito.Mockito.mock(SkillBundleService.class);
+        org.mockito.Mockito.when(brokenSvc.currentVersion())
+            .thenReturn(new SkillBundleService.SkillVersion(
+                SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, java.util.List.of()));
         var call2 = new OpenSandbox(farmState(host, "sbx-farm-err"), osb,
-            farmOptions(svc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            farmOptions(brokenSvc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
             null, null, spec);
         bindFarmSession(call2, "sess-A");
         call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);

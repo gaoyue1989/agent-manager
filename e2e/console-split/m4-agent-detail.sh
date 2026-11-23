@@ -2,7 +2,7 @@
 # M4 · Agent 详情六 Tab（实施文档 05 §4/§5）
 # 覆盖：详情聚合（pods/events/envSecretKeys）/ 生命周期动作状态机闭环（unpublish→publish→
 #       republish→register）/ 版本 Tab（current 标注/upgrade）；member 只读矩阵（自有空间，
-#       非 default——决议 2 下 default 对普通用户不可见，写 403 断言须在可见空间做）
+#       写 403 断言须在成员空间做——default 可见性已收敛为成员关系裁决，issue #388）
 # 调试 Tab SSE 与 HITL 在 M3 覆盖；技能/凭证 Tab 在 M5/M8 覆盖。
 source "$(dirname "$0")/lib.sh"
 

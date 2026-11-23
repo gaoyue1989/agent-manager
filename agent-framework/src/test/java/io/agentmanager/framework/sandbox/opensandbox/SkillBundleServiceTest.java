@@ -305,12 +305,13 @@ class SkillBundleServiceTest {
 
     @Test
     void currentVersionShouldReturnErrPrefixWhenFingerprintComputationFails() {
-        // computeVersion 全 catch 输出约定：指纹/bundle 枚举失败 → ERR-<nanos>（非空、非正常指纹），
-        // 供版本端点（503）与农场判定（degraded_endpoint_down）识别「端点不可用」
-        var missing = Path.of("/nonexistent-skills-" + System.nanoTime());
+        // computeVersion 全 catch 输出约定：枚举链路真实 I/O 故障（如权限拒绝）→ ERR-<nanos>
+        // （非空、非正常指纹），供版本端点（503）与农场判定（degraded_endpoint_down）识别
+        // 「端点不可用」。目录缺失/普通文件不算故障——见空源语义用例（issue #397）。
         var manage = org.mockito.Mockito.mock(SkillManageService.class);
-        org.mockito.Mockito.when(manage.getSkillsDir()).thenReturn(missing);
-        org.mockito.Mockito.when(manage.getDisabledSet()).thenReturn(java.util.Set.of());
+        org.mockito.Mockito.when(manage.getSkillsDir()).thenReturn(configDir.resolve("skills"));
+        org.mockito.Mockito.when(manage.getDisabledSet())
+            .thenThrow(new IllegalStateException("simulated io failure"));
         var service = new SkillBundleService(manage, cacheDir, Duration.ofSeconds(5), clock);
 
         var version = service.currentVersion();
@@ -318,6 +319,56 @@ class SkillBundleServiceTest {
         assertTrue(version.version().startsWith(SkillBundleService.ERROR_VERSION_PREFIX),
             "枚举失败必须落 ERR-* 输出约定，实际: " + version.version());
         assertEquals(0, version.skillCount());
+    }
+
+    @Test
+    void missingSkillsDirShouldYieldStableEmptyVersion() {
+        // issue #397：只读 /config 无 skills/ 子目录（无技能包）必须与 PackageSourceFingerprint
+        // 空源语义对齐——稳定空版本、空名单、合法空 bundle，而非 ERR-* + 503 死循环退避
+        var missing = Path.of("/nonexistent-skills-" + System.nanoTime());
+        var service = serviceWithSkillsDir(missing);
+
+        var first = service.currentVersion();
+        var second = service.currentVersion();
+
+        assertEquals(first.version(), second.version());
+        assertTrue(first.version().matches("[0-9a-f]{16}"),
+            "无技能目录应返回稳定空指纹，实际: " + first.version());
+        assertEquals(0, first.skillCount());
+        assertEquals(List.of(), first.skills());
+    }
+
+    @Test
+    void missingSkillsDirShouldServeLegalEmptyBundle() throws Exception {
+        var missing = Path.of("/nonexistent-skills-" + System.nanoTime());
+        var service = serviceWithSkillsDir(missing);
+        var version = service.currentVersion().version();
+
+        var names = bundleEntryNames(service, version);
+
+        assertEquals(List.of(), names);
+    }
+
+    @Test
+    void skillsDirAsRegularFileShouldYieldStableEmptyVersion() throws IOException {
+        // skills 被普通文件占据与缺失同口径（isDirectory 判定与 PackageSourceFingerprint 一致）
+        var notADir = configDir.resolve("skills-is-a-file");
+        Files.writeString(notADir, "not a dir");
+        var service = serviceWithSkillsDir(notADir);
+
+        var version = service.currentVersion();
+
+        assertTrue(version.version().matches("[0-9a-f]{16}"),
+            "skills 为普通文件应与缺失同口径返回稳定空指纹，实际: " + version.version());
+        assertEquals(0, version.skillCount());
+        assertEquals(List.of(), version.skills());
+    }
+
+    private SkillBundleService serviceWithSkillsDir(Path skillsDir) {
+        var manage = org.mockito.Mockito.mock(SkillManageService.class);
+        org.mockito.Mockito.when(manage.getSkillsDir()).thenReturn(skillsDir);
+        org.mockito.Mockito.when(manage.getDisabledSet()).thenReturn(java.util.Set.of());
+        return new SkillBundleService(manage, cacheDir, Duration.ofSeconds(5), clock);
     }
 
     private SkillBundleService service(Duration ttl) {

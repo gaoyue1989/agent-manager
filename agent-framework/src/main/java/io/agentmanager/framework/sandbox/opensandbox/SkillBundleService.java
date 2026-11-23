@@ -211,6 +211,12 @@ public class SkillBundleService {
 
     private List<BundleFile> bundleFiles(Set<String> disabled) throws IOException {
         var dir = skillManageService.getSkillsDir();
+        if (!Files.isDirectory(dir)) {
+            // 空源语义对齐 PackageSourceFingerprint（issue #397）：无技能包（目录缺失或为普通
+            // 文件）返回空名单——稳定空版本 + 合法空 bundle，守护/农场健康稳态；真正不可读
+            // （目录存在但 list 抛 IOException，如权限拒绝）才上抛走 ERR-* 输出约定
+            return List.of();
+        }
         var files = new ArrayList<BundleFile>();
         try (var top = Files.list(dir)) {
             for (var skillDir : top.filter(Files::isDirectory).toList()) {

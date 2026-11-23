@@ -220,6 +220,10 @@ type ModelDelivery struct {
 	Error         string     `gorm:"size:256" json:"error"`
 	SyncedAt      *time.Time `json:"syncedAt"`
 	CreatedAt     time.Time  `json:"createdAt"`
+	// IsDefault 该行连接为此 Agent 的默认连接（issue #387：删除守卫/usage 默认名/编辑回显
+	// 的唯一真相源，取代 env LLM_* 字符串匹配——同 modelId+baseUrl 的其他连接不再被牵连）。
+	// AutoMigrate 加列存量行为 NULL，由 store.Backfill 第 9 步按服务 env 归一。
+	IsDefault bool `json:"isDefault"`
 }
 
 func (ModelDelivery) TableName() string { return "model_deliveries" }
