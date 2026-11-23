@@ -499,6 +499,9 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	// 出口兜底：空值永不进入 CM/env_json/env_secret_json（设计 §3.3，与 Publish 同语义）
 	dropEmptyEnv(plain)
 	dropEmptyEnv(secret)
+	// 会话隔离派生重跑（issue #385，与 Republish 同理）：全量覆盖语义下未回传派生键
+	// 时不得让 Pod 回退共享库；缺失或等于平台默认才派生，显式值零影响。
+	c.applyIsolationEnv(svc.K8sName, plain, secret)
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
@@ -581,6 +584,11 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	// 出口兜底：空值永不进入 CM/env_json/env_secret_json（设计 §3.3，与 Publish 同语义）
 	dropEmptyEnv(plain)
 	dropEmptyEnv(secret)
+	// 会话隔离派生重跑（issue #385）：Republish 是 env 重建出口，派生键可能在上游被
+	// 平台默认预填覆盖回共享值（UpdateAgent 的 buildPublishEnv 预填 CHECKPOINT_JDBC_URL
+	// 平台默认再全量合并）——Pod 滚动重启后即回连共享库，会话跨服务串列。与 Publish
+	// 同语义：缺失或等于平台默认才派生，派生键原样/用户显式值零影响。
+	c.applyIsolationEnv(svc.K8sName, plain, secret)
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
