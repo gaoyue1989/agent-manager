@@ -127,7 +127,7 @@ func TestAgentGenFrontmatterGolden(t *testing.T) {
 // TestAgentGenMcpConfigGolden config.yaml 字段契约（M6 §2.3）。
 func TestAgentGenMcpConfigGolden(t *testing.T) {
 	got := mcpConfigYAML("ticket-system", "streamable_http", "http://mcp.internal:9090/mcp", 90,
-		`{"mode":"all"}`, `{"tools":{"ticket_query":"allow","ticket_escalate":"ask"}}`, "none")
+		`{"mode":"all"}`, `{"tools":{"ticket_query":"allow","ticket_escalate":"ask"}}`, `{}`, "none")
 	for _, want := range []string{
 		"server: ticket-system", "vendor: agentmanager", "type: streamableHttp",
 		"url: http://mcp.internal:9090/mcp", "timeout: 90",
@@ -142,12 +142,40 @@ func TestAgentGenMcpConfigGolden(t *testing.T) {
 		t.Fatalf("none authType should omit auth:\n%s", got)
 	}
 	// mode=all 未声明工具不写 tools 段
-	empty := mcpConfigYAML("n", "sse", "http://x/sse", 0, `{"mode":"all"}`, `{}`, "")
+	empty := mcpConfigYAML("n", "sse", "http://x/sse", 0, `{"mode":"all"}`, `{}`, `{}`, "")
 	if strings.Contains(empty, "tools:") {
 		t.Fatalf("empty permissions should omit tools:\n%s", empty)
 	}
+	if strings.Contains(empty, "direct_return:") {
+		t.Fatalf("empty directReturn should omit direct_return:\n%s", empty)
+	}
 	if !strings.Contains(builtinPlatformMCPConfig(), "platform-publisher") {
 		t.Fatal("builtin template")
+	}
+}
+
+func TestAgentGenMcpConfigDirectReturn(t *testing.T) {
+	got := mcpConfigYAML("order", "streamableHttp", "http://x/mcp", 60, `{"mode":"all"}`,
+		`{"tools":{"lookup_order":"allow"}}`, `{"tools":["render_confirm_card","submit_order"]}`, "none")
+	for _, want := range []string{
+		"direct_return:", "- render_confirm_card", "- submit_order",
+		"permissions:", "lookup_order: allow",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("config.yaml missing %q:\n%s", want, got)
+		}
+	}
+	permSection := got[strings.Index(got, "permissions:"):strings.Index(got, "direct_return:")]
+	if strings.Contains(permSection, "render_confirm_card") || strings.Contains(permSection, "submit_order") {
+		t.Fatalf("direct_return entries must not leak into permissions.tools:\n%s", got)
+	}
+	onlyDirect := mcpConfigYAML("order2", "streamableHttp", "http://x/mcp", 60, `{"mode":"all"}`,
+		`{}`, `{"tools":["render_confirm_card"]}`, "none")
+	if strings.Contains(onlyDirect, "permissions:") {
+		t.Fatalf("direct_return without permissions should omit permissions:\n%s", onlyDirect)
+	}
+	if strings.Contains(onlyDirect, "auth:") {
+		t.Fatalf("direct_return should not affect auth omission:\n%s", onlyDirect)
 	}
 }
 
@@ -189,7 +217,7 @@ func TestBuiltinPlatformDecl(t *testing.T) {
 // 真实 token 走服务 Secret env（MCP_TOKEN_<NAME>），包内只有运行时可解析的 ${ENV} 引用。
 func TestAgentGenMcpConfigBearerAuth(t *testing.T) {
 	got := mcpConfigYAML("mcd-mcp", "streamableHttp", "https://mcp.mcd.cn", 120,
-		`{"mode":"all"}`, `{}`, "bearer")
+		`{"mode":"all"}`, `{}`, `{}`, "bearer")
 	if !strings.Contains(got, "token: ${MCP_TOKEN_MCD_MCP}") {
 		t.Fatalf("bearer auth token placeholder missing:\n%s", got)
 	}
@@ -197,7 +225,7 @@ func TestAgentGenMcpConfigBearerAuth(t *testing.T) {
 		t.Fatalf("real token must never land in package:\n%s", got)
 	}
 	// env 键与 buildPublishEnv 注入键同源：sanitizeEnvKey（连字符转下划线）
-	if got := mcpConfigYAML("my-mcp.x", "sse", "http://x/sse", 0, `{}`, `{}`, "bearer"); !strings.Contains(got, "${MCP_TOKEN_MY_MCP_X}") {
+	if got := mcpConfigYAML("my-mcp.x", "sse", "http://x/sse", 0, `{}`, `{}`, `{}`, "bearer"); !strings.Contains(got, "${MCP_TOKEN_MY_MCP_X}") {
 		t.Fatalf("sanitized env key missing:\n%s", got)
 	}
 }

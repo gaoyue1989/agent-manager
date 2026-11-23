@@ -14,14 +14,15 @@ import (
 
 // CreateMcpConnectorInput 新建连接器入参。
 type CreateMcpConnectorInput struct {
-	Name        string          `json:"name"`
-	Transport   string          `json:"transport"`
-	Endpoint    string          `json:"endpoint"`
-	AuthType    string          `json:"authType"`
-	AuthToken   string          `json:"authToken"`
-	TimeoutSec  int             `json:"timeoutSec"`
-	ToolScope   json.RawMessage `json:"toolScope"`
-	Permissions json.RawMessage `json:"permissions"`
+	Name         string          `json:"name"`
+	Transport    string          `json:"transport"`
+	Endpoint     string          `json:"endpoint"`
+	AuthType     string          `json:"authType"`
+	AuthToken    string          `json:"authToken"`
+	TimeoutSec   int             `json:"timeoutSec"`
+	ToolScope    json.RawMessage `json:"toolScope"`
+	Permissions  json.RawMessage `json:"permissions"`
+	DirectReturn json.RawMessage `json:"directReturn"`
 }
 
 // McpToolInfo verify 返回的工具快照。
@@ -53,6 +54,30 @@ func validatePermissions(raw json.RawMessage) error {
 		default:
 			return fmt.Errorf("%w: permissions.tools[%s] must be allow|ask|deny", ErrInvalidForm, tool)
 		}
+	}
+	return nil
+}
+
+func validateDirectReturn(raw json.RawMessage) error {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	var declared struct {
+		Tools []string `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &declared); err != nil {
+		return fmt.Errorf("%w: directReturn must be an object {\"tools\":[...]}", ErrInvalidForm)
+	}
+	seen := map[string]bool{}
+	for _, tool := range declared.Tools {
+		if strings.TrimSpace(tool) == "" {
+			return fmt.Errorf("%w: directReturn.tools has empty tool name", ErrInvalidForm)
+		}
+		if seen[tool] {
+			return fmt.Errorf("%w: directReturn.tools has duplicate %q", ErrInvalidForm, tool)
+		}
+		seen[tool] = true
 	}
 	return nil
 }
@@ -136,6 +161,9 @@ func (c *Core) CreateMcpConnector(workspaceID uint, in CreateMcpConnectorInput) 
 	if err := validatePermissions(in.Permissions); err != nil {
 		return nil, err
 	}
+	if err := validateDirectReturn(in.DirectReturn); err != nil {
+		return nil, err
+	}
 	var cnt int64
 	if err := c.DB.Model(&store.McpConnector{}).
 		Where("workspace_id = ? AND name = ?", workspaceID, in.Name).Count(&cnt).Error; err != nil {
@@ -164,6 +192,11 @@ func (c *Core) CreateMcpConnector(workspaceID uint, in CreateMcpConnectorInput) 
 	} else {
 		m.Permissions = "{}"
 	}
+	if len(in.DirectReturn) > 0 {
+		m.DirectReturn = string(in.DirectReturn)
+	} else {
+		m.DirectReturn = "{}"
+	}
 	if err := c.DB.Create(&m).Error; err != nil {
 		return nil, err
 	}
@@ -180,7 +213,8 @@ type PatchMcpConnectorInput struct {
 	TimeoutSec *int             `json:"timeoutSec"`
 	ToolScope  *json.RawMessage `json:"toolScope"`
 	// Permissions 三态默认策略（tools.map）；nil=不变
-	Permissions *json.RawMessage `json:"permissions"`
+	Permissions  *json.RawMessage `json:"permissions"`
+	DirectReturn *json.RawMessage `json:"directReturn"`
 }
 
 // UpdateMcpConnector 局部更新。
@@ -217,6 +251,12 @@ func (c *Core) UpdateMcpConnector(workspaceID, id uint, in PatchMcpConnectorInpu
 			return nil, err
 		}
 		updates["permissions"] = string(*in.Permissions)
+	}
+	if in.DirectReturn != nil {
+		if err := validateDirectReturn(*in.DirectReturn); err != nil {
+			return nil, err
+		}
+		updates["direct_return"] = string(*in.DirectReturn)
 	}
 	if len(updates) > 0 {
 		if err := c.DB.Model(&m).Updates(updates).Error; err != nil {
