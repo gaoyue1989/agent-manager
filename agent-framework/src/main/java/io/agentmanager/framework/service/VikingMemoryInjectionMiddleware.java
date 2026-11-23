@@ -28,8 +28,9 @@ import reactor.core.publisher.Mono;
  * 官方注入点 = MiddlewareBase.onSystemPrompt（带 RuntimeContext，可解析真实 userId）。
  *
  * <p>性能（§4.6）：检索超时 AGENT 级预算（VikingConfig.searchTimeoutMs，默认 2s）内
- * fail-soft 降级为无记忆；结果按用户缓存 injectCacheTtlSeconds（默认 300s）——同用户
- * 多 turn 复用首轮检索，摊薄后多数 turn 零额外延迟。
+ * fail-soft 降级为无记忆；结果按 (userId, sessionId) 复合会话键缓存 injectCacheTtlSeconds
+ * （默认 300s）——同 session 多 turn 复用首轮检索，摊薄后多数 turn 零额外延迟；
+ * 同用户新会话必重新检索，不复用上一会话的注入结果（issue #419）。
  *
  * <p>provider!=openviking 时不装配（HarnessAgentFactory 分支），本地记忆现状零影响。
  */
@@ -79,11 +80,12 @@ public class VikingMemoryInjectionMiddleware implements MiddlewareBase {
         if (userId == null || userId.isBlank()) {
             return Mono.just(systemPrompt);
         }
+        var sessionId = sessionKeyResolver.canonicalSessionId(ctx);
         var query = ctx.get(CTX_QUERY_KEY);
         if (!(query instanceof String q) || q.isBlank()) {
             return Mono.just(systemPrompt);
         }
-        var text = cachedOrSearch(userId, q);
+        var text = cachedOrSearch(userId, sessionId, q);
         if (text == null) {
             return Mono.just(systemPrompt);
         }
@@ -124,10 +126,13 @@ public class VikingMemoryInjectionMiddleware implements MiddlewareBase {
         return metadata == null || !metadata.containsKey(Msg.METADATA_CONFIRM_RESULTS);
     }
 
-    /** 缓存命中直接返回；未命中检索并回填（检索内部已 fail-soft + 超时预算） */
-    private String cachedOrSearch(String userId, String query) {
+    /** 缓存命中直接返回；未命中检索并回填（检索内部已 fail-soft + 超时预算）。
+     * 缓存键 = 复合会话键 slotKey(userId, sessionId)（与归档槽位同源）：设计语义是
+     * session 内缓存——同用户新会话必须重新检索，不得复用上一会话的注入结果（issue #419） */
+    private String cachedOrSearch(String userId, String sessionId, String query) {
+        var cacheKey = SessionMessageArchiveStateStore.slotKey(userId, sessionId);
         long now = System.currentTimeMillis();
-        var hit = cache.get(userId);
+        var hit = cache.get(cacheKey);
         if (hit instanceof Object[] entry && entry.length == 2
                 && entry[0] instanceof String text && entry[1] instanceof Long expireAt
                 && expireAt >= now) {
@@ -138,7 +143,7 @@ public class VikingMemoryInjectionMiddleware implements MiddlewareBase {
         }
         var text = client.searchContext(userId, query);
         if (text != null) {
-            cache.put(userId, new Object[]{text, now + cfg.injectCacheTtlSeconds() * 1000L});
+            cache.put(cacheKey, new Object[]{text, now + cfg.injectCacheTtlSeconds() * 1000L});
         }
         return text;
     }

@@ -236,6 +236,8 @@ MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permi
 
 > `OVK_MCP_SHARED_CONTEXT` 实现现状(2026-11-23 回填,issue #415):合成 server `openviking` 经 `HarnessAgentFactory.registerVikingSharedContextMcp` 程序化注入,权限声明位置 = 包内 `mcp-configs/openviking/config.yaml` 的 `permissions.tools`(permissions-only),句柄可换芯、看门狗探测/补偿自愈、A 路径 reload 豁免、frontmatter 同名声明守卫——细节见 §7 实现现状回填。
 
+> 首推理注入缓存 + 本地记忆关闸实现现状(2026-11-23 回填,issue #419):首推理注入缓存键 = slot 复合会话键 `userId:sessionId`(§4.6 缓解①「session 内缓存」语义落地,实现期曾误为 per-user 键——同用户 5 分钟内新会话直接复用上一会话检索结果,与当前问题无关的旧记忆被注入、刚写入的记忆不可见);`AGENT_MEMORY_PROVIDER=openviking`(VikingMemoryClient 在位)时 `AgentScopeConfig.workspaceReader` 装配 `memoryEnabled = AGENT_MEMORY_ENABLED && VikingMemoryClient 不在位`——沙箱对 `MEMORY.md`/`memory/` 不注入(`readRuntimeFiles` 空集)、不回写(`WorkspaceSyncService.syncBack` 同一开关),与 SDK hooks/tools 双关共同消除双记忆源。
+
 ### 11.2 实施拆分(单分支多 commit,一个 PR)
 
 1. **backend**:VikingAdminClient(建/删户、注册用户、知识/技能导入)+ 发布/删除生命周期挂钩(OPENVIKING_ENABLED 门控)+ 服务 env/Secret 注入 + per-user key 签发端点

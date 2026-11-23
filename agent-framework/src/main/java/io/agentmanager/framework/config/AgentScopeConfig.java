@@ -298,12 +298,17 @@ public class AgentScopeConfig {
      */
     @Bean
     public io.agentmanager.framework.service.WorkspaceReader workspaceReader(
-            DistributedStore distributedStore, OafConfig oafConfig, AgentManagerProperties props) {
+            DistributedStore distributedStore, OafConfig oafConfig, AgentManagerProperties props,
+            org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient> vikingClientProvider) {
         var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
         // 记忆总开关传入 WorkspaceReader：false 时运行时文件读取返回空集，
-        // 沙箱注入链路（OpenSandbox.injectRuntimeFilesIfNeeded）拿空文件集后天然 no-op
+        // 沙箱注入链路（OpenSandbox.injectRuntimeFilesIfNeeded）拿空文件集后天然 no-op。
+        // provider=openviking（VikingMemoryClient bean 在位）时同样关闭：记忆供给已由
+        // OpenViking 全链路接管，本地 MEMORY.md/memory/ 注入与回写必须关闸，
+        // 否则双记忆源并存（issue #419 B-07b；回写侧经 WorkspaceSyncService 同一开关）
+        var localMemoryEnabled = harness.memoryEnabled() && vikingClientProvider.getIfAvailable() == null;
         return new io.agentmanager.framework.service.WorkspaceReader(distributedStore, oafConfig.name(),
-            harness.memoryEnabled());
+            localMemoryEnabled);
     }
 
     @Bean
