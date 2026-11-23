@@ -401,6 +401,45 @@ class ChatStreamControllerTest {
     }
 
     @Test
+    void chatShouldCarryOnlyInjectableFileIdsInMsgMetadata() {
+        // issue #411：Msg.metadata.file_ids 必须写过滤后的 injectableFileIds 而非请求原列表——
+        // 被归属校验拒绝的他人 fileId 若进 metadata，history 回放会把他人附件卡片挂到本消息上
+        var sessionId = "test-user-filemeta";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-fm");
+        when(workspaceInjector.assignWorkspacePaths(anyList(), anyString(), anyString()))
+            .thenReturn(List.of("kept-id"));
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-fm")));
+
+        collect(sessionId, "hello", "alice", List.of("kept-id", "foreign-id"));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        verify(chatChannel).dispatchStream(captor.capture());
+        var meta = captor.getValue().messages().get(0).getMetadata();
+        assertEquals(List.of("kept-id"), meta.get(UploadWorkspaceInjector.METADATA_FILE_IDS),
+            "metadata.file_ids 必须等于过滤后的可注入列表: " + meta);
+    }
+
+    @Test
+    void chatShouldOmitFileIdsMetadataWhenAllUploadsRejected() {
+        // 全部被拒（injectableFileIds 为空）时不写 file_ids 键——history 不挂空附件卡片
+        var sessionId = "test-user-filemeta2";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-fm2");
+        when(workspaceInjector.assignWorkspacePaths(anyList(), anyString(), anyString()))
+            .thenReturn(List.of());
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-fm2")));
+
+        collect(sessionId, "hello", "alice", List.of("foreign-id"));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        verify(chatChannel).dispatchStream(captor.capture());
+        assertFalse(captor.getValue().messages().get(0).getMetadata()
+                .containsKey(UploadWorkspaceInjector.METADATA_FILE_IDS),
+            "全部被拒不得写 file_ids 键: " + captor.getValue().messages().get(0).getMetadata());
+    }
+
+    @Test
     void chatShouldReleaseLeaseWhenSendStreamThrowsSynchronously() {
         // sendStream 同步抛异常（如 channel 未就绪）时租约同样已经到手。这一刻执行流还
         // **没有**走到 .subscribe(...)，所以没有任何终态回调会来收尾——不在准备段的 try
