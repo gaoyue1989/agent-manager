@@ -1,5 +1,7 @@
 package io.agentmanager.framework.controller;
 
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -72,9 +74,12 @@ public final class AgentEventSseSerializer {
 
         if (event instanceof AgentStartEvent) {
             // agent 开始处理本 turn 的墙钟时刻（追加需求④）：SDK 在事件构造时即置
-            // createdAt = Instant.now()（ISO-8601 UTC），原样透传不改写；远程转发事件
+            // createdAt = Instant.now()（ISO-8601 UTC），下发转毫秒时间戳；远程转发事件
             // 携带的是远端子 agent 真实开始时刻，如实记录
-            putIfNotBlank(payload, "created_at", event.getCreatedAt());
+            Long createdAt = epochMillis(event.getCreatedAt());
+            if (createdAt != null) {
+                payload.put("created_at", createdAt);
+            }
         } else if (event instanceof TextBlockDeltaEvent delta) {
             payload.put("delta", delta.getDelta());
             Object generateReason = event.getMetadata() != null
@@ -218,6 +223,17 @@ public final class AgentEventSseSerializer {
     private static void putIfNotBlank(Map<String, Object> payload, String key, String value) {
         if (value != null && !value.isBlank()) {
             payload.put(key, value);
+        }
+    }
+
+    private static Long epochMillis(String isoInstant) {
+        if (isBlank(isoInstant)) {
+            return null;
+        }
+        try {
+            return Instant.parse(isoInstant).toEpochMilli();
+        } catch (DateTimeParseException e) {
+            return null;
         }
     }
 

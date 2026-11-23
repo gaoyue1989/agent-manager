@@ -61,6 +61,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）；超限类错误（ErrZipTooLarge/ErrTooManyFiles/ErrExtractTooLarge）统一 400 JSON（issue #165）——入口链路（宿主机 nginx / ingress-nginx `proxy-body-size: 200m` / platform-router `client_max_body_size`）须宽于应用 20MB 上限，超限由 backend 出 JSON
 - skills/ 目录合规检查（issue #163）：`service/skillcheck.go` `checkSkillDirs` 宽松模式——上传登记写包 `warningsJson`、`SpaceSkills` 产条目 `issues`；规则对齐运行时 OafConfigLoader 降级验证（SKILL.md 存在性 / frontmatter name/description / 名称正则与 64 长度 / 描述 1024），只提示不阻断
 - 导入模式 env（issue #161）：`CreateAgentImport` 与 harness 同走 `buildPublishEnv`——平台默认恒合并、模型连接可选（勾选则校验+注入+下发登记）；派生副本发布失败回删，本空间已上传包保留
+- 平台默认的沙箱分组键（`SANDBOX_*`）按表单沙箱开关过滤（issue #402）：`buildPublishEnv` 仅在 `sandbox.enabled=true` 时预填（表单显式值优先、平台默认补空）；关闭/未声明不注入任何 `SANDBOX_*`（m10 B3 契约），其余分组键不受影响
 
 ## 控制台与跨集群导出（auth/console/admin + export/workspaceconfig + imagebuilder）
 

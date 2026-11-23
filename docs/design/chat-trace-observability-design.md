@@ -149,12 +149,12 @@ turn 收尾时（终态帧之后、关流之前）追加一条合成帧，经 Ev
 
 ```json
 {"type":"AGENT_START","id":"…","replyId":"…","session_id":"…",
- "created_at":"2026-11-11T02:14:05.123456789Z"}
+ "created_at":1794363245123}
 ```
 
 | 决策点 | 选择 | 理由 |
 |--------|------|------|
-| 值 | `event.getCreatedAt()` **原样透传**（ISO-8601 UTC 字符串，`Instant.parse` 可解析） | SDK 构造 `AGENT_START` 的瞬间即「agent 开始处理本 turn」的时刻——语义精确匹配诉求；改写/换格式（如 epoch ms）徒增两端对时成本，无收益 |
+| 值 | `event.getCreatedAt()` 经 `Instant.parse(...).toEpochMilli()` 转 **epoch 毫秒数字**（2026-11-23 契约演进见 §10） | SDK 构造 `AGENT_START` 的瞬间即「agent 开始处理本 turn」的时刻——语义精确匹配诉求；数字毫秒便于客户端直接做数值比较与差值计算 |
 | 字段名 | `created_at`（snake_case） | 与 `session_created.session_id`、monitor 接口 `created_at` 同风格；仅此一帧携带，客户端按键名读 |
 | 只挂 AGENT_START | 不扩散到其他事件类型 | 按诉求最小改动；SDK 每个 `AgentEvent` 都有 `createdAt`，后续要扩是加一行分支的事 |
 
@@ -255,7 +255,7 @@ turn 收尾时（终态帧之后、关流之前）追加一条合成帧，经 Ev
 ## 7. 验收口径（对业务方三点的逐条回应）
 
 1. **trace 里能看到 MCP 调用参数**：开启 OTLP 导出后，任一 MCP 工具调用的 trace 树为 `chat → execute_tool → mcp.call_tool`，末级 span 可见 server 名、最终出站参数、注入 header 名、MCP 调用自身错误与耗时；
-2. **chat 接口返回 token 和时间**：每轮对话流末尾（AGENT_END/error/cancelled 之后）收到 `turn_finished` 帧，含本轮 token 汇总与执行耗时；断线重连经 `/subscribe` 回放同样拿得到；本轮的 `AGENT_START` 帧携带 `created_at`（agent 开始处理的墙钟时刻，ISO-8601 UTC），与 `elapsed_ms` 联合可拆出「排队+准备 / 执行」两段耗时；
+2. **chat 接口返回 token 和时间**：每轮对话流末尾（AGENT_END/error/cancelled 之后）收到 `turn_finished` 帧，含本轮 token 汇总与执行耗时；断线重连经 `/subscribe` 回放同样拿得到；本轮的 `AGENT_START` 帧携带 `created_at`（agent 开始处理的墙钟时刻，毫秒时间戳，见 §10），与 `elapsed_ms` 联合可拆出「排队+准备 / 执行」两段耗时；
 3. **每条事件带会话 id**：`/threads/chat` 与 `/threads/{sid}/subscribe` 的每一条 data 帧顶层恒有 `session_id`。
 
 ## 8. 实施记录（2026-11-11，feat/chat-trace-observability 分支）
@@ -307,3 +307,16 @@ turn 收尾时（终态帧之后、关流之前）追加一条合成帧，经 Ev
 
 动机：客户端不需要额外处理未知事件类型即可获得 turn 级汇总（增量字段对既有 AGENT_END
 消费方向后兼容），事件词表保持最小。
+
+---
+
+## 10. 契约演进（2026-11-23，fix/sse-created-at-ms 分支）
+
+§2.6 的 `AGENT_START.created_at` 由 ISO-8601 UTC 字符串改为 **epoch 毫秒数字**：
+
+- 值：`Instant.parse(event.getCreatedAt()).toEpochMilli()`，JSON number（如 `1794363245123`）；
+- 非法/缺失的 `createdAt`（远程转发事件的网络输入）省略该字段，不中断帧序列化；
+- 只影响升级后新写入事件流的帧；升级前已落 Redis 的旧帧在 7 天 TTL 内原样回放 ISO
+  字符串（或缺失），不做读端兼容转换；
+- 语义与计时锚点不变（agent 开始处理本 turn 的墙钟时刻，远程转发事件仍如实记录）。
+

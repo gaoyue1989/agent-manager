@@ -813,6 +813,120 @@ func TestSkillDedupSameName(t *testing.T) {
 	}
 }
 
+// TestAgentGenSandboxPlatformDefaultsGate（issue #402）：平台默认 SANDBOX_* 只作用于
+// 开启沙箱的 Agent——buildPublishEnv 原先无条件预填全部平台默认，关闭/未声明沙箱的服务
+// 也被写入 SANDBOX_IMAGE 并一路下发 CM/Pod env，与控制台回显、m10 B3「关闭时无 SANDBOX_*」
+// 契约矛盾。开启场景保持平台默认补空（表单显式值覆盖）。
+func TestAgentGenSandboxPlatformDefaultsGate(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-sbx-0402", "沙箱泄漏空间")
+	owner := seedUserIn(t, c, "sbxo", "user", ws.ID, "owner")
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+	if _, err := c.UpdatePlatformConfig(map[string]string{
+		"SANDBOX_IMAGE":        "registry.example.com/leak-probe:v1",
+		"SANDBOX_MEMORY_MB":    "2048",
+		"AGENT_REDIS_COMMAND_TIMEOUT_MS": "2000",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mkForm := func(name string) *AgentForm {
+		form := goldenForm()
+		form.Name = name
+		form.ModelConnections[0].ConnectionID = conn.ID
+		form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+		return form
+	}
+	envOf := func(svc *store.ServiceEntity) map[string]string {
+		t.Helper()
+		if err := c.DB.First(svc, svc.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		env := map[string]string{}
+		_ = jsonUnmarshalStrict(svc.EnvJSON, &env)
+		return env
+	}
+	sandboxKeys := func(env map[string]string) []string {
+		var keys []string
+		for k := range env {
+			if strings.HasPrefix(k, "SANDBOX_") {
+				keys = append(keys, k)
+			}
+		}
+		return keys
+	}
+
+	// A 显式关闭：无任何 SANDBOX_*（m10 B3 契约）；非沙箱平台默认照常预填
+	off := false
+	fa := mkForm("sbx-default-off")
+	fa.Sandbox = &SandboxForm{Enabled: &off}
+	svcA, _, err := c.CreateAgent(ws.ID, owner.ID, fa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envA := envOf(svcA)
+	if keys := sandboxKeys(envA); len(keys) != 0 {
+		t.Fatalf("issue #402：沙箱关闭的 Agent 不得注入 SANDBOX_*（平台默认泄漏）：%v", keys)
+	}
+	if envA["AGENT_REDIS_COMMAND_TIMEOUT_MS"] != "2000" {
+		t.Fatalf("非沙箱平台默认应照常预填：%v", envA)
+	}
+
+	// B 未声明：无任何 SANDBOX_*
+	fb := mkForm("sbx-default-none")
+	svcB, _, err := c.CreateAgent(ws.ID, owner.ID, fb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys := sandboxKeys(envOf(svcB)); len(keys) != 0 {
+		t.Fatalf("issue #402：未声明沙箱的 Agent 不得注入 SANDBOX_*：%v", keys)
+	}
+
+	// C 开启 + 镜像留空：平台默认补空（SANDBOX_IMAGE=平台默认，表单值优先语义不变）
+	on := true
+	fc := mkForm("sbx-default-on")
+	fc.Sandbox = &SandboxForm{Enabled: &on}
+	svcC, _, err := c.CreateAgent(ws.ID, owner.ID, fc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envC := envOf(svcC)
+	if envC["SANDBOX_IMAGE"] != "registry.example.com/leak-probe:v1" {
+		t.Fatalf("开启沙箱且镜像留空时应预填平台默认：%v", envC)
+	}
+	if envC["SANDBOX_MEMORY_MB"] != "2048" {
+		t.Fatalf("开启沙箱时平台默认资源项应预填：%v", envC)
+	}
+
+	// D 开启 + 显式镜像：表单值覆盖平台默认
+	fd := mkForm("sbx-default-explicit")
+	fd.Sandbox = &SandboxForm{Enabled: &on, Image: "opensandbox/code-interpreter:v1.1.0"}
+	svcD, _, err := c.CreateAgent(ws.ID, owner.ID, fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envOf(svcD)["SANDBOX_IMAGE"]; got != "opensandbox/code-interpreter:v1.1.0" {
+		t.Fatalf("表单显式镜像必须覆盖平台默认，got %q", got)
+	}
+
+	// E 编辑链路：关闭 Agent 编辑保存后仍无 SANDBOX_*（编辑复用 buildPublishEnv）；
+	// republish 需 running 状态（复用 TestUpdateAgentCopyOnWrite 的铺法）
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svcA.ID).
+		Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+	fe := mkForm("sbx-default-off")
+	fe.Sandbox = &SandboxForm{Enabled: &off}
+	svcE, _, err := c.UpdateAgent(ws.ID, owner.ID, svcA.ID, fe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys := sandboxKeys(envOf(svcE)); len(keys) != 0 {
+		t.Fatalf("issue #402：沙箱关闭的 Agent 编辑保存不得注入 SANDBOX_*：%v", keys)
+	}
+}
+
 // TestAgentGenSandboxForm 沙箱配置（demo §5）三层落点：
 // 1) sandbox=nil → 包无 config 声明、env 无 SANDBOX_*；
 // 2) 显式开 + 资源项 → 包声明 config.sandbox.enabled=true + env 注入；
