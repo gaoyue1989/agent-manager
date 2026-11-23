@@ -1,5 +1,7 @@
 package io.agentmanager.framework.controller;
 
+import java.time.Instant;
+
 import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -226,17 +228,27 @@ class AgentEventSseSerializerTest {
     }
 
     @Test
-    void agentStartShouldCarryCreatedAtPassthrough() {
-        // SDK 在事件构造时置 createdAt = Instant.now()（ISO-8601 UTC），原样透传不改写
+    void agentStartShouldCarryCreatedAtEpochMillis() {
+        // SDK 在事件构造时置 createdAt = Instant.now()（ISO-8601 UTC），下发时转毫秒时间戳
         //（3 参构造参数序：sessionId, replyId, name——javap 核实）
         var start = new io.agentscope.core.event.AgentStartEvent("sid-3", "reply-s3", "assistant");
         String json = AgentEventSseSerializer.payload(start, "sid-3");
         String createdAt = start.getCreatedAt();
         assertTrue(createdAt != null && !createdAt.isBlank(), "SDK 事件应自带 createdAt");
-        assertTrue(json.contains("\"created_at\":\"" + createdAt + "\""),
-            "created_at 原样透传: " + json);
+        assertTrue(json.contains("\"created_at\":" + Instant.parse(createdAt).toEpochMilli()),
+            "created_at 应为毫秒时间戳: " + json);
+        assertFalse(json.contains("\"created_at\":\""), "created_at 不应为字符串: " + json);
         // 与 session_id 并存（一帧同时满足需求②时间与需求③归属）
         assertTrue(json.contains("\"session_id\":\"sid-3\""), json);
+    }
+
+    @Test
+    void agentStartShouldOmitUnparseableCreatedAt() {
+        // 远程转发事件的 createdAt 来自网络，非法值不得中断帧序列化
+        var start = new io.agentscope.core.event.AgentStartEvent(
+            "id-bad", "not-an-instant", "sid-bad", "reply-bad", "assistant", "assistant");
+        String json = AgentEventSseSerializer.payload(start, "sid-bad");
+        assertFalse(json.contains("created_at"), "非法时间戳不输出: " + json);
     }
 
     @Test

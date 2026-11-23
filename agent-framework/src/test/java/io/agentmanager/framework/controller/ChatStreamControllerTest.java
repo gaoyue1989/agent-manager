@@ -1,6 +1,7 @@
 package io.agentmanager.framework.controller;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -228,8 +229,8 @@ class ChatStreamControllerTest {
     }
 
     @Test
-    void agentStartFrameShouldCarryCreatedAt() {
-        // 追加需求④：AGENT_START 帧透传 SDK 自带的 created_at（agent 开始处理墙钟时刻）
+    void agentStartFrameShouldCarryCreatedAtEpochMillis() {
+        // 追加需求④：AGENT_START 帧携带 created_at（agent 开始处理墙钟时刻，毫秒时间戳）
         var sessionId = "test-user-startat";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
         var start = new io.agentscope.core.event.AgentStartEvent(sessionId, "reply-st1", "assistant");
@@ -240,8 +241,9 @@ class ChatStreamControllerTest {
         var frames = collect(sessionId, "hello", "alice");
         var startFrame = frames.stream()
             .filter(f -> f != null && f.contains("AGENT_START")).findFirst().orElseThrow();
-        assertTrue(startFrame.contains("\"created_at\":\"" + start.getCreatedAt() + "\""),
-            "created_at 原样透传: " + startFrame);
+        assertTrue(startFrame.contains(
+            "\"created_at\":" + Instant.parse(start.getCreatedAt()).toEpochMilli()),
+            "created_at 应为毫秒时间戳: " + startFrame);
     }
 
     @Test
