@@ -56,9 +56,32 @@ func newDaemon(cfg config, logger *log.Logger) *daemon {
 		cfg:    cfg,
 		client: &http.Client{Timeout: cfg.timeout},
 		log:    logger,
-		jitter: jitterMax,
+		jitter: pollJitter(cfg.interval),
 		recent: make(map[string]time.Time),
 	}
+}
+
+// pollJitter 轮询错峰上限（issue #400）：min(jitterMax, interval/2)——硬编码 30s 会让
+// 小 INTERVAL 配置（5s/1s）失真，冷启动被 0~30s 睡眠拖慢，违背 §10.3-1 ≤INTERVAL
+// 就绪承诺（默认 interval=1m 时仍为 30s，集群错峰粒度不变）
+func pollJitter(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	if half := interval / 2; half < jitterMax {
+		return half
+	}
+	return jitterMax
+}
+
+// pullBackoff 版本变化的拉取退避（D-7）：已有版本时 [0, interval) 铺满一个周期防集群
+// 同刻重拉风暴；冷启动（current==""，本地无任何可用版本）无风暴可言——立即拉取，
+// 新 warm pod 秒级就绪（issue #400，§10.3-1）
+func pullBackoff(current string, interval time.Duration) time.Duration {
+	if current == "" {
+		return 0
+	}
+	return randomBelow(interval)
 }
 
 func (d *daemon) loop(ctx context.Context) {
@@ -112,7 +135,7 @@ func (d *daemon) cycle(ctx context.Context) error {
 		d.log.Printf("ver=%s recently pulled, skipping re-pull within tolerance window", info.Version)
 		return nil
 	}
-	d.sleep(ctx, randomBelow(d.cfg.interval))
+	d.sleep(ctx, pullBackoff(current, d.cfg.interval))
 	return d.pull(info.Version)
 }
 
