@@ -149,9 +149,17 @@ public class OafReloadService {
         }
         var detail = new ArrayList<Map<String, Object>>();
         var declaredNames = freshConfig.mcpServers().stream().map(OafConfig.McpServerConfig::server).toList();
+        var syntheticNames = mcpToolRegistrar.syntheticServers().keySet();
 
-        // ① 声明中已删除的 server：摘除（工具下线 + 连接关闭，含共享句柄定向驱逐）
+        // ① 声明中已删除的 server：摘除（工具下线 + 连接关闭，含共享句柄定向驱逐）。
+        //    合成 server（openviking 等，issue #415）豁免——其生命周期属构建期/B 路径重建
+        //    （不由 frontmatter 声明/撤销，下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更
+        //    + rollout），A 路径 mcp-configs 变更与其无关，不得误判「已声明删除」摘工具
+        //    或驱逐句柄（修复前 openviking 每次被误杀且永不重注册）
         for (var registered : mcpToolRegistrar.getRegisteredServerNames()) {
+            if (syntheticNames.contains(registered)) {
+                continue;
+            }
             if (!declaredNames.contains(registered)) {
                 var entry = new LinkedHashMap<String, Object>();
                 entry.put("server", registered);

@@ -435,6 +435,40 @@ class McpToolRegistrarTest {
         assertEquals(PermissionMode.DEFAULT, registrar.collectPermissionRules(oaf).mode());
     }
 
+    /**
+     * 合成 server（issue #415）：包内 mcp-configs/openviking/config.yaml 仅 permissions.tools
+     * （permissions-only，无 connection 节）时，collectPermissionRules 输出
+     * mcp__openviking__{tool} 键规则——合成 server 权限唯一真相源，修复前注册点硬编码
+     * 空 Map 致 ask/deny 规则被静默丢弃。
+     */
+    @Test
+    void shouldCollectPermissionRulesFromSyntheticServerPermissionsOnlyConfig() throws Exception {
+        writeConfigYaml("openviking", """
+            permissions:
+              tools:
+                write: ask
+                read: deny
+            """);
+        var synthetic = new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+        var wrapper = mock(McpClientWrapper.class);
+        when(wrapper.initialize()).thenReturn(Mono.empty());
+        when(wrapper.listTools()).thenReturn(Mono.just(List.of(
+            new McpSchema.Tool("write", "", "desc", null, null, null, null),
+            new McpSchema.Tool("read", "", "desc", null, null, null, null))));
+        assertEquals("openviking", registrar.registerSyntheticClient(new Toolkit(), synthetic, () -> wrapper));
+
+        var oaf = mock(OafConfig.class);
+        when(oaf.runtimeConfig())
+            .thenReturn(new OafConfig.RuntimeConfig(0.7, 4096, false, "default"));
+        // frontmatter 不声明 openviking（注入守卫保证两者互斥）：规则仍须来自合成 server 的包内声明
+        when(oaf.mcpServers()).thenReturn(List.of());
+
+        var result = registrar.collectPermissionRules(oaf);
+
+        assertEquals(Map.of("mcp__openviking__write", "ask", "mcp__openviking__read", "deny"), result.tools());
+        assertTrue(result.mcpNames().containsAll(Set.of("mcp__openviking__write", "mcp__openviking__read")));
+    }
+
     // ===== MCP Apps: ui 静态声明解析 =====
 
     @Test

@@ -177,6 +177,33 @@ class OafReloadServiceTest {
         assertEquals("server-a", result.mcpServers().get(0).get("server"));
     }
 
+    /**
+     * A 路径「声明已删除」循环必须豁免合成 server（issue #415）：openviking 不由
+     * frontmatter 声明，修复前每次 mcp-configs 变更都被误判已删除（摘工具+驱逐句柄
+     * 且永不重注册=永久下线）；豁免后工具保留、句柄不驱逐。
+     */
+    @Test
+    void reloadMcpAllShouldNotRemoveSyntheticServers() throws IOException {
+        when(registrar.getRegisteredServerNames()).thenReturn(java.util.Set.of("server-a", "openviking"));
+        when(registrar.syntheticServers()).thenReturn(java.util.Map.of("openviking",
+            new McpToolRegistrar.SyntheticServer(
+                new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false),
+                () -> null)));
+
+        var mcpDir = tempDir.resolve("mcp-configs/server-a");
+        Files.createDirectories(mcpDir);
+        Files.writeString(mcpDir.resolve("config.yaml"), "connection:\n  type: sse\n  url: http://x\n");
+        var result = service.reload();
+
+        assertEquals("mcp", result.scope());
+        assertTrue(result.mcpServers().stream().noneMatch(e -> "openviking".equals(e.get("server"))),
+            "合成 server 不进 removed/reloaded 明细");
+        org.mockito.Mockito.verify(registrar, org.mockito.Mockito.never())
+            .clearServer(any(), org.mockito.ArgumentMatchers.eq("openviking"));
+        org.mockito.Mockito.verify(registrar, org.mockito.Mockito.never())
+            .evictSharedWrapper("openviking");
+    }
+
     @Test
     void reloadShouldRouteToAgentPathWhenAgentsMdChanges() throws IOException {
         service.reload();

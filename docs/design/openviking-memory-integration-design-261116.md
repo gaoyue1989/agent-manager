@@ -166,6 +166,13 @@ platform-router(introspect)→ X-User-Id → agent-framework Pod
 
 MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permissions.tools` 控制(ask 走 HITL 确认流,与现有体系兼容);`read_only` 不适用于会短路 ask 流的服务(同 release-agent 约束)。
 
+**实现现状回填(2026-11-23,issue #415)**:上表「全套复用」以**程序化合成注册**落地——OpenViking 地址/凭据来自平台注入 env(OVK_ADMIN_KEY 走服务 Secret),无法走文件声明的 connection 节,故不声明于 frontmatter mcpServers,由 `HarnessAgentFactory.registerVikingSharedContextMcp` 构建期经 `McpToolRegistrar.registerSyntheticClient(toolkit, mcp, baseFactory)` 注入合成 server `openviking`(唯一注入点,frontmatter 已声明同名 server 时 WARN 跳过,declared 声明优先)。与声明的差异与共性:
+
+- **权限**:包内 `mcp-configs/openviking/config.yaml` 仅 `permissions.tools` 节(permissions-only)即生效,注册时装载、`collectPermissionRules` 与 declared server 同款翻译为 `mcp__openviking__{tool}` 规则——上表「permissions 全套复用」的兑现;frontmatter `config.permission.tools` 不承载 MCP 工具(声明 MCP 注册名忽略并告警)
+- **句柄**:工厂产物 `UserScoped(EMPTY)` 装饰的 base,包 `ReconnectableMcpClientWrapper` 入共享缓存(与 declared 的 `buildBaseClient` 产物形态对称;注册与换芯共用同一工厂);McpConnectionWatchdog 探测名单含合成注册表,失联对句柄原地换芯,无句柄按 agent 有无分流补偿(单例在→工厂+registerSyntheticClient 补注册;纯会话隔离→仅 `cacheSyntheticClient` 入缓存,新会话 build 经 putIfAbsent 复用)
+- **生命周期**:A 路径 reload(`reloadMcpAll`)「声明已删除」循环豁免合成 server(不由 frontmatter 声明/撤销,下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更 + rollout);B 路径整包重建前 evict 共享缓存不清合成注册表——build 失败回滚窗口内旧 agent 的合成句柄仍可被看门狗自愈
+- **补偿路径权限快照边界(平台既有行为,非合成特有)**:启动期/补偿期注册成功的工具,权限规则不在既有 agent 的 PermissionContextState 内(SDK 引擎构造期快照),DEFAULT 模式按未覆盖兜底 ASK——declared server 的 compensate 同样如此,不为它扩权限系统运行期可变语义
+
 ## 8. 部署形态(裁决 261116:OpenViking 由外部提供服务,平台不部署)
 
 平台是接入方,与外部 MySQL/Redis 同一模式。接入契约(四项):
@@ -224,6 +231,8 @@ MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permi
 | `OVK_PER_USER_KEY`(平台能力) | — | backend `POST /api/v1/services/{id}/memory-keys`:root key 注册用户并签发个人 user_key(供 Studio/外部 MCP 凭证访问),签发一次明文返回 |
 
 **兼容矩阵**:`AGENT_MEMORY_ENABLED=false` 时两个 provider 全关(无记忆),优先级最高;`local` 路径代码零改动。
+
+> `OVK_MCP_SHARED_CONTEXT` 实现现状(2026-11-23 回填,issue #415):合成 server `openviking` 经 `HarnessAgentFactory.registerVikingSharedContextMcp` 程序化注入,权限声明位置 = 包内 `mcp-configs/openviking/config.yaml` 的 `permissions.tools`(permissions-only),句柄可换芯、看门狗探测/补偿自愈、A 路径 reload 豁免、frontmatter 同名声明守卫——细节见 §7 实现现状回填。
 
 ### 11.2 实施拆分(单分支多 commit,一个 PR)
 

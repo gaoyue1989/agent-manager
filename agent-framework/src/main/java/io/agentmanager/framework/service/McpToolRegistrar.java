@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -109,6 +110,24 @@ public class McpToolRegistrar {
     /** per-server 换芯在途标记（防同 server 并发重建；看门狗与后续调用方共用此去重） */
     private final Map<String, java.util.concurrent.atomic.AtomicBoolean> rebuildInFlight = new ConcurrentHashMap<>();
 
+    /**
+     * 合成 server（issue #415，openviking-memory-integration-design §7）：server 名 → 声明与
+     * 连接工厂。合成 server 不由 frontmatter mcpServers 声明/撤销（唯一入口是
+     * OVK_MCP_SHARED_CONTEXT env 变更 + rollout——新 Pod 全新 registrar，注册表随 Pod
+     * 生命周期，天然无跨世代残留），连接由程序化工厂构建（外部服务地址来自 env，无法走
+     * 文件声明）。看门狗探测/换芯/补偿与 A 路径 reload 的「声明已删除」豁免均以此表为
+     * 单一真相源。env 派生的可重建元数据（等同 rebuildInFlight 簿记，Pod 内存允许）；
+     * 多副本各自持连接与「共享连接池 per-Pod」既有语义一致。
+     *
+     * <p>生命周期：registerSyntheticClient 无条件登记（注册失败驱逐句柄但保留工厂，
+     * 看门狗下周期补偿复活）；{@link #evictSharedWrappers()}（B 路径 build 前）不清本表
+     * ——build 失败回滚窗口内旧 agent 的合成句柄仍可被看门狗自愈，与 declared 的
+     * compensate 兜底对称；工厂闭包 env 派生、世代间等价，残留无害。
+     */
+    record SyntheticServer(OafConfig.McpServerConfig config, Supplier<McpClientWrapper> factory) {}
+
+    private final Map<String, SyntheticServer> syntheticRegistry = new ConcurrentHashMap<>();
+
     public McpToolRegistrar(io.agentmanager.framework.config.AgentManagerProperties props) {
         this.configDir = Path.of(props.resolvedConfigDir());
     }
@@ -195,30 +214,49 @@ public class McpToolRegistrar {
     }
 
     /**
-     * 注册单个 MCP server 到 Toolkit（registerAll 循环体提取，供运行时 reload 复用）。
-     * 语义与启动期注册完全一致：ui/权限/只读/required 配置即时装载，
-     * fail-soft（连接失败仅告警跳过），startup.required=true 时抛异常；
-     * 注册失败时 CAS 驱逐共享缓存死句柄（P0 自愈口，issue #348）。
-     *
-     * @return 本次注册的 server 名（构建失败返回 null）
-     */
-    /**
      * 合成 MCP server 注册（openviking-memory-integration-design §7：OVK_MCP_SHARED_CONTEXT
-     * 的唯一调用方是 HarnessAgentFactory）。与 registerOne 的差异仅在连接来源——声明式
-     * config.yaml vs 程序化构建的 wrapper（OpenViking /mcp + 服务身份 Bearer，外部服务
-     * 地址由平台注入 env 提供，无法走文件声明）；其余语义完全对齐 registerOne：
-     * 句柄进共享缓存（reload evict 统一管理生命周期）、server 级缓存按"无声明"缺省装载、
-     * 标准路径注册（mcp__openviking__ 前缀）、fail-soft（失败仅告警返回 null）。
+     * 的唯一调用方是 HarnessAgentFactory）。与 registerOne 的差异在两处连接面——
+     * ① 连接来源：声明式 config.yaml（connection 节）vs 程序化工厂（OpenViking /mcp +
+     * 服务身份 Bearer，外部服务地址由平台注入 env 提供，无法走文件声明）；② server 级
+     * 声明缓存按"无声明"缺省装载，但工具权限仍从包内
+     * {@code mcp-configs/{server}/config.yaml} 的 permissions.tools 装载（permissions-only，
+     * 与全部 MCP server 同源，openviking-memory-integration-design §7「permissions 全套
+     * 复用」）。其余对齐 registerOne：句柄 {@code Reconnectable(UserScoped(base))} 进共享
+     * 缓存（看门狗可换芯）、标准路径注册（mcp__{server}__ 前缀）、fail-soft（失败仅告警
+     * 返回 null）。
      *
+     * <p>注册失败驱逐句柄但工厂保留在合成注册表（看门狗下周期补偿复活）；
+     * frontmatter 已声明同名 server 时不应调用本方法（HarnessAgentFactory 注入守卫，
+     * declared 声明优先）。
+     *
+     * @param baseFactory base 连接工厂，产物 = 已做 UserScoped 装饰的 base 连接（与
+     *                    declared 路径 {@link #buildBaseClient} 产物形态对称）；注册与
+     *                    rebuildSharedWrapper 换芯共用同一工厂，杜绝换芯后装饰丢失
      * @return 注册的 server 名（失败返回 null）
      */
     public String registerSyntheticClient(Toolkit toolkit, OafConfig.McpServerConfig mcp,
-                                          McpClientWrapper wrapper) {
+                                          Supplier<McpClientWrapper> baseFactory) {
         uiMappings.put(mcp.server(), UiMapping.empty());
-        toolPermissions.put(mcp.server(), Map.of());
+        toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
         userHeaderRules.put(mcp.server(), UserHeaderRule.EMPTY);
         readOnlyServers.put(mcp.server(), false);
         startupRequired.put(mcp.server(), false);
+        // 注册表无条件登记（含注册失败路径）：看门狗探测/补偿的单一真相源
+        syntheticRegistry.put(mcp.server(), new SyntheticServer(mcp, baseFactory));
+        McpClientWrapper wrapper;
+        try {
+            var base = baseFactory.get();
+            if (base == null) {
+                log.warn("[MCP] synthetic server '{}' base client build returned empty, skipped (fail-soft)",
+                    mcp.server());
+                return null;
+            }
+            wrapper = new ReconnectableMcpClientWrapper(mcp.server(), base);
+        } catch (Exception e) {
+            log.warn("[MCP] synthetic server '{}' base client build failed, skipped (fail-soft): {}",
+                mcp.server(), e.getMessage());
+            return null;
+        }
         var prev = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
         var freshOwner = prev == null;
         if (prev != null) {
@@ -241,7 +279,7 @@ public class McpToolRegistrar {
                 log.warn("[MCP] synthetic server '{}' registration failed, evicted shared handle: {}",
                     mcp.server(), e.getMessage());
                 if (freshOwner) {
-                    // fresh wrapper（issue #353 同型）：驱逐后脱缓存且从未交付任何 toolkit，
+                    // fresh 句柄（issue #353 同型）：驱逐后脱缓存且从未交付任何 toolkit，
                     // 不 close 即无持有者孤儿（泄漏子进程/HttpClient）
                     closeQuietly(wrapper);
                 }
@@ -252,6 +290,53 @@ public class McpToolRegistrar {
         }
     }
 
+    /**
+     * 仅构建可换芯句柄入共享缓存、不注册工具（看门狗 compensate 的 agent==null 分支，
+     * issue #415）：纯会话隔离模式无单例 agent 可补注册，新会话 build 经
+     * {@link #registerSyntheticClient} 的 putIfAbsent 复用该句柄。构建失败只告警返回
+     * false（看门狗下一周期重试）；缓存已有句柄时直接复用（新构建即刻关闭，竞态败者
+     * close 先例）。
+     *
+     * @return true 表示句柄已在缓存（新建或复用）
+     */
+    boolean cacheSyntheticClient(OafConfig.McpServerConfig mcp, Supplier<McpClientWrapper> baseFactory) {
+        if (sharedWrappers.containsKey(mcp.server())) {
+            return true;
+        }
+        McpClientWrapper wrapper;
+        try {
+            var base = baseFactory.get();
+            if (base == null) {
+                log.warn("[MCP] synthetic server '{}' base client build returned empty (cache-only)",
+                    mcp.server());
+                return false;
+            }
+            wrapper = new ReconnectableMcpClientWrapper(mcp.server(), base);
+        } catch (Exception e) {
+            log.warn("[MCP] synthetic server '{}' base client build failed (cache-only): {}",
+                mcp.server(), e.getMessage());
+            return false;
+        }
+        var prev = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
+        if (prev != null) {
+            closeQuietly(wrapper);
+        }
+        return true;
+    }
+
+    /** 合成 server 注册表只读视图（看门狗探测名单与补偿分流、A 路径 reload 豁免判据） */
+    Map<String, SyntheticServer> syntheticServers() {
+        return Collections.unmodifiableMap(syntheticRegistry);
+    }
+
+    /**
+     * 注册单个 MCP server 到 Toolkit（registerAll 循环体提取，供运行时 reload 复用）。
+     * 语义与启动期注册完全一致：ui/权限/只读/required 配置即时装载，
+     * fail-soft（连接失败仅告警跳过），startup.required=true 时抛异常；
+     * 注册失败时 CAS 驱逐共享缓存死句柄（P0 自愈口，issue #348）。
+     *
+     * @return 本次注册的 server 名（构建失败返回 null）
+     */
     public String registerOne(Toolkit toolkit, OafConfig.McpServerConfig mcp) {
         var uiMapping = loadUiMapping(mcp);
         uiMappings.put(mcp.server(), uiMapping);
@@ -706,7 +791,22 @@ public class McpToolRegistrar {
             if (!(handle instanceof ReconnectableMcpClientWrapper reconnectable)) {
                 return false;
             }
-            var base = buildBaseClient(mcp);
+            // 合成 server 走注册表工厂（无 config.yaml connection 节可回退），产物已含
+            // UserScoped 装饰、与注册路径同源（形态恒一致，评审 P1）；declared server
+            // 主路径维持 buildBaseClient 不变
+            McpClientWrapper base;
+            var synthetic = syntheticRegistry.get(serverName);
+            if (synthetic != null) {
+                try {
+                    base = synthetic.factory().get();
+                } catch (Exception e) {
+                    log.warn("[MCP] synthetic server '{}' rebuild build failed, keeping dead handle: {}",
+                        serverName, e.getMessage());
+                    return false;
+                }
+            } else {
+                base = buildBaseClient(mcp);
+            }
             if (base == null) {
                 log.warn("[MCP] server '{}' rebuild build failed, keeping dead handle", serverName);
                 return false;
@@ -872,7 +972,8 @@ public class McpToolRegistrar {
      *   非法值回退 DEFAULT 并告警
      * - tools：各 server permissions.tools 显式声明（config 用远端裸名，仅保留已注册工具；
      *   未注册声明告警忽略），输出键翻译为注册名 mcp__{server}__{tool}——权限引擎按
-     *   模型侧工具名精确匹配（PermissionEngine.rulesFor = map.get(name)）
+     *   模型侧工具名精确匹配（PermissionEngine.rulesFor = map.get(name)）；合成 server
+     *   （issue #415）的 permissions 在注册时已装载进缓存，同款翻译
      * - mcpNames：本次实际注册的 MCP 工具注册名集合（含 ActiveMCP 子集过滤后的结果）
      *
      * @return {mode, tools, mcpNames}
@@ -881,26 +982,39 @@ public class McpToolRegistrar {
         var mode = resolvePermissionMode(oafConfig);
         var tools = new LinkedHashMap<String, String>();
         for (var mcp : oafConfig.mcpServers()) {
-            for (var entry : loadToolPermissions(mcp).entrySet()) {
-                var name = entry.getKey();
-                var info = registeredTools.get(mcp.server() + ":" + name);
-                if (info == null) {
-                    log.warn("MCP {}: permission declared for '{}' but tool not registered (ActiveMCP filtered or server offline), ignored",
-                        mcp.server(), name);
-                    continue;
-                }
-                var prev = tools.put(info.displayName(), entry.getValue());
-                if (prev != null && !prev.equals(entry.getValue())) {
-                    log.warn("MCP tool '{}' declared with conflicting behaviors across servers ({} vs {}), using '{}'",
-                        name, prev, entry.getValue(), entry.getValue());
-                }
-            }
+            collectServerToolPermissions(mcp.server(), loadToolPermissions(mcp), tools);
+        }
+        // 合成 server（issue #415）：权限在 registerSyntheticClient 时已从包内
+        // mcp-configs/{server}/config.yaml permissions.tools（permissions-only）装载进缓存，
+        // 翻译/判存/冲突告警与 declared 同款。注入守卫（HarnessAgentFactory）保证合成名
+        // 与 frontmatter 声明名不相交，无同名含混
+        for (var server : syntheticRegistry.keySet()) {
+            collectServerToolPermissions(server, toolPermissions.getOrDefault(server, Map.of()), tools);
         }
         var mcpNames = new LinkedHashSet<String>();
         for (var info : registeredTools.values()) {
             mcpNames.add(info.displayName());
         }
         return new PermissionRuleResult(mode, tools, mcpNames);
+    }
+
+    /** 单 server 权限声明 → 注册名规则翻译（declared 与合成 server 循环共用） */
+    private void collectServerToolPermissions(String serverName, Map<String, String> permissions,
+                                              Map<String, String> tools) {
+        for (var entry : permissions.entrySet()) {
+            var name = entry.getKey();
+            var info = registeredTools.get(serverName + ":" + name);
+            if (info == null) {
+                log.warn("MCP {}: permission declared for '{}' but tool not registered (ActiveMCP filtered or server offline), ignored",
+                    serverName, name);
+                continue;
+            }
+            var prev = tools.put(info.displayName(), entry.getValue());
+            if (prev != null && !prev.equals(entry.getValue())) {
+                log.warn("MCP tool '{}' declared with conflicting behaviors across servers ({} vs {}), using '{}'",
+                    name, prev, entry.getValue(), entry.getValue());
+            }
+        }
     }
 
     /** 解析 frontmatter config.permission.mode → PermissionMode；非法值回退 DEFAULT 并告警 */

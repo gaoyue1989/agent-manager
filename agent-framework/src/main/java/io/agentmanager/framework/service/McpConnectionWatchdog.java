@@ -26,8 +26,10 @@ import io.agentscope.core.tool.mcp.McpClientWrapper;
  * <p>探活走 {@code listTools()}（发现通道走静态凭据，与用户级 header 注入无关）；
  * 重建期间该 server 跳过后续探测（per-server 在途标记），OAF reload 进行中整体让位
  * （换连语义同源，避免双 swap 竞态）。缓存无句柄（典型：启动期注册失败被 P0 驱逐）
- * 走 compensate：复用 {@code registerOne} 补建——会话隔离模式下新会话经共享缓存自然
- * 取到；单例 agent 存在时顺带补登记（隔离关闭模式的会话入口）。
+ * 走 compensate：declared server 复用 {@code registerOne} 补建——会话隔离模式下新会话
+ * 经共享缓存自然取到，单例 agent 存在时顺带补登记（隔离关闭模式的会话入口）；合成
+ * server（openviking，issue #415）经注册表工厂同型分流（agent!=null 补注册 /
+ * agent==null 仅入缓存）。探测名单 = frontmatter 声明 ∪ registrar 合成注册表。
  * 全部动作 fail-soft：单 server 失败只告警，下一周期重试。
  *
  * <p>调度参数在 {@link McpHealthTiming}（独立 bean——@Scheduled SpEL 不能自引用宿主）。
@@ -78,6 +80,12 @@ public class McpConnectionWatchdog {
         for (var m : oaf.mcpServers()) {
             probeOne(m);
         }
+        // 合成 server（issue #415）：不由 frontmatter 声明，探测名单来自 registrar 注册表
+        // （config+factory）；注入守卫（HarnessAgentFactory）保证合成名与 declared 名单
+        // 不相交，无重复探测
+        for (var synthetic : mcpToolRegistrar.syntheticServers().values()) {
+            probeOne(synthetic.config());
+        }
     }
 
     /**
@@ -116,7 +124,8 @@ public class McpConnectionWatchdog {
      * 补偿「有 OAF 配置但共享缓存无句柄」的 server（启动期注册失败被 P0 驱逐后的现场）。
      * 复用 {@code registerOne} 完整语义（构建/缓存/注册/P0 驱逐）：会话隔离模式下
      * 句柄入缓存后新会话自然取用；单例 agent 存在时补登记其 toolkit（隔离关闭模式
-     * 的会话入口）。失败只告警，下一周期重试。
+     * 的会话入口）。合成 server（issue #415）分流：复用注册表工厂补注册 /
+     * {@code cacheSyntheticClient} 入缓存。失败只告警，下一周期重试。
      */
     private void compensate(OafConfig.McpServerConfig m) {
         var flag = rebuilding.computeIfAbsent(m.server(), k -> new AtomicBoolean());
@@ -124,6 +133,11 @@ public class McpConnectionWatchdog {
             return;
         }
         try {
+            var synthetic = mcpToolRegistrar.syntheticServers().get(m.server());
+            if (synthetic != null) {
+                compensateSynthetic(synthetic);
+                return;
+            }
             var agent = agentRuntimeService.getAgent();
             if (agent != null && agent.getToolkit() != null) {
                 log.info("[MCP-watchdog] server '{}' configured but no shared connection, compensating via registerOne",
@@ -140,6 +154,27 @@ public class McpConnectionWatchdog {
         } finally {
             flag.set(false);
         }
+    }
+
+    /**
+     * 合成 server 补偿（对齐 declared 的 registerOne / sharedClient 双分支语义，issue #415）：
+     * 单例 agent 存在 → 工厂产出连接 + {@code registerSyntheticClient} 补注册（恢复单例
+     * toolkit 的工具面）；agent==null（per-session 模式无单例）→ {@code cacheSyntheticClient}
+     * 仅把可换芯句柄入缓存，新会话 build 经 putIfAbsent 复用。失败只告警，下一周期重试。
+     */
+    private void compensateSynthetic(McpToolRegistrar.SyntheticServer synthetic) {
+        var m = synthetic.config();
+        var agent = agentRuntimeService.getAgent();
+        if (agent != null && agent.getToolkit() != null) {
+            log.info("[MCP-watchdog] synthetic server '{}' no shared connection, compensating via registerSyntheticClient",
+                m.server());
+            mcpToolRegistrar.registerSyntheticClient(agent.getToolkit(), m, synthetic.factory());
+        } else {
+            log.info("[MCP-watchdog] synthetic server '{}' no shared connection and no live agent, caching client only",
+                m.server());
+            mcpToolRegistrar.cacheSyntheticClient(m, synthetic.factory());
+        }
+        rebuildCount.incrementAndGet();
     }
 
     /** 探活：listTools 短超时内返回即视为健康 */
