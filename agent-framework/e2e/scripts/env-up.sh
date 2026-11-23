@@ -13,6 +13,7 @@ E2E_BASE_PORT="${E2E_BASE_PORT:-8100}"
 LLM_MOCK_PORT="${LLM_MOCK_PORT:-18081}"
 BENCH_MCP_PORT="${BENCH_MCP_PORT:-18082}"
 APPROVAL_MCP_PORT="${APPROVAL_MCP_PORT:-8813}"
+DIRECT_MCP_PORT="${DIRECT_MCP_PORT:-8814}"
 SANDBOX_MOCK_PORT="${SANDBOX_MOCK_PORT:-8090}"
 MYSQL_URL="${MYSQL_URL:-jdbc:mysql://127.0.0.1:3306/agent_framework_e2e}"
 MYSQL_USER="${MYSQL_USER:-e2e}"
@@ -60,7 +61,7 @@ if [ "${E2E_RESET_DATA:-true}" = "true" ]; then
 fi
 
 # ---------- 0. 清场：杀掉上一轮残留的同端口进程（陈旧 mock/实例会让新进程绑定失败且难以察觉） ----------
-for PORT_CLEAN in "$LLM_MOCK_PORT" "$BENCH_MCP_PORT" "$APPROVAL_MCP_PORT" "$SANDBOX_MOCK_PORT" "$E2E_BASE_PORT" "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 2))" "$((E2E_BASE_PORT + 100))" "$((E2E_BASE_PORT + 101))" "$((E2E_BASE_PORT + 102))"; do
+for PORT_CLEAN in "$LLM_MOCK_PORT" "$BENCH_MCP_PORT" "$APPROVAL_MCP_PORT" "$DIRECT_MCP_PORT" "$SANDBOX_MOCK_PORT" "$E2E_BASE_PORT" "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 2))" "$((E2E_BASE_PORT + 100))" "$((E2E_BASE_PORT + 101))" "$((E2E_BASE_PORT + 102))"; do
   PIDS=$(ss -ltnp 2>/dev/null | grep ":${PORT_CLEAN} " | grep -oP 'pid=\K[0-9]+' | sort -u || true)
   for p in $PIDS; do kill -9 "$p" 2>/dev/null || true; done
 done
@@ -71,7 +72,7 @@ AGENT_CFG="$RUNTIME/agent-config"
 rm -rf "$AGENT_CFG"
 cp -r "$ROOT/fixtures/agent-config" "$AGENT_CFG"
 for f in "$AGENT_CFG"/mcp-configs/*/config.yaml; do
-  sed -i "s|http://127.0.0.1:8813|http://127.0.0.1:${APPROVAL_MCP_PORT}|g; s|http://172.17.0.1:18082/mcp|http://127.0.0.1:${BENCH_MCP_PORT}/mcp|g; s|http://127.0.0.1:18082/mcp|http://127.0.0.1:${BENCH_MCP_PORT}/mcp|g" "$f"
+  sed -i "s|http://127.0.0.1:8813|http://127.0.0.1:${APPROVAL_MCP_PORT}|g; s|http://127.0.0.1:8814|http://127.0.0.1:${DIRECT_MCP_PORT}|g; s|http://172.17.0.1:18082/mcp|http://127.0.0.1:${BENCH_MCP_PORT}/mcp|g; s|http://127.0.0.1:18082/mcp|http://127.0.0.1:${BENCH_MCP_PORT}/mcp|g" "$f"
 done
 
 
@@ -117,10 +118,13 @@ MOCK_MCP_PORT="$BENCH_MCP_PORT" node "$ROOT/../bench/mock-mcp/server.js" > "$LOG
 echo $! > "$RUNTIME/mock-bench-mcp.pid"
 python3 "$ROOT/mock/approval-mcp.py" > "$LOGS/mock-approval-mcp.log" 2>&1 &
 echo $! > "$RUNTIME/mock-approval-mcp.pid"
+DIRECT_MCP_PORT="$DIRECT_MCP_PORT" python3 "$ROOT/mock/direct-return-mcp.py" > "$LOGS/mock-direct-mcp.log" 2>&1 &
+echo $! > "$RUNTIME/mock-direct-mcp.pid"
 
 "$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${LLM_MOCK_PORT}/health" 30 mock-llm
 "$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${BENCH_MCP_PORT}/health" 30 mock-bench-mcp
-"$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${APPROVAL_MCP_PORT}/stats" 30 mock-approval-mcp
+"$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:8813/stats" 30 mock-approval-mcp
+"$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${DIRECT_MCP_PORT}/calls" 30 mock-direct-mcp
 
 # approval MCP 地址跟随端口：python 版端口固定 8813，非默认端口经 socat 转发兜底
 if [ "$APPROVAL_MCP_PORT" != "8813" ]; then

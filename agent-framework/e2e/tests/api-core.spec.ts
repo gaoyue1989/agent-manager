@@ -5,10 +5,10 @@
  * 协议权威：docs/api-thread-spec.md v1.0。
  */
 import { test, expect, type APIRequestContext, type APIResponse } from '@playwright/test';
-import { BASE, BENCH_MCP, ids, sessionIdFor } from '../lib/env.js';
+import { BASE, BENCH_MCP, DIRECT_MCP, ids, sessionIdFor } from '../lib/env.js';
 import { chat, status, subscribe, history, threads, deleteThread, patchThread, a2a, llmStats, llmReset, createApprovalApp, confirmStream, confirmSync, userHeaders } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/matchers.js';
-import { seqMonotonic } from '../lib/sse.js';
+import { expectSequence, seqMonotonic, type Frame } from '../lib/sse.js';
 import { upload, download, textBytes, pngBytes } from '../lib/files.js';
 import { seedCompactionArchive, seedSyntheticReminderArchive } from '../lib/archive-seed.js';
 import mysql from 'mysql2/promise';
@@ -2041,4 +2041,161 @@ test('X5 对照组：无头时 endpoints 根路径且无 base_url 键', async ({
   const meta = await (await request.get('/metadata?includeDetails=true')).json();
   expect(meta.endpoints.threads).toBe('/threads');
   expect(meta.base_url).toBeUndefined();
+});
+
+const DIRECT_TOOLS = {
+  card: 'mcp__order__render_confirm_card',
+  submit: 'mcp__order__submit_order',
+  broken: 'mcp__order__broken_render',
+  empty: 'mcp__order__empty_render',
+  lookup: 'mcp__order__lookup_order',
+  notify: 'mcp__order__notify_warehouse',
+} as const;
+
+const directTextOf = (frames: Frame[]) => frames
+  .filter(f => f.type === 'TEXT_BLOCK_DELTA' && f.generateReason === 'TOOL_RETURN_DIRECT')
+  .map(f => String(f.delta ?? '')).join('');
+
+const modelTextOf = (frames: Frame[]) => frames
+  .filter(f => f.type === 'TEXT_BLOCK_DELTA' && !f.generateReason)
+  .map(f => String(f.delta ?? '')).join('');
+
+const resultTextOf = (frames: Frame[], toolCallId: string) => frames
+  .filter(f => f.type === 'TOOL_RESULT_TEXT_DELTA' && f.toolCallId === toolCallId)
+  .map(f => String(f.delta ?? '')).join('');
+
+const callStartOf = (frames: Frame[], toolName: string) => frames
+  .find(f => f.type === 'TOOL_CALL_START' && f.toolName === toolName) as Record<string, unknown> | undefined;
+
+const dialogueCalls = async (scenario: string) => (await llmStats()).calls
+  .filter(c => c.scenario === scenario && String(c.systemContent ?? '').includes('E2E 测试助手')).length;
+
+const expectedPayload = async (tool: string, orderId = 'o-1') => {
+  const res = await fetch(`${DIRECT_MCP}/expected?tool=${tool}&order_id=${orderId}`);
+  return String((await res.json()).text);
+};
+
+const directChat = async (marker: string, label: string) => {
+  const sid = sessionIdFor(`${label}-${uniq()}`);
+  const stream = chat({ message: `[E2E:${marker}]`, userId: U, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type, `终态帧 ${stream.terminal?.type}，末帧 ${JSON.stringify(stream.frames.slice(-2))}`).toBe('done');
+  return { sid, frames: stream.frames };
+};
+
+test('DR1 直返工具成功：模型只调用 1 次，内容逐字节原样下发并终止本轮', async () => {
+  const { frames } = await directChat('direct:render', 'dr1');
+  const start = callStartOf(frames, DIRECT_TOOLS.card);
+  expect(start, '缺少 render_confirm_card 的 TOOL_CALL_START').toBeTruthy();
+  expect(start!.directReturn, 'TOOL_CALL_START 应携带 directReturn').toBe(true);
+  expect(start, '直返工具不带 ui 元数据').not.toHaveProperty('ui');
+  const end = toolResults(frames).find(r => r.toolCallId === start!.toolCallId);
+  expect(String(end?.state)).toBe('SUCCESS');
+  const card = directTextOf(frames);
+  expect(card.length, '缺少带 TOOL_RETURN_DIRECT 标记的收尾文本').toBeGreaterThan(0);
+  expect(card, '收尾文本应等于工具结果原文').toBe(resultTextOf(frames, String(start!.toolCallId)));
+  expect(card, '下发内容与 MCP 返回不一致').toBe(await expectedPayload('render_confirm_card'));
+  expect(modelTextOf(frames), '直返后不应再有模型正文').toBe('');
+  expect(frames.filter(f => f.type === 'MODEL_CALL_START'), '本轮只应有一次模型调用').toHaveLength(1);
+  expect(frames.filter(f => f.type === 'AGENT_END')).toHaveLength(1);
+  expect(await dialogueCalls('direct-render'), 'mock LLM 只应收到 1 次主对话请求').toBe(1);
+  expectSequence(frames, ['TOOL_CALL_START', 'TOOL_RESULT_END', 'TEXT_BLOCK_START', 'TEXT_BLOCK_DELTA', 'TEXT_BLOCK_END', 'AGENT_END']);
+});
+
+test('DR2 直返轮的 history 与续传回放保留直返标记', async () => {
+  const { sid, frames } = await directChat('direct:render', 'dr2');
+  const card = directTextOf(frames);
+  const h = await history(sid, BASE, U);
+  const msgs = (h.messages ?? []) as Array<Record<string, unknown>>;
+  const closing = msgs.filter(m => m.generate_reason === 'TOOL_RETURN_DIRECT');
+  expect(closing, 'history 应有且仅有一条直返收尾消息').toHaveLength(1);
+  expect(closing[0].role).toBe('assistant');
+  expect(closing[0].content, 'history 收尾消息应等于原样内容').toBe(card);
+  expect(msgs.filter(m => 'generate_reason' in m), '普通消息不应带 generate_reason').toHaveLength(1);
+
+  const replay = subscribe(sid, 0, BASE, undefined, U);
+  await waitTerminal(replay);
+  expect(callStartOf(replay.frames, DIRECT_TOOLS.card)?.directReturn).toBe(true);
+  expect(directTextOf(replay.frames), '续传回放应还原带标记的收尾文本').toBe(card);
+  expectSequence(replay.frames, ['AGENT_END', 'done']);
+});
+
+test('DR3 普通工具不受影响：模型继续推理收尾，无直返标记', async () => {
+  const { frames } = await directChat('direct:plain', 'dr3');
+  const start = callStartOf(frames, DIRECT_TOOLS.lookup);
+  expect(start, '缺少 lookup_order 的 TOOL_CALL_START').toBeTruthy();
+  expect(start, '普通工具不应携带 directReturn').not.toHaveProperty('directReturn');
+  expect(String(toolResults(frames).find(r => r.toolCallId === start!.toolCallId)?.state)).toBe('SUCCESS');
+  expect(directTextOf(frames), '普通工具不应产生直返文本').toBe('');
+  expect(modelTextOf(frames).length, '普通工具的结果应回喂模型').toBeGreaterThan(0);
+  expect(await dialogueCalls('direct-plain')).toBe(2);
+});
+
+test('DR4 直返工具失败不短路：ERROR 结果回喂模型', async () => {
+  const { frames } = await directChat('direct:fail', 'dr4');
+  const start = callStartOf(frames, DIRECT_TOOLS.broken);
+  expect(start?.directReturn).toBe(true);
+  const end = toolResults(frames).find(r => r.toolCallId === start!.toolCallId);
+  expect(String(end?.state)).toBe('ERROR');
+  expect(directTextOf(frames), '工具失败不应直返').toBe('');
+  expect(modelTextOf(frames).length, '失败结果应由模型说明').toBeGreaterThan(0);
+  expect(await dialogueCalls('direct-fail'), '失败后模型应被再次调用').toBe(2);
+});
+
+test('DR5 直返工具成功但内容为空：归一化为 ERROR 回喂模型', async () => {
+  const { frames } = await directChat('direct:empty', 'dr5');
+  const start = callStartOf(frames, DIRECT_TOOLS.empty);
+  const end = toolResults(frames).find(r => r.toolCallId === start!.toolCallId);
+  expect(String(end?.state), '空内容不得当作成功的直返').toBe('ERROR');
+  expect(resultTextOf(frames, String(start!.toolCallId))).toContain('empty content');
+  expect(directTextOf(frames), '空内容不应直返').toBe('');
+  expect(await dialogueCalls('direct-empty')).toBe(2);
+});
+
+test('DR6 HITL ask + 直返：批准后执行并直返，恢复流不再调用模型', async () => {
+  const sid = sessionIdFor(`dr6-${uniq()}`);
+  const ask = chat({ message: '[E2E:direct:submit]', userId: U, sessionId: sid });
+  await waitTerminal(ask);
+  expect(ask.terminal?.type).toBe('permission_ask');
+  const asked = (ask.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>;
+  expect(asked[0].name).toBe(DIRECT_TOOLS.submit);
+  expect(callStartOf(ask.frames, DIRECT_TOOLS.submit)?.directReturn).toBe(true);
+  expect(directTextOf(ask.frames), '未批准前不得直返').toBe('');
+  expect(toolResults(ask.frames), '未批准前工具不得执行').toHaveLength(0);
+  expect((await status(sid, BASE, U)).state).toBe('waiting_confirm');
+
+  await new Promise(r => setTimeout(r, 800));
+  const rec = confirmStream(sid, [{ tool_call_id: String(asked[0].tool_call_id), confirmed: true }], BASE, 120_000, U);
+  await waitTerminal(rec);
+  expect(rec.terminal?.type).toBe('done');
+  expect(String(toolResults(rec.frames)[0]?.state)).toBe('SUCCESS');
+  const receipt = directTextOf(rec.frames);
+  expect(receipt, '批准后应直返订单回执').toBe(await expectedPayload('submit_order'));
+  expect(modelTextOf(rec.frames)).toBe('');
+  expect(await dialogueCalls('direct-submit'), '批准后的恢复流不应再调用模型').toBe(1);
+});
+
+test('DR7 同批混合调用不短路：直返工具与普通工具同一步执行后整批回喂模型', async () => {
+  const { frames } = await directChat('direct:mixed', 'dr7');
+  expect(toolNames(frames)).toEqual(expect.arrayContaining([DIRECT_TOOLS.notify, DIRECT_TOOLS.card]));
+  expect(toolResults(frames).filter(r => String(r.state) === 'SUCCESS'), '两个工具都应真实执行').toHaveLength(2);
+  const stepIds = new Set(frames.filter(f => f.type === 'TOOL_CALL_START').map(f => f.replyId));
+  expect(stepIds.size, '两个调用应出现在同一步').toBe(1);
+  expect(callStartOf(frames, DIRECT_TOOLS.card)?.directReturn).toBe(true);
+  expect(callStartOf(frames, DIRECT_TOOLS.notify)).not.toHaveProperty('directReturn');
+  expect(directTextOf(frames), '混合批次不应直返').toBe('');
+  expect(modelTextOf(frames).length).toBeGreaterThan(0);
+  expect(await dialogueCalls('direct-mixed')).toBe(2);
+});
+
+test('DR8 /tools 的 directReturn 标记与 config.yaml 声明一致', async ({ request }) => {
+  const tools = await (await request.get('/tools')).json() as { tools: Array<Record<string, unknown>> };
+  const order = new Map(tools.tools.filter(t => t.server === 'order').map(t => [String(t.name), t]));
+  expect([...order.keys()].sort()).toEqual(['broken_render', 'empty_render', 'lookup_order', 'notify_warehouse', 'render_confirm_card', 'submit_order']);
+  for (const name of ['render_confirm_card', 'submit_order', 'broken_render', 'empty_render']) {
+    expect(order.get(name)?.directReturn, `${name} 应标记直返`).toBe(true);
+  }
+  for (const name of ['lookup_order', 'notify_warehouse']) {
+    expect(order.get(name), `${name} 不应标记直返`).not.toHaveProperty('directReturn');
+  }
 });

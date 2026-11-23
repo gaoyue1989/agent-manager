@@ -1,0 +1,24 @@
+vendor: "local"
+server: "order"
+version: "1.0.0"
+
+connection:
+  type: "streamableHttp"
+  url: "http://127.0.0.1:8814"
+  timeout: 60
+
+permissions:
+  tools:
+    render_confirm_card: allow
+    submit_order: ask
+    broken_render: allow
+    empty_render: allow
+    lookup_order: allow
+    notify_warehouse: allow
+
+direct_return:
+  tools:
+    - render_confirm_card
+    - submit_order
+    - broken_render
+    - empty_render

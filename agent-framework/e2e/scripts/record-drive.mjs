@@ -40,6 +40,12 @@ export const SCENARIOS = {
   'execute-fail': { turns: [{ message: '请在沙箱中执行命令：ls /nonexistent-e2a-dir，并告诉我执行结果（失败也要告诉我）。', tool: 'execute' }] },
   'sandbox-write': { turns: [{ message: '请调用 write_file 工具创建文件 data/out.txt，内容为：沙箱落盘验证。完成后简短确认。', tool: 'write_file' }] },
   'sandbox-read':  { turns: [{ message: '请调用 read_file 工具读取 data/out.txt 的完整内容并原样复述。', tool: 'read_file' }] },
+  'direct-render': { turns: [{ message: '请调用 render_confirm_card 工具，参数 order_id 为 o-1，把确认卡片展示给我。', tools: ['mcp__order__render_confirm_card'] }] },
+  'direct-fail': { turns: [{ message: '请调用 broken_render 工具，参数 order_id 为 o-1。', tools: ['mcp__order__broken_render'] }] },
+  'direct-empty': { turns: [{ message: '请调用 empty_render 工具，参数 order_id 为 o-1。', tools: ['mcp__order__empty_render'] }] },
+  'direct-plain': { turns: [{ message: '请调用 lookup_order 工具查询订单 o-1 的物流状态，然后用一句话告诉我结果。', tools: ['mcp__order__lookup_order'] }] },
+  'direct-submit': { turns: [{ message: '请调用 submit_order 工具，参数 order_id 为 o-1。', tools: ['mcp__order__submit_order'], terminal: 'permission_ask' }], rewrite: [['authorization', '']] },
+  'direct-mixed': { turns: [{ message: '请在同一步里同时调用两个工具：notify_warehouse 和 render_confirm_card，order_id 都传 o-1。不要分两步，必须一起调用。', tools: ['mcp__order__notify_warehouse', 'mcp__order__render_confirm_card'] }] },
 };
 
 // ---------- SSE 客户端（POST /threads/chat）----------
@@ -112,7 +118,7 @@ async function recordScenario(name, spec, sessions) {
   const sessionId = spec.sameSessionAs && sessions[spec.sameSessionAs] ? sessions[spec.sameSessionAs] : sid;
   sessions[name] = sessionId;
   // 需要 application_id 的场景：预创建申请，录制件中该 id 被改写为 {{appId}} 占位符
-  let appId = null, rewrite = [];
+  let appId = null, rewrite = (spec.rewrite ?? []).map(([from, to]) => [from, to]);
   if (spec.turns.some(t => t.appId)) {
     appId = await createApprovalApp();
     rewrite = [[appId, '{{appId}}']];

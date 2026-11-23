@@ -25,6 +25,10 @@ mcpServers:
     server: "cards"
     version: "1.0.0"
     configDir: "mcp-configs/cards"
+  - vendor: "order"
+    server: "order"
+    version: "1.0.0"
+    configDir: "mcp-configs/order"
 
 config:
   require_confirmation: false

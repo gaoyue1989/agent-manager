@@ -85,6 +85,30 @@
       "variants": [
         "denied"
       ]
+    },
+    "direct-render": {
+      "marker": "[E2E:direct:render]",
+      "calls": 1
+    },
+    "direct-fail": {
+      "marker": "[E2E:direct:fail]",
+      "calls": 2
+    },
+    "direct-empty": {
+      "marker": "[E2E:direct:empty]",
+      "calls": 2
+    },
+    "direct-plain": {
+      "marker": "[E2E:direct:plain]",
+      "calls": 2
+    },
+    "direct-submit": {
+      "marker": "[E2E:direct:submit]",
+      "calls": 1
+    },
+    "direct-mixed": {
+      "marker": "[E2E:direct:mixed]",
+      "calls": 2
     }
   },
   "sandbox": [

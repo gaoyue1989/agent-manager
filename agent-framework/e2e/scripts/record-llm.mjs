@@ -40,12 +40,12 @@ function applyRewrites(s) {
 function flush() {
   if (!scenario) return;
   if (!calls.length) { console.log(`[record-llm] scenario=${scenario} 无调用，跳过`); return; }
-  // 过滤 1：jar 后台记忆提取调用（MemoryFlushMiddleware，非对话链路）
-  const isMemoryExtract = c => (c.request.messages ?? []).some(m =>
-    m.role === 'system' && String(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).includes('memory extraction assistant'));
+  // 过滤 1：jar 后台调用（MemoryFlushMiddleware 记忆提取 / SessionTitleService 会话标题生成，非对话链路）
+  const isBackground = c => (c.request.messages ?? []).some(m =>
+    m.role === 'system' && /memory extraction assistant|会话标题生成助手/.test(String(typeof m.content === 'string' ? m.content : JSON.stringify(m.content))));
   // 过滤 2：前导裁剪——首个含真实 tool_call 的调用之前的多余调用（模型偶发 NO_REPLY 前置）
   const hasRealToolCall = c => (c.chunks ?? []).some(ch => ch.includes('"tool_calls": [') || ch.includes('"tool_calls":{'));
-  let good = calls.filter(c => !isMemoryExtract(c));
+  let good = calls.filter(c => !isBackground(c));
   const firstTool = good.findIndex(hasRealToolCall);
   if (firstTool > 0) good = good.slice(firstTool);
   const fixture = {
