@@ -55,6 +55,7 @@ public class SkillBundleController {
         var body = new LinkedHashMap<String, Object>();
         body.put("version", current.version());
         body.put("skillCount", current.skillCount());
+        body.put("fileCount", current.fileCount());
         body.put("sizeBytes", current.sizeBytes());
         body.put("serverProtocol", SERVER_PROTOCOL);
         return ResponseEntity.ok(body);

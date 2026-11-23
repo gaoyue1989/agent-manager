@@ -78,13 +78,14 @@ class SkillBundleControllerTest {
     @Test
     void versionShouldReturnFingerprintWithProtocol() throws Exception {
         when(bundleService.currentVersion())
-            .thenReturn(new SkillBundleService.SkillVersion("abc123", 3, 27L));
+            .thenReturn(new SkillBundleService.SkillVersion("abc123", 2, 3, 27L, List.of()));
 
         mvc.perform(get("/internal/skills/version")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.version").value("abc123"))
-            .andExpect(jsonPath("$.skillCount").value(3))
+            .andExpect(jsonPath("$.skillCount").value(2))
+            .andExpect(jsonPath("$.fileCount").value(3))
             .andExpect(jsonPath("$.sizeBytes").value(27))
             .andExpect(jsonPath("$.serverProtocol").value("v1"));
     }
@@ -94,7 +95,7 @@ class SkillBundleControllerTest {
         // 指纹计算失败（computeVersion 全 catch → ERR-*）= 端点当前不可用：返回 503 让守护
         // 退避重试，不输出 ERR-* 版本（守护会把它当合法版本装进 store 污染版本空间）
         when(bundleService.currentVersion())
-            .thenReturn(new SkillBundleService.SkillVersion("ERR-123456", 0, 0L));
+            .thenReturn(new SkillBundleService.SkillVersion("ERR-123456", 0, 0, 0L, List.of()));
 
         mvc.perform(get("/internal/skills/version")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))

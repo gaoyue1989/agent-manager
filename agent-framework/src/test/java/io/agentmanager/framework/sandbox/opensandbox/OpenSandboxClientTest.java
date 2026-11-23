@@ -152,6 +152,59 @@ class OpenSandboxClientTest {
     }
 
     @Test
+    void createShouldHonorSkillSyncSwitchesFromOptions() {
+        var osb = mockOsbSandbox("sb-switches");
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var builder = mock(Sandbox.Builder.class);
+            when(builder.connectionConfig(any())).thenReturn(builder);
+            when(builder.image(anyString())).thenReturn(builder);
+            when(builder.timeout(any())).thenReturn(builder);
+            when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.env(anyMap())).thenReturn(builder);
+            when(builder.build()).thenReturn(osb);
+            mocked.when(Sandbox::builder).thenReturn(builder);
+
+            var switchesOff = options()
+                .skillRevisionGateEnabled(false)
+                .syncSnapshotDiffEnabled(false);
+            var client = new OpenSandboxClient(switchesOff, mock(WorkspaceReader.class), null);
+
+            var sandbox = (OpenSandbox) client.create(new WorkspaceSpec(), null, switchesOff);
+            assertFalse(sandbox.skillRevisionGateEnabled());
+            assertFalse(sandbox.syncSnapshotDiffEnabled());
+
+            var defaults = (OpenSandbox) client.create(new WorkspaceSpec(), null, options());
+            assertTrue(defaults.skillRevisionGateEnabled());
+            assertTrue(defaults.syncSnapshotDiffEnabled());
+        }
+    }
+
+    @Test
+    void resumeShouldHonorSkillSyncSwitchesFromOptions() {
+        var osb = mockOsbSandbox("sb-resume-switches");
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var switchesOff = options()
+                .skillRevisionGateEnabled(false)
+                .syncSnapshotDiffEnabled(false);
+            var client = new OpenSandboxClient(switchesOff, null, null);
+            var resumeState = state();
+            resumeState.setSandboxId("sb-resume-switches");
+
+            var sandbox = (OpenSandbox) client.resume(resumeState);
+
+            assertFalse(sandbox.skillRevisionGateEnabled());
+            assertFalse(sandbox.syncSnapshotDiffEnabled());
+        }
+    }
+
+    @Test
     void deleteShouldKillAndClose() {
         var osb = mockOsbSandbox("sb-delete");
         var client = new OpenSandboxClient(options(), null, null);

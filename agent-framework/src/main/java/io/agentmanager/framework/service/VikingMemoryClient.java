@@ -48,6 +48,10 @@ public class VikingMemoryClient {
     private final VikingConfig cfg;
     private final HttpClient http;
     private final Map<String, String> ovSessionIds = new ConcurrentHashMap<>();
+    /** createSession 失败负缓存（platformSessionId → 失败时刻 epoch ms），冷却期内 append 快速丢弃 */
+    private final Map<String, Long> failedSessionAt = new ConcurrentHashMap<>();
+
+    static final long SESSION_RETRY_COOLDOWN_MS = 30_000;
 
     public VikingMemoryClient(VikingConfig cfg) {
         this.cfg = cfg;
@@ -186,6 +190,9 @@ public class VikingMemoryClient {
     /**
      * 追加一条会话消息到 OpenViking session（Pod 本地缓存 sid→ovSid 映射，丢失重建）。
      * 提取由服务端 auto_commit_policy 调度，本方法只负责 append（异步语义由调用方保证）。
+     *
+     * <p>createSession 失败负缓存 {@link #SESSION_RETRY_COOLDOWN_MS}：OpenViking 不可用时
+     * 冷却期内同会话 append 快速丢弃，避免每条消息都撞一次 searchTimeoutMs（issue #418）。
      */
     public void appendSessionMessage(String userId, String platformSessionId, String role, String content) {
         var key = keyFor(userId);
@@ -193,10 +200,21 @@ public class VikingMemoryClient {
             return;
         }
         try {
-            var ovSid = ovSessionIds.computeIfAbsent(platformSessionId,
-                sid -> createSession(key, userId));
+            var ovSid = ovSessionIds.get(platformSessionId);
             if (ovSid == null) {
-                return;
+                var failedAt = failedSessionAt.get(platformSessionId);
+                if (failedAt != null && System.currentTimeMillis() - failedAt < SESSION_RETRY_COOLDOWN_MS) {
+                    return;
+                }
+                ovSid = createSession(key, userId);
+                if (ovSid == null) {
+                    failedSessionAt.put(platformSessionId, System.currentTimeMillis());
+                    log.warn("[viking] create session failed (sid={}), dropping appends for {}ms",
+                        platformSessionId, SESSION_RETRY_COOLDOWN_MS);
+                    return;
+                }
+                failedSessionAt.remove(platformSessionId);
+                ovSessionIds.put(platformSessionId, ovSid);
             }
             var body = MAPPER.writeValueAsString(Map.of("role", role, "content", content));
             var resp = sendWithReauth("POST", cfg.url() + "/api/v1/sessions/" + ovSid + "/messages",

@@ -37,8 +37,14 @@ public class MarketplaceStager {
 
     private static final Logger log = LoggerFactory.getLogger(MarketplaceStager.class);
 
-    /** 遮蔽自检标记：SDK 原类无此字段——运行期读取失败即遮蔽失效（jar 原版被加载），启动 fail-fast */
-    public static final String SHADOW_MARKER = "agent-framework";
+    /**
+     * 遮蔽自检标记：SDK 原类无此字段——运行期读取失败即遮蔽失效（jar 原版被加载），启动 fail-fast。
+     *
+     * <p><b>禁止改为编译期常量字面量</b>（issue #426）：{@code static final String = "字面量"}
+     * 会被 javac 内联进消费方常量池（ldc），运行期不访问本字段——原版 SDK 类被加载时引用
+     * 照常求值，自检恒真。{@code String.valueOf(...)} 非常量表达式，强制运行期 getstatic。
+     */
+    public static final String SHADOW_MARKER = String.valueOf("agent-framework");
 
     public static final String CACHE_DIR = ".skills-cache";
     public static final String GLOBAL_NAMESPACE = "_global";

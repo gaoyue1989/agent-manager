@@ -278,6 +278,29 @@ class UploadWorkspaceInjectorTest {
     }
 
     @Test
+    void injectToWorkspaceShouldRematerializeInjectedRowWithNullWorkspacePath(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        // issue #431：存量 injected 行 workspace_path 可为 NULL（#346 之前的行，写盘分支
+        // :83 的 null 兜底同证）——磁盘存在性检查直接 resolve(null) 会 NPE。null = 未落盘，
+        // 必须按重物化分支走
+        var base = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var props = new AgentManagerProperties(base.llm(), base.server(), base.checkpoint(),
+            "/config", tmp.toString(), base.cleanup(), base.file(), base.sse(), base.harness());
+        var localInjector = new UploadWorkspaceInjector(fileStorage, fileAssetStore, props);
+        when(fileAssetStore.get("f1")).thenReturn(Optional.of(
+            uploadRow("f1", "alice", "s1", null, "injected")));
+        when(fileStorage.read("upload/k/f1")).thenReturn(
+            new java.io.ByteArrayInputStream("content".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        when(fileAssetStore.listWorkspacePaths("s1")).thenReturn(List.of());
+
+        var wsPath = localInjector.injectToWorkspace("f1", "s1");
+
+        assertEquals("uploads/note.txt", wsPath, "null workspace_path 按未落盘重物化");
+        verify(fileAssetStore).updateWorkspacePath("f1", "uploads/note.txt");
+        verify(fileAssetStore).markInjected(java.util.List.of("f1"));
+    }
+
+    @Test
     void injectToWorkspaceShouldRenameWhenTargetExistsOnDisk(
             @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
         // 工作区基目录用 @TempDir（testProps 默认 /config，跨运行残留会让撞名断言漂移）

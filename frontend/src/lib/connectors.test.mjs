@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseDirectReturn, parseSnapshotTools, parseToolPerms } from "./connectors.ts";
+import { isPermsDirty, parseDirectReturn, parseSnapshotTools, parseToolPerms } from "./connectors.ts";
 
 const cn = (directReturn) => ({ directReturn });
 
@@ -47,4 +47,25 @@ test("the three parsers share one tolerant JSON entry point", () => {
   }
   assert.deepEqual(parseToolPerms({}), {});
   assert.deepEqual(parseSnapshotTools({}), []);
+});
+
+test("unedited connector with undeclared snapshot tools is not dirty", () => {
+  assert.equal(isPermsDirty({ a: "allow", b: "allow" }, {}, ["a", "b"], [], []), false);
+});
+
+test("undeclared tools normalize to allow, partial declarations stay clean", () => {
+  assert.equal(isPermsDirty({ a: "ask", b: "allow", c: "allow" }, { a: "ask" }, ["a", "b", "c"], [], []), false);
+});
+
+test("a changed tool is dirty until reverted to its declared default", () => {
+  assert.equal(isPermsDirty({ a: "deny", b: "allow" }, {}, ["a", "b"], [], []), true);
+  assert.equal(isPermsDirty({ a: "deny", b: "allow" }, { a: "ask" }, ["a", "b"], [], []), true);
+  assert.equal(isPermsDirty({ a: "allow", b: "allow" }, { a: "deny" }, ["a", "b"], [], []), true);
+  assert.equal(isPermsDirty({ a: "allow", b: "allow" }, {}, ["a", "b"], [], []), false);
+});
+
+test("direct return set differences are dirty only when sets differ", () => {
+  assert.equal(isPermsDirty({}, {}, [], ["a"], []), true);
+  assert.equal(isPermsDirty({}, {}, [], [], ["a"]), true);
+  assert.equal(isPermsDirty({}, {}, [], ["a", "b"], ["b", "a"]), false);
 });

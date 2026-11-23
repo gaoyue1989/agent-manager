@@ -128,6 +128,7 @@ platform-router(introspect)→ X-User-Id → agent-framework Pod
 | 事件 | OpenViking 动作 | 说明 |
 |---|---|---|
 | Publish 成功(服务就绪) | `POST /admin/accounts` `{account_id, admin_user_id: "svc-system"}`(root key) | 响应中的 `user_key`(ADMIN key)与平台生成的 `OV_USER_SEED`(随机)经敏感键自动路由服务 Secret;非敏感 env 注入 `OPENVIKING_URL` / `OPENVIKING_ACCOUNT`。admin_user(`svc-system`)即服务身份,承载共享 resources/skills 与 MCP 连接 |
+| Publish 中途失败(实现现状 2026-11-24 回填,issue #430) | 失败即回滚 | DB `k8s_name` 唯一键占位**先行**(并发同名发布败者在占位事务唯一键冲突处失败,零建户零轮换——胜者在线 ADMIN key 不被轮换失效);占位后供给(knowledge/skills 导入)/env 回写任一失败,本次**新建** account 回滚删除 + 占位行/ref_count 清理(DB 零残留、无外部孤儿);EnsureAccount 走 CONFLICT 轮换分支(account 已存在、持有者在用)时失败**绝不删除**。provider 切 `local` 时 plain/secret 派生键双侧清空,memory-key 签发按 provider 事实校验拒绝 |
 | Republish / update_env | 无动作 | account 幂等已存在(409 视为成功),Secret 不变 |
 | Unpublish(下线) | 无动作 | 数据保留,与「下线不删数据」语义一致 |
 | Delete(删除) | `DELETE /admin/accounts/{id}`(root key) | 与服务数据同生命周期;删除前可选导出(二期) |
@@ -232,7 +233,11 @@ MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permi
 
 **兼容矩阵**:`AGENT_MEMORY_ENABLED=false` 时两个 provider 全关(无记忆),优先级最高;`local` 路径代码零改动。
 
+> `OVK_SESSION_COMMIT` 实现现状(2026-11-23 回填,issue #418):append 链路异步化——`VikingSessionCommitStateStore` 先同步完成 `delegate.save`(agent_state 落库零延迟),新增消息整批投递单线程 worker 有界队列(500)异步 append,队列满整批丢弃并告警;`createSession` 失败负缓存 30s(冷却期快速丢弃,杜绝 OV 不可用时的 N×timeout 重试风暴);OV session 映射键 = slot 复合会话键 `userId:sessionId`(A2A 同用户多会话不再按 userId 串写);装配门控 = VikingMemoryClient 在位 + OVK_SESSION_COMMIT + AGENT_MEMORY_ENABLED 三条件齐备(`AgentScopeConfig.vikingSessionCommitEnabled`,记忆总开关关闭不再被绕过)。
+
 > `OVK_MCP_SHARED_CONTEXT` 实现现状(2026-11-23 回填,issue #415):合成 server `openviking` 经 `HarnessAgentFactory.registerVikingSharedContextMcp` 程序化注入,权限声明位置 = 包内 `mcp-configs/openviking/config.yaml` 的 `permissions.tools`(permissions-only),句柄可换芯、看门狗探测/补偿自愈、A 路径 reload 豁免、frontmatter 同名声明守卫——细节见 §7 实现现状回填。
+
+> 首推理注入缓存 + 本地记忆关闸实现现状(2026-11-23 回填,issue #419):首推理注入缓存键 = slot 复合会话键 `userId:sessionId`(§4.6 缓解①「session 内缓存」语义落地,实现期曾误为 per-user 键——同用户 5 分钟内新会话直接复用上一会话检索结果,与当前问题无关的旧记忆被注入、刚写入的记忆不可见);`AGENT_MEMORY_PROVIDER=openviking`(VikingMemoryClient 在位)时 `AgentScopeConfig.workspaceReader` 装配 `memoryEnabled = AGENT_MEMORY_ENABLED && VikingMemoryClient 不在位`——沙箱对 `MEMORY.md`/`memory/` 不注入(`readRuntimeFiles` 空集)、不回写(`WorkspaceSyncService.syncBack` 同一开关),与 SDK hooks/tools 双关共同消除双记忆源。
 
 ### 11.2 实施拆分(单分支多 commit,一个 PR)
 

@@ -165,24 +165,27 @@ func vikingResultKey(out *vikingAPIResponse) (string, error) {
 }
 
 // EnsureAccount 幂等创建 account 并返回 svc-system 的明文 ADMIN key：建户响应自带
-// 首个 admin 的 user_key；account 已存在（并发发布/重试）时经 root key 轮换该 admin
-// 的 key（同端点幂等，旧 key 即时失效——仅出现在建户竞态，常态发布一次即成）。
-func (v *VikingAdmin) EnsureAccount(accountID string) (string, error) {
+// 首个 admin 的 user_key；account 已存在（Secret 丢失后的重供给）时经 root key 轮换
+// 该 admin 的 key（同端点幂等，旧 key 即时失效）。created 区分两种结果：新建（调用方
+// 失败路径须回滚删除）与轮换已有 account（持有者在用，绝不删除——issue #430）。
+func (v *VikingAdmin) EnsureAccount(accountID string) (adminKey string, created bool, err error) {
 	out, err := v.call(http.MethodPost, "/api/v1/admin/accounts",
 		map[string]string{"account_id": accountID, "admin_user_id": vikingAdminUser})
 	if err == nil {
-		return vikingResultKey(out)
+		key, err := vikingResultKey(out)
+		return key, true, err
 	}
 	if vikingConflict(err) {
 		regen, err := v.call(http.MethodPost,
 			fmt.Sprintf("/api/v1/admin/accounts/%s/users/%s/key", accountID, vikingAdminUser),
 			map[string]string{})
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
-		return vikingResultKey(regen)
+		key, err := vikingResultKey(regen)
+		return key, false, err
 	}
-	return "", err
+	return "", false, err
 }
 
 // DeleteAccount 删除 account（服务删除链路调用；调用方 best-effort，不阻断服务删除）。
@@ -253,9 +256,12 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 	}
 	switch provider {
 	case MemoryProviderLocal:
-		// 显式退出：清掉可能残留的派生键（切换语义干净，provider=local 不消费这些值）
+		// 显式退出：清掉全部派生键（plain 与 secret 双侧；secret 残留曾让签发入口凭
+		// 旧凭据继续签发无对应供给的 userKey——issue #430）
 		delete(plain, OpenVikingURLEnv)
 		delete(plain, OpenVikingAccountEnv)
+		delete(secret, OvkAdminKeyEnv)
+		delete(secret, OvkUserSeedEnv)
 		return nil
 	case MemoryProviderOpenViking:
 	default:
@@ -264,11 +270,13 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 	}
 
 	account := VikingAccountID(k8sName)
+	created := false
 	if secret[OvkAdminKeyEnv] == "" || secret[OvkUserSeedEnv] == "" {
-		adminKey, err := c.Viking.EnsureAccount(account)
+		adminKey, isNew, err := c.Viking.EnsureAccount(account)
 		if err != nil {
 			return fmt.Errorf("openviking provision account %s: %w", account, err)
 		}
+		created = isNew
 		seed := secret[OvkUserSeedEnv]
 		if seed == "" {
 			seed = VikingUserSeed()
@@ -281,15 +289,28 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 	plain[OpenVikingAccountEnv] = account
 	if plain[OvkKnowledgeImportEnv] == "true" && pkg != nil {
 		if err := c.importPackageDirWith(secret, pkg, "knowledge", "resources/"+pkg.Slug); err != nil {
+			c.rollbackProvision(account, created)
 			return fmt.Errorf("openviking knowledge import: %w", err)
 		}
 	}
 	if plain[OvkSharedSkillsEnv] == "true" && pkg != nil {
 		if err := c.importPackageDirWith(secret, pkg, "skills", "agent/skills/"+pkg.Slug); err != nil {
+			c.rollbackProvision(account, created)
 			return fmt.Errorf("openviking skills import: %w", err)
 		}
 	}
 	return nil
+}
+
+// rollbackProvision 供给失败回滚（issue #430）：仅删除本次新建的 account（best-effort，
+// 失败仅告警）；CONFLICT 轮换分支（account 已存在、持有者在用）绝不删除。
+func (c *Core) rollbackProvision(account string, created bool) {
+	if !created {
+		return
+	}
+	if err := c.Viking.DeleteAccount(account); err != nil {
+		log.Printf("[openviking] rollback account %s after failed provision: %v", account, err)
+	}
 }
 
 // vikingUserIDRe OpenViking user_id 合法字符集（官方口径：字母/数字/_/./@/-，非空且
@@ -336,6 +357,11 @@ func (c *Core) issueMemoryKeyFor(serviceID uint, userID string) (string, string,
 		return "", "", fmt.Errorf("corrupt env secret json: %w", err)
 	}
 	_ = json.Unmarshal([]byte(svc.EnvJSON), &plain)
+	// provider 事实校验（issue #430）：凭据残留不等同供给有效，切 local 的服务拒绝签发
+	if plain[AgentMemoryProviderEnv] != MemoryProviderOpenViking {
+		return "", "", fmt.Errorf("%w: service %d is not on OpenViking memory supply",
+			ErrInvalidForm, serviceID)
+	}
 	seed := secret[OvkUserSeedEnv]
 	if seed == "" || secret[OvkAdminKeyEnv] == "" {
 		return "", "", fmt.Errorf("%w: service %d has no OpenViking provisioning (publish with %s=%s first)",
@@ -433,8 +459,9 @@ func (c *Core) AdminMemorySupply(keyword string) ([]MemorySupplyItem, error) {
 // 身份：userId = u-{uid}（与数据面 X-User-Id 同源），key 本地推导；uri 双向归一到
 // viking://~/ 本人空间单一口径（issue #374）：入参接受 ~/ 契约口径与自有 user/{uid}
 // 展开形态（外部服务原生形态），出参 list 条目统一改写为 ~/ 形态（read 纯文本透传）。
-// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；他人 user/{uid} 形态一律
-// ErrInvalidForm 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
+// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；穿越段（../、%2e%2e）在闸门
+// 之前拒绝、绝不代理上游（issue #420）；他人 user/{uid} 形态一律 ErrInvalidForm
+// 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
 // （fail-soft 由前端呈现空态）。
 func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri string) (json.RawMessage, error) {
 	if _, err := c.ConsoleAgentDetail(workspaceID, serviceID); err != nil {
@@ -447,6 +474,9 @@ func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri
 	ownUserPrefix := "viking://user/" + ownID + "/"
 	uri, err := vikingNormalizeBrowseInput(uri, ownUserPrefix)
 	if err != nil {
+		return nil, err
+	}
+	if err := vikingRejectTraversalSegments(uri); err != nil {
 		return nil, err
 	}
 	const prefix = "viking://~/"
@@ -497,6 +527,20 @@ func vikingNormalizeBrowseInput(uri, ownUserPrefix string) (string, error) {
 	}
 	return "", fmt.Errorf("%w: uri %q is not own space, expected prefix %s",
 		ErrInvalidForm, uri, strings.TrimSuffix(ownUserPrefix, "/"))
+}
+
+// vikingRejectTraversalSegments 拒绝路径穿越段（issue #420）：任一路径段为 `..` 或
+// 其百分号编码形态（%2e%2e，大小写不敏感）即 ErrInvalidForm。~/ 前缀闸门只验首段
+// 形态，`viking://~/../u-9999/…`（含自有 user/{uid}/../ 改写产物）会带着穿越段通过
+// 并被代理上游——仅本人空间闸门可被越权；段级精确匹配不误伤文件名中的点（a..b）。
+func vikingRejectTraversalSegments(uri string) error {
+	rest, _ := strings.CutPrefix(uri, "viking://~/")
+	for _, seg := range strings.Split(rest, "/") {
+		if seg == ".." || strings.EqualFold(seg, "%2e%2e") {
+			return fmt.Errorf("%w: uri %q contains path traversal segment %q", ErrInvalidForm, uri, seg)
+		}
+	}
+	return nil
 }
 
 // vikingNormalizeListOutput 出参条目 URI 归一（仅 action=list，issue #374）：OpenViking

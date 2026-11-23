@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type MemorySupplyItem, type VikingFsEntry } from "@/lib/api";
 import { useConsoleWs } from "@/lib/useMe";
+import { VIKING_MEMORY_ROOT, vikingEntryName, vikingParentUri } from "@/lib/viking-uri";
 import { Badge, Btn, Card, CopyBtn, Note, PageHead } from "@/components/ui";
 
 export default function MemoryPage() {
@@ -128,7 +129,7 @@ function MemoryBrowserCard({ ws, item }: { ws: number; item: MemorySupplyItem })
   const [entries, setEntries] = useState<VikingFsEntry[]>([]);
   const [content, setContent] = useState("");
   const [reading, setReading] = useState("");
-  const [path, setPath] = useState("viking://~/memories");
+  const [path, setPath] = useState(VIKING_MEMORY_ROOT);
   const [msg, setMsg] = useState<{ text: string; detail: string } | null>(null);
   const reqRef = useRef(0);
 
@@ -147,7 +148,7 @@ function MemoryBrowserCard({ ws, item }: { ws: number; item: MemorySupplyItem })
     }
   }, [ws, item.serviceId]);
 
-  useEffect(() => { list("viking://~/memories"); }, [list]);
+  useEffect(() => { list(VIKING_MEMORY_ROOT); }, [list]);
 
   const read = async (uri: string) => {
     const token = ++reqRef.current;
@@ -165,14 +166,14 @@ function MemoryBrowserCard({ ws, item }: { ws: number; item: MemorySupplyItem })
     }
   };
 
-  const crumb = path.replace("viking://~/memories", "").replace(/^\//, "");
+  const crumb = path.replace(VIKING_MEMORY_ROOT, "").replace(/^\//, "");
   return (
     <Card title={`我的记忆空间 · ${item.displayName}`}>
       <Note tone="info">只读浏览 viking://~/memories（编辑与删除请在 OpenViking Studio 完成）。{msg && <span className="text-amber-700" title={msg.detail}> {msg.text}</span>}</Note>
       <div className="mb-2 flex items-center gap-2 text-xs">
-        <Btn sm onClick={() => list("viking://~/memories")}>根目录</Btn>
-        {path !== "viking://~/memories" && (
-          <Btn sm onClick={() => list(path.split("/").slice(0, -1).join("/") || "viking://~/memories")}>上一级</Btn>
+        <Btn sm onClick={() => list(VIKING_MEMORY_ROOT)}>根目录</Btn>
+        {path !== VIKING_MEMORY_ROOT && (
+          <Btn sm onClick={() => list(vikingParentUri(path))}>上一级</Btn>
         )}
         <span className="font-mono text-gray-400">{crumb || "memories/"}</span>
       </div>
@@ -180,8 +181,8 @@ function MemoryBrowserCard({ ws, item }: { ws: number; item: MemorySupplyItem })
         {entries.map((e) => (
           <li key={e.uri} className="flex items-center justify-between border-b last:border-0 px-2.5 py-1.5 hover:bg-gray-50">
             <button className="text-left font-mono text-xs text-blue-700 hover:underline"
-              onClick={() => (e.isDir ? list(e.uri + "/") : read(e.uri))}>
-              {e.isDir ? "📁" : "📄"} {e.uri.split("/").pop()}
+              onClick={() => (e.isDir ? list(e.uri) : read(e.uri))}>
+              {e.isDir ? "📁" : "📄"} {vikingEntryName(e.uri)}
             </button>
             <span className="text-[11px] text-gray-400">{e.isDir ? "目录" : `${e.size} B`}</span>
           </li>
@@ -191,7 +192,7 @@ function MemoryBrowserCard({ ws, item }: { ws: number; item: MemorySupplyItem })
       {content && (
         <pre className="max-h-64 overflow-auto rounded-lg bg-[#0d1526] p-3 font-mono text-[11.5px] leading-6 text-[#c9d6f2]" data-testid="memory-browser-content">{content}</pre>
       )}
-      {reading && <p className="text-xs text-gray-400">读取中：{reading.split("/").pop()}</p>}
+      {reading && <p className="text-xs text-gray-400">读取中：{vikingEntryName(reading)}</p>}
     </Card>
   );
 }

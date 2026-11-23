@@ -47,7 +47,7 @@
 - 写入路径 = 行内 `workspace_path` 原样落盘（#343 语义不变）→ 容器销毁重建后重放路径不变（幂等，`_N` 漂移消失）
 - `resetInjectedToPending(sessionId)` session 单条件：createNew 被动兜底 / delete 主动回滚 / middleware 换代 reset 三处对齐；sid 缺失跳过（createNew 兜底覆盖）
 
-**非沙箱**：`injectToWorkspace` 取预留路径；status=injected 幂等跳过；pending 行目标已在磁盘存在（agent 手写同名防覆盖）→ 按 DB 行集 ∪ 目录现状重分配；写盘后 `markInjected`。本地 ls 判重（uniqueWorkspacePath）退役，统一 DB 集合
+**非沙箱**：`injectToWorkspace` 取预留路径；status=injected 幂等跳过（前提 = workspace_path 非空且磁盘文件健在，#354——Pod 重建清空工作区后落回重物化自愈；workspace_path 为 NULL 的存量行视为未落盘直接走重物化分支，#431）；pending 行目标已在磁盘存在（agent 手写同名防覆盖）→ 按 DB 行集 ∪ 目录现状重分配；写盘后 `markInjected`。本地 ls 判重（uniqueWorkspacePath）退役，统一 DB 集合
 
 **存量与清理**
 - session_id NULL 的 pending 行 = 上传后从未被引用，自然不注入；**pending 超期清理**：`cleanupExpiredUploads` 不再豁免 pending（7 天同口径，防上传未发送文件永久占额）

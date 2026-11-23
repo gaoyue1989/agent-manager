@@ -33,6 +33,35 @@ public class AgentScopeConfig {
     private static final Logger log = LoggerFactory.getLogger(AgentScopeConfig.class);
 
     /**
+     * SDK 遮蔽生效自检（sdk-stager-shadow-design C-3，issue #426）：断言运行期加载的
+     * MarketplaceStager 是本仓库遮蔽类而非 SDK jar 原版。两条判据均运行期求值，与编译期解耦：
+     * <ol>
+     *   <li>反射读 {@code SHADOW_MARKER}：仅遮蔽类声明此字段，原版类被加载即失败；字面量比对
+     *       不可用——javac 把常量引用内联为 ldc，运行期不访问字段（实测原实现的失效形态）</li>
+     *   <li>CodeSource 不得来自 agentscope-harness jar：遮蔽类由 BOOT-INF/classes（fat jar）/
+     *       target/classes（本地与单测）加载，classpath 顺序回归时 SDK jar 胜出</li>
+     * </ol>
+     * package-private 供单测以无该字段的异类验证负分支。
+     */
+    static void verifyShadowActive(Class<?> shadowClass) {
+        String marker;
+        try {
+            marker = (String) shadowClass.getField("SHADOW_MARKER").get(null);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("SDK MarketplaceStager shadow INACTIVE: loaded class ("
+                + shadowClass.getName() + ") has no SHADOW_MARKER field — original SDK jar wins "
+                + "the classpath, shadow regressed", e);
+        }
+        var cs = shadowClass.getProtectionDomain().getCodeSource();
+        var location = cs != null ? cs.getLocation().toString() : "";
+        if (location.contains("agentscope-harness")) {
+            throw new IllegalStateException("SDK MarketplaceStager shadow INACTIVE: class loaded from "
+                + "SDK jar (" + location + ") — classpath order regressed");
+        }
+        log.info("SDK MarketplaceStager shadow active (marker={}, codeSource={})", marker, location);
+    }
+
+    /**
      * 沙箱文件系统（SandboxRuntime.enabled() 时装配，issue #27）。
      * enabled 生效值经 SandboxRuntime 三层裁决（SANDBOX_ENABLED env 显式 > OAF 包声明
      * config.sandbox.enabled > yml 默认）。装配两个 harness 官方能力：
@@ -99,11 +128,12 @@ public class AgentScopeConfig {
             .isolationScope(IsolationScope.USER)
             .skillsSharedStore(config.skillsSharedStore())
             .skillBundleService(skillBundleService)
-            .farmMeterRegistry(farmMeterRegistryProvider.getIfAvailable());
-        // 遮蔽生效自检（sdk-stager-shadow-design C-3）：SHADOW_MARKER 仅存在于遮蔽类——
-        // 若 jar 原版被加载（遮蔽失效=宿主写盘静默回归），本字段链接失败即启动 fail-fast
-        log.info("SDK MarketplaceStager shadow active (marker={})",
-            io.agentscope.harness.agent.skill.runtime.MarketplaceStager.SHADOW_MARKER);
+            .farmMeterRegistry(farmMeterRegistryProvider.getIfAvailable())
+            .skillRevisionGateEnabled(sandboxRuntime.skillRevisionGateEnabled())
+            .syncSnapshotDiffEnabled(sandboxRuntime.syncSnapshotDiffEnabled());
+        // 遮蔽生效自检（sdk-stager-shadow-design C-3，issue #426）：运行期加载的必须是遮蔽类
+        // 而非 SDK jar 原版——遮蔽失效 = 宿主写盘静默回归，启动即硬失败
+        verifyShadowActive(io.agentscope.harness.agent.skill.runtime.MarketplaceStager.class);
         spec.setSessionKeyResolver(sessionKeyResolver);
         // 技能禁用投放过滤（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放前按
         // L2 禁用集 + L4 用户标记过滤候选目录并清理容器残留——堵「load_skill_through_path
@@ -298,12 +328,17 @@ public class AgentScopeConfig {
      */
     @Bean
     public io.agentmanager.framework.service.WorkspaceReader workspaceReader(
-            DistributedStore distributedStore, OafConfig oafConfig, AgentManagerProperties props) {
+            DistributedStore distributedStore, OafConfig oafConfig, AgentManagerProperties props,
+            org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient> vikingClientProvider) {
         var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
         // 记忆总开关传入 WorkspaceReader：false 时运行时文件读取返回空集，
-        // 沙箱注入链路（OpenSandbox.injectRuntimeFilesIfNeeded）拿空文件集后天然 no-op
+        // 沙箱注入链路（OpenSandbox.injectRuntimeFilesIfNeeded）拿空文件集后天然 no-op。
+        // provider=openviking（VikingMemoryClient bean 在位）时同样关闭：记忆供给已由
+        // OpenViking 全链路接管，本地 MEMORY.md/memory/ 注入与回写必须关闸，
+        // 否则双记忆源并存（issue #419 B-07b；回写侧经 WorkspaceSyncService 同一开关）
+        var localMemoryEnabled = harness.memoryEnabled() && vikingClientProvider.getIfAvailable() == null;
         return new io.agentmanager.framework.service.WorkspaceReader(distributedStore, oafConfig.name(),
-            harness.memoryEnabled());
+            localMemoryEnabled);
     }
 
     @Bean
@@ -422,6 +457,18 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.service.VikingMemoryClient(cfg);
     }
 
+    /**
+     * VikingSessionCommitStateStore 装配门控（issue #418 B-05c）：OpenViking 客户端在位 +
+     * OVK_SESSION_COMMIT 开启 + AGENT_MEMORY_ENABLED 开启三者齐备才装配会话归档层——
+     * 记忆总开关关闭时不得绕过（与 HarnessAgentFactory 的 memoryEnabled 判定同源语义）。
+     */
+    static boolean vikingSessionCommitEnabled(io.agentmanager.framework.service.VikingMemoryClient vikingClient,
+            io.agentmanager.framework.config.VikingConfig vikingCfg,
+            AgentManagerProperties.HarnessConfig harness) {
+        return vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit()
+            && harness != null && harness.memoryEnabled();
+    }
+
     @Bean
     @org.springframework.context.annotation.DependsOn("flywayInitializer")
     public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props,
@@ -430,6 +477,7 @@ public class AgentScopeConfig {
             org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient> vikingClientProvider,
             org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.config.VikingConfig> vikingCfgProvider) {
         var dbName = props.checkpoint().resolvedDbName();
+        var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
         // AgentStateStore 装饰链（自内向外，顺序不可换）：
         //   ① MysqlAgentStateStore —— 真实 MySQL 存储（官方校验仅拒空/超长，
         //      沙箱 slot ID sandbox/user/{agentId}/{userId} 含 / 天然放行）
@@ -444,7 +492,7 @@ public class AgentScopeConfig {
                 dataSource, dbName, "agent_state", true);
         var vikingCfg = vikingCfgProvider.getIfAvailable();
         var vikingClient = vikingClientProvider.getIfAvailable();
-        if (vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit()) {
+        if (vikingSessionCommitEnabled(vikingClient, vikingCfg, harness)) {
             agentStateStore = new io.agentmanager.framework.service.VikingSessionCommitStateStore(
                 agentStateStore, vikingClient,
                 new io.agentmanager.framework.service.SessionUserStore(dataSource));
@@ -463,7 +511,7 @@ public class AgentScopeConfig {
             .build();
         log.info("DistributedStore initialized ({} . agent_state + agent_fs, historyArchive={}, vikingSessionCommit={})",
             dbName, historyConfig == null || historyConfig.archiveEnabled(),
-            vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit());
+            vikingSessionCommitEnabled(vikingClient, vikingCfg, harness));
         return store;
     }
 

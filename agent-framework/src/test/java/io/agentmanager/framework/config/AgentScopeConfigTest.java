@@ -478,6 +478,128 @@ class AgentScopeConfigTest {
         assertTrue(names.contains("memory_save"), "memory 默认开启时应注册 memory_save");
     }
 
+    /**
+     * VikingSessionCommit 装配门控（issue #418 B-05c）：client/sessionCommit/memoryEnabled
+     * 三条件齐备才装配，AGENT_MEMORY_ENABLED=false 不得再绕过记忆总开关。
+     */
+    @Test
+    void vikingSessionCommitGateRequiresMemoryEnabled() {
+        var cfgOn = new io.agentmanager.framework.config.VikingConfig(
+            "openviking", "http://localhost:1933", "acct", "admin-key", "seed",
+            true, false, 2000, 300);
+        var cfgCommitOff = new io.agentmanager.framework.config.VikingConfig(
+            "openviking", "http://localhost:1933", "acct", "admin-key", "seed",
+            false, false, 2000, 300);
+        var client = mock(io.agentmanager.framework.service.VikingMemoryClient.class);
+        var harnessOn = AgentManagerProperties.HarnessConfig.defaults();
+        var harnessOff = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, false, 10, 8000, 60,
+            30, 80000, 20000, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+
+        assertFalse(AgentScopeConfig.vikingSessionCommitEnabled(null, cfgOn, harnessOn),
+            "无 VikingMemoryClient 不得装配");
+        assertFalse(AgentScopeConfig.vikingSessionCommitEnabled(client, cfgCommitOff, harnessOn),
+            "sessionCommit=false 不得装配");
+        assertFalse(AgentScopeConfig.vikingSessionCommitEnabled(client, cfgOn, harnessOff),
+            "AGENT_MEMORY_ENABLED=false 必须门控（issue #418）");
+        assertTrue(AgentScopeConfig.vikingSessionCommitEnabled(client, cfgOn, harnessOn),
+            "三条件齐备才装配");
+    }
+
+    /**
+     * WorkspaceReader 本地记忆门控（issue #419 B-07b）：provider=openviking（VikingMemoryClient
+     * bean 在位）时必须关闭本地文件记忆注入/回写，消除双记忆源；provider=local 保持现状；
+     * AGENT_MEMORY_ENABLED=false 时无论 provider 均关闭（既有语义不变）。
+     */
+    @Test
+    void workspaceReaderShouldDisableLocalMemoryUnderVikingProvider() {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        var store = mock(DistributedStore.class);
+        when(store.baseStore()).thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+
+        var harnessOff = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, false, 10, 8000, 60,
+            30, 80000, 20000, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+        var propsOff = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
+            emptyServer(), emptyCheckpoint(), "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300), harnessOff);
+
+        var withClient = providerOf(mock(io.agentmanager.framework.service.VikingMemoryClient.class));
+        var noClient = providerOf(null);
+
+        assertFalse(config.workspaceReader(store, oaf, propsForLlm(), withClient).isMemoryEnabled(),
+            "provider=openviking 时本地文件记忆必须关闭（issue #419 双记忆源）");
+        assertTrue(config.workspaceReader(store, oaf, propsForLlm(), noClient).isMemoryEnabled(),
+            "provider=local 时本地文件记忆保持现状");
+        assertFalse(config.workspaceReader(store, oaf, propsOff, withClient).isMemoryEnabled(),
+            "AGENT_MEMORY_ENABLED=false 时无论 provider 均关闭");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient> providerOf(
+            io.agentmanager.framework.service.VikingMemoryClient client) {
+        var provider = (org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient>)
+            mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(client);
+        return provider;
+    }
+
+    // ===== SDK 遮蔽自检（sdk-stager-shadow-design C-3，issue #426）=====
+
+    @Test
+    void shadowSelfCheckMustPassForRuntimeLoadedShadowClass() {
+        // mvn test 下遮蔽类由 target/classes 加载（classpath 先于依赖 jar），自检必须通过
+        assertDoesNotThrow(() -> AgentScopeConfig.verifyShadowActive(
+            io.agentscope.harness.agent.skill.runtime.MarketplaceStager.class));
+    }
+
+    @Test
+    void shadowSelfCheckMustRejectClassWithoutMarkerField() {
+        // 负分支：原版 SDK 类没有 SHADOW_MARKER 字段——自检必须抛出而非静默放行
+        // （原实现引用编译期常量被 javac 内联，任何加载形态下都恒真放行）
+        var e = assertThrows(IllegalStateException.class,
+            () -> AgentScopeConfig.verifyShadowActive(String.class));
+        assertTrue(e.getMessage().contains("shadow INACTIVE"), e.getMessage());
+    }
+
+    @Test
+    void shadowSelfCheckMustFailFastOnOriginalSdkClassFromJar() throws Exception {
+        // 真实复现（issue #426）：classpath 顺序回归时运行期加载到 SDK jar 原版类——
+        // 旧实现（消费方 ldc 内联常量）对该场景静默放行；对原版类（无 SHADOW_MARKER 字段）
+        // 自检必须硬失败。child-first loader 仅对遮蔽 FQN 强制从 jar 加载，依赖类走标准委派
+        var jarUrl = io.agentscope.harness.agent.skill.WorkspaceSkillRepository.class
+            .getProtectionDomain().getCodeSource().getLocation();
+        var loader = new java.net.URLClassLoader(new java.net.URL[]{jarUrl},
+            AgentScopeConfigTest.class.getClassLoader()) {
+            @Override
+            protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if (!name.equals("io.agentscope.harness.agent.skill.runtime.MarketplaceStager")) {
+                    return super.loadClass(name, resolve);
+                }
+                synchronized (this.getClassLoadingLock(name)) {
+                    var c = findLoadedClass(name);
+                    if (c == null) {
+                        c = findClass(name);
+                    }
+                    if (resolve) {
+                        resolveClass(c);
+                    }
+                    return c;
+                }
+            }
+        };
+        var original = loader.loadClass("io.agentscope.harness.agent.skill.runtime.MarketplaceStager");
+        assertThrows(NoSuchFieldException.class, () -> original.getField("SHADOW_MARKER"),
+            "SDK jar 原版类不得有 SHADOW_MARKER 字段（自检判据前提）");
+        var e = assertThrows(IllegalStateException.class,
+            () -> AgentScopeConfig.verifyShadowActive(original),
+            "自检对 SDK jar 原版类必须 fail-fast（issue #426 复现场景）");
+        assertTrue(e.getMessage().contains("shadow INACTIVE"), e.getMessage());
+    }
+
     private static AgentManagerProperties.ServerConfig emptyServer() {
         return new AgentManagerProperties.ServerConfig("0.0.0.0", 8100);
     }

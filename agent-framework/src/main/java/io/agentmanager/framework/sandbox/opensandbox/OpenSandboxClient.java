@@ -232,7 +232,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         //    （create() 无 RuntimeContext 参数拿不到 userId，见 OpenSandbox 注释）
         //    userId 由 SandboxUserKeyMiddleware 注入（filesystemSpec.pendingUserKey）
         OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService,
-            filesystemSpec, fileAssetStore, fileStorage);
+            filesystemSpec, fileAssetStore, fileStorage,
+            options.isSkillRevisionGateEnabled(), options.isSyncSnapshotDiffEnabled());
         bindUserKey(sandbox);
         sandbox.setSessionId(sid);
         // 被动兜底（§6.2.4 双保险）：新容器启动时，本会话 injected 上传文件回滚 pending
@@ -279,7 +280,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         state.setImage(options.getImage());
         state.setCreatedAt(System.currentTimeMillis());
         OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader,
-            workspaceSyncService, filesystemSpec, fileAssetStore, fileStorage);
+            workspaceSyncService, filesystemSpec, fileAssetStore, fileStorage,
+            options.isSkillRevisionGateEnabled(), options.isSyncSnapshotDiffEnabled());
         bindUserKey(sandbox);
         sandbox.setSessionId(sessionId);
         sandbox.injectPendingUploads();
@@ -428,7 +430,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         }
 
         var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService,
-            filesystemSpec, fileAssetStore, fileStorage);
+            filesystemSpec, fileAssetStore, fileStorage,
+            options.isSkillRevisionGateEnabled(), options.isSyncSnapshotDiffEnabled());
         bindUserKey(sandbox);
         sandbox.setSessionId(sid);
         // 上传文件注入：恢复会话后立即执行（同 create）
