@@ -3,7 +3,7 @@
 // 新建连接器走右侧抽屉（slide-over，与模型连接页同交互——评审反馈统一弹出形态）。
 import { useCallback, useEffect, useState } from "react";
 import { api, type BuiltinPlatformDecl, type McpConnectorView } from "@/lib/api";
-import { parseDirectReturn, parseSnapshotTools, parseToolPerms } from "@/lib/connectors";
+import { isPermsDirty, parseDirectReturn, parseSnapshotTools, parseToolPerms } from "@/lib/connectors";
 import { PERM_STYLE } from "@/lib/status";
 import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
 import { Badge, Btn, Note, PageHead, Tag } from "@/components/ui";
@@ -146,10 +146,7 @@ export default function ToolsPage() {
     ?? Object.fromEntries(rowNames.map((n) => [n, declared[n] ?? "allow"]));
   const effectiveDirect = directDraft ?? declaredDirect;
   const dirty = selCn !== null
-    && (Object.keys(effective).length !== Object.keys(declared).length
-      || rowNames.some((n) => effective[n] !== declared[n])
-      || effectiveDirect.length !== declaredDirect.length
-      || effectiveDirect.some((n) => !declaredDirect.includes(n)));
+    && isPermsDirty(effective, declared, rowNames, effectiveDirect, declaredDirect);
 
   const savePerms = async () => {
     if (!selCn) return;

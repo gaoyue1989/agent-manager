@@ -24,3 +24,15 @@ export function parseDirectReturn(cn: Pick<McpConnectorView, "directReturn">): s
   if (!Array.isArray(tools)) return [];
   return tools.filter((tool): tool is string => typeof tool === "string" && tool.trim() !== "");
 }
+
+export function isPermsDirty(
+  effective: Record<string, string>,
+  declared: Record<string, string>,
+  rowNames: string[],
+  effectiveDirect: string[],
+  declaredDirect: string[],
+): boolean {
+  return rowNames.some((n) => effective[n] !== (declared[n] ?? "allow"))
+    || effectiveDirect.length !== declaredDirect.length
+    || effectiveDirect.some((n) => !declaredDirect.includes(n));
+}
