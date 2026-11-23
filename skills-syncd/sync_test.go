@@ -615,6 +615,53 @@ func TestFetchRetryBackoff(t *testing.T) {
 	})
 }
 
+func TestPollJitterCappedByInterval(t *testing.T) {
+	// issue #400：轮询错峰 jitter 必须受 INTERVAL 约束——硬编码 30s 让小 INTERVAL 配置
+	// （5s/1s）失真，冷启动被 0~30s 睡眠拖慢，违背 §10.3-1 ≤INTERVAL 就绪承诺
+	cases := []struct {
+		interval time.Duration
+		want     time.Duration
+	}{
+		{1 * time.Second, 500 * time.Millisecond},
+		{100 * time.Millisecond, 50 * time.Millisecond},
+		{2 * time.Second, 1 * time.Second},
+		{60 * time.Second, jitterMax},
+		{time.Minute, jitterMax},
+		{0, 0},
+	}
+	for _, c := range cases {
+		if got := pollJitter(c.interval); got != c.want {
+			t.Fatalf("pollJitter(%v) = %v, want %v", c.interval, got, c.want)
+		}
+	}
+}
+
+func TestPullBackoffSkipsColdStart(t *testing.T) {
+	// issue #400：冷启动（本地无任何版本，current==""）跳过 [0, INTERVAL) 拉取退避——
+	// D-7 重拉退避只服务「已有版本集群同刻重拉防风暴」；新 warm pod 首拉零退避，秒级就绪
+	if got := pullBackoff("", 60*time.Second); got != 0 {
+		t.Fatalf("cold-start pull backoff = %v, want 0", got)
+	}
+	for i := 0; i < 200; i++ {
+		// 已有版本（变更重拉）保留退避：落在 [0, interval) 防集群风暴
+		got := pullBackoff("v-1111111111111111", 30*time.Millisecond)
+		if got < 0 || got >= 30*time.Millisecond {
+			t.Fatalf("change pull backoff %v outside [0, interval)", got)
+		}
+	}
+}
+
+func TestNewDaemonJitterDerivedFromInterval(t *testing.T) {
+	src := newFakeSource(t)
+	d := newTestDaemon(t, src, func(c *config) { c.interval = time.Second }, nil)
+	d.jitter = 0 // 测试辅助清零，此处复位验证构造值来源
+	d2 := newDaemon(config{baseURL: src.srv.URL, storeDir: t.TempDir(), interval: time.Second,
+		timeout: time.Second, maxBundleBytes: 1 << 20}, log.New(io.Discard, "", 0))
+	if d2.jitter != 500*time.Millisecond {
+		t.Fatalf("newDaemon jitter = %v, want interval/2 (500ms)", d2.jitter)
+	}
+}
+
 func TestRandomDelayBounds(t *testing.T) {
 	t.Run("generator within [0, max)", func(t *testing.T) {
 		for _, max := range []time.Duration{7 * time.Millisecond, jitterMax} {

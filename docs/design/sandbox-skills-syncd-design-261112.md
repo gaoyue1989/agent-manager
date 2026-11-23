@@ -172,10 +172,13 @@ flat 字段即 skills 通道的平铺形态。避免「knowledge 小改触发全
 
 ```go
 for {
-    jitterSleep(0~30s 随机)             // 轮询错峰（version 请求 <200B，轻量）；重操作风暴由拉取退避承担
+    jitterSleep(rand(0, min(30s, INTERVAL/2)))  // 轮询错峰（issue #400：受 INTERVAL 封顶，
+                                                // 小 INTERVAL 配置真实生效；默认 1m 时仍 30s）
     ver, err := fetchVersion()          // 失败 → 退避重试（1m 起指数，上限 = INTERVAL），fail-open
     if err == nil && ver != currentVersion(storeDir) {
-        sleep(rand(0, INTERVAL))         // 拉取退避（D-7）：集群级重拉铺满一个周期，防同刻风暴
+        if currentVersion(storeDir) != "" {   // 冷启动（无任何版本）跳过退避（issue #400）：
+            sleep(rand(0, INTERVAL))          // 新 warm pod 秒级就绪，兑现 ≤INTERVAL 承诺；
+        }                                     // 已有版本变更重拉保留 D-7 退避防集群同刻风暴
         pullBundle(ver)                  // → $STORE/.staging-<ver>.tar.gz
         verifySha256()
         extract → $STORE/.staging-<ver>/  // 独立目录，读方不可见
