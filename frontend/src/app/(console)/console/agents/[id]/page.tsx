@@ -120,7 +120,9 @@ export default function AgentDetailPage() {
       {tab === "debug" && (
         <>
           <Note>调试流量直连业务运行时（SSE，不经控制面后端）；身份以平台用户注入（X-User-Id: u-{me?.user.id}），会话与记忆按用户隔离。</Note>
-          <ChatPane agentBase={`/agent/${detail.shortName}`} persistKey={`oaf-debug-sid-${detail.shortName}`}
+          {/* key 按 Agent 重挂载（issue #385）：同一 SPA 路由切换 Agent 时复用实例会
+              把上一 Agent 的消息/会话列表残留进当前调试面板 */}
+          <ChatPane key={detail.shortName} agentBase={`/agent/${detail.shortName}`} persistKey={`oaf-debug-sid-${detail.shortName}`}
             title="调试对话" subtitle={`直连 ${detail.shortName} · durable SSE`}
             userId={`u-${me?.user.id ?? 0}`} testId="debug-pane" />
         </>
