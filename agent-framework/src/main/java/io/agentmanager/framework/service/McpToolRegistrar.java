@@ -333,6 +333,14 @@ public class McpToolRegistrar {
      * （mcp__{server}__{tool}，两路径同口径）逐个 toolkit.removeTool（幂等），
      * 并显式关闭被跟踪的旧 wrapper（防连接/stdio 子进程泄漏）。
      *
+     * <p>共享句柄例外（issue #410）：tracked wrapper 即 sharedWrappers 缓存句柄时，
+     * 该连接是全体 toolkit（单例+存量会话）正在使用的活连接——SDK removeMcpClient 会经
+     * Mono.fromRunnable(wrapper::close) 关闭它，ReconnectableMcpClientWrapper.close()
+     * 永久置 closed（拒绝后续 swap），刚换芯/在用的连接被误杀。故 ② 不透传、③ 不 close，
+     * 工具摘除由 ① 按注册名完成；A 路径 reload 随后 registerOne 复用同一句柄重注册
+     * （SDK mcpClients 为 put 覆盖写，条目留存指向同一实例，无害）。句柄的下线由
+     * 定向驱逐（evictSharedWrapper）负责。
+     *
      * @return true 表示该 server 此前已注册
      */
     public boolean clearServer(Toolkit toolkit, String serverName) {
@@ -341,6 +349,8 @@ public class McpToolRegistrar {
         }
         var oldWrapper = registeredWrappers.remove(serverName);
         var had = oldWrapper != null;
+        // 共享句柄判定（②③ 共用的单一真相源）：tracked == 缓存句柄 → 全体 toolkit 的活连接
+        boolean sharedHandle = oldWrapper != null && sharedWrappers.get(serverName) == oldWrapper;
         // ① 手动路径兜底：按注册名逐个摘除（标准路径注册名同形态，removeTool 幂等）
         var registeredNames = registeredTools.entrySet().stream()
             .filter(e -> e.getKey().startsWith(serverName + ":"))
@@ -355,8 +365,10 @@ public class McpToolRegistrar {
                 }
             }
         }
-        // ② 标准路径：SDK 摘工具并关闭其登记的连接（手动路径未登记，无效果但不报错）
-        if (toolkit != null) {
+        // ② 标准路径：SDK 摘工具并关闭其登记的连接（手动路径未登记，无效果但不报错）。
+        //    共享句柄跳过（issue #410）：SDK removeMcpClient 会 close 该句柄并永久置 closed，
+        //    误杀单例+存量会话正在使用的活连接
+        if (toolkit != null && !sharedHandle) {
             try {
                 toolkit.removeMcpClient(serverName).block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
             } catch (Exception e) {
@@ -364,10 +376,10 @@ public class McpToolRegistrar {
             }
         }
         // ③ 显式关闭被跟踪的旧 wrapper（两条路径统一，兜 SDK 未覆盖的手动路径连接）。
-        //    共享句柄除外（issue #348）：句柄生命周期归 sharedWrappers 缓存统一管理，
+        //    共享句柄除外（issue #348/#410）：句柄生命周期归 sharedWrappers 缓存统一管理，
         //    A 路径 reload「摘旧注册→registerOne 重注册」复用同一句柄，此处 close 会
         //    误杀全部存量会话的连接；句柄的下线由定向驱逐（evictSharedWrapper）负责
-        if (oldWrapper != null && sharedWrappers.get(serverName) != oldWrapper) {
+        if (oldWrapper != null && !sharedHandle) {
             closeQuietly(oldWrapper);
         }
         registeredTools.keySet().removeIf(key -> key.startsWith(serverName + ":"));
