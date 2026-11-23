@@ -26,6 +26,7 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.service.FileAssetStore;
+import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.storage.FileStorage;
 
 /**
@@ -54,12 +55,14 @@ public class FileController {
 
     private final FileStorage fileStorage;
     private final FileAssetStore fileAssetStore;
+    private final SessionUserStore sessionUserStore;
     private final AgentManagerProperties props;
 
     public FileController(FileStorage fileStorage, FileAssetStore fileAssetStore,
-                          AgentManagerProperties props) {
+                          SessionUserStore sessionUserStore, AgentManagerProperties props) {
         this.fileStorage = fileStorage;
         this.fileAssetStore = fileAssetStore;
+        this.sessionUserStore = sessionUserStore;
         this.props = props;
     }
 
@@ -68,7 +71,8 @@ public class FileController {
      *
      * @param file      单文件（v1）
      * @param userId    可选，默认 "debug-user"（与 chat 一致；沙箱注入命名空间）
-     * @param sessionId 可选，上传时绑定会话
+     * @param sessionId 可选，上传时绑定会话（blank 归 null 交 bind-at-use；非空经归属校验，
+     *                  issue #411）
      */
     @PostMapping("/upload")
     public ResponseEntity<Map<String, Object>> upload(
@@ -106,6 +110,28 @@ public class FileController {
                 "file exceeds " + cfg.uploadMaxMb() + "MB limit");
         }
         var key = resolveUserKey(userId, headerUserId);
+        // userKey sanitize 对齐 chat 的 finalUserId 命名空间（ChatStreamController 同款 PathSafe），
+        // 保证注入侧 listPending 的 user_key 双条件与 file_asset.user_key 可精确匹配
+        key = io.agentmanager.framework.util.PathSafe.sanitize(key);
+
+        // 会话归属校验 + 归一（issue #411）：向他人会话投递文件 = 沙箱注入面越权，upload 侧
+        // 必须前置拦截。① 已映射会话（session_user 有行且 owner ≠ 请求者）→ 404，对齐
+        // SessionAccessGuard「不泄露会话存在性」惯例（chat 的 thread_not_found 同款语义）；
+        // 无映射行放行（上传先于首聊是真实流，chat 侧 bind-at-use 认领），异 user 行由注入侧
+        // listPending user_key 双条件兜底。② sessionId 归一：blank 归 null（未绑定，交
+        // bind-at-use，消空串 session_id 永久孤儿）；非空经 PathSafe.sanitize 对齐 chat 的
+        // finalSessionId 命名空间（消 'acme-agent:thread-1' 冒号经 chat sanitize 后永不匹配）
+        String normalizedSessionId = null;
+        if (sessionId != null && !sessionId.isBlank()) {
+            normalizedSessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+            if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                    sessionUserStore, normalizedSessionId, key)) {
+                log.info("[upload] reject foreign session: sessionId={}, userKey={}",
+                    normalizedSessionId, key);
+                return err(HttpStatus.NOT_FOUND, "session_not_found",
+                    "session '" + normalizedSessionId + "' not found");
+            }
+        }
 
         // 数量上限（软限制：并发上传可能少量超发）
         int pending = fileAssetStore.countPending(key);
@@ -129,7 +155,7 @@ public class FileController {
         // 清理永远漏掉未发送的上传件
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
-                id, key, sessionId, null, fileName, null, mime, file.getSize(),
+                id, key, normalizedSessionId, null, fileName, null, mime, file.getSize(),
                 props.file().storageType(), storageKey, "upload", "pending",
                 java.time.LocalDateTime.now()));
         } catch (Exception e) {

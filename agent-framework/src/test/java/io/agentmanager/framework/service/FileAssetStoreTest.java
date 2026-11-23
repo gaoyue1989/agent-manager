@@ -94,10 +94,11 @@ class FileAssetStoreTest {
     }
 
     @Test
-    void listPendingShouldFilterBySessionOnly() throws Exception {
+    void listPendingShouldFilterBySessionAndUser() throws Exception {
         var conn = dataSource.getConnection();
         var ps = mock(PreparedStatement.class);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        var sqlCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
         var rs = mock(ResultSet.class);
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true).thenReturn(true).thenReturn(false);
@@ -114,9 +115,13 @@ class FileAssetStoreTest {
         when(rs.getString("status")).thenReturn("pending");
         when(rs.getTimestamp("created_at")).thenReturn(java.sql.Timestamp.valueOf(LocalDateTime.now()));
 
-        assertEquals(2, store.listPending("s1").size());
-        // session 单条件（issue #345）：user 维度 OR 命中是跨 session 泄漏根源，SQL 必须只含 session_id
+        assertEquals(2, store.listPending("s1", "alice").size());
+        // session + user 双条件（issue #345 消 user 维度 OR；issue #411 补 user 维度）：
+        // 他人行即使绑定同 session 也不得进入注入批次——SQL 必须同时含 session_id 与 user_key
+        assertTrue(sqlCaptor.getValue().contains("session_id = ?"), sqlCaptor.getValue());
+        assertTrue(sqlCaptor.getValue().contains("user_key = ?"), sqlCaptor.getValue());
         verify(ps).setString(1, "s1");
+        verify(ps).setString(2, "alice");
     }
 
     @Test

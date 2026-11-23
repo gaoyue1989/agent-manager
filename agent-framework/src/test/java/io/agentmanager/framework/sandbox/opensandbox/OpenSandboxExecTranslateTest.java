@@ -96,6 +96,39 @@ class OpenSandboxExecTranslateTest {
             + "fi; done; fi";
     }
 
+    /** SDK glob 模板（P_FIND 同形，root/pattern 可参数化） */
+    private static String findTemplate(String root, String pattern) {
+        return "find '" + root + "' -type f -name '" + pattern + "' 2>/dev/null | sort | while IFS= read -r f; do"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
+    }
+
+    /** glob 模板的 -L 归一化形态（doExec normalizeSymlinkHostileFind 契约：回落真 exec 必带 -L） */
+    private static String findLTemplate(String root, String pattern) {
+        return "find -L '" + root + "' -type f -name '" + pattern + "' 2>/dev/null | sort | while IFS= read -r f; do"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
+    }
+
+    private static OffsetDateTime epoch() {
+        return OffsetDateTime.ofInstant(Instant.ofEpochSecond(1730000000), ZoneOffset.UTC);
+    }
+
+    /** 覆盖 mockOsb 的通用 commands stub（run 返回真实执行对象），供回落断言 */
+    private static void stubRealExec(Sandbox osb, Execution realExec) {
+        var commands = mock(Commands.class);
+        when(commands.run(anyString())).thenReturn(realExec);
+        when(osb.commands()).thenReturn(commands);
+    }
+
+    /** symlink 条目（EntryInfo 8 参构造；type 对齐 execd Lstat 语义 file/directory/symlink/other） */
+    private static EntryInfo symlinkEntry(String path) {
+        var t = epoch();
+        return new EntryInfo(path, 493, "root", "root", 0, t, t, "symlink");
+    }
+
     @Test
     void readShouldMatchExecdLineSemantics() throws Exception {
         var osb = mock(Sandbox.class);
@@ -216,6 +249,107 @@ class OpenSandboxExecTranslateTest {
         assertNull(sandbox.translateForProbe("mkdir -p /workspace"), "mkdir -p 必须回落真 exec（返回 null）");
         assertNull(sandbox.translateForProbe("mkdir -p a b"));
         verify(files, never()).createDirectories(anyList());
+        verify(osb.commands(), never()).run(anyString());
+    }
+
+    // ---------- 软链农场透明性（issue #394，skills-syncd §6.3 落实 §13 A-1）----------
+    // farm 模式下翻译语义必须与真实 shell 一致：ls/glob/test -e 遇 type=symlink 条目
+    // 不可裁决（EntryInfo 无 link target、execd 对软链根拒绝穿透），整目录回落真 exec。
+
+    @Test
+    void lsSymlinkEntryShouldFallBackToRealExecWithOriginalCommand() throws Exception {
+        // ① ls 父目录含 type=symlink 条目 → 翻译 null 回落；doExec 收到原始 P_LS 模板命令
+        // （shell [ -d ]/[ -f ] 解引用语义兜底——软链目录显示 DIR:、软链文件显示 FILE:）
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("/workspace")).thenReturn(List.of(
+            symlinkEntry("/workspace/.skills-cache/sess/oaf-package/demo"),
+            new EntryInfo("/workspace/a.txt", 420, "root", "root", 7, epoch(), epoch(), "file")));
+        stubRealExec(osb, mockExecution(0, "DIR:.skills-cache/sess/oaf-package/demo\t0"));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertNull(sandbox.translateForProbe(lsTemplate("/workspace")), "含 symlink 条目必须整目录回落（null）");
+
+        var r = sandbox.exec(io.agentscope.core.agent.RuntimeContext.builder().userId("u1").build(),
+            lsTemplate("/workspace"), 30);
+        assertEquals(0, r.exitCode());
+        assertEquals("DIR:.skills-cache/sess/oaf-package/demo\t0", r.stdout(), "结果必须取自真 exec stub（回落生效）");
+        verify(osb.commands()).run(lsTemplate("/workspace"));
+    }
+
+    @Test
+    void globSymlinkSubtreeShouldFallBackToFindL() throws Exception {
+        // ② glob 父目录（真实目录）含 symlink 子目录 → 回落真 exec，且命令补 -L
+        // （GNU find 默认不跟随目录软链，无 -L 恒空；-L 对混合树语义=跟随链接枚举文件）
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("tree")).thenReturn(List.of(
+            symlinkEntry("/workspace/tree/link")));
+        stubRealExec(osb, mockExecution(0, "tree/link/script.py\t3\t0"));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertNull(sandbox.translateForProbe(findTemplate("tree", "*.py")), "软链子树必须回落（null）");
+
+        var r = sandbox.exec(io.agentscope.core.agent.RuntimeContext.builder().userId("u1").build(),
+            findTemplate("tree", "*.py"), 30);
+        assertEquals(0, r.exitCode());
+        assertEquals("tree/link/script.py\t3\t0", r.stdout(), "结果必须取自真 exec stub（回落生效）");
+        verify(osb.commands()).run(findLTemplate("tree", "*.py"));
+    }
+
+    @Test
+    void globSymlinkRootRejectedByExecdShouldFallBackToFindL() throws Exception {
+        // ③ glob ROOT 本身为软链：execd listDirectory 对软链根拒绝穿透 400（设计 §6.3 契约，
+        // 非 404 → 上抛交 tryTranslateExec 回落）→ doExec 收到 -L 归一化后的 find 命令
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("link")).thenThrow(new SandboxApiException("HTTP 400 Bad Request",
+            null, 400, new SandboxError("UNEXPECTED_RESPONSE", "symlink not a directory")));
+        stubRealExec(osb, mockExecution(0, "link/script.py\t3\t0"));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var r = sandbox.exec(io.agentscope.core.agent.RuntimeContext.builder().userId("u1").build(),
+            findTemplate("link", "*.py"), 30);
+        assertEquals(0, r.exitCode());
+        assertEquals("link/script.py\t3\t0", r.stdout());
+        verify(osb.commands()).run(findLTemplate("link", "*.py"));
+    }
+
+    @Test
+    void testExistsSymlinkEntryShouldFallBackToRealTestE() throws Exception {
+        // ④ test -e 父目录列举命中 type=symlink 条目 → 翻译 null 回落，doExec 收到原始
+        // test -e 命令（悬空链 shell 判 no、有效链判 yes/no 由 shell 裁决）
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("/workspace/tree")).thenReturn(List.of(
+            symlinkEntry("/workspace/tree/dangling")));
+        stubRealExec(osb, mockExecution(0, "no"));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var probe = "test -e 'tree/dangling' && echo yes || echo no";
+        assertNull(sandbox.translateForProbe(probe), "父列举命中 symlink 条目必须回落（null）");
+
+        var r = sandbox.exec(io.agentscope.core.agent.RuntimeContext.builder().userId("u1").build(), probe, 30);
+        assertEquals("no", r.stdout(), "悬空链由 shell 裁决（真 test -e 答 no）");
+        verify(osb.commands()).run(probe);
+    }
+
+    @Test
+    void symlinkFreeEntriesShouldKeepFastPathByteIdentical() throws Exception {
+        // ⑤ 快路径回归：仅 file/directory 条目时翻译直答逐字节不变（不回落、不触 commands）
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("tree")).thenReturn(List.of(
+            new EntryInfo("/workspace/tree/sub", 493, "root", "root", 0, epoch(), epoch(), "directory"),
+            new EntryInfo("/workspace/tree/f.md", 420, "root", "root", 7, epoch(), epoch(), "file")));
+        when(files.listDirectory("tree/sub")).thenReturn(List.of(
+            new EntryInfo("/workspace/tree/sub/x.py", 420, "root", "root", 3, epoch(), epoch(), "file")));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var r = sandbox.translateForProbe(findTemplate("tree", "*.py"));
+        assertNotNull(r, "无软链时 glob 快路径必须保持翻译直答");
+        assertEquals(0, r.exitCode());
+        assertEquals("tree/sub/x.py\t3\t1730000000", r.stdout());
         verify(osb.commands(), never()).run(anyString());
     }
 }

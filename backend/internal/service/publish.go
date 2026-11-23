@@ -283,7 +283,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		return nil, err
 	}
 
-	if _, err := c.applyAllPublic(params, public); err != nil {
+	if _, err := c.applyAllPublic(params, public, nil); err != nil { // nil：新服务无上一版 env
 		c.transition(svc, store.StatusError, "apply failed: "+err.Error())
 		return nil, err
 	}
@@ -293,16 +293,16 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 
 // applyAllPublic 公共入口开关包装：public=false 时 host 模式跳过 Ingress 创建
 // （M3 §2.4：不发布对外访问入口 = 仅集群内可达）；router 模式行为不变（本就无 per-service
-// Ingress，收敛旧对象语义保持）。
-func (c *Core) applyAllPublic(p k8s.ObjectParams, public bool) (*networkingv1.Ingress, error) {
+// Ingress，收敛旧对象语义保持）。prevSecret 透传 applyServiceEnvObjects（token 撤销判定）。
+func (c *Core) applyAllPublic(p k8s.ObjectParams, public bool, prevSecret map[string]string) (*networkingv1.Ingress, error) {
 	if public || c.Cfg.IngressHostSuffix == "" {
-		return c.applyAll(p)
+		return c.applyAll(p, prevSecret)
 	}
 	// host 模式私有发布：跳过 Ingress 构建/写入，并清理历史同名 Ingress（如有）
 	if err := c.K8s.DeleteIngress(p.Namespace, p.K8sName); err != nil {
 		return nil, fmt.Errorf("ingress cleanup: %w", err)
 	}
-	if err := c.applyServiceEnvObjects(p); err != nil {
+	if err := c.applyServiceEnvObjects(p, prevSecret); err != nil {
 		return nil, err
 	}
 	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
@@ -327,7 +327,7 @@ func (c *Core) applyAllPublic(p k8s.ObjectParams, public bool) (*networkingv1.In
 // router 模式（IngressHostSuffix 空）：不构造 per-service Ingress（子路径路由由集群内
 // platform-router 承担），并对同名 Ingress「存在即删除」（NotFound 容忍）——存量
 // path 模式对象与共享 /agent Ingress 路径重叠，经显式发布 API 收敛（不做后台批量迁移）。
-func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
+func (c *Core) applyAll(p k8s.ObjectParams, prevSecret map[string]string) (*networkingv1.Ingress, error) {
 	dep, err := c.deployBuilder().Build(p)
 	if err != nil {
 		return nil, fmt.Errorf("deployment: %w", err)
@@ -346,7 +346,7 @@ func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 			return nil, fmt.Errorf("ingress: %w", err)
 		}
 	}
-	if err := c.applyServiceEnvObjects(p); err != nil {
+	if err := c.applyServiceEnvObjects(p, prevSecret); err != nil {
 		return nil, err
 	}
 	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
@@ -362,10 +362,29 @@ func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 // env 含敏感键 SKILLSYNC_TOKEN 时幂等 Ensure 技能同步 token Secret（D-8：池模板
 // secretKeyRef 引用，落点=池 workload ns k8s.SandboxWorkloadNamespace 消费方——跨 ns
 // 引用不成立，服务 ns 无消费方；轮换=本入口同值更新 + 池 Pod 重建，单写入口即服务
-// env 表单）；无该键不产出对象，且存量 token Secret 同步撤销（不变量：池 ns token
-// Secret 存在 ⇔ env 携带非空 SKILLSYNC_TOKEN，issue #350——先 SecretExists 确认存在
-// 再删，无该键的常规发布零 delete 调用、不依赖 RBAC delete 授权）。
-func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
+// env 表单）；无该键不产出对象，且上一版 env 曾携带该键时同步撤销存量 token Secret
+// （不变量：池 ns token Secret 存在 ⇔ 当前或上一版 env 携带非空 SKILLSYNC_TOKEN，
+// issue #350/#409——本 Secret 唯一写入口是本函数，prevSecret 无该键 ⇒ 池 ns 必无
+// 本服务 token Secret，直接跳过：未配置过 token 的发布零跨 ns 访问，未部署
+// OpenSandbox/未授权池 ns 的环境 Publish/UpdateEnv/Republish/StartAgain 不再报
+// forbidden）。撤销意图分支在写服务两级对象之前复核绑定池（issue #396）：池模板
+// secretKeyRef 引用该 Secret，绑定池在运行/管理面不可达时拒绝撤销（ErrConflict → 409）
+// ——守卫前移保证拒绝零副作用（EnsureSecret 整体替换 Data，若先写后拒，UpdateEnv 的
+// K8s 与 DB env_secret_json 静默漂移）；轮换/常规发布调用序列不变，零新增上游调用。
+func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams, prevSecret map[string]string) error {
+	revoke := false
+	if p.EnvSecret[k8s.SkillsyncTokenEnvKey] == "" && prevSecret[k8s.SkillsyncTokenEnvKey] != "" {
+		exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
+		if err != nil {
+			return fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
+		}
+		if exists {
+			if err := c.guardBoundSandboxPool(p.K8sName, "撤销技能同步 token"); err != nil {
+				return err
+			}
+			revoke = true
+		}
+	}
 	if err := c.K8s.EnsureConfigMap(k8s.EnvConfigMap(p)); err != nil {
 		return fmt.Errorf("configmap: %w", err)
 	}
@@ -379,11 +398,7 @@ func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
 		}
 		return nil
 	}
-	exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
-	if err != nil {
-		return fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
-	}
-	if !exists {
+	if !revoke {
 		return nil
 	}
 	if err := c.K8s.DeleteSecret(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName)); err != nil {
@@ -467,7 +482,7 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	}
 	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
 	params.EnvSecret = secret
-	if err := c.applyServiceEnvObjects(params); err != nil {
+	if err := c.applyServiceEnvObjects(params, oldSecret); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -619,7 +634,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	svc.Endpoint, svc.Spec = endpoint, spec
 	svc.PublicEndpoint = &public
 
-	if _, err := c.applyAllPublic(params, public); err != nil {
+	if _, err := c.applyAllPublic(params, public, oldSecret); err != nil {
 		c.transition(svc, store.StatusError, "republish apply failed: "+err.Error())
 		return nil, err
 	}
@@ -645,7 +660,7 @@ func (c *Core) StartAgain(id uint) (*store.ServiceEntity, error) {
 	}
 	params := applySpec(c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID)), svc.Spec)
 	params.EnvSecret = secret
-	ing, err := c.applyAllPublic(params, svc.EndpointPublic())
+	ing, err := c.applyAllPublic(params, svc.EndpointPublic(), secret)
 	if err != nil {
 		c.transition(svc, store.StatusError, "start again apply failed: "+err.Error())
 		return nil, err
@@ -684,7 +699,7 @@ func (c *Core) Delete(id uint) error {
 	// 删除守卫（issue #359）：绑定池 {k8sName}-pool 仍在上游运行时拒绝——本函数下方
 	// 连带删除的池 ns token Secret 被池模板 secretKeyRef 引用，池新 Pod 会卡
 	// CreateContainerConfigError、池容量静默退化；建池门只护建池，Delete 复核同一前提。
-	if err := c.guardBoundSandboxPool(svc.K8sName); err != nil {
+	if err := c.guardBoundSandboxPool(svc.K8sName, "删除服务"); err != nil {
 		return err
 	}
 	ns := c.Cfg.Namespace
