@@ -23,6 +23,9 @@ public class ReconnectableMcpClientWrapper extends McpClientWrapper {
     private volatile McpClientWrapper delegate;
     private volatile boolean closed;
 
+    /** 毒化标记（issue #417）：注册失败的句柄留缓存原地换芯（不驱逐脱管），换芯成功即清除 */
+    private volatile boolean poisoned;
+
     public ReconnectableMcpClientWrapper(String name, McpClientWrapper delegate) {
         super(name);
         if (delegate == null) {
@@ -42,8 +45,22 @@ public class ReconnectableMcpClientWrapper extends McpClientWrapper {
         }
         var old = delegate;
         delegate = next;
+        poisoned = false;
         closeQuietly(old);
         return true;
+    }
+
+    /** 注册失败毒化（issue #417）：句柄留缓存，看门狗/下一会话经 swap 原地重建 */
+    public void markPoisoned() {
+        poisoned = true;
+    }
+
+    public boolean poisoned() {
+        return poisoned;
+    }
+
+    public boolean isClosed() {
+        return closed;
     }
 
     /** 当前生效连接（看门狗探测/诊断用，不外逃——外部一律经句柄调用） */
@@ -83,7 +100,9 @@ public class ReconnectableMcpClientWrapper extends McpClientWrapper {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+        // 与 swap 同步（issue #417）：无锁时 close 在 swap 装新关旧之间进入会关掉刚装的
+        // next 而 swap 仍返回 true——调用方误以为换芯成功而使用死连接；加锁后两段串行
         closed = true;
         closeQuietly(delegate);
     }
