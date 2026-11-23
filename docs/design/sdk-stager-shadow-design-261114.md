@@ -93,7 +93,16 @@ staging 不写盘后，宿主目录不再产生内容，farm manifest 只信端�
 |---|---|---|
 | C-1 | `ShellPathPolicy.joinCache` 输出 == farm 容器路径（逐字） | 单测：合成 Cached → resolve 输出断言 |
 | C-2 | `WorkspaceManager.getSkillsDir` repo 归属（决定 WorkspaceNative vs Cached） | 实现期核实；若它指向 L4 workspace 区则归 WorkspaceNative |
-| C-3 | 遮蔽生效 | 启动自检：`MarketplaceStager.class.getProtectionDomain().getCodeSource()` 指向 BOOT-INF/classes；CI 断言 SDK 版本 pin |
+| C-3 | 遮蔽生效 | 启动自检：`AgentScopeConfig.verifyShadowActive` 反射读运行期加载类的 `SHADOW_MARKER` + CodeSource 不得来自 agentscope-harness jar（issue #426 修正落地，见下）；SDK 版本 pin 单测断言 |
+
+> **C-3 修正落地（issue #426）**：PR #340 原实现为消费方引用 `SHADOW_MARKER` 常量 + log 输出，
+> 但 `static final String = "字面量"` 是编译期常量，javac 把引用内联为 `ldc`（javap 实证），
+> 运行期不访问字段——jar 原版类被加载时自检恒真、照常启动。修正后两条判据均运行期求值：
+> 反射 `getField("SHADOW_MARKER")`（原版类无此字段即启动 IllegalStateException）+
+> CodeSource 校验；`SHADOW_MARKER` 必须保持 `String.valueOf(...)` 非常量表达式形态（字面量
+> 形态下任何引用式自检都失效）。SDK 版本 pin 断言在 `MarketplaceStagerShadowTest`：非遮蔽 SDK
+> 类 jar manifest `Implementation-Version` 必须等于 pom `agentscope.version`（当前 2.0.4），
+> 另有 child-first loader 从 SDK jar 加载原版类的 fail-fast 复现测试。
 
 ## 4. 测试与验收
 
