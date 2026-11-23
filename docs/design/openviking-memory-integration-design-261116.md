@@ -232,6 +232,8 @@ MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permi
 
 **兼容矩阵**:`AGENT_MEMORY_ENABLED=false` 时两个 provider 全关(无记忆),优先级最高;`local` 路径代码零改动。
 
+> `OVK_SESSION_COMMIT` 实现现状(2026-11-23 回填,issue #418):append 链路异步化——`VikingSessionCommitStateStore` 先同步完成 `delegate.save`(agent_state 落库零延迟),新增消息整批投递单线程 worker 有界队列(500)异步 append,队列满整批丢弃并告警;`createSession` 失败负缓存 30s(冷却期快速丢弃,杜绝 OV 不可用时的 N×timeout 重试风暴);OV session 映射键 = slot 复合会话键 `userId:sessionId`(A2A 同用户多会话不再按 userId 串写);装配门控 = VikingMemoryClient 在位 + OVK_SESSION_COMMIT + AGENT_MEMORY_ENABLED 三条件齐备(`AgentScopeConfig.vikingSessionCommitEnabled`,记忆总开关关闭不再被绕过)。
+
 > `OVK_MCP_SHARED_CONTEXT` 实现现状(2026-11-23 回填,issue #415):合成 server `openviking` 经 `HarnessAgentFactory.registerVikingSharedContextMcp` 程序化注入,权限声明位置 = 包内 `mcp-configs/openviking/config.yaml` 的 `permissions.tools`(permissions-only),句柄可换芯、看门狗探测/补偿自愈、A 路径 reload 豁免、frontmatter 同名声明守卫——细节见 §7 实现现状回填。
 
 ### 11.2 实施拆分(单分支多 commit,一个 PR)

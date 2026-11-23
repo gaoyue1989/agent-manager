@@ -478,6 +478,34 @@ class AgentScopeConfigTest {
         assertTrue(names.contains("memory_save"), "memory 默认开启时应注册 memory_save");
     }
 
+    /**
+     * VikingSessionCommit 装配门控（issue #418 B-05c）：client/sessionCommit/memoryEnabled
+     * 三条件齐备才装配，AGENT_MEMORY_ENABLED=false 不得再绕过记忆总开关。
+     */
+    @Test
+    void vikingSessionCommitGateRequiresMemoryEnabled() {
+        var cfgOn = new io.agentmanager.framework.config.VikingConfig(
+            "openviking", "http://localhost:1933", "acct", "admin-key", "seed",
+            true, false, 2000, 300);
+        var cfgCommitOff = new io.agentmanager.framework.config.VikingConfig(
+            "openviking", "http://localhost:1933", "acct", "admin-key", "seed",
+            false, false, 2000, 300);
+        var client = mock(io.agentmanager.framework.service.VikingMemoryClient.class);
+        var harnessOn = AgentManagerProperties.HarnessConfig.defaults();
+        var harnessOff = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, false, 10, 8000, 60,
+            30, 80000, 20000, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+
+        assertFalse(AgentScopeConfig.vikingSessionCommitEnabled(null, cfgOn, harnessOn),
+            "无 VikingMemoryClient 不得装配");
+        assertFalse(AgentScopeConfig.vikingSessionCommitEnabled(client, cfgCommitOff, harnessOn),
+            "sessionCommit=false 不得装配");
+        assertFalse(AgentScopeConfig.vikingSessionCommitEnabled(client, cfgOn, harnessOff),
+            "AGENT_MEMORY_ENABLED=false 必须门控（issue #418）");
+        assertTrue(AgentScopeConfig.vikingSessionCommitEnabled(client, cfgOn, harnessOn),
+            "三条件齐备才装配");
+    }
+
     private static AgentManagerProperties.ServerConfig emptyServer() {
         return new AgentManagerProperties.ServerConfig("0.0.0.0", 8100);
     }
