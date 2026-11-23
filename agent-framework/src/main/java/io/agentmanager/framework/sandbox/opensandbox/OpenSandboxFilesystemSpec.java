@@ -66,8 +66,20 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
      */
     private volatile SandboxLifecycleManager lifecycleManager;
 
-    /** userKey → 已注入沙箱 id（reset 仅在新沙箱代执行，防多实例循环 reset/inject）；LRU 有界 */
-    private final Map<String, String> userInjectedSandbox = lruMap(256);
+    /** 会话键 → 已执行过 reset 的沙箱代（reset 仅在新沙箱代执行，防多实例循环 reset/inject）；
+     *  键=会话键，与 file_asset.session_id 同命名空间（issue #413：旧 userKey 键会被同用户
+     *  他会话翻转，回原会话误判换代 → 冗余 reset+重注入覆写容器内已修改上传件）；LRU 有界。
+     *  Pod 本地是 L1 快照，跨副本/重启/淘汰的裁决走 {@link ResetMarkStore} 共享层（评审 g1） */
+    private final Map<String, String> sessionInjectedSandbox = lruMap(256);
+
+    /** 换代 reset 记账跨副本共享层（评审 g1，AgentScopeConfig 装配时注入；NOOP=纯 Pod 级） */
+    private ResetMarkStore resetMarkStore = ResetMarkStore.NOOP;
+
+    /** 注入换代 reset 记账共享层（无 Redis 时保持 NOOP=现行为） */
+    public OpenSandboxFilesystemSpec resetMarkStore(ResetMarkStore store) {
+        this.resetMarkStore = store != null ? store : ResetMarkStore.NOOP;
+        return this;
+    }
 
     /**
      * 会话水合门控表（pod 本地缓存，真相在 KV/容器）：userKey|sandboxId → 已知同步状态。
@@ -199,15 +211,28 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         }
     }
 
-    /** 该用户当前是否已在新沙箱代 reset+inject 过 */
-    public boolean isInjectedOnSandbox(String userKey, String sandboxId) {
-        return sandboxId != null && sandboxId.equals(userInjectedSandbox.get(userKey));
+    /** 该会话当前是否已在新沙箱代 reset+inject 过：Pod 级 miss → 共享层裁决（评审 g1）——
+     *  会话轮转到新副本/Pod 重启/LRU 淘汰丢 Pod 标记时凭共享命中跳过同代重复 reset
+     *  （否则原始字节重注入覆写容器内已修改上传件），命中回填 Pod 级（此后共享层不可用仍稳态） */
+    public boolean isInjectedOnSandbox(String sessionId, String sandboxId) {
+        if (sandboxId == null) {
+            return false;
+        }
+        if (sandboxId.equals(sessionInjectedSandbox.get(sessionId))) {
+            return true;
+        }
+        if (resetMarkStore.marked(sessionId, sandboxId)) {
+            sessionInjectedSandbox.put(sessionId, sandboxId);
+            return true;
+        }
+        return false;
     }
 
-    /** 记录该用户已注入的沙箱 id */
-    public void markInjectedOnSandbox(String userKey, String sandboxId) {
-        if (userKey != null && sandboxId != null) {
-            userInjectedSandbox.put(userKey, sandboxId);
+    /** 记录该会话已注入的沙箱 id（Pod 级 + 共享层双写，共享层失败仅告警） */
+    public void markInjectedOnSandbox(String sessionId, String sandboxId) {
+        if (sessionId != null && sandboxId != null) {
+            sessionInjectedSandbox.put(sessionId, sandboxId);
+            resetMarkStore.mark(sessionId, sandboxId);
         }
     }
 

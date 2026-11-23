@@ -208,7 +208,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 模型集成 | ✅ | OpenAI 兼容 API；多托管模型（`/models`）+ 会话级切换 + 全局默认模型（`PUT /models/{id}/default`）+ 可配置备用模型（`PUT /models/{id}/fallback`，DB 优先于 `LLM_FALLBACK_MODEL_ID`；见 [docs/model-fallback-design.md](docs/model-fallback-design.md)） |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
 | MCP 启动容错 | ✅ | 默认 fail-soft：server 不可达仅告警跳过不阻断启动；config.yaml `startup.required: true` 可声明严格失败 |
-| MCP 断联恢复 | ✅ | 共享连接缓存句柄化（ReconnectableMcpClientWrapper，issue #348）：注册失败 CAS 驱逐死句柄（下会话重建）；McpConnectionWatchdog 对共享句柄探活（listTools）+ 原地换芯（build+握手成功才 swap，全部 toolkit 持有同一句柄实例免重注册自愈）；缓存无句柄时 compensate 复用 registerOne 补建；独立懒连接 McpResourceProxy 由看门狗联动 evictClient |
+| MCP 断联恢复 | ✅ | 共享连接缓存句柄化（ReconnectableMcpClientWrapper，issue #348）：注册失败 CAS 驱逐死句柄（下会话重建）；McpConnectionWatchdog 对共享句柄探活（listTools）+ 原地换芯（build+握手成功才 swap，全部 toolkit 持有同一句柄实例免重注册自愈）；缓存无句柄时 compensate 复用 registerOne 补建；独立懒连接 McpResourceProxy 由看门狗联动 evictClient。合成 server（openviking，issue #415）纳入同一链路：句柄 Reconnectable(UserScoped(base))、探测名单含 registrar 合成注册表、换芯走注册表工厂（与注册同源防形态漂移）、无句柄按 agent 有无分流补注册/仅入缓存；A 路径 reload「声明已删除」循环豁免合成 server（其下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更 + rollout） |
 | A2A 协议 | ✅ | AgentScopeA2aServer + HarnessAgentRunner |
 | 多租户 | ✅ | IsolationScope.USER (按 userId 隔离) |
 
@@ -269,7 +269,8 @@ OAF `deniedTools` 字段控制排除列表。
 | 来源 | 作用域 | 声明位置 |
 |---|---|---|
 | MCP 工具 | 各 server 的 MCP 工具 | `mcp-configs/{server}/config.yaml` 的 `permissions.tools`（allow/ask/deny） |
-| 自定义/内置工具 | @Tool 注解工具 + Harness 内置工具 | AGENTS.md frontmatter `config.permission.tools`（2026-09-20 新增） |
+| 合成 MCP server（openviking，OVK_MCP_SHARED_CONTEXT） | 同 MCP 工具（`mcp__openviking__*`） | 包内 `mcp-configs/openviking/config.yaml` 的 `permissions.tools`（permissions-only，无 connection 节；issue #415 修复前被静默丢弃） |
+| 自定义/内置工具 | @Tool 注解工具 + Harness 内置工具 | AGENTS.md frontmatter `config.permission.tools`（2026-09-20 新增；不承载 MCP 工具——声明 MCP 注册名忽略并告警） |
 
 - 自定义/内置工具**未声明默认 ALLOW**（不参与确认，零侵入）；声明 `ask` 即接入 HITL 确认卡链路（`permission_ask` → `confirm_context` → `/threads/{sid}/confirm-stream`，与 MCP 工具共用）
 - 优先级：MCP 显式规则 > frontmatter 声明 > 自动放行；与 MCP 裸名冲突的 frontmatter 声明忽略并告警
