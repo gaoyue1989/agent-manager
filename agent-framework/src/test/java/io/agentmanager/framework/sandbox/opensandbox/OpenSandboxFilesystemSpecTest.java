@@ -59,6 +59,16 @@ class OpenSandboxFilesystemSpecTest {
     }
 
     @Test
+    void skillSyncSwitchesShouldPropagateToClientOptions() {
+        var spec = new OpenSandboxFilesystemSpec()
+            .skillRevisionGateEnabled(false)
+            .syncSnapshotDiffEnabled(false);
+
+        assertFalse(spec.clientOptions().isSkillRevisionGateEnabled());
+        assertFalse(spec.clientOptions().isSyncSnapshotDiffEnabled());
+    }
+
+    @Test
     void createClientShouldWrapOpenSandboxClientWithTracing() {
         var spec = new OpenSandboxFilesystemSpec()
             .serverUrl("s").apiKey("k");

@@ -128,7 +128,9 @@ public class AgentScopeConfig {
             .isolationScope(IsolationScope.USER)
             .skillsSharedStore(config.skillsSharedStore())
             .skillBundleService(skillBundleService)
-            .farmMeterRegistry(farmMeterRegistryProvider.getIfAvailable());
+            .farmMeterRegistry(farmMeterRegistryProvider.getIfAvailable())
+            .skillRevisionGateEnabled(sandboxRuntime.skillRevisionGateEnabled())
+            .syncSnapshotDiffEnabled(sandboxRuntime.syncSnapshotDiffEnabled());
         // 遮蔽生效自检（sdk-stager-shadow-design C-3，issue #426）：运行期加载的必须是遮蔽类
         // 而非 SDK jar 原版——遮蔽失效 = 宿主写盘静默回归，启动即硬失败
         verifyShadowActive(io.agentscope.harness.agent.skill.runtime.MarketplaceStager.class);

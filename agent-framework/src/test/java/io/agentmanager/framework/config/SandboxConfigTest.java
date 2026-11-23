@@ -62,6 +62,27 @@ class SandboxConfigTest {
         assertEquals("/tmp/skills-bundle-cache", on.skillsBundleCacheDir());
     }
 
+    @Test
+    void compatConstructorsShouldDefaultBundleCacheDirToWorkspaceResolution() {
+        var positional17 = new SandboxConfig(
+            false, "img", 30, 30, 512, 1, List.of("sh"),
+            Duration.ofMillis(100),
+            true, true, 900,
+            true, true, false, 500, 30,
+            new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
+        assertEquals("", positional17.skillsBundleCacheDir(),
+            "兼容构造器缺省须为空串（运行时解析 {workspaceBase}/tmp/skills-bundle-cache，issue #358），"
+                + "不得落业务 Pod 不可写的 /tmp");
+
+        var positional18 = new SandboxConfig(
+            true, "img", 30, 30, 512, 1, List.of("sh"),
+            Duration.ofMillis(100),
+            true, true, 900,
+            true, true, true, true, 500, 30,
+            new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
+        assertEquals("", positional18.skillsBundleCacheDir());
+    }
+
     /**
      * 绑定层默认翻转回归（issue #392，Binder 范式同 AgentManagerPropertiesBindingTest）：
      * 属性缺失（存量服务 env 固化不含该键）绑得 {@code /skills-store}（与守护

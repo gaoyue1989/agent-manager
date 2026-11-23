@@ -49,6 +49,8 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private SkillBundleService skillBundleService;
     /** 农场判定打点（D-5）；null = 不打点 */
     private io.micrometer.core.instrument.MeterRegistry farmMeterRegistry;
+    private boolean skillRevisionGateEnabled = true;
+    private boolean syncSnapshotDiffEnabled = true;
 
     @Override
     public String getType() {
@@ -78,6 +80,8 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public String getSkillsSharedStore() { return skillsSharedStore; }
     public SkillBundleService getSkillBundleService() { return skillBundleService; }
     public io.micrometer.core.instrument.MeterRegistry getFarmMeterRegistry() { return farmMeterRegistry; }
+    public boolean isSkillRevisionGateEnabled() { return skillRevisionGateEnabled; }
+    public boolean isSyncSnapshotDiffEnabled() { return syncSnapshotDiffEnabled; }
 
     // ---- fluent builder methods ----
     public OpenSandboxClientOptions serverUrl(String serverUrl) { this.serverUrl = serverUrl; return this; }
@@ -93,4 +97,6 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public OpenSandboxClientOptions skillsSharedStore(String store) { this.skillsSharedStore = store; return this; }
     public OpenSandboxClientOptions skillBundleService(SkillBundleService service) { this.skillBundleService = service; return this; }
     public OpenSandboxClientOptions farmMeterRegistry(io.micrometer.core.instrument.MeterRegistry registry) { this.farmMeterRegistry = registry; return this; }
+    public OpenSandboxClientOptions skillRevisionGateEnabled(boolean enabled) { this.skillRevisionGateEnabled = enabled; return this; }
+    public OpenSandboxClientOptions syncSnapshotDiffEnabled(boolean enabled) { this.syncSnapshotDiffEnabled = enabled; return this; }
 }

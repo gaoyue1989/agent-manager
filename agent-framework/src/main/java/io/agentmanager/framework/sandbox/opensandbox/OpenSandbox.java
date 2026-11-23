@@ -1609,6 +1609,14 @@ public class OpenSandbox extends AbstractBaseSandbox
         return osbSandbox;
     }
 
+    boolean skillRevisionGateEnabled() {
+        return skillRevisionGateEnabled;
+    }
+
+    boolean syncSnapshotDiffEnabled() {
+        return syncSnapshotDiffEnabled;
+    }
+
     /**
      * stat 工作区文件大小（present_file 交付前置的快速拒绝，issue #345）：经 execd
      * directories/list 列父目录、按 basename 定位 EntryInfo.size（结构化元数据，无 shell
