@@ -102,6 +102,25 @@ public class ScopedFingerprintStore {
         return slot.substring(sep + 1);
     }
 
+    /**
+     * 清除某沙箱代某 scope 的共享层记账（同 Pod prune 其它 scope 后调用，issue #416）：
+     * 单槽语义下仅当槽指向该 scope 时 DEL——其他 scope 无共享记账可清；失败仅告警。
+     */
+    public void remove(String sandboxId, String scope) {
+        if (facade == null || sandboxId == null || sandboxId.isBlank() || scope == null
+                || scope.isBlank()) {
+            return;
+        }
+        try {
+            String slot = slot(sandboxId);
+            if (slot != null && slot.startsWith(scope + "|")) {
+                facade.sync().del(key(sandboxId));
+            }
+        } catch (RedisException | IllegalStateException e) {
+            log.warn("[scoped-fp-store] remove failed ({}|{}): {}", sandboxId, scope, e.getMessage());
+        }
+    }
+
     /** 记录已投放指纹（投放成功后调用）：单槽 {@code scope|value} 原子覆盖；失败仅告警 */
     public void put(String sandboxId, String scope, String value) {
         if (facade == null || sandboxId == null || sandboxId.isBlank() || scope == null

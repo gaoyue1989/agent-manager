@@ -2813,6 +2813,97 @@ class OpenSandboxTest {
     }
 
     @Test
+    void farmPruneShouldClearPrunedScopeAccounting() throws Exception {
+        // issue #416：同 Pod prune 其它 scope 目录后，其记账（Pod 级 + 共享层 + 现役槽）必须
+        // 同步清除——否则切回该 scope 时稳态判定（记账==指纹 && 现役==scope）恒 true，容器内
+        // 目录已被 prune 删除而软链不再重建（稳态短路锁死）。同时 ERR- 收敛不得 mark 现役
+        // scope（不写「从未成功投放」的错误事实，实现于 hydrate 收敛记账段）
+        var host = java.nio.file.Files.createTempDirectory("farm-prune");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-prune-cfg");
+        bundleSkill(cfg, "demo-a");
+        var healthySvc = bundleServiceLive(cfg);
+        var version = healthySvc.currentVersion().version();
+        var osb = farmOsb("v-" + version);
+        var spec = new OpenSandboxFilesystemSpec();
+        String id = "sbx-farm-prune";
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
+        // call1：scope A 健康收敛（记账 A + mark A）
+        var call1 = new OpenSandbox(farmState(host, id), osb, farmOptions(healthySvc, registry, null),
+            null, null, spec);
+        bindFarmSession(call1, "sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+        assertEquals("sess-A", spec.hydratedScopedScope(id), "健康收敛后记账现役 scope");
+        assertNotNull(spec.scopedSkillCacheFingerprint(id, "sess-A",
+            OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM), "scope A 记账存在");
+
+        // call2：scope B 健康收敛——prune 删除 A 目录，其记账必须同步清除
+        var call2 = new OpenSandbox(farmState(host, id), osb, farmOptions(healthySvc, registry, null),
+            null, null, spec);
+        bindFarmSession(call2, "sess-B");
+        call2.exec(RuntimeContext.builder().userId("sess-B").build(), "ls /workspace/.skills-cache", 30);
+        assertEquals("sess-B", spec.hydratedScopedScope(id), "scope B 健康收敛记账现役 scope");
+        assertNull(spec.scopedSkillCacheFingerprint(id, "sess-A",
+            OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "issue #416：被 prune scope 的记账必须同步清除（否则切回稳态锁死）");
+
+        // call3：切回 A——记账已清 → 必触发重收敛并建链（不被旧记账稳态锁死）
+        var beforeCaptor = ArgumentCaptor.forClass(String.class);
+        verify(osb.commands(), atLeastOnce()).run(beforeCaptor.capture());
+        var beforeCall3 = beforeCaptor.getAllValues().size();
+        var call3 = new OpenSandbox(farmState(host, id), osb, farmOptions(healthySvc, registry, null),
+            null, null, spec);
+        bindFarmSession(call3, "sess-A");
+        call3.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+        var afterCaptor = ArgumentCaptor.forClass(String.class);
+        verify(osb.commands(), atLeastOnce()).run(afterCaptor.capture());
+        var added = String.join("\n---\n", afterCaptor.getAllValues().subList(beforeCall3, afterCaptor.getAllValues().size()));
+        assertTrue(added.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a'"),
+            "切回 A 必须重收敛建链（不被旧记账稳态锁死）：" + added);
+    }
+
+    @Test
+    void farmTtlEdgeShouldUseSingleVersionSnapshot() throws Exception {
+        // issue #416a：hydrate 多次读取 currentVersion（指纹一次 + 候选两次，5s TTL 内
+        // 缓存过期重算即分裂）——首次健康 V、随后 ERR+空清单的组合会以健康指纹执行孤儿
+        // 差集，空候选把 scope 内有效软链删光且记账稳态锁死。快照单次读取：指纹/候选/
+        // 禁用判定同源，且 ERR- 统一视为指纹未知（不建链不清链不记账）
+        var host = java.nio.file.Files.createTempDirectory("farm-ttl");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var svc = org.mockito.Mockito.mock(SkillBundleService.class);
+        var healthy = new SkillBundleService.SkillVersion("aaaaaaaaaaaaaaaa", 1, 9,
+            java.util.List.of("demo-a"));
+        // 前 2 次读返回健康 V（decideMode 判定 1 次 + hydrate 快照 1 次），此后全部 ERR
+        // （模拟 TTL 过期重算失败）——修复前 hydrate 内再读 2 次（指纹+候选）拿到空清单，
+        // 指纹却仍是首读的健康 V，健康指纹+空候选的孤儿差集删光软链
+        var err = new SkillBundleService.SkillVersion(
+            SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, java.util.List.of());
+        org.mockito.Mockito.when(svc.currentVersion()).thenReturn(healthy, healthy, err, err);
+        var osb = farmOsb("v-" + healthy.version());
+        var spec = new OpenSandboxFilesystemSpec();
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-ttl"), osb,
+            farmOptions(svc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            null, null, spec);
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var captor = ArgumentCaptor.forClass(String.class);
+        verify(osb.commands(), atLeastOnce()).run(captor.capture());
+        var all = String.join("\n---\n", captor.getAllValues());
+        assertTrue(all.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a'"),
+            "快照健康 V：候选与指纹同源，demo-a 正常建链：" + all);
+        // 快照同源的判据：孤儿差集的保护名单（case '|'）必须含快照候选 demo-a——修复前
+        // 指纹取首读健康 V、候选取后续 ERR 空清单，差集段为空候选形态（case '|'），demo-a
+        // 会被当孤儿删除
+        assertTrue(all.contains("case '|oaf-package/demo-a|'"),
+            "issue #416：孤儿差集保护名单必须含快照候选（指纹/候选同源），否则有效软链被删：" + all);
+        // decideMode 判定 1 次 + hydrate 快照 1 次；修复前 hydrate 内再读 2 次（共 4）
+        org.mockito.Mockito.verify(svc, org.mockito.Mockito.atMost(2)).currentVersion();
+    }
+
+    @Test
     void farmEndpointHealthyWithNoSkillsShouldStillWipeOrphanLinks() throws Exception {
         // 对照（防回归）：端点健康但零技能（包技能真实移除场景）→ 空候选孤儿差集必须照常
         // 执行（删链是设计的 §6.2-3 语义，issue #355 只豁免指纹未知分支）

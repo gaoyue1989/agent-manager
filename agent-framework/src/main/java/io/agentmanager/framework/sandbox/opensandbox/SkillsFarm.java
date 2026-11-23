@@ -241,16 +241,6 @@ final class SkillsFarm {
         return List.copyOf(candidates);
     }
 
-    /** 端点 enabled 技能名单（D-4 缓存内；异常上抛由 {@link #hydrate} 归为指纹未知走收敛——
-     *  ERR- 空清单的收敛跳过孤儿差集（issue #355），指纹健康下的空候选（真实移除）照删） */
-    private List<String> endpointSkillNames() {
-        var svc = options != null ? options.getSkillBundleService() : null;
-        if (svc == null) {
-            throw new IllegalStateException("skill bundle service unwired");
-        }
-        return svc.currentVersion().skills();
-    }
-
     /**
      * 软链农场投放（规则 1-5，单条 exec 幂等收敛）：对 manifest 内的包技能路径有全权——
      * 目标态为软链 {@code <store>/CURRENT/<skill>}（B-4 间接寻址不钉版本目录），路径现存任何物
@@ -260,7 +250,7 @@ final class SkillsFarm {
      * prune 与禁用清理复用容器内清理语义。exec 失败上抛（CAS 复位，下次触发重试），判定不变。
      *
      * <p><b>稳态短路（D-10，设计修订否决原 H2「每次触发收敛」口径）</b>：稳态指纹 =
-     * {@link #farmFingerprint}（端点版本 + L4 revision，PR-4b 拆分后包内容身份唯一 SSOT 在
+     * 端点版本 + L4 revision（PR-4b 拆分后包内容身份唯一 SSOT 在
      * 端点侧）+ sandboxId 代际记账（复用 scoped 指纹表，Pod 级 miss 经跨副本共享层兜底），记账带
      * farm 模式分量（D-11：本代降级会话的记账不满足 farm 稳态——降级↔farm 翻转后代际必须重收敛，
      * 把降级残留真实文件副本替换为软链，D-2/§6.2-4）。指纹未变且本沙箱代已收敛过当前 scope →
@@ -270,19 +260,37 @@ final class SkillsFarm {
      * per-call 容器侧标记兜底被否决（观测容器态本身即 1 次 exec RTT）。
      */
     private void hydrate(String scope, SkillSyncGate gate, String uid) throws Exception {
-        String fingerprint;
+        // 端点状态单次快照（issue #416）：指纹 / 候选名单 / 禁用判定同源同一 SkillVersion——
+        // 多次读取在 D-4 TTL 边界会分裂（首次健康 V、缓存过期重算失败 ERR+空清单），健康指纹
+        // + 空候选的孤儿差集会删光 scope 内有效软链且记账稳态锁死。快照为 null（svc 缺失/异常）
+        // 或 ERR- 版本统一视为指纹未知：不建链、不清链（孤儿差集跳过，issue #355）、不记账
+        SkillBundleService.SkillVersion snapshot;
         try {
+            var svc = options != null ? options.getSkillBundleService() : null;
+            if (svc == null) {
+                throw new IllegalStateException("skill bundle service unwired");
+            }
+            snapshot = svc.currentVersion();
+        } catch (Exception e) {
+            log.warn("[sandbox-open] skills farm endpoint snapshot unavailable ({}), converging anyway "
+                + "(orphan diff skipped)", e.getMessage());
+            snapshot = null;
+        }
+        boolean endpointHealthy = snapshot != null
+            && !snapshot.version().startsWith(SkillBundleService.ERROR_VERSION_PREFIX);
+        String fingerprint;
+        if (endpointHealthy) {
             // uid 整链路传递（issue #399）：tryHydrate 已解析的会话身份（userKey 缺失回退
             // pendingUserKey），不得绕回原始 userKey.get()——延迟投放场景（downloadFile/
-            // statWorkspaceFile/doExec(null)）userKey 未绑定，null 会让 farmFingerprint 丢
-            // L4 revision 分量、disabledSkillNames 用户级禁用判定恒 false
-            fingerprint = farmFingerprint(uid);
-        } catch (Exception e) {
-            // 端点瞬时不可达：无法判定稳态 → 仍收敛，但孤儿差集跳过（issue #355：ERR- 空清单
-            // 的差集会删光有效软链且无法恢复）——保留现状等恢复；不记账（record 对 null 指纹
-            // 为 no-op），下次触发重新判定
-            log.warn("[sandbox-open] skills farm fingerprint unavailable ({}), converging anyway "
-                + "(orphan diff skipped)", e.getMessage());
+            // statWorkspaceFile/doExec(null)）userKey 未绑定，null 会丢 L4 revision 分量、
+            // 用户级禁用判定恒 false
+            String revision = "";
+            if (workspaceReader != null && uid != null && !uid.isBlank()) {
+                var rev = workspaceReader.readUserSkillRevision(uid);
+                revision = rev == null ? "" : rev;
+            }
+            fingerprint = snapshot.version() + "|" + revision;
+        } else {
             fingerprint = null;
         }
         String id = sandboxId.get();
@@ -295,8 +303,9 @@ final class SkillsFarm {
             log.debug("[sandbox-open] skills farm fingerprint unchanged ({}), skipping converge", scope);
             return;
         }
+        var manifest = endpointHealthy ? snapshot.skills() : List.<String>of();
         var disabledNames = disabledSkillNames(
-            options.getSkillDisabledChecker(), uid, endpointSkillNames());
+            options.getSkillDisabledChecker(), uid, manifest);
         // l4Names 快照刷新（issue #399）：非稳态（指纹变化含 L4 revision bump / 模式翻转 /
         // 新沙箱代）到达此处即需重收敛——仍用首判定冻结的快照会让「删除同名 L4 覆盖」后的
         // 包技能永不建链。重新 capture 并回写 gate（farm 分量保持 true）；稳态短路路径不经过
@@ -306,7 +315,7 @@ final class SkillsFarm {
             gate.setSkillFarmState(new SkillSyncGate.SkillFarmState(true, l4Names));
         }
         var linkCmd = new StringBuilder();
-        var candidates = linkCandidates(endpointSkillNames(), disabledNames, l4Names);
+        var candidates = linkCandidates(manifest, disabledNames, l4Names);
         for (var rel : candidates) {
             if (linkCmd.length() > 0) {
                 linkCmd.append(" && ");
@@ -342,10 +351,17 @@ final class SkillsFarm {
                 "hydrateSkillsFarm", "skills farm converge failed with exit " + execution.getExitCode(), null);
         }
         // 收敛成功才记账（失败不记账：下次触发重收敛），带 farm 模式分量；指纹未知（端点瞬时
-        // 不可达）时 record 对 null 指纹 no-op——下次触发重新判定稳态
+        // 不可达）时 record 对 null 指纹 no-op，且不得 mark 现役 scope（issue #416）：本代记账
+        // 与现役 scope 记录会与 prune 后的容器实态脱钩——端点恢复后稳态判定恒 true，软链缺失
+        // 被锁死；不 mark 则恢复后必触发重收敛
         filesystemSpec.recordScopedSkillCacheFingerprint(id, scope,
             OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, fingerprint);
-        filesystemSpec.markHydratedScopedScope(id, scope);
+        if (fingerprint != null) {
+            filesystemSpec.markHydratedScopedScope(id, scope);
+        }
+        // prune 已删除非现役 scope 目录（issue #416）：其记账必须同步清除，否则切回时稳态
+        // 判定（记账==指纹 && 现役==scope）恒 true，软链缺失被稳态短路锁死
+        filesystemSpec.pruneScopedSkillCacheFingerprintsExcept(id, scope);
     }
 
     /**
@@ -375,26 +391,6 @@ final class SkillsFarm {
      * stat 包目录——「包指纹逻辑整体移交端点侧」；L4 revision 覆盖用户维度（用户级禁用/
      * 同名变化经 revision bump 进指纹）。端点版本经 D-4 singleflight+TTL 缓存且 decideMode
      * 已在取，稳态短路零额外开销。异常上抛由 {@link #hydrate} 归为「指纹未知」→ 收敛不记账。
-     * 升级窗口：存量记账值（旧「包 stat|revision」口径）与新口径天然不等 → 首轮触发一次
-     * 重收敛（与 D-11 无模式存量同姿态，无需迁移）。
-     */
-    private String farmFingerprint(String uid) throws Exception {
-        var svc = options != null ? options.getSkillBundleService() : null;
-        if (svc == null) {
-            throw new IllegalStateException("skill bundle service unwired");
-        }
-        var version = svc.currentVersion().version();
-        if (version == null || version.startsWith(SkillBundleService.ERROR_VERSION_PREFIX)) {
-            throw new IllegalStateException("skill bundle endpoint unavailable (version=" + version + ")");
-        }
-        String revision = "";
-        if (workspaceReader != null && uid != null && !uid.isBlank()) {
-            var rev = workspaceReader.readUserSkillRevision(uid);
-            revision = rev == null ? "" : rev;
-        }
-        return version + "|" + revision;
-    }
-
     /**
      * 禁用技能名解析（oa-1110-repro-fixes-design §2.1a；端点 manifest 制后按名单逐名判定）：
      * 包级禁用名 + 用户级禁用，返回禁用名集。checker 缺失返回空集；用户级判定异常按
