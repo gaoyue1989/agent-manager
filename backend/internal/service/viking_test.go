@@ -49,15 +49,25 @@ type fakeOpenViking struct {
 
 func (f *fakeOpenViking) recordCreate() { f.mu.Lock(); f.creates++; f.mu.Unlock() }
 func (f *fakeOpenViking) recordWrite(uri string) {
-	f.mu.Lock(); f.writeURI = append(f.writeURI, uri); f.mu.Unlock()
+	f.mu.Lock()
+	f.writeURI = append(f.writeURI, uri)
+	f.mu.Unlock()
 }
 func (f *fakeOpenViking) recordBrowse(uri string) {
-	f.mu.Lock(); f.browseURI = append(f.browseURI, uri); f.mu.Unlock()
+	f.mu.Lock()
+	f.browseURI = append(f.browseURI, uri)
+	f.mu.Unlock()
 }
 func (f *fakeOpenViking) createCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.creates }
-func (f *fakeOpenViking) uris() []string   { f.mu.Lock(); defer f.mu.Unlock(); return append([]string{}, f.writeURI...) }
+func (f *fakeOpenViking) uris() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.writeURI...)
+}
 func (f *fakeOpenViking) browseURIs() []string {
-	f.mu.Lock(); defer f.mu.Unlock(); return append([]string{}, f.browseURI...)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.browseURI...)
 }
 func (f *fakeOpenViking) resetBrowse() { f.mu.Lock(); f.browseURI = nil; f.mu.Unlock() }
 
@@ -159,8 +169,8 @@ func TestPublishWithOpenVikingProvision(t *testing.T) {
 	core, baseURL := newVikingTestCore(t, fake.handler(true))
 
 	zip := buildTestZip(map[string]string{
-		"AGENTS.md":          testAgentsMD,
-		"knowledge/guide.md": "# 指南\n平台发布流程说明",
+		"AGENTS.md":             testAgentsMD,
+		"knowledge/guide.md":    "# 指南\n平台发布流程说明",
 		"skills/greet/SKILL.md": "---\nname: greet\ndescription: 打招呼技能\n---\n\n说你好。",
 	})
 	pkg, err := core.Packages.Upload("demo.zip", bytesReader(zip))
@@ -596,5 +606,48 @@ func TestMemoryBrowseURINormalization(t *testing.T) {
 	// ⑤ 白名单闸门语义不变：非 ~/ 且非 user/ 形态仍拒绝
 	if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://resources/x"); err == nil {
 		t.Fatalf("non-home non-user uri must stay rejected by whitelist")
+	}
+}
+
+// 路径穿越段拒绝（issue #420）：`..`/`%2e%2e` 段在白名单闸门之前拦截，绝不代理给
+// 上游——viking://~/../ 与自有 user/{uid}/../ 前缀改写后仍含穿越段，前缀闸门拦不住；
+// 文件名中的点（a..b/.hidden）与合法单段不受影响。
+func TestMemoryBrowseRejectsPathTraversal(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, _ := newVikingTestCore(t, fake.handler(true))
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", WorkspaceID: 7})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+
+	for _, uri := range []string{
+		"viking://~/../u-9999/memories",                // 前缀改写后的越权形态（他人空间）
+		"viking://~/../../resources/acme/secret.md",    // 越出本人空间根
+		"viking://user/u-1001/../u-9999/memories",      // 自有展开形态夹带穿越段
+		"viking://~/memories/%2e%2e/u-9999/secrets.md", // 百分号编码穿越段
+		"viking://~/memories/%2E%2E/plan.md",           // 大小写变体
+	} {
+		fake.resetBrowse()
+		if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", uri); err == nil {
+			t.Fatalf("traversal uri must be rejected: %s", uri)
+		}
+		if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "read", uri); err == nil {
+			t.Fatalf("traversal uri must be rejected on read too: %s", uri)
+		}
+		if got := fake.browseURIs(); len(got) != 0 {
+			t.Fatalf("traversal uri %s must never reach upstream, got %v", uri, got)
+		}
+	}
+
+	// 文件名中的点不是穿越段：合法 URI 照常代理
+	fake.resetBrowse()
+	if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "read", "viking://~/memories/a..b.md"); err != nil {
+		t.Fatalf("dots inside filename must not be rejected: %v", err)
+	}
+	if got := fake.browseURIs(); len(got) != 1 || got[0] != "viking://~/memories/a..b.md" {
+		t.Fatalf("legit uri must reach upstream verbatim, got %v", got)
 	}
 }

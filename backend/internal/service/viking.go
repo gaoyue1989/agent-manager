@@ -433,8 +433,9 @@ func (c *Core) AdminMemorySupply(keyword string) ([]MemorySupplyItem, error) {
 // 身份：userId = u-{uid}（与数据面 X-User-Id 同源），key 本地推导；uri 双向归一到
 // viking://~/ 本人空间单一口径（issue #374）：入参接受 ~/ 契约口径与自有 user/{uid}
 // 展开形态（外部服务原生形态），出参 list 条目统一改写为 ~/ 形态（read 纯文本透传）。
-// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；他人 user/{uid} 形态一律
-// ErrInvalidForm 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
+// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；穿越段（../、%2e%2e）在闸门
+// 之前拒绝、绝不代理上游（issue #420）；他人 user/{uid} 形态一律 ErrInvalidForm
+// 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
 // （fail-soft 由前端呈现空态）。
 func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri string) (json.RawMessage, error) {
 	if _, err := c.ConsoleAgentDetail(workspaceID, serviceID); err != nil {
@@ -447,6 +448,9 @@ func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri
 	ownUserPrefix := "viking://user/" + ownID + "/"
 	uri, err := vikingNormalizeBrowseInput(uri, ownUserPrefix)
 	if err != nil {
+		return nil, err
+	}
+	if err := vikingRejectTraversalSegments(uri); err != nil {
 		return nil, err
 	}
 	const prefix = "viking://~/"
@@ -497,6 +501,20 @@ func vikingNormalizeBrowseInput(uri, ownUserPrefix string) (string, error) {
 	}
 	return "", fmt.Errorf("%w: uri %q is not own space, expected prefix %s",
 		ErrInvalidForm, uri, strings.TrimSuffix(ownUserPrefix, "/"))
+}
+
+// vikingRejectTraversalSegments 拒绝路径穿越段（issue #420）：任一路径段为 `..` 或
+// 其百分号编码形态（%2e%2e，大小写不敏感）即 ErrInvalidForm。~/ 前缀闸门只验首段
+// 形态，`viking://~/../u-9999/…`（含自有 user/{uid}/../ 改写产物）会带着穿越段通过
+// 并被代理上游——仅本人空间闸门可被越权；段级精确匹配不误伤文件名中的点（a..b）。
+func vikingRejectTraversalSegments(uri string) error {
+	rest, _ := strings.CutPrefix(uri, "viking://~/")
+	for _, seg := range strings.Split(rest, "/") {
+		if seg == ".." || strings.EqualFold(seg, "%2e%2e") {
+			return fmt.Errorf("%w: uri %q contains path traversal segment %q", ErrInvalidForm, uri, seg)
+		}
+	}
+	return nil
 }
 
 // vikingNormalizeListOutput 出参条目 URI 归一（仅 action=list，issue #374）：OpenViking
