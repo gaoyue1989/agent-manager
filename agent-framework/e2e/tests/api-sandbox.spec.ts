@@ -485,6 +485,32 @@ test('X21 会话隔离：上传件 bind-at-use，不跨 session 重放（issue #
   }
 });
 
+test('X21b 上传越权：他人 session 调 /files/upload → 404 session_not_found（issue #411）', async () => {
+  // upload 侧归属校验：uidA 已 chat 的 session（session_user 有映射）对 uidB 不可上传——
+  // 否则 uidB 可借 upload(sessionId=sidA) 把文件挂进 uidA 会话，沙箱注入面越权。
+  // 404 口径对齐 SessionAccessGuard「不泄露会话存在性」
+  const uidA = U();
+  const uidB = U();
+  const sidA = sessionIdFor(`x21b-a-${uniq()}`);
+  const streamA = chat({ message: `[E2E:plain]`, userId: uidA, sessionId: sidA });
+  await waitTerminal(streamA);
+  expect(streamA.terminal?.type).toBe('done');
+
+  const foreign = await upload(BASE, textBytes('intruder'), `bad-${uniq()}.txt`, 'text/plain',
+    { userId: uidB, sessionId: sidA });
+  expect(foreign.status).toBe(404);
+  expect((foreign.body as Record<string, string>).error).toBe('session_not_found');
+
+  // 兼容回归：uidB 带自己的 session（先 chat 认领再上传）→ 200
+  const sidB = sessionIdFor(`x21b-b-${uniq()}`);
+  const streamB = chat({ message: `[E2E:plain]`, userId: uidB, sessionId: sidB });
+  await waitTerminal(streamB);
+  expect(streamB.terminal?.type).toBe('done');
+  const own = await upload(BASE, textBytes('ok'), `own-${uniq()}.txt`, 'text/plain',
+    { userId: uidB, sessionId: sidB });
+  expect(own.status).toBe(200);
+});
+
 test('X22 容器换代幂等重放：同路径重注入，无 _N 漂移（issue #345）', async () => {
   const uid = U();
   const name = `replay-${uniq()}.txt`;
