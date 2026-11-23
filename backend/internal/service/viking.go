@@ -433,8 +433,9 @@ func (c *Core) AdminMemorySupply(keyword string) ([]MemorySupplyItem, error) {
 // 身份：userId = u-{uid}（与数据面 X-User-Id 同源），key 本地推导；uri 双向归一到
 // viking://~/ 本人空间单一口径（issue #374）：入参接受 ~/ 契约口径与自有 user/{uid}
 // 展开形态（外部服务原生形态），出参 list 条目统一改写为 ~/ 形态（read 纯文本透传）。
-// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；他人 user/{uid} 形态一律
-// ErrInvalidForm 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
+// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；穿越段（../、%2e%2e）在闸门
+// 之前拒绝、绝不代理上游（issue #420）；他人 user/{uid} 形态一律 ErrInvalidForm
+// 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
 // （fail-soft 由前端呈现空态）。
 func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri string) (json.RawMessage, error) {
 	if _, err := c.ConsoleAgentDetail(workspaceID, serviceID); err != nil {
