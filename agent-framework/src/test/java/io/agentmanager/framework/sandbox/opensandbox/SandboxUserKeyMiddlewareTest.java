@@ -257,6 +257,53 @@ class SandboxUserKeyMiddlewareTest {
     }
 
     @Test
+    void shouldSkipGenerationResetWhenSharedResetMarkHitsCrossReplica() {
+        // 评审 g1（issue #413）：会话轮转到新副本/Pod 重启/LRU 淘汰丢 Pod 级换代标记 →
+        // 共享层命中 = 同代已 reset → 跳过 reset+invalidate。否则 DB 行回滚 pending →
+        // 原始上传字节重注入覆写容器内已被 agent 修改的文件（静默数据丢失，违反架构
+        // 原则二「任意请求可落任意副本」）
+        var spec = new OpenSandboxFilesystemSpec();
+        var shared = mock(ResetMarkStore.class);
+        when(shared.marked("front-sid", "sbx-gen-9")).thenReturn(true);
+        spec.resetMarkStore(shared);
+        var sandbox = mockSandbox("sbx-gen-9");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        spec.fileAssetStore(store);
+        var sessionStore = mock(SessionUserStore.class);
+        when(sessionStore.findUserIdBySession(anyString())).thenReturn(null);
+        when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
+
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+
+        verify(store, never()).resetInjectedToPending(anyString());
+        verify(sandbox, never()).invalidatePendingUploadMemo();
+        verify(sandbox).injectPendingUploads();
+    }
+
+    @Test
+    void generationResetShouldRecordSharedMarkForOtherReplicas() {
+        // reset 决策落定即共享层双写：他副本/重启后凭 mark 跳过同代重复 reset
+        var spec = new OpenSandboxFilesystemSpec();
+        var shared = mock(ResetMarkStore.class);
+        when(shared.marked(anyString(), anyString())).thenReturn(false);
+        spec.resetMarkStore(shared);
+        var sandbox = mockSandbox("sbx-gen-10");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        when(store.resetInjectedToPending("front-sid")).thenReturn(1);
+        spec.fileAssetStore(store);
+        var sessionStore = mock(SessionUserStore.class);
+        when(sessionStore.findUserIdBySession(anyString())).thenReturn(null);
+        when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
+
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+
+        verify(store).resetInjectedToPending("front-sid");
+        verify(shared).mark("front-sid", "sbx-gen-10");
+    }
+
+    @Test
     void shouldBindOnlyItsOwnTurnSandboxUnderConcurrency() {
         // 并发串沙箱回归：两个并发 turn 各自 ctx 持有自己的沙箱，onAgent 只重绑本 turn 的沙箱
         // （历史上 spec.latestSandbox 进程级指针会被其他用户 create/resume 覆盖 → 误绑他人沙箱）

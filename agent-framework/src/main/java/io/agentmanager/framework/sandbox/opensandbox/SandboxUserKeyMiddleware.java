@@ -91,6 +91,9 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
                     // 本 turn 重新注入；按会话单条件回滚（issue #345，user 维度会波及他 session 行）。
                     // 同沙箱代重复 onAgent（多实例竞争）不再 reset，防循环；换代索引按会话键
                     // （issue #413：旧 userKey 键被同用户他会话翻转 → 回原会话误判换代冗余 reset）。
+                    // 误判换代的代价不是幂等覆写而是数据丢失（原始字节覆盖容器内已修改上传件），
+                    // 跨副本/重启/LRU 淘汰的裁决由 isInjectedOnSandbox 内部经 ResetMarkStore
+                    // 共享层兜住（评审 g1）：命中=同代已 reset，此处整块跳过
                     if (!spec.isInjectedOnSandbox(pendingSessionId, sandboxId)) {
                         var rolledBack = store.resetInjectedToPending(pendingSessionId);
                         // 确有行回滚才失效实例注入备忘（issue #413 B-13a）：wrapReused/resume 换代后

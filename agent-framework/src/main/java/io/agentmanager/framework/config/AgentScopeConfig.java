@@ -124,6 +124,14 @@ public class AgentScopeConfig {
         // 直接组键会让 USER 串行化退化为每会话一把，2026-10-16 实测确认）；无 store 时回退原值
         // 2026-10-21：per-session agent 隔离开启后 slot 已按会话分（Channel=前端 sid），锁粒度
         // 跟随 slot（sessionGranularLocks=true），否则同用户多会话在各自独立 slot 上互相排队
+        // 换代 reset 记账跨副本共享层（issue #413 评审 g1）：「(会话, 沙箱代) 已 reset」放 Redis，
+        // 会话轮转到新副本/Pod 重启/LRU 淘汰丢 Pod 级标记后不再误判换代——否则 DB 行回滚 +
+        // 重注入以原始上传字节覆写容器内已被 agent 修改的上传件（静默数据丢失）；fail-open
+        // 同 ScopedFingerprintStore（不可用回落 Pod 级=现行为，重复 reset 幂等不漏注入）
+        var sandboxRedisFacade = redisFacadeProvider.getIfAvailable();
+        if (sandboxRedisFacade != null) {
+            spec.resetMarkStore(new io.agentmanager.framework.sandbox.opensandbox.ResetMarkStore(sandboxRedisFacade));
+        }
         var guardEnabled = sandboxRuntime.guardEnabled();
         io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard guard = null;
         if (guardEnabled) {

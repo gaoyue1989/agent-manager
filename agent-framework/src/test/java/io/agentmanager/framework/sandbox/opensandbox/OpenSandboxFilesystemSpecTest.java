@@ -96,6 +96,45 @@ class OpenSandboxFilesystemSpecTest {
         assertFalse(spec.isInjectedOnSandbox("sess-c", "sbx-a"), "第三会话独立");
     }
 
+    @Test
+    void sharedResetMarkHitShouldBackfillPodIndexAndSkipRecheck() {
+        // 评审 g1（issue #413）：换代索引 Pod 级 miss（跨副本轮转/Pod 重启/LRU 淘汰）→
+        // 共享层命中 = 该 (会话, 沙箱代) 已 reset → 判定换代，命中回填 Pod 级索引
+        // （此后共享层不可用仍维持稳态判定，不再逐 turn 查 Redis）
+        var shared = org.mockito.Mockito.mock(ResetMarkStore.class);
+        org.mockito.Mockito.when(shared.marked("sess-a", "sbx-1")).thenReturn(true);
+        var spec = new OpenSandboxFilesystemSpec().resetMarkStore(shared);
+
+        assertTrue(spec.isInjectedOnSandbox("sess-a", "sbx-1"), "共享层命中=该代已 reset（跨副本/重启不丢）");
+        assertTrue(spec.isInjectedOnSandbox("sess-a", "sbx-1"), "命中回填 Pod 级索引");
+        org.mockito.Mockito.verify(shared, org.mockito.Mockito.times(1)).marked("sess-a", "sbx-1");
+        assertFalse(spec.isInjectedOnSandbox("sess-b", "sbx-1"), "未记账对=未知");
+        org.mockito.Mockito.verify(shared).marked("sess-b", "sbx-1");
+    }
+
+    @Test
+    void markInjectedOnSandboxShouldRecordSharedMark() {
+        // reset 决策落定即双写（Pod 级 + 共享层）：他副本/重启后凭共享层跳过同代重复 reset
+        var shared = org.mockito.Mockito.mock(ResetMarkStore.class);
+        var spec = new OpenSandboxFilesystemSpec().resetMarkStore(shared);
+
+        spec.markInjectedOnSandbox("sess-a", "sbx-1");
+
+        assertTrue(spec.isInjectedOnSandbox("sess-a", "sbx-1"));
+        org.mockito.Mockito.verify(shared).mark("sess-a", "sbx-1");
+    }
+
+    @Test
+    void noopResetMarkStoreKeepsPurePodLocalBehavior() {
+        // 未装配共享层（无 Redis）：行为回到纯 Pod 级（与 ScopedFingerprintStore.NOOP 同姿态）
+        var spec = new OpenSandboxFilesystemSpec();
+
+        assertFalse(spec.isInjectedOnSandbox("sess-a", "sbx-a"));
+        spec.markInjectedOnSandbox("sess-a", "sbx-a");
+        assertTrue(spec.isInjectedOnSandbox("sess-a", "sbx-a"));
+        assertFalse(spec.isInjectedOnSandbox("sess-b", "sbx-a"));
+    }
+
     // ==================== Pod 级缓存表（稳态短路记账 / P1 护栏） ====================
 
     @Test
