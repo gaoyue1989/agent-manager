@@ -2224,7 +2224,8 @@ class OpenSandboxTest {
         var host = java.nio.file.Files.createTempDirectory("farm-err-endpoint");
         writeHostSkill(host, "sess-A", "demo-a");
         var svc = mock(SkillBundleService.class);
-        when(svc.currentVersion()).thenReturn(new SkillBundleService.SkillVersion("ERR-123456", 0, 0L));
+        when(svc.currentVersion())
+            .thenReturn(new SkillBundleService.SkillVersion("ERR-123456", 0, 0, 0L, java.util.List.of()));
         var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         var osb = farmOsb("v-0123456789abcdef", true);
 
@@ -2855,7 +2856,7 @@ class OpenSandboxTest {
         var brokenSvc = org.mockito.Mockito.mock(SkillBundleService.class);
         org.mockito.Mockito.when(brokenSvc.currentVersion())
             .thenReturn(new SkillBundleService.SkillVersion(
-                SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, java.util.List.of()));
+                SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, 0, java.util.List.of()));
         var call2 = new OpenSandbox(farmState(host, "sbx-farm-err"), osb,
             farmOptions(brokenSvc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
             null, null, spec);
@@ -2934,13 +2935,13 @@ class OpenSandboxTest {
         var host = java.nio.file.Files.createTempDirectory("farm-ttl");
         writeHostSkill(host, "sess-A", "demo-a");
         var svc = org.mockito.Mockito.mock(SkillBundleService.class);
-        var healthy = new SkillBundleService.SkillVersion("aaaaaaaaaaaaaaaa", 1, 9,
+        var healthy = new SkillBundleService.SkillVersion("aaaaaaaaaaaaaaaa", 1, 1, 9,
             java.util.List.of("demo-a"));
         // 前 2 次读返回健康 V（decideMode 判定 1 次 + hydrate 快照 1 次），此后全部 ERR
         // （模拟 TTL 过期重算失败）——修复前 hydrate 内再读 2 次（指纹+候选）拿到空清单，
         // 指纹却仍是首读的健康 V，健康指纹+空候选的孤儿差集删光软链
         var err = new SkillBundleService.SkillVersion(
-            SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, java.util.List.of());
+            SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, 0, java.util.List.of());
         org.mockito.Mockito.when(svc.currentVersion()).thenReturn(healthy, healthy, err, err);
         var osb = farmOsb("v-" + healthy.version());
         var spec = new OpenSandboxFilesystemSpec();

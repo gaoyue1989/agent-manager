@@ -109,7 +109,7 @@ public record SandboxConfig(
             projectionEnabled, guardEnabled, guardLeaseSeconds,
             skillRevisionGateEnabled, syncSnapshotDiffEnabled,
             true, sessionAgentIsolation, sessionAgentCacheMax, sessionAgentCacheTtlMinutes,
-            "", "/tmp/skills-bundle-cache", "", opensandbox);
+            "", "", "", opensandbox);
     }
 
     /**
@@ -132,7 +132,7 @@ public record SandboxConfig(
             skillRevisionGateEnabled, syncSnapshotDiffEnabled,
             syncSkipPackageBaselineEnabled, sessionAgentIsolation, sessionAgentCacheMax,
             sessionAgentCacheTtlMinutes,
-            "", "/tmp/skills-bundle-cache", "", opensandbox);
+            "", "", "", opensandbox);
     }
 
     public record OpenSandboxConfig(

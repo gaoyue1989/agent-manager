@@ -44,6 +44,8 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private SkillBundleService skillBundleService;
     /** 农场判定打点（D-5）；null = 不打点 */
     private volatile io.micrometer.core.instrument.MeterRegistry farmMeterRegistry;
+    private boolean skillRevisionGateEnabled = true;
+    private boolean syncSnapshotDiffEnabled = true;
 
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
@@ -391,7 +393,9 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .requestTimeout(requestTimeout)
             .skillsSharedStore(skillsSharedStore)
             .skillBundleService(skillBundleService)
-            .farmMeterRegistry(farmMeterRegistry);
+            .farmMeterRegistry(farmMeterRegistry)
+            .skillRevisionGateEnabled(skillRevisionGateEnabled)
+            .syncSnapshotDiffEnabled(syncSnapshotDiffEnabled);
     }
 
     @Override
@@ -451,6 +455,16 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
 
     public OpenSandboxFilesystemSpec farmMeterRegistry(io.micrometer.core.instrument.MeterRegistry registry) {
         this.farmMeterRegistry = registry;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillRevisionGateEnabled(boolean enabled) {
+        this.skillRevisionGateEnabled = enabled;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec syncSnapshotDiffEnabled(boolean enabled) {
+        this.syncSnapshotDiffEnabled = enabled;
         return this;
     }
 

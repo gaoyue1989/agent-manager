@@ -83,7 +83,8 @@ class SkillBundleServiceTest {
         assertEquals(first.version(), second.version());
         assertEquals(16, first.version().length());
         assertTrue(first.version().matches("[0-9a-f]{16}"));
-        assertEquals(3, first.skillCount());
+        assertEquals(2, first.skillCount());
+        assertEquals(3, first.fileCount());
         assertEquals(9 + 9 + 9, first.sizeBytes());
     }
 
@@ -133,7 +134,8 @@ class SkillBundleServiceTest {
 
         var version = service.currentVersion();
 
-        assertEquals(2, version.skillCount());
+        assertEquals(1, version.skillCount());
+        assertEquals(2, version.fileCount());
         assertEquals(9 + 9, version.sizeBytes());
     }
 
@@ -319,6 +321,7 @@ class SkillBundleServiceTest {
         assertTrue(version.version().startsWith(SkillBundleService.ERROR_VERSION_PREFIX),
             "枚举失败必须落 ERR-* 输出约定，实际: " + version.version());
         assertEquals(0, version.skillCount());
+        assertEquals(0, version.fileCount());
     }
 
     @Test
@@ -335,6 +338,7 @@ class SkillBundleServiceTest {
         assertTrue(first.version().matches("[0-9a-f]{16}"),
             "无技能目录应返回稳定空指纹，实际: " + first.version());
         assertEquals(0, first.skillCount());
+        assertEquals(0, first.fileCount());
         assertEquals(List.of(), first.skills());
     }
 
@@ -361,6 +365,7 @@ class SkillBundleServiceTest {
         assertTrue(version.version().matches("[0-9a-f]{16}"),
             "skills 为普通文件应与缺失同口径返回稳定空指纹，实际: " + version.version());
         assertEquals(0, version.skillCount());
+        assertEquals(0, version.fileCount());
         assertEquals(List.of(), version.skills());
     }
 

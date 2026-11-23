@@ -1,6 +1,6 @@
 # 沙箱技能同步守护设计（skills-syncd + 镜像 entrypoint）- 261112
 
-> 状态：**设计定稿并已实施（PR-1~PR-4b 合入，2026-11-14；三轮架构评审意见已吸收，决议 A-1~D-11 见 §13；验收清单见 §10——未回填执行结果，部署与回滚见 docs/deployment.md §五之二→4）**
+> 状态：**设计定稿并已实施（PR-1~PR-4b 合入，2026-11-14；三轮架构评审意见已吸收，决议 A-1~D-11 见 §13；验收清单见 §10，执行状态已按证据回填于 §10.3，部署与回滚见 docs/deployment.md §五之二→4）**
 > 前置调研：本设计经与维护者多轮收敛（备选方案对比：对象存储挂载 / CSI / ZeroFS-NFS / execd 文件 API 推送 / 守护自拉），最终选定「沙箱内定时同步守护 + 镜像 entrypoint」形态。备选方案淘汰理由见 §12。
 
 ## 1. 背景与问题机制
@@ -128,7 +128,7 @@ skills-syncd/
 
 ```
 GET {BASE_URL}/internal/skills/version
-  → 200 {"version": "<sha256[:16]>", "skillCount": 2000, "sizeBytes": 66000000}
+  → 200 {"version": "<sha256[:16]>", "skillCount": <启用技能数>, "fileCount": <文件数>, "sizeBytes": <总字节>}
   ← 401 token 无效
 
 GET {BASE_URL}/internal/skills/bundle?version=<v>
@@ -510,7 +510,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 比较；**禁止**在 Java 侧重算 store 内容的 stat 指纹（跨语言 stat 规则——mtime 精度、tar 解包还原、
 排序——必然漂移，会导致永久误报降级）。版本字符串对守护是不透明 token，单向数据流无重复实现。
 
-纯观测面：acquire 创建软链时记录「store 版本 vs 端点版本」，偏差持续超 3×INTERVAL 打 WARN（不阻断）。
+对账观测由硬校验直接承担（issue #401 修正，原「纯观测面：偏差持续超 3×INTERVAL 打 WARN 不阻断」未实现）：每次农场判定都比对 store `CURRENT` 与端点版本，不一致即降级 `degraded_version_mismatch` + 结构化 ERROR 日志 + D-5 打点——持续偏差表现为该 Counter 持续增长，无独立观测通路。
 
 **判定打点（D-5，本功能第一 SLO）**：会话级二值判定结果落 Micrometer Counter——
 `skills.farm.decision`，tag `result` ∈ {`farm`, `degraded_store_missing`, `degraded_version_mismatch`,
@@ -602,6 +602,11 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 ### 10.3 真实环境验收（kind 集群）
 
+> 执行状态回填（issue #401，2026-11-23）：**7 已实测**——issue #394 翻译层软链透明性落地时把关，
+> 跳链判据契约由单测钉死（§6.2/§6.3 补记）；**8 持续回归**——CI job「E2E 沙箱生命周期（L 组）」
+> （agent-framework-ci，观察期转必需中）；**其余 10 项未见专项执行记录**，依赖含技能包服务的
+> 真实池化环境，随下次集群专项验收回填。
+
 1. 发布含技能的服务 → 池 warm pod 起后 ≤INTERVAL 内 `/skills-store/CURRENT` 就绪
 2. 会话开始：首命令触及技能路径，断言符号链接生效、技能脚本可执行（bash/python 对 symlink 透明）
 3. 改包发新版 → ≤INTERVAL+会话粒度 内新会话用新版、旧会话不受扰动
@@ -683,7 +688,7 @@ P0-1/P1-3 机制对用户技能维度继续生效。**PR-4b 之后的回滚语�
 | 池名派生/硬校验 | preset 校验 + §7.2 readlink 字符串比较 | §5.2/§7.2 |
 | D-1 模板-镜像偏斜守卫 | preset args 内联 launcher 存在性检查，缺失时 exec 原命令——偏斜退化为无守护运行，防 warm pod crashloop | §5.2 |
 | D-2 农场管辖与残留收敛 | manifest 内包技能路径农场全权收敛为软链（含降级 tar 残留）；真实文件保护仅限 manifest 判定 L4；前提「沙箱跨会话顺序复用」已代码核实（uk_session 并发 1:1） | §6.2 |
-| D-3 bundle 服务端缓存 | 按 version 落盘（确定性打包 = 内容寻址；keep-2 LRU、`/tmp`、冷启重建）——关闭原开放问题 4 | §6.1 |
+| D-3 bundle 服务端缓存 | 按 version 落盘（确定性打包 = 内容寻址；keep-2 LRU、workspace 卷内 `{workspaceBase}/tmp/skills-bundle-cache`（issue #358 修正，业务 Pod /tmp 不可写）、冷启重建）——关闭原开放问题 4 | §6.1 |
 | D-4 version 端点缓存 | singleflight + ≤5s TTL（修订 G2 绝对化表述；新鲜度语义仍由守护轮询 INTERVAL 决定） | §6.1 |
 | D-5 判定打点 SLO | Micrometer Counter `skills.farm.decision{result}`（actuator 已带 micrometer-core，零新增依赖）；降级同步 WARN | §7.2 |
 | D-6 守护自愈 | launcher watchdog 30s 重启（sleep 兼任崩溃循环节流），修订原「无 supervise」口径 | §5.1/§4.5 |

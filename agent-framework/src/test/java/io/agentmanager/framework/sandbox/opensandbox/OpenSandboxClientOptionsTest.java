@@ -44,6 +44,19 @@ class OpenSandboxClientOptionsTest {
     }
 
     @Test
+    void skillSyncSwitchesShouldDefaultOnAndFluentToggleOff() {
+        var options = new OpenSandboxClientOptions();
+        assertTrue(options.isSkillRevisionGateEnabled());
+        assertTrue(options.isSyncSnapshotDiffEnabled());
+
+        var off = new OpenSandboxClientOptions()
+            .skillRevisionGateEnabled(false)
+            .syncSnapshotDiffEnabled(false);
+        assertFalse(off.isSkillRevisionGateEnabled());
+        assertFalse(off.isSyncSnapshotDiffEnabled());
+    }
+
+    @Test
     void createClientShouldReturnOpenSandboxClient() {
         var options = new OpenSandboxClientOptions()
             .serverUrl("192.168.31.155:8090")
