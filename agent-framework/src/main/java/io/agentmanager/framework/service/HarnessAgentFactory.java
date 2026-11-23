@@ -204,10 +204,6 @@ public class HarnessAgentFactory {
             }
             mcpToolRegistrar.registerAll(toolkit, oafConfig);
 
-            // HITL 权限上下文装配（MCP-only）：仅 MCP tools 规则或 require_confirmation 存在时启用
-            var permCfg = mcpToolRegistrar.collectPermissionRules(oafConfig);
-            var permissionContext = buildPermissionContext(oafConfig, permCfg, customToolNames);
-
             // 业务规范键解析（RuntimeContext → 规范会话/用户）：Channel 链路下 ctx.sessionId
             // 是全进程共享的网关 gw-hash、ctx.userId 是 peer，不翻译会让 LLM 记录与 span
             // 属性都记成运行时路由键——前者按 sid 查不到（issue #44），后者按会话过滤失效
@@ -217,6 +213,10 @@ public class HarnessAgentFactory {
             // AGENT_MEMORY_PROVIDER=openviking 且配置齐备时接管记忆——SDK 文件记忆全关
             // （与 memory-enabled=false 同款双关），换为 VikingMemoryClient 链路
             // （首推理注入中间件 + memory_* 工具桥 + 会话归档装饰器[装配在 distributedStore]）
+            // 必须先于权限上下文装配（issue #415）：合成 MCP server openviking 在此注册，
+            // collectPermissionRules 才能把包内 mcp-configs/openviking/config.yaml 的
+            // permissions.tools 翻译进规则、mcpNames 才覆盖 mcp__openviking__*（否则 ask/deny
+            // 规则被静默丢弃、verifyToolCoverage 误报 gap）
             var vikingMemory = harness.memoryEnabled()
                 && vikingConfig != null && vikingConfig.enabled() && vikingMemoryClient != null;
             if (vikingMemory) {
@@ -230,9 +230,13 @@ public class HarnessAgentFactory {
                 // ② OVK_MCP_SHARED_CONTEXT=true：注入合成 MCP server openviking（服务身份
                 // 连接，account 共享 resources/skills 与 rule_search 等；per-user 记忆不走 MCP）
                 if (vikingConfig.mcpSharedContext()) {
-                    registerVikingSharedContextMcp(toolkit);
+                    registerVikingSharedContextMcp(toolkit, oafConfig);
                 }
             }
+
+            // HITL 权限上下文装配（MCP-only）：仅 MCP tools 规则或 require_confirmation 存在时启用
+            var permCfg = mcpToolRegistrar.collectPermissionRules(oafConfig);
+            var permissionContext = buildPermissionContext(oafConfig, permCfg, customToolNames);
 
             var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
@@ -466,32 +470,54 @@ public class HarnessAgentFactory {
         return io.agentmanager.framework.config.ChatModelFactory.build(llm, harness);
     }
 
+    /** 合成 MCP server 名（OVK_MCP_SHARED_CONTEXT 注入的 server 标识，注入守卫同名判据） */
+    static final String SYNTHETIC_OPENVIKING_SERVER = "openviking";
+
     /**
      * 合成 MCP server openviking 注入（OVK_MCP_SHARED_CONTEXT，openviking-memory-integration-design
      * §11.1）：服务身份 ADMIN key 固定 Bearer 连接 {@code {url}/mcp}（streamable HTTP），
      * 暴露 account 级共享工具（find/search/read/rule_search/add_resource 等，见 OpenViking
      * MCP 工具表）；per-user 记忆不走 MCP（共享连接无法 per-user 换身份，设计 §7）。
-     * 走 registerBuiltClient 复用既有注册/权限/只读装配；连接失败 fail-soft 仅告警
-     * （对齐 registerOne 语义），不影响 agent 构建。
+     * 工具权限唯一来源 = 包内 {@code mcp-configs/openviking/config.yaml} 的
+     * permissions.tools（permissions-only，与全部 MCP server 同源）。连接失败 fail-soft
+     * 仅告警（对齐 registerOne 语义），不影响 agent 构建；句柄进共享缓存，断联由
+     * McpConnectionWatchdog 换芯/补偿自愈（issue #415）。
+     *
+     * <p>frontmatter 已声明同名 MCP server 守卫（评审 P3）：包 frontmatter mcpServers
+     * 显式声明 openviking 时（用户自带 OpenViking 直连声明）合成注入跳过——declared
+     * 声明优先，杜绝同名双注入与权限来源含混。上一代合成注入的残留注册表项不在此
+     * 清理（注入点无法区分「本代首次构建」与「回滚窗口内的重复构建」）：由 reloadAgent
+     * 代际收口移除（{@code McpToolRegistrar.removeSyntheticServers}，swap 成功后调用），
+     * 构建期则由 collectPermissionRules 跳过 declared 同名兜底——串台/双探测/规则覆盖
+     * 三道防线各守其位。
      */
-    private void registerVikingSharedContextMcp(io.agentscope.core.tool.Toolkit toolkit) {
-        try {
-            var builder = io.agentscope.core.tool.mcp.McpClientBuilder.create("openviking");
+    private void registerVikingSharedContextMcp(io.agentscope.core.tool.Toolkit toolkit, OafConfig oafConfig) {
+        if (oafConfig.mcpServers().stream()
+                .anyMatch(m -> SYNTHETIC_OPENVIKING_SERVER.equals(m.server()))) {
+            log.warn("[viking] frontmatter already declares MCP server '{}', synthetic shared-context "
+                + "injection skipped (declared declaration wins)", SYNTHETIC_OPENVIKING_SERVER);
+            return;
+        }
+        // base 连接工厂（注册与换芯共用同一 factory，单一真相源）：产物 = UserScoped(EMPTY)
+        // 装饰的 base（与 declared 路径 buildBaseClient 产物形态对称——_meta reqHeader:* 剥离
+        // 卫生常驻，本 server 无 userHeaders 声明即无 header 注入），装饰收在 factory 内，
+        // 换芯后形态不漂移（评审 P1）
+        java.util.function.Supplier<io.agentscope.core.tool.mcp.McpClientWrapper> baseFactory = () -> {
+            var builder = io.agentscope.core.tool.mcp.McpClientBuilder.create(SYNTHETIC_OPENVIKING_SERVER);
             builder.streamableHttpTransport(vikingConfig.url() + "/mcp");
             builder.header("Authorization", "Bearer " + vikingConfig.adminKey());
-            var wrapper = builder.buildAsync().block();
-            if (wrapper == null) {
-                log.warn("[viking] shared-context MCP client build returned empty, skipped");
-                return;
+            var base = builder.buildAsync().block();
+            if (base == null) {
+                return null;
             }
-            var synthetic = new io.agentmanager.framework.model.OafConfig.McpServerConfig(
-                "openviking", "openviking", "1.0.0", "", false);
-            var registered = mcpToolRegistrar.registerSyntheticClient(toolkit, synthetic, wrapper);
-            log.info("[viking] shared-context MCP server registered: {} (tools={})",
-                registered, registered != null ? "account-shared find/search/read/..." : "none");
-        } catch (Exception e) {
-            log.warn("[viking] shared-context MCP registration failed (fail-soft): {}", e.getMessage());
-        }
+            return new io.agentmanager.framework.mcp.UserScopedMcpClientWrapper(
+                base, io.agentmanager.framework.mcp.UserHeaderRule.EMPTY);
+        };
+        var synthetic = new io.agentmanager.framework.model.OafConfig.McpServerConfig(
+            SYNTHETIC_OPENVIKING_SERVER, SYNTHETIC_OPENVIKING_SERVER, "1.0.0", "", false);
+        var registered = mcpToolRegistrar.registerSyntheticClient(toolkit, synthetic, baseFactory);
+        log.info("[viking] shared-context MCP server registered: {} (tools={})",
+            registered, registered != null ? "account-shared find/search/read/..." : "none");
     }
 
     /** remoteHeadersJson 解析用（ObjectMapper 线程安全，复用实例） */
@@ -658,13 +684,21 @@ public class HarnessAgentFactory {
             }
         }
 
-        // ③ 声明了未注册工具（deniedTools 排除/名字写错）→ 告警忽略，规则不生效
+        // ③ 声明了未注册工具（deniedTools 排除/名字写错）→ 告警忽略，规则不生效；
+        //    声明的是 MCP 注册名（mcp__{server}__{tool}，含合成 server）→ 同样不生效并告警：
+        //    frontmatter config.permission.tools 不承载 MCP 工具（OafConfig.RuntimeConfig
+        //    契约），MCP 规则唯一来源是 mcp-configs/{server}/config.yaml permissions.tools
+        //    （issue #415：此前该情况静默 continue，ask/deny 声明看似生效实被丢弃）
         if (hasCustomRules) {
             var known = new HashSet<String>();
             known.addAll(builtinNames);
             known.addAll(permCfg.mcpNames());
             for (var name : customRules.keySet()) {
-                if (!known.contains(name)) {
+                if (permCfg.mcpNames().contains(name)) {
+                    log.warn("config.permission.tools declares '{}' but MCP tool rules come from "
+                        + "mcp-configs/{{server}}/config.yaml permissions.tools; frontmatter declaration ignored",
+                        name);
+                } else if (!known.contains(name)) {
                     log.warn("config.permission.tools declares '{}' but no such tool is registered "
                         + "(deniedTools filtered or typo), rule ignored", name);
                 }

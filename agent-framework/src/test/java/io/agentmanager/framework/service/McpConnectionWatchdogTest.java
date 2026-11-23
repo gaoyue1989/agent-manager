@@ -192,4 +192,62 @@ class McpConnectionWatchdogTest {
         assertTrue(timing.enabled());
         assertEquals(5, timing.probeTimeoutSeconds());
     }
+
+    // ---------- 合成 server（issue #415）：探测名单含注册表、补偿按 agent 有无分流 ----------
+
+    private static final OafConfig.McpServerConfig SYNTHETIC =
+        new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+
+    /** 合成注册表桩：registrar.syntheticServers() 返回含 openviking 的真实条目 */
+    @SuppressWarnings("unchecked")
+    private java.util.function.Supplier<McpClientWrapper> stubSyntheticRegistry() {
+        var factory = mock(java.util.function.Supplier.class);
+        when(registrar.syntheticServers())
+            .thenReturn(java.util.Map.of("openviking",
+                new McpToolRegistrar.SyntheticServer(SYNTHETIC, factory)));
+        return (java.util.function.Supplier<McpClientWrapper>) factory;
+    }
+
+    @Test
+    void syntheticServerShouldBeProbedAndRebuiltOnFailure() {
+        stubSyntheticRegistry();
+        when(registrar.sharedWrapper("openviking")).thenReturn(handle);
+        when(handle.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));
+        when(registrar.rebuildSharedWrapper(eq("openviking"), eq(SYNTHETIC))).thenReturn(true);
+
+        watchdog.probeAll();
+
+        verify(registrar).rebuildSharedWrapper("openviking", SYNTHETIC);
+        verify(resourceProxy).evictClient("openviking");
+    }
+
+    /** 补偿分流①：单例 agent 存在 → 工厂 + registerSyntheticClient 补注册 */
+    @Test
+    void syntheticMissingHandleWithLiveAgentShouldReRegister() {
+        var factory = stubSyntheticRegistry();
+        when(registrar.sharedWrapper("openviking")).thenReturn(null);
+        when(agentRuntimeService.getAgent()).thenReturn(agent);
+        when(agent.getToolkit()).thenReturn(toolkit);
+
+        watchdog.probeOne(SYNTHETIC);
+
+        verify(registrar).registerSyntheticClient(toolkit, SYNTHETIC, factory);
+        verify(registrar, never()).registerOne(any(), any());
+        verify(registrar, never()).cacheSyntheticClient(any(), any());
+    }
+
+    /** 补偿分流②：无单例 agent（per-session 模式）→ 仅把可换芯句柄入缓存 */
+    @Test
+    void syntheticMissingHandleWithoutAgentShouldCacheClientOnly() {
+        var factory = stubSyntheticRegistry();
+        when(registrar.sharedWrapper("openviking")).thenReturn(null);
+        when(agentRuntimeService.getAgent()).thenReturn(null);
+
+        watchdog.probeOne(SYNTHETIC);
+
+        verify(registrar).cacheSyntheticClient(SYNTHETIC, factory);
+        verify(registrar, never()).registerSyntheticClient(any(), any(), any());
+        verify(registrar, never()).registerOne(any(), any());
+        verify(registrar, never()).sharedClient(any());
+    }
 }
