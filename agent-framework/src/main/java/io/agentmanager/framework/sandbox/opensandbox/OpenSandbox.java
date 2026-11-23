@@ -1339,6 +1339,21 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
+     * 失效上传注入备忘（issue #413）：middleware 换代 reset 确有行回滚
+     * （FileAssetStore.resetInjectedToPending 返回 n&gt;0）后调用——DB 已回到 pending 的
+     * 历史上传件必须在本 turn 重新注入，稳态短路（{@code pendingEmptyChecked}）与
+     * 「本代已注完」（{@code uploadsInjected}）不得吞掉这一批；两备忘须一并复位
+     * （client 先行注入成功 + middleware reset n&gt;0 组合下，只复位其一仍会短路）。
+     * 触发前提由换代记账去重兜住（评审 g1）：{@code ResetMarkStore} 共享层命中时同代
+     * 不再 reset——重注入会以原始上传字节覆写容器内已被 agent 修改的上传件，误判换代
+     * 即静默数据丢失，不是无害方向。
+     */
+    public void invalidatePendingUploadMemo() {
+        pendingEmptyChecked.set(false);
+        uploadsInjected.set(false);
+    }
+
+    /**
      * 首次文件操作前注入 KV 运行时文件（MEMORY.md/memory/）。
      * 静态模板（AGENTS.md/skills/ 等）由框架投影在 hydrateWorkspace 时注入。
      *

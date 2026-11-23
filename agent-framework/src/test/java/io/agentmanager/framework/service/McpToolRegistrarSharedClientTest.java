@@ -223,10 +223,11 @@ class McpToolRegistrarSharedClientTest {
     @Test
     void syntheticRegistrationFailureShouldCloseFreshWrapper() {
         var base = deadBase();
-        var synthetic = new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+        registrar.bases.add(base);
+        var synthetic = syntheticConfig();
 
-        assertNull(registrar.registerSyntheticClient(toolkit, synthetic, base));
-        assertNull(registrar.sharedWrapper(synthetic.server()));
+        assertNull(registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
+        assertNull(registrar.sharedWrapper(synthetic.server()), "注册失败死句柄必须被驱逐");
         verify(base, times(1)).close();
     }
 
@@ -234,14 +235,178 @@ class McpToolRegistrarSharedClientTest {
     void syntheticRejectedWrapperShouldBeClosedImmediately() {
         var base = healthyBase("b1");
         registrar.bases.add(base);
-        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var synthetic = syntheticConfig();
+        // 看门狗 agent==null 分支先入缓存：openviking 已有可换芯句柄
+        assertTrue(registrar.cacheSyntheticClient(synthetic, scopedFactory()));
+        var cached = registrar.sharedWrapper(synthetic.server());
 
-        // 缓存已有句柄：合成 wrapper 被拒（putIfAbsent 竞败）——从未入缓存即无任何持有者，
-        // 即刻关闭（sharedClient 竞态败者 closeQuietly 先例），注册走既有句柄照常成功
+        // 新会话 build：工厂照常产出（build 先于 putIfAbsent），被拒 wrapper 从未入缓存
+        // 即无任何持有者，即刻关闭（sharedClient 竞态败者 closeQuietly 先例），
+        // 注册走缓存句柄照常成功
         var rejected = deadBase();
-        assertEquals(mcp.server(), registrar.registerSyntheticClient(new Toolkit(), mcp, rejected));
+        registrar.bases.add(rejected);
+        assertEquals(synthetic.server(), registrar.registerSyntheticClient(new Toolkit(), synthetic, scopedFactory()));
         verify(rejected, times(1)).close();
         verify(base, never()).close();
+        assertSame(cached, registrar.sharedWrapper(synthetic.server()));
+    }
+
+    // ---------- 合成 server 生命周期（issue #415） ----------
+    // 三处同根因缺陷的句柄面：① 句柄必须 Reconnectable(UserScoped(base)) 形态（与
+    // registerOne 的 buildClient 产物对称——UserScoped 承载 _meta reqHeader:* 剥离卫生，
+    // Reconnectable 承载看门狗换芯）；② rebuildSharedWrapper 对合成 server 走注册表工厂
+    // 换芯（形态对称，防装饰丢失回归）；③ 注册表（config+factory）是看门狗探测/补偿与
+    // A 路径 reload 豁免的单一真相源，evictSharedWrappers 不清它（B 路径 build 失败
+    // 回滚窗口内旧 agent 的合成句柄仍可自愈）。
+
+    /** 合成 server 声明（HarnessAgentFactory.registerVikingSharedContextMcp 同款形态） */
+    private static OafConfig.McpServerConfig syntheticConfig() {
+        return new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+    }
+
+    /** 合成 base 工厂桩：从队列取桩连接并按真实工厂形态包 UserScoped（评审 P1 形态对称） */
+    private java.util.function.Supplier<McpClientWrapper> scopedFactory() {
+        return () -> {
+            var base = registrar.bases.poll();
+            return base == null ? null
+                : new io.agentmanager.framework.mcp.UserScopedMcpClientWrapper(
+                    base, io.agentmanager.framework.mcp.UserHeaderRule.EMPTY);
+        };
+    }
+
+    @Test
+    void syntheticRegistrationShouldWrapReconnectableWithUserScopedDelegate() {
+        var base = healthyBase("ov-base");
+        registrar.bases.add(base);
+        var synthetic = syntheticConfig();
+
+        assertEquals(synthetic.server(), registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
+
+        var handle = registrar.sharedWrapper(synthetic.server());
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, handle);
+        var delegate = ((ReconnectableMcpClientWrapper) handle).delegate();
+        assertInstanceOf(io.agentmanager.framework.mcp.UserScopedMcpClientWrapper.class, delegate);
+        assertEquals("ov-base", delegate.getName());
+    }
+
+    @Test
+    void syntheticRebuildShouldSwapViaFactoryKeepingHandleAndShape() {
+        registrar.bases.add(healthyBase("old"));
+        var synthetic = syntheticConfig();
+        assertEquals(synthetic.server(), registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
+        var handleBefore = registrar.sharedWrapper(synthetic.server());
+
+        // 换芯经注册表工厂（不走 buildBaseClient——合成 server 无 config.yaml connection 节）：
+        // 句柄实例不变，delegate 仍是 UserScoped 形态（评审 P1 形态对称断言）
+        registrar.bases.add(healthyBase("new"));
+        assertTrue(registrar.rebuildSharedWrapper(synthetic.server(), synthetic));
+
+        assertSame(handleBefore, registrar.sharedWrapper(synthetic.server()));
+        var delegate = ((ReconnectableMcpClientWrapper) handleBefore).delegate();
+        assertInstanceOf(io.agentmanager.framework.mcp.UserScopedMcpClientWrapper.class, delegate);
+        assertEquals("new", delegate.getName());
+    }
+
+    @Test
+    void syntheticRebuildFailureShouldKeepOldHandle() {
+        registrar.bases.add(healthyBase("old"));
+        var synthetic = syntheticConfig();
+        registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory());
+        var handleBefore = registrar.sharedWrapper(synthetic.server());
+
+        // 工厂产物为 null（build 失败）→ 保旧句柄
+        assertFalse(registrar.rebuildSharedWrapper(synthetic.server(), synthetic));
+        assertSame(handleBefore, registrar.sharedWrapper(synthetic.server()));
+
+        // 握手失败 → 保旧句柄、新连接关闭防泄漏
+        var broken = mock(McpClientWrapper.class);
+        when(broken.getName()).thenReturn("broken");
+        when(broken.initialize()).thenReturn(Mono.error(new RuntimeException("handshake failed")));
+        registrar.bases.add(broken);
+        assertFalse(registrar.rebuildSharedWrapper(synthetic.server(), synthetic));
+        assertSame(handleBefore, registrar.sharedWrapper(synthetic.server()));
+        verify(broken).close();
+    }
+
+    @Test
+    void syntheticRegistrationFailureShouldEvictHandleButKeepFactoryForCompensation() {
+        var base = deadBase();
+        registrar.bases.add(base);
+        var synthetic = syntheticConfig();
+
+        assertNull(registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
+        assertNull(registrar.sharedWrapper(synthetic.server()));
+        verify(base, times(1)).close();
+        // 工厂保留在注册表：看门狗下周期可补偿复活（agent!=null 补注册 / agent==null 入缓存）
+        var registry = registrar.syntheticServers();
+        assertTrue(registry.containsKey(synthetic.server()));
+
+        // 复活：同一工厂产出健康连接 → 补注册成功且句柄入缓存
+        registrar.bases.add(healthyBase("revived"));
+        assertEquals(synthetic.server(),
+            registrar.registerSyntheticClient(new Toolkit(), synthetic,
+                registry.get(synthetic.server()).factory()));
+        assertNotNull(registrar.sharedWrapper(synthetic.server()));
+    }
+
+    @Test
+    void cacheSyntheticClientShouldCacheHandleWithoutRegisteringTools() {
+        var synthetic = syntheticConfig();
+        registrar.bases.add(healthyBase("ov"));
+
+        // 看门狗 compensate 的 agent==null 分支：仅把可换芯句柄入缓存，不注册工具
+        assertTrue(registrar.cacheSyntheticClient(synthetic, scopedFactory()));
+        var handle = registrar.sharedWrapper(synthetic.server());
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, handle);
+        assertTrue(registrar.getToolsByServer(synthetic.server()).isEmpty());
+        assertFalse(registrar.getRegisteredServerNames().contains(synthetic.server()));
+
+        // 新会话 build 经 registerSyntheticClient 的 putIfAbsent 复用该句柄：
+        // 工厂照常产出（build 先于 putIfAbsent），被拒新句柄即刻关闭，注册走缓存句柄
+        var rejected = healthyBase("rejected-b2");
+        registrar.bases.add(rejected);
+        assertEquals(synthetic.server(), registrar.registerSyntheticClient(new Toolkit(), synthetic, scopedFactory()));
+        assertSame(handle, registrar.sharedWrapper(synthetic.server()));
+        verify(rejected, times(1)).close();
+    }
+
+    @Test
+    void cacheSyntheticClientShouldFailSoftWhenBuildReturnsNull() {
+        var synthetic = syntheticConfig();
+        assertFalse(registrar.cacheSyntheticClient(synthetic, scopedFactory()), "队列空=build 返回 null");
+        assertNull(registrar.sharedWrapper(synthetic.server()));
+    }
+
+    @Test
+    void evictSharedWrappersShouldKeepSyntheticRegistryForRollbackWindow() {
+        registrar.bases.add(healthyBase("ov"));
+        var synthetic = syntheticConfig();
+        registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory());
+
+        // B 路径 build 前 evict：清共享缓存但不清合成注册表——build 失败回滚窗口内
+        // 旧 agent 的合成句柄仍可被看门狗探测/换芯/补偿（评审 P2；工厂闭包 env 派生、
+        // 同名未声明时世代间等价，残留无害）
+        registrar.evictSharedWrappers();
+        assertNull(registrar.sharedWrapper(synthetic.server()));
+        assertTrue(registrar.syntheticServers().containsKey(synthetic.server()));
+    }
+
+    @Test
+    void removeSyntheticServersShouldDropResidualEntriesWithoutTouchingSharedCache() {
+        registrar.bases.add(healthyBase("ov"));
+        var synthetic = syntheticConfig();
+        registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory());
+        assertNotNull(registrar.sharedWrapper(synthetic.server()));
+
+        // 代际收口（reloadAgent swap 成功后）：同名已转 frontmatter 声明 → 残留项移除，
+        // 该名此后完全归属 declared 链路（rebuild/补偿/探测不再走 viking 工厂）；
+        // 共享缓存不触碰——清理点缓存已是新代 declared 句柄（gen1 合成句柄由旧代收尾关闭）
+        assertEquals(List.of("openviking"), registrar.removeSyntheticServers(List.of("openviking", "other")));
+        assertFalse(registrar.syntheticServers().containsKey(synthetic.server()));
+        assertNotNull(registrar.sharedWrapper(synthetic.server()));
+
+        // 幂等：已移除名再清理为 no-op
+        assertTrue(registrar.removeSyntheticServers(List.of("openviking")).isEmpty());
     }
 
     // ---------- clearServer 共享句柄不 close 契约（issue #348 防回归核心） ----------

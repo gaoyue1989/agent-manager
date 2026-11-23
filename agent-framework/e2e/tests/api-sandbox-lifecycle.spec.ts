@@ -16,6 +16,8 @@ import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { BASE, sessionIdFor } from '../lib/env.js';
 import { chat, confirmStream, createApprovalApp } from '../lib/client.js';
+import { upload } from '../lib/files.js';
+import type { UploadResult } from '../lib/files.js';
 import { waitTerminal, pollUntil } from '../lib/matchers.js';
 
 const SANDBOX_MOCK = process.env.E2E_SANDBOX_MOCK ?? 'http://127.0.0.1:8090';
@@ -585,6 +587,51 @@ test('L19 同 user 继承残留（契约钉死）：LRU 复用后新会话可见
   expect(probe.status, '继承沙箱内旧会话文件丢失').toBe(200);
   expect(probe.text).toContain('l19-residue-');
   await waitTerminal(busy);
+});
+
+test('L21 wrapReused 换代后历史上传件重注入（注入备忘失效，issue #413）', async () => {
+  const uid = U();
+  // turn1：S 建 C1，上传件 F 注入 C1（create 路径 memo 天然为 false）
+  const name = `memo-${uniq()}.zip`;
+  const bytes = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0xCC, 0x04, 0x21, 0x43]);
+  const up = await upload(BASE, bytes, name, 'application/zip', { userId: uid });
+  expect(up.status, '上传失败').toBe(200);
+  const fileId = (up.body as UploadResult).file_id;
+  const sidS = sessionIdFor(`l21s-${uniq()}`);
+  const t1 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sidS, fileIds: [fileId], timeoutMs: 120_000 });
+  await waitTerminal(t1);
+  expect(t1.terminal?.type).toBe('done');
+  const bindS1 = await bindingOf(sidS);
+  expect(bindS1?.sandbox_id, 'S 无绑定').toBeTruthy();
+  const probe1 = await probeFile(bindS1!.sandbox_id, `/workspace/uploads/${name}`);
+  expect(probe1.status, 'turn1 上传件未注入 C1').toBe(200);
+
+  // 另会话建 C2
+  const sidOther = sessionIdFor(`l21o-${uniq()}`);
+  await waitTerminal(chat({ message: `[E2E:plain]`, userId: uid, sessionId: sidOther, timeoutMs: 120_000 }));
+  const bindOther = await bindingOf(sidOther);
+  expect(bindOther?.sandbox_id, '另一会话无绑定').toBeTruthy();
+  expect(bindOther!.sandbox_id).not.toBe(bindS1!.sandbox_id);
+
+  // SQL 改绑（L13/L20 先例注入面）：S → C2，强制 turn2 的 resume(C1) 归属失效降级
+  // create → ① 绑定复用 wrapReused(C2) 换代。uk_sandbox 唯一——先删另一会话占用 C2
+  // 的行再改绑（槽位让渡，等价 ⑤ LRU 改绑的行迁移语义）
+  await withSql(async q => {
+    await q(`DELETE FROM sandbox_binding WHERE session_id = ?`, [sidOther]);
+    await q(`UPDATE sandbox_binding SET sandbox_id = ? WHERE session_id = ?`, [bindOther!.sandbox_id, sidS]);
+  });
+
+  // turn2：wrapReused 先行注入查无 pending 置位备忘 → middleware 换代 reset 回滚 F 行
+  // （n>0）→ 备忘失效 → 真实重查重注入 C2。旧实现备忘短路吞掉重注入批次 → probe 404
+  const t2 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sidS, timeoutMs: 120_000 });
+  await waitTerminal(t2);
+  expect(t2.terminal?.type).toBe('done');
+  const bindS2 = await bindingOf(sidS);
+  expect(bindS2?.sandbox_id, 'turn2 未复用 C2（未走 ① 绑定复用）').toBe(bindOther!.sandbox_id);
+  const dl = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${bindOther!.sandbox_id}/proxy/44772/files/download?path=${encodeURIComponent(`/workspace/uploads/${name}`)}`);
+  expect(dl.status, '换代后历史上传件未重注入新代容器').toBe(200);
+  const got = Buffer.from(await dl.arrayBuffer());
+  expect(got.equals(bytes), '重注入字节与上传原始字节不一致').toBe(true);
 });
 
 // ==================== D 组：HITL 保留窗 ====================
