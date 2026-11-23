@@ -371,6 +371,80 @@ class SkillBundleServiceTest {
         return new SkillBundleService(manage, cacheDir, Duration.ofSeconds(5), clock);
     }
 
+    @Test
+    void frontmatterNameShouldCanonicalizeManifestAndBundleTopLevel() throws Exception {
+        // issue #398：SDK 提示词渲染（MarketplaceStager Cached）按 SKILL.md frontmatter name
+        // 推导 /workspace/.skills-cache/<scope>/<ns>/<name>；farm 建链来自 version.skills 清单 +
+        // bundle 解包顶层目录——两者必须以同一规范名对齐，否则渲染路径 404
+        var service = service(Duration.ZERO);
+        skill("my-dir-name", "---\nname: my-frontmatter-name\n---\n# body\n", "scripts/run.py", "print(1)\n");
+
+        var version = service.currentVersion();
+
+        assertEquals(List.of("my-frontmatter-name"), version.skills(),
+            "version.skills 清单必须用 frontmatter 规范名（SDK 渲染口径）");
+        assertEquals(List.of(
+            "my-frontmatter-name/SKILL.md",
+            "my-frontmatter-name/scripts/run.py"), bundleEntryNames(service, version.version()),
+            "bundle 顶层目录必须重写为规范名（守护解包后 /skills-store/CURRENT/<规范名> 与软链 target 一致）");
+    }
+
+    @Test
+    void missingOrBlankFrontmatterNameShouldFallBackToDirName() throws Exception {
+        var service = service(Duration.ZERO);
+        skill("no-fm", "# 无 frontmatter\n");
+        skill("blank-fm", "---\ntitle: x\n---\n# name 缺失\n");
+
+        var version = service.currentVersion();
+
+        assertEquals(List.of("blank-fm", "no-fm"), version.skills(),
+            "无 frontmatter/无 name 字段回落目录名");
+    }
+
+    @Test
+    void unsafeCanonicalNameShouldFallBackToDirName() throws Exception {
+        // 规范名进入 tar rel 与容器命令拼接（farm 建链引号路径段），与 SkillsFarm
+        // isShellSafeRelPath 同防线：含 '..'、引号、空白、'/'、以 / 开头一律回落目录名
+        var service = service(Duration.ZERO);
+        skill("escape-dir", "---\nname: ../../escape\n---\n# x\n");
+        skill("quote-dir", "---\nname: has'quote\n---\n# x\n");
+        skill("space-dir", "---\nname: has space\n---\n# x\n");
+        skill("slash-dir", "---\nname: a/b\n---\n# x\n");
+
+        var version = service.currentVersion();
+
+        assertEquals(List.of("escape-dir", "quote-dir", "slash-dir", "space-dir"), version.skills(),
+            "不安全规范名回落目录名");
+    }
+
+    @Test
+    void binarySkillMdShouldFallBackToDirName() throws Exception {
+        var service = service(Duration.ZERO);
+        var root = configDir.resolve("skills").resolve("bin-dir");
+        Files.createDirectories(root);
+        Files.write(root.resolve("SKILL.md"), new byte[]{0, 1, 2, (byte) 0xFF, (byte) 0xFE});
+
+        var version = service.currentVersion();
+
+        assertEquals(List.of("bin-dir"), version.skills(),
+            "SKILL.md 非文本（extractSkillName 抛 IllegalArgumentException）回落目录名，不炸版本计算");
+    }
+
+    @Test
+    void dirNameDisabledShouldStillExcludeCanonicalSkill() throws Exception {
+        // 服务级禁用集键 = 目录名（SkillManageService.toggleSkill 按目录 resolve 校验），
+        // 禁用判定保持目录名口径；被禁技能不进清单不进 bundle（规范名也不得出现）
+        var service = service(Duration.ZERO);
+        skill("my-dir-name", "---\nname: my-frontmatter-name\n---\n# x\n");
+        skill("keep-dir", "---\nname: keep-name\n---\n# x\n");
+        manageService().toggleSkill("my-dir-name");
+
+        var version = service.currentVersion();
+
+        assertEquals(List.of("keep-name"), version.skills());
+        assertEquals(List.of("keep-name/SKILL.md"), bundleEntryNames(service, version.version()));
+    }
+
     private SkillBundleService service(Duration ttl) {
         return new SkillBundleService(manageService(), cacheDir, ttl, clock);
     }

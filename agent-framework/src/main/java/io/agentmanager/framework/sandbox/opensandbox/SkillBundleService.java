@@ -28,6 +28,7 @@ import org.springframework.stereotype.Service;
 
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.SkillManageService;
+import io.agentmanager.framework.service.SkillZipSupport;
 
 /**
  * skills-syncd 版本协商服务（sandbox-skills-syncd-design §4.3/§6.1）：对包技能目录
@@ -224,11 +225,17 @@ public class SkillBundleService {
                 if (name.startsWith(".") || disabled.contains(name)) {
                     continue;
                 }
+                // 打包规范名 = SKILL.md frontmatter name（issue #398）：SDK 渲染路径与
+                // farm 建链/解包顶层三方对齐；无 frontmatter/不安全名回落目录名。
+                // version.skills 清单由 rel 顶层段派生，自动同口径
+                var canonical = SkillZipSupport.canonicalSkillName(skillDir);
                 try (var walk = Files.walk(skillDir)) {
                     for (var f : walk.filter(Files::isRegularFile).toList()) {
-                        files.add(new BundleFile(f,
-                            dir.relativize(f).toString().replace('\\', '/'), Files.size(f),
-                            isExecutable(f)));
+                        var rel = dir.relativize(f).toString().replace('\\', '/');
+                        if (!canonical.equals(name)) {
+                            rel = canonical + rel.substring(name.length());
+                        }
+                        files.add(new BundleFile(f, rel, Files.size(f), isExecutable(f)));
                     }
                 }
             }
