@@ -224,6 +224,118 @@ class AgentScopeConfigTest {
     }
 
     /**
+     * frontmatter 声明 MCP 注册名（含合成 server 的 mcp__openviking__*，issue #415）：
+     * 契约不变——规则来自 mcp-configs/{server}/config.yaml permissions.tools，
+     * frontmatter 声明不生效并打告警（修复前静默 continue）。
+     */
+    @Test
+    void frontmatterDeclarationForMcpRegisteredNameShouldBeIgnored() {
+        var ctx = factory.buildPermissionContext(
+            oafForPermission(false, java.util.Map.of("mcp__openviking__write", "deny")),
+            permCfg(java.util.Map.of("mcp__openviking__write", "ask"),
+                java.util.Set.of("mcp__openviking__write")),
+            java.util.Set.of());
+
+        // 规则来自 mcp-configs permissions.tools（ask），frontmatter 的 deny 不生效
+        assertFalse(ctx.getDenyRules().containsKey("mcp__openviking__write"));
+        assertTrue(ctx.getAskRules().containsKey("mcp__openviking__write"));
+    }
+
+    /**
+     * 重排后链路（issue #415）：collectPermissionRules 输出的合成 server 注册名走
+     * buildPermissionContext step② 全套规则装配（含 mcp__openviking__ 前缀键）。
+     */
+    @Test
+    void syntheticMcpNamesShouldGetFullPermissionRules() {
+        var ctx = factory.buildPermissionContext(
+            oafForPermission(true, java.util.Map.of()),
+            permCfg(java.util.Map.of("mcp__openviking__write", "ask"),
+                java.util.Set.of("mcp__openviking__write", "mcp__openviking__read")),
+            java.util.Set.of());
+
+        // 显式声明 ask 生效；未声明的合成工具兜底 require_confirmation → ask（规则面完整覆盖）
+        assertTrue(ctx.getAskRules().containsKey("mcp__openviking__write"));
+        assertTrue(ctx.getAskRules().containsKey("mcp__openviking__read"));
+    }
+
+    // ---------- 合成 MCP 注入守卫（issue #415 评审 P3，全构建验证） ----------
+
+    /**
+     * OVK_MCP_SHARED_CONTEXT 全构建：frontmatter 已声明 openviking 时合成注入跳过
+     * （declared 声明优先），未声明时经 registerSyntheticClient 注入。viking 依赖
+     * @Autowired 字段注入，测试按既有先例（ThreadControllerStopTest）用
+     * ReflectionTestUtils 置桩。
+     */
+    private io.agentmanager.framework.service.HarnessAgentFactory vikingEnabledFactory(McpToolRegistrar registrar)
+            throws Exception {
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("viking-guard-test"));
+        var factory = new io.agentmanager.framework.service.HarnessAgentFactory(
+            propsForLlm(), ws, registrar, java.util.List.of(),
+            mock(io.agentmanager.framework.service.RemoteConfirmBridge.class), null, null,
+            mock(io.agentmanager.framework.service.SessionToolScopeService.class));
+        var vikingConfig = new io.agentmanager.framework.config.VikingConfig(
+            "openviking", "http://localhost:1933", "acct", "admin-key", "seed",
+            false, true, 2000, 300);
+        org.springframework.test.util.ReflectionTestUtils.setField(factory, "vikingConfig", vikingConfig);
+        org.springframework.test.util.ReflectionTestUtils.setField(factory, "vikingMemoryClient",
+            mock(io.agentmanager.framework.service.VikingMemoryClient.class));
+        return factory;
+    }
+
+    private OafConfig oafForBuild(java.util.List<OafConfig.McpServerConfig> mcpServers) {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+        when(oaf.skills()).thenReturn(java.util.List.of());
+        when(oaf.subAgents()).thenReturn(java.util.List.of());
+        when(oaf.mcpServers()).thenReturn(mcpServers);
+        return oaf;
+    }
+
+    private io.agentscope.harness.agent.DistributedStore buildableStore() {
+        var store = mock(DistributedStore.class);
+        when(store.baseStore()).thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        when(store.agentStateStore())
+            .thenReturn(mock(io.agentscope.core.state.AgentStateStore.class));
+        return store;
+    }
+
+    @Test
+    void syntheticOpenVikingInjectionShouldSkipWhenFrontmatterDeclaresSameName() throws Exception {
+        var registrar = mock(McpToolRegistrar.class);
+        when(registrar.collectPermissionRules(any(OafConfig.class)))
+            .thenReturn(permCfg(java.util.Map.of(), java.util.Set.of()));
+        var factory = vikingEnabledFactory(registrar);
+
+        var oaf = oafForBuild(java.util.List.of(
+            new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false)));
+        factory.build(oaf, buildableStore(), new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+
+        org.mockito.Mockito.verify(registrar, org.mockito.Mockito.never())
+            .registerSyntheticClient(any(), any(), any());
+    }
+
+    @Test
+    void syntheticOpenVikingInjectionShouldRegisterWhenNotDeclared() throws Exception {
+        var registrar = mock(McpToolRegistrar.class);
+        when(registrar.collectPermissionRules(any(OafConfig.class)))
+            .thenReturn(permCfg(java.util.Map.of(), java.util.Set.of()));
+        var factory = vikingEnabledFactory(registrar);
+
+        var oaf = oafForBuild(java.util.List.of());
+        factory.build(oaf, buildableStore(), new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+
+        org.mockito.Mockito.verify(registrar).registerSyntheticClient(
+            any(), any(io.agentmanager.framework.model.OafConfig.McpServerConfig.class), any());
+    }
+
+    /**
      * 真实 SDK 评估链路验证：自定义 @Tool 注册为 ReflectiveFunctionTool(ToolBase) 后，
      * PermissionEngine 按注册名命中 ask/deny/allow 规则（hitl-permission-plan 15.1）。
      */

@@ -177,6 +177,33 @@ class OafReloadServiceTest {
         assertEquals("server-a", result.mcpServers().get(0).get("server"));
     }
 
+    /**
+     * A 路径「声明已删除」循环必须豁免合成 server（issue #415）：openviking 不由
+     * frontmatter 声明，修复前每次 mcp-configs 变更都被误判已删除（摘工具+驱逐句柄
+     * 且永不重注册=永久下线）；豁免后工具保留、句柄不驱逐。
+     */
+    @Test
+    void reloadMcpAllShouldNotRemoveSyntheticServers() throws IOException {
+        when(registrar.getRegisteredServerNames()).thenReturn(java.util.Set.of("server-a", "openviking"));
+        when(registrar.syntheticServers()).thenReturn(java.util.Map.of("openviking",
+            new McpToolRegistrar.SyntheticServer(
+                new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false),
+                () -> null)));
+
+        var mcpDir = tempDir.resolve("mcp-configs/server-a");
+        Files.createDirectories(mcpDir);
+        Files.writeString(mcpDir.resolve("config.yaml"), "connection:\n  type: sse\n  url: http://x\n");
+        var result = service.reload();
+
+        assertEquals("mcp", result.scope());
+        assertTrue(result.mcpServers().stream().noneMatch(e -> "openviking".equals(e.get("server"))),
+            "合成 server 不进 removed/reloaded 明细");
+        org.mockito.Mockito.verify(registrar, org.mockito.Mockito.never())
+            .clearServer(any(), org.mockito.ArgumentMatchers.eq("openviking"));
+        org.mockito.Mockito.verify(registrar, org.mockito.Mockito.never())
+            .evictSharedWrapper("openviking");
+    }
+
     @Test
     void reloadShouldRouteToAgentPathWhenAgentsMdChanges() throws IOException {
         service.reload();
@@ -241,6 +268,39 @@ class OafReloadServiceTest {
         assertEquals("mcp", result.scope());
         assertEquals("not-declared", result.mcpServers().get(0).get("action"));
         assertNotNull(result.error());
+    }
+
+    // ---------- 合成注册表代际收口（issue #415 评审 g1） ----------
+
+    private void stubSyntheticResidual() {
+        when(registrar.syntheticServers()).thenReturn(java.util.Map.of("openviking",
+            new McpToolRegistrar.SyntheticServer(
+                new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false),
+                () -> null)));
+    }
+
+    /** gen1 合成注入的名在 gen2 frontmatter 同名声明：新代建立成功后残留项必须清理（declared 独占该名） */
+    @Test
+    void reloadAgentShouldCleanSyntheticResidualWhenSameNameDeclared() throws IOException {
+        stubSyntheticResidual();
+        when(loader.load()).thenReturn(oafWithMcpServers("openviking"));
+
+        service.reloadAgent();
+
+        org.mockito.Mockito.verify(registrar).removeSyntheticServers(java.util.List.of("openviking"));
+    }
+
+    /** build 失败回滚：不达清理点，残留注册表保留——回滚窗口内旧 agent 合成句柄仍有看门狗自愈（评审 P2） */
+    @Test
+    void reloadAgentFailureShouldKeepSyntheticResidualForRollbackWindow() throws IOException {
+        stubSyntheticResidual();
+        when(loader.load()).thenReturn(oafWithMcpServers("openviking"));
+        when(factory.build(any(), any(), any(), any(), any(), any(), any()))
+            .thenThrow(new RuntimeException("build failed"));
+
+        assertThrows(java.io.IOException.class, () -> service.reloadAgent());
+        org.mockito.Mockito.verify(registrar, org.mockito.Mockito.never())
+            .removeSyntheticServers(any());
     }
 
     @Test
