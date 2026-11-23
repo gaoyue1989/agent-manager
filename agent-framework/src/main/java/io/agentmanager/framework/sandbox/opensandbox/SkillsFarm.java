@@ -75,7 +75,7 @@ final class SkillsFarm {
         if (gate == null || !acquireMode(gate, uid)) {
             return false;
         }
-        hydrate(scope, gate);
+        hydrate(scope, gate, uid);
         return true;
     }
 
@@ -269,10 +269,14 @@ final class SkillsFarm {
      * （同 sandboxId resume）软链不重建为已接受盲点——与投影指纹缓存 §3.3 系统性盲点同姿态；
      * per-call 容器侧标记兜底被否决（观测容器态本身即 1 次 exec RTT）。
      */
-    private void hydrate(String scope, SkillSyncGate gate) throws Exception {
+    private void hydrate(String scope, SkillSyncGate gate, String uid) throws Exception {
         String fingerprint;
         try {
-            fingerprint = farmFingerprint(userKey.get());
+            // uid 整链路传递（issue #399）：tryHydrate 已解析的会话身份（userKey 缺失回退
+            // pendingUserKey），不得绕回原始 userKey.get()——延迟投放场景（downloadFile/
+            // statWorkspaceFile/doExec(null)）userKey 未绑定，null 会让 farmFingerprint 丢
+            // L4 revision 分量、disabledSkillNames 用户级禁用判定恒 false
+            fingerprint = farmFingerprint(uid);
         } catch (Exception e) {
             // 端点瞬时不可达：无法判定稳态 → 仍收敛，但孤儿差集跳过（issue #355：ERR- 空清单
             // 的差集会删光有效软链且无法恢复）——保留现状等恢复；不记账（record 对 null 指纹
@@ -292,10 +296,15 @@ final class SkillsFarm {
             return;
         }
         var disabledNames = disabledSkillNames(
-            options.getSkillDisabledChecker(), userKey.get(), endpointSkillNames());
-        Set<String> l4Names = gate != null && gate.skillFarmState() != null
-            ? gate.skillFarmState().l4Names()
-            : Set.of();
+            options.getSkillDisabledChecker(), uid, endpointSkillNames());
+        // l4Names 快照刷新（issue #399）：非稳态（指纹变化含 L4 revision bump / 模式翻转 /
+        // 新沙箱代）到达此处即需重收敛——仍用首判定冻结的快照会让「删除同名 L4 覆盖」后的
+        // 包技能永不建链。重新 capture 并回写 gate（farm 分量保持 true）；稳态短路路径不经过
+        // 此处，零开销、零 KV 枚举语义不变
+        Set<String> l4Names = captureL4SkillNames(uid);
+        if (gate != null) {
+            gate.setSkillFarmState(new SkillSyncGate.SkillFarmState(true, l4Names));
+        }
         var linkCmd = new StringBuilder();
         var candidates = linkCandidates(endpointSkillNames(), disabledNames, l4Names);
         for (var rel : candidates) {

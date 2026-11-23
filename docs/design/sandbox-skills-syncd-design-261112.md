@@ -377,7 +377,13 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 1. **次序固定：先 L4 用户技能物化（真实文件），后包技能软链**——同名时 L4 真实文件优先、包技能软链跳过
    （对齐现有 L4-enabled 覆盖语义；该裁决发生在 SDK 消费层而非文件系统层）；软链目标
    `/skills-store/CURRENT/<skillName>`（间接寻址，不钉版本目录——B-4 决议：接受切换即生效语义，
-   不做会话钉版，SKILL.md 与脚本的换版错配窗口 ≤INTERVAL 为已接受项）
+   不做会话钉版，SKILL.md 与脚本的换版错配窗口 ≤INTERVAL 为已接受项）。
+   **同名裁决名单（l4Names）按非稳态刷新（issue #399）**：首判定 capture 的用户 L4 名集不再整个
+   沙箱代冻结——重收敛（指纹变化含 L4 revision bump / 模式翻转 / 新沙箱代）时重新 capture 并回写
+   gate，用户删除同名 L4 覆盖后包技能在当代即补建链；稳态短路路径不 capture，零开销、零 KV 枚举
+   语义不变。会话身份（uid）整链路传递（tryHydrate 解析值含 pendingUserKey 兜底传入 hydrate 的
+   指纹与禁用判定，issue #399）：延迟投放场景（userKey 未绑定）不再以 null 判定——否则用户级
+   禁用失效、指纹丢 revision 分量
 2. **manifest 强约束**：农场与旧投放路径必须复用**同一个** manifest/禁用判定服务（`SkillDisabledChecker`
    同源），禁止农场侧重写过滤规则
 3. **禁用两级语义（B-2）**：**服务级（全局）禁用 = 新版本**——全局禁用集纳入 bundle 内容与版本指纹
