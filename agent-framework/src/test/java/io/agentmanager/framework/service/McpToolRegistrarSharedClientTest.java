@@ -300,4 +300,48 @@ class McpToolRegistrarSharedClientTest {
         verify(base, times(2)).close();
         assertNull(registrar.sharedWrapper(mcp.server()), "clearServer 不回填共享缓存");
     }
+
+    // ---------- 原地 reload 换芯后 clearServer 不得关闭共享句柄（issue #410 回归） ----------
+    // A 路径 reload 的 clearServer ② toolkit.removeMcpClient 会命中 SDK mcpClients 登记
+    // （标准路径注册的正是共享句柄）并经 Mono.fromRunnable(wrapper::close) 关闭它——
+    // ReconnectableMcpClientWrapper.close() 永久置 closed，刚换芯的活连接被误杀、句柄
+    // 拒绝后续 swap。共享句柄是全体 toolkit（单例+存量会话）的活连接，②③ 都不得触碰；
+    // 工具摘除由既有 ①（按注册名逐个 removeTool）完成。
+
+    @Test
+    void clearServerShouldKeepRebuiltSharedHandleAliveForInPlaceReload() {
+        var displayName = "mcp__" + mcp.server() + "__get_time";
+        var tool = new McpSchema.Tool("get_time", "", "desc", null, null, null, null);
+        // 标准路径注册进真实 Toolkit（listTools 返回 1 个工具）
+        var base1 = mock(McpClientWrapper.class);
+        when(base1.getName()).thenReturn("base1");
+        when(base1.initialize()).thenReturn(Mono.empty());
+        when(base1.listTools()).thenReturn(Mono.just(List.of(tool)));
+        registrar.bases.add(base1);
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        assertTrue(toolkit.getToolNames().contains(displayName));
+
+        // 看门狗原地换芯：句柄 delegate → base2（实例不变，换芯后新连接上报同一工具面）
+        var base2 = mock(McpClientWrapper.class);
+        when(base2.getName()).thenReturn("base2");
+        when(base2.initialize()).thenReturn(Mono.empty());
+        when(base2.listTools()).thenReturn(Mono.just(List.of(tool)));
+        registrar.bases.add(base2);
+        assertTrue(registrar.rebuildSharedWrapper(mcp.server(), mcp));
+        var handle = (ReconnectableMcpClientWrapper) registrar.sharedWrapper(mcp.server());
+        assertSame(base2, handle.delegate());
+
+        // A 路径 reload 原地 clearServer：共享句柄不透传 SDK removeMcpClient 的 close
+        assertTrue(registrar.clearServer(toolkit, mcp.server()));
+        verify(base2, never()).close();
+
+        // 重注册：bases 队列空 → 命中缓存复用同一句柄（delegate 仍 base2），工具面恢复
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        assertSame(handle, registrar.sharedWrapper(mcp.server()));
+        assertSame(base2, ((ReconnectableMcpClientWrapper) registrar.sharedWrapper(mcp.server())).delegate());
+        assertTrue(toolkit.getToolNames().contains(displayName), "clearServer 后重注册必须恢复工具面");
+
+        // 句柄未被 close 置死：换芯语义保持可用
+        assertTrue(handle.swap(healthyBase("base3")), "共享句柄不得被 clearServer 置 closed");
+    }
 }
