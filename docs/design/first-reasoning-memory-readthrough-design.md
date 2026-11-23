@@ -90,6 +90,16 @@ KV 点查用 `baseStore.get`（主键查询）而非 search+过滤——search �
 'runtime_ns%'` 前缀扫描，会把 `…/users/{uid}/skills` 子命名空间整族行（含内容）拖过
 JDBC（L4 大时即 `OpenSandbox.java:822` 注释记载的 ≈1.5s/call 噪声来源）。
 
+> `translateExists` 判定口径修订（2026-11-23 回填，issue #423）：本节第 1 条「容器缺失时
+> 回落 KV」在 `test -e` 翻译上曾被实现为 **KV 优先**（记忆路径命中即点查 KV 直接 return，
+> 不看容器）——容器内本轮新写、尚未回写 KV 的 `MEMORY.md` / `memory/一级.md` 被判 no，
+> 而同路径 `translateRead` 容器优先能读到，SDK/模型基于 `test -e` 决策（新建 vs 追加记忆）
+> 得到矛盾信号，可能覆盖刚写的记忆。修订后与 `translateRead` 完全同口径：**容器优先判定
+> （父目录列举/两步实现），仅容器确定缺失的出口回落 KV**（`memoryKvExists`：memory/ 目录
+> 按运行时清单判存在，`MEMORY.md` 与 memory/ 一级 .md 按点查判存在，空内容 → yes 与
+> `__EMPTY__` 一致）；symlink 回落真 exec（#394）与异常向上抛语义不变，读穿关闭/未绑定
+> 时回落短路 false（行为与不读穿一致）。
+
 ### 3.2 D2 运行时文件单次枚举（P0）
 
 `readRuntimeFiles` 从「1 read + 1 ls + N read」改为**一次 `baseStore.search` 大页分页
