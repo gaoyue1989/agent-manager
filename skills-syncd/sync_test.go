@@ -401,8 +401,10 @@ func TestCurrentVersionFromReadlink(t *testing.T) {
 	if err := os.Symlink(versionPrefix+"deadbeefdeadbeef", filepath.Join(store, currentLink)); err != nil {
 		t.Fatal(err)
 	}
-	if got := currentVersion(store); got != "deadbeefdeadbeef" {
-		t.Fatalf("current = %q, want deadbeefdeadbeef", got)
+	// CURRENT 悬空（目标版本目录不存在）视为无现役版本（issue #429）：只读链接不验目标
+	// 会让 info.Version == current 恒成立、永不重拉
+	if got := currentVersion(store); got != "" {
+		t.Fatalf("dangling current = %q, want empty", got)
 	}
 	if err := os.Remove(filepath.Join(store, currentLink)); err != nil {
 		t.Fatal(err)
@@ -832,6 +834,68 @@ func TestRollingDeployAfterSteadyStateDwellDoesNotDowngrade(t *testing.T) {
 	assertCurrent(t, d.cfg.storeDir, ver2)
 }
 
+// 回归（issue #429，PR #404 后续）：稳态命中每轮刷新 recent[current] 之后，CURRENT 被
+// 外部删除时容忍窗把恢复拉取挡住最长 2×interval——期间该 Pod 全部新会话零包技能。
+// 修复语义：容忍窗只对「本地确有现役版本」的回退生效，current=="" 必须拉取。
+func TestMissingCurrentRecoversNextCycle(t *testing.T) {
+	src := newFakeSource(t)
+	src.setVersion(ver1)
+	src.setBundleFiles(defaultFixture("v1"))
+	d := newTestDaemon(t, src, nil, nil)
+	ctx := context.Background()
+
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("initial pull: %v", err)
+	}
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("steady-state cycle: %v", err)
+	}
+	if err := os.Remove(filepath.Join(d.cfg.storeDir, currentLink)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("recovery cycle: %v", err)
+	}
+	if hits := src.stats().bundleHits; hits != 2 {
+		t.Fatalf("bundle hits after CURRENT removed = %d, want 2 (tolerance window must not block recovery pull)", hits)
+	}
+	assertCurrent(t, d.cfg.storeDir, ver1)
+	assertIndirectRead(t, d.cfg.storeDir, "skill-a/SKILL.md", "skill a v1")
+}
+
+// 回归（issue #429）：CURRENT 悬空（版本目录被外部删除）时 currentVersion 只 Readlink
+// 不校验目标存在，info.Version == current 恒成立、稳态永不重拉。修复语义：目标目录缺失
+// 视为无现役版本，下一轮即重拉并经 swapCurrent 修复悬空链接。
+func TestDanglingCurrentRecoversNextCycle(t *testing.T) {
+	src := newFakeSource(t)
+	src.setVersion(ver1)
+	src.setBundleFiles(defaultFixture("v1"))
+	d := newTestDaemon(t, src, nil, nil)
+	ctx := context.Background()
+
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("initial pull: %v", err)
+	}
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("steady-state cycle: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(d.cfg.storeDir, versionPrefix+ver1)); err != nil {
+		t.Fatal(err)
+	}
+	// 链接仍在但目标已删（悬空）
+	if _, err := os.Lstat(filepath.Join(d.cfg.storeDir, currentLink)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.cycle(ctx); err != nil {
+		t.Fatalf("recovery cycle: %v", err)
+	}
+	if hits := src.stats().bundleHits; hits != 2 {
+		t.Fatalf("bundle hits after version dir removed = %d, want 2 (dangling CURRENT must not count as steady state)", hits)
+	}
+	assertCurrent(t, d.cfg.storeDir, ver1)
+	assertIndirectRead(t, d.cfg.storeDir, "skill-a/SKILL.md", "skill a v1")
+}
+
 func TestStagingInterruptLeavesNoReadableState(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -1030,8 +1094,9 @@ func TestStartupCleanupIdempotent(t *testing.T) {
 				t.Fatalf("v-* survived cleanup with dangling CURRENT: %s", e.Name())
 			}
 		}
-		if got := currentVersion(store); got != "gone" {
-			t.Fatalf("CURRENT link damaged by cleanup: %q", got)
+		// 链接本体不被 cleanup 触碰（目标目录已删，currentVersion 语义为空，issue #429）
+		if target, err := os.Readlink(filepath.Join(store, currentLink)); err != nil || target != versionPrefix+"gone" {
+			t.Fatalf("CURRENT link damaged by cleanup: target=%q err=%v", target, err)
 		}
 	})
 }
