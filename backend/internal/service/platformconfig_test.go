@@ -6,7 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clienttesting "k8s.io/client-go/testing"
 
 	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/k8s/k8sfake"
@@ -383,6 +387,87 @@ func TestSkillsyncTokenSecretRevocation(t *testing.T) {
 	}
 	if string(sec.Data["token"]) != "tok-2" {
 		t.Fatalf("re-grant token value wrong: %q", sec.Data["token"])
+	}
+}
+
+// forbidPoolSecretRead 注入池 workload ns Secret 读 Forbidden（issue #409：模拟
+// 未部署 OpenSandbox / 未授权该 ns 的环境），仅拦 opensandbox ns，服务 ns 不受影响。
+func forbidPoolSecretRead(fk *k8sfake.FakeK8s) {
+	fk.CS().Fake.PrependReactor("get", "secrets", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() != k8s.SandboxWorkloadNamespace {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("no pool ns RBAC"))
+	})
+}
+
+// TestPublishNoTokenForbiddenFree（issue #409，PR #364 回归）：未配置 SKILLSYNC_TOKEN
+// 的服务发布零跨 ns 访问——池 ns Secret 读被 Forbidden 时 Publish 照常成功。
+func TestPublishNoTokenForbiddenFree(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	forbidPoolSecretRead(fk)
+	if _, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Env: map[string]string{"LOG_LEVEL": "info"}}); err != nil {
+		t.Fatalf("publish without token must not touch pool ns: %v", err)
+	}
+}
+
+// TestUpdateEnvNoTokenForbiddenFree（issue #409）：存量无 token 服务 UpdateEnv 不触碰池 ns。
+func TestUpdateEnvNoTokenForbiddenFree(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
+	forbidPoolSecretRead(fk)
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn"}, nil); err != nil {
+		t.Fatalf("update env without token must not touch pool ns: %v", err)
+	}
+}
+
+// TestRepublishNoTokenForbiddenFree（issue #409）：存量无 token 服务 Republish 不触碰池 ns。
+func TestRepublishNoTokenForbiddenFree(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
+	forbidPoolSecretRead(fk)
+	if _, err := core.Republish(svc.ID, RepublishOptions{}); err != nil {
+		t.Fatalf("republish without token must not touch pool ns: %v", err)
+	}
+}
+
+// TestStartAgainNoTokenForbiddenFree（issue #409）：存量无 token 服务 StartAgain 不触碰池 ns。
+func TestStartAgainNoTokenForbiddenFree(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
+	forbidPoolSecretRead(fk)
+	if _, err := core.StartAgain(svc.ID); err != nil {
+		t.Fatalf("start again without token must not touch pool ns: %v", err)
+	}
+}
+
+// TestRepublishTokenRevocation 撤销闭环对照（issue #409，RBAC 正常）：曾带 token 服务经
+// Republish 以「空串=删除」清 token → 池 ns token Secret 仍被撤销（prevSecret 传参在
+// 四条写路径不遗漏；UpdateEnv 侧由 TestSkillsyncTokenSecretRevocation 锁定）。
+func TestRepublishTokenRevocation(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID,
+		map[string]string{"SKILLSYNC_TOKEN": "tok-1"}, nil)
+	secName := k8s.SkillsyncTokenName(svc.K8sName)
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err != nil {
+		t.Fatalf("precondition: token secret ensured on publish: %v", err)
+	}
+	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{"SKILLSYNC_TOKEN": ""}}); err != nil {
+		t.Fatalf("republish clear token: %v", err)
+	}
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
+		t.Fatal("token secret must be revoked when republish drops SKILLSYNC_TOKEN")
 	}
 }
 
