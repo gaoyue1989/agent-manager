@@ -193,6 +193,70 @@ class SandboxUserKeyMiddlewareTest {
     }
 
     @Test
+    void shouldResetOncePerSessionAcrossAlternatingTurnsOfSameUser() {
+        // B-13b（issue #413）：换代索引必须按会话键——Channel 链路同一真实用户（alice）两个
+        // 前端会话（front-sid-a/b）交替时，旧 userKey 键实现的单槽索引被 B 会话翻转，回到 A
+        // 误判换代 → 冗余 reset+重注入（覆写容器内已被 agent 修改的上传件）。A→B→A 交替，
+        // 每 session 恰 reset 一次。
+        var spec = new OpenSandboxFilesystemSpec();
+        var sandboxA = mockSandbox("sbx-a");
+        var sandboxB = mockSandbox("sbx-b");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        spec.fileAssetStore(store);
+        var sessionStore = mock(SessionUserStore.class);
+        when(sessionStore.findUserIdBySession(anyString())).thenReturn(null);
+        when(sessionStore.findUserIdBySession("front-sid-a")).thenReturn("alice");
+        when(sessionStore.findUserIdBySession("front-sid-b")).thenReturn("alice");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
+
+        run(mw, turnCtx("gw-hash-a", "front-sid-a", sandboxA));
+        run(mw, turnCtx("gw-hash-b", "front-sid-b", sandboxB));
+        run(mw, turnCtx("gw-hash-a", "front-sid-a", sandboxA));
+
+        verify(store, times(1)).resetInjectedToPending("front-sid-a");
+        verify(store, times(1)).resetInjectedToPending("front-sid-b");
+    }
+
+    @Test
+    void shouldInvalidateUploadMemoWhenGenerationResetRolledBackRows() {
+        // B-13a（issue #413）：换代 reset 确有行回滚（n>0）→ 必须显式失效沙箱实例的注入备忘
+        // （pendingEmptyChecked/uploadsInjected）——否则 wrapReused/resume 换代后实例备忘命中
+        // 稳态短路，本 turn injectPendingUploads 不重查，历史上传件不重注入（首轮 404）
+        var spec = new OpenSandboxFilesystemSpec();
+        var sandbox = mockSandbox("sbx-gen-1");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        when(store.resetInjectedToPending("front-sid")).thenReturn(1);
+        spec.fileAssetStore(store);
+        var sessionStore = mock(SessionUserStore.class);
+        when(sessionStore.findUserIdBySession(anyString())).thenReturn(null);
+        when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
+
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+
+        verify(sandbox).invalidatePendingUploadMemo();
+    }
+
+    @Test
+    void shouldNotInvalidateUploadMemoWhenGenerationResetRolledNothingBack() {
+        // n=0（同代重入/无 injected 行）：不失效备忘——保住 P2-16 稳态短路（实例每 doExec
+        // 跑 hydrateForCall，无条件失效=每次换代判定白付一次 file_asset 查询）
+        var spec = new OpenSandboxFilesystemSpec();
+        var sandbox = mockSandbox("sbx-gen-2");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        when(store.resetInjectedToPending("front-sid")).thenReturn(0);
+        spec.fileAssetStore(store);
+        var sessionStore = mock(SessionUserStore.class);
+        when(sessionStore.findUserIdBySession(anyString())).thenReturn(null);
+        when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
+
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+
+        verify(sandbox, never()).invalidatePendingUploadMemo();
+    }
+
+    @Test
     void shouldBindOnlyItsOwnTurnSandboxUnderConcurrency() {
         // 并发串沙箱回归：两个并发 turn 各自 ctx 持有自己的沙箱，onAgent 只重绑本 turn 的沙箱
         // （历史上 spec.latestSandbox 进程级指针会被其他用户 create/resume 覆盖 → 误绑他人沙箱）

@@ -77,6 +77,25 @@ class OpenSandboxFilesystemSpecTest {
         assertNotNull(spec.createClient());
     }
 
+    // ==================== 注入换代索引（会话键，issue #413） ====================
+
+    @Test
+    void injectedGenerationIndexShouldKeyBySessionNotUser() {
+        // 键=会话键（与 file_asset.session_id 同命名空间，issue #413）：同用户两个会话各自
+        // 持有「已执行过 reset 的沙箱代」索引，互不翻转——会话 A 的换代状态不因会话 B
+        // mark 而丢失，A 重入不误判换代（B-13b）
+        var spec = new OpenSandboxFilesystemSpec();
+
+        assertFalse(spec.isInjectedOnSandbox("sess-a", "sbx-a"), "未记录=未换代");
+        spec.markInjectedOnSandbox("sess-a", "sbx-a");
+        spec.markInjectedOnSandbox("sess-b", "sbx-b");
+
+        assertTrue(spec.isInjectedOnSandbox("sess-a", "sbx-a"), "会话 A 的换代索引被会话 B 翻转（必须按会话键独立记账）");
+        assertTrue(spec.isInjectedOnSandbox("sess-b", "sbx-b"));
+        assertFalse(spec.isInjectedOnSandbox("sess-a", "sbx-b"), "同会话换新沙箱代=未换代");
+        assertFalse(spec.isInjectedOnSandbox("sess-c", "sbx-a"), "第三会话独立");
+    }
+
     // ==================== Pod 级缓存表（稳态短路记账 / P1 护栏） ====================
 
     @Test

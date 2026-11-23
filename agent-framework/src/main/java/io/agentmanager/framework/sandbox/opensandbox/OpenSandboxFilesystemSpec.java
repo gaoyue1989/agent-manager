@@ -66,8 +66,10 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
      */
     private volatile SandboxLifecycleManager lifecycleManager;
 
-    /** userKey → 已注入沙箱 id（reset 仅在新沙箱代执行，防多实例循环 reset/inject）；LRU 有界 */
-    private final Map<String, String> userInjectedSandbox = lruMap(256);
+    /** 会话键 → 已执行过 reset 的沙箱代（reset 仅在新沙箱代执行，防多实例循环 reset/inject）；
+     *  键=会话键，与 file_asset.session_id 同命名空间（issue #413：旧 userKey 键会被同用户
+     *  他会话翻转，回原会话误判换代 → 冗余 reset+重注入覆写容器内已修改上传件）；LRU 有界 */
+    private final Map<String, String> sessionInjectedSandbox = lruMap(256);
 
     /**
      * 会话水合门控表（pod 本地缓存，真相在 KV/容器）：userKey|sandboxId → 已知同步状态。
@@ -199,15 +201,15 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         }
     }
 
-    /** 该用户当前是否已在新沙箱代 reset+inject 过 */
-    public boolean isInjectedOnSandbox(String userKey, String sandboxId) {
-        return sandboxId != null && sandboxId.equals(userInjectedSandbox.get(userKey));
+    /** 该会话当前是否已在新沙箱代 reset+inject 过 */
+    public boolean isInjectedOnSandbox(String sessionId, String sandboxId) {
+        return sandboxId != null && sandboxId.equals(sessionInjectedSandbox.get(sessionId));
     }
 
-    /** 记录该用户已注入的沙箱 id */
-    public void markInjectedOnSandbox(String userKey, String sandboxId) {
-        if (userKey != null && sandboxId != null) {
-            userInjectedSandbox.put(userKey, sandboxId);
+    /** 记录该会话已注入的沙箱 id */
+    public void markInjectedOnSandbox(String sessionId, String sandboxId) {
+        if (sessionId != null && sandboxId != null) {
+            sessionInjectedSandbox.put(sessionId, sandboxId);
         }
     }
 

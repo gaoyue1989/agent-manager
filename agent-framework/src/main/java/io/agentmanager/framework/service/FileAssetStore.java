@@ -213,8 +213,12 @@ public class FileAssetStore {
      *
      * <p>session 单条件（与 {@link #listPending} 同口径）：容器按会话绑定，回滚也只回滚
      * 本会话的行；session 未知时调用方必须跳过（user 维度回滚会波及他 session 行）。
+     *
+     * <p>返回实际回滚行数（issue #413）：n&gt;0 = 确有 injected 行回到 pending，调用方据此
+     * 失效沙箱实例的注入备忘（否则备忘短路吞掉重注入批次）；异常路径返回 0（与
+     * catch-告警语义一致）。
      */
-    public void resetInjectedToPending(String sessionId) {
+    public int resetInjectedToPending(String sessionId) {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  UPDATE file_asset SET status = 'pending'
@@ -225,8 +229,10 @@ public class FileAssetStore {
             if (n > 0) {
                 log.info("FileAssetStore: reset {} file(s) injected→pending for session {}", n, sessionId);
             }
+            return n;
         } catch (Exception e) {
             log.warn("FileAssetStore: resetInjectedToPending {} failed: {}", sessionId, e.getMessage());
+            return 0;
         }
     }
 

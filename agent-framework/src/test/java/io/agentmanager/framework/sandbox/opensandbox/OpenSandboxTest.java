@@ -434,6 +434,37 @@ class OpenSandboxTest {
         verify(store).markInjected(List.of("f9"));
     }
 
+    @Test
+    void invalidatePendingUploadMemoShouldForceRecheckAndSteadyStateStaysShortCircuited() throws Exception {
+        // issue #413 语义钉子：查无 pending 置位备忘（pendingEmptyChecked）后——
+        // ① 不失效备忘：同实例重复调用不重查（P2-16 稳态短路，实例存活期=单 call 的
+        //   file_asset 查询节流不得回归）；
+        // ② 失效备忘（middleware 换代 reset 确有行回滚后调用）：下一次调用真实重查重注
+        //   （wrapReused/resume 换代后历史上传件必须重新注入）
+        var store = mockAssetStore();
+        when(store.listPending("u9")).thenReturn(List.of());
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setUserKey("u9");
+        sandbox.setSessionId("u9");
+
+        sandbox.injectPendingUploads();
+        verify(store, times(1)).listPending("u9");
+
+        // 对照组：不 invalidate，稳态短路保持
+        sandbox.injectPendingUploads();
+        verify(store, times(1)).listPending("u9");
+        verify(osb.files(), never()).write(anyList());
+
+        // 换代 reset 有行回滚 → invalidate → 真实重查重注
+        when(store.listPending("u9")).thenReturn(List.of(asset("f9", "memo.txt")));
+        sandbox.invalidatePendingUploadMemo();
+        sandbox.injectPendingUploads();
+        verify(store, times(2)).listPending("u9");
+        verify(osb.files()).write(anyList());
+        verify(store).markInjected(List.of("f9"));
+    }
+
     private static FileAssetStore.FileAsset asset(String id, String fileName) {
         return new FileAssetStore.FileAsset(id, "u", null, null, fileName, null,
             "application/octet-stream", 1, "local", "upload/x/" + id, "upload", "pending", null);
