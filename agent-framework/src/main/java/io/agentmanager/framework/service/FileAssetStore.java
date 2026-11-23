@@ -90,29 +90,31 @@ public class FileAssetStore {
     }
 
     /**
-     * 该 session 下 status=pending 的文件（沙箱注入批次）。
+     * 该 session + user 下 status=pending 的文件（沙箱注入批次）。
      *
-     * <p>严格按 session 单条件过滤（上传作用域 session 化，issue #345）：user 维度的
-     * OR 命中是历史缺陷——旧 session 文件对新 session 是无引用路径的纯噪音。
-     * 未绑定会话的行（session_id IS NULL，上传后从未被 chat 引用）永不注入，
-     * bind-at-use 在 chat 首次引用时绑定（UploadWorkspaceInjector#assignWorkspacePaths）。
+     * <p>session + user 双条件过滤：session 维度是上传作用域 session 化（issue #345，
+     * 消 user 维度 OR 命中的跨 session 重放）；user 维度补齐归属（issue #411）——他人行
+     * 即使绑定同 session 也不得进入注入批次。未绑定会话的行（session_id IS NULL，上传后
+     * 从未被 chat 引用）永不注入，bind-at-use 在 chat 首次引用时绑定
+     * （UploadWorkspaceInjector#assignWorkspacePaths）。
      */
-    public List<FileAsset> listPending(String sessionId) {
+    public List<FileAsset> listPending(String sessionId, String userKey) {
         var result = new ArrayList<FileAsset>();
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT * FROM file_asset
-                 WHERE status = 'pending' AND session_id = ?
+                 WHERE status = 'pending' AND session_id = ? AND user_key = ?
                  ORDER BY created_at
                  """)) {
             stmt.setString(1, sessionId != null ? sessionId : "");
+            stmt.setString(2, userKey != null ? userKey : "");
             try (var rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(map(rs));
                 }
             }
         } catch (Exception e) {
-            log.warn("FileAssetStore: listPending {} failed: {}", sessionId, e.getMessage());
+            log.warn("FileAssetStore: listPending {}/{} failed: {}", sessionId, userKey, e.getMessage());
         }
         return result;
     }

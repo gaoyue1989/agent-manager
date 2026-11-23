@@ -318,7 +318,7 @@ class OpenSandboxTest {
         // 不做 base64 解码——旧实现传 base64 字符串，沙箱内二进制文件全部损坏
         var raw = new byte[]{0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, (byte) 0xFF, 0x10}; // zip magic + 二进制
         var store = mockAssetStore();
-        when(store.listPending("u1")).thenReturn(List.of(asset("f1", "sample.docx")));
+        when(store.listPending("u1", "u1")).thenReturn(List.of(asset("f1", "sample.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(raw));
         sandbox.setUserKey("u1");
@@ -342,7 +342,7 @@ class OpenSandboxTest {
         // 重放即触发）。
         var store = mockAssetStore();
         when(store.listWorkspacePaths("u2")).thenReturn(List.of("uploads/report.docx"));
-        when(store.listPending("u2")).thenReturn(List.of(reserved("f2", "report.docx", "uploads/report.docx")));
+        when(store.listPending("u2", "u2")).thenReturn(List.of(reserved("f2", "report.docx", "uploads/report.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u2");
@@ -364,7 +364,7 @@ class OpenSandboxTest {
         // 保证后续轮次提示路径与磁盘一致
         var store = mockAssetStore();
         when(store.listWorkspacePaths("u3")).thenReturn(List.of("uploads/plan.docx"));
-        when(store.listPending("u3")).thenReturn(List.of(asset("f3", "plan.docx")));
+        when(store.listPending("u3", "u3")).thenReturn(List.of(asset("f3", "plan.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u3");
@@ -384,7 +384,7 @@ class OpenSandboxTest {
         // 同一批次两份无预留的同名文件：第二份也得避开第一份刚分配的路径
         var store = mockAssetStore();
         when(store.listWorkspacePaths("u4")).thenReturn(List.of());
-        when(store.listPending("u4")).thenReturn(List.of(
+        when(store.listPending("u4", "u4")).thenReturn(List.of(
             asset("a", "plan.docx"), asset("b", "plan.docx")));
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
@@ -413,7 +413,7 @@ class OpenSandboxTest {
 
         sandbox.injectPendingUploads();
 
-        verify(store, never()).listPending(anyString());
+        verify(store, never()).listPending(anyString(), anyString());
         verify(osb.files(), never()).write(anyList());
     }
 
@@ -421,7 +421,7 @@ class OpenSandboxTest {
     void injectUploadsShouldFallBackToSpecPendingSessionId() throws Exception {
         // 实例未绑定（acquire 先于 bindUserKey 的窗口）→ spec ThreadLocal 兜底
         var store = mockAssetStore();
-        when(store.listPending("sess-9")).thenReturn(List.of(asset("f9", "a.txt")));
+        when(store.listPending("sess-9", "u1")).thenReturn(List.of(asset("f9", "a.txt")));
         var spec = new OpenSandboxFilesystemSpec();
         spec.setPendingSessionId("sess-9");
         var osb = mockOsb(mockExecution(0, "", ""));
@@ -430,7 +430,7 @@ class OpenSandboxTest {
 
         sandbox.injectPendingUploads();
 
-        verify(store).listPending("sess-9");
+        verify(store).listPending("sess-9", "u1");
         verify(store).markInjected(List.of("f9"));
     }
 
@@ -442,27 +442,44 @@ class OpenSandboxTest {
         // ② 失效备忘（middleware 换代 reset 确有行回滚后调用）：下一次调用真实重查重注
         //   （wrapReused/resume 换代后历史上传件必须重新注入）
         var store = mockAssetStore();
-        when(store.listPending("u9")).thenReturn(List.of());
+        when(store.listPending("u9", "u9")).thenReturn(List.of());
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
         sandbox.setUserKey("u9");
         sandbox.setSessionId("u9");
 
         sandbox.injectPendingUploads();
-        verify(store, times(1)).listPending("u9");
+        verify(store, times(1)).listPending("u9", "u9");
 
         // 对照组：不 invalidate，稳态短路保持
         sandbox.injectPendingUploads();
-        verify(store, times(1)).listPending("u9");
+        verify(store, times(1)).listPending("u9", "u9");
         verify(osb.files(), never()).write(anyList());
 
         // 换代 reset 有行回滚 → invalidate → 真实重查重注
-        when(store.listPending("u9")).thenReturn(List.of(asset("f9", "memo.txt")));
+        when(store.listPending("u9", "u9")).thenReturn(List.of(asset("f9", "memo.txt")));
         sandbox.invalidatePendingUploadMemo();
         sandbox.injectPendingUploads();
-        verify(store, times(2)).listPending("u9");
+        verify(store, times(2)).listPending("u9", "u9");
         verify(osb.files()).write(anyList());
         verify(store).markInjected(List.of("f9"));
+    }
+
+    @Test
+    void injectUploadsShouldSkipWhenNoUserKeyBound() throws Exception {
+        // 注入前身份齐备校验（issue #411）：listPending 双条件的 userKey 维度取自实例绑定
+        // （bindUserKey / middleware setUserKey）——缺失即无法与 file_asset.user_key 比对，
+        // 必须跳过注入（行保持 pending，不置 pendingEmptyChecked，下 turn 身份齐备后重试）。
+        // 与 injectUploadsShouldSkipWhenNoSessionBound 对偶：绝不回退 user 维度兜底
+        var store = mockAssetStore();
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setSessionId("sess-10");
+
+        sandbox.injectPendingUploads();
+
+        verify(store, never()).listPending(anyString(), anyString());
+        verify(osb.files(), never()).write(anyList());
     }
 
     private static FileAssetStore.FileAsset asset(String id, String fileName) {
@@ -863,6 +880,12 @@ class OpenSandboxTest {
             + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
             + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
             + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
+    /** glob 回落命令的 -L 归一化形态（doExec normalizeSymlinkHostileFind 契约：回落真 exec 必带 -L） */
+    private static final String FIND_PROBE_L =
+        "find -L 'tree' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
 
     /** glob 探测模板参数化形态（P_FIND 同形，root/pattern 可指定的根级/子树 glob 用例构造） */
     private static String findProbeForm(String root, String pattern) {
@@ -1042,7 +1065,7 @@ class OpenSandboxTest {
 
         assertTrue(r.ok());
         assertEquals("tree/sub/x.md\t3\t0", r.stdout(), "结果必须取自真 exec stub（回落生效）");
-        verify(osb.commands()).run(FIND_PROBE);
+        verify(osb.commands()).run(FIND_PROBE_L);
     }
 
     @Test
@@ -1174,7 +1197,7 @@ class OpenSandboxTest {
 
     @Test
     void globProbeWithProxySandboxNotFound404ShouldFallBackToRealFind() throws Exception {
-        // 同型：walkFiles 对死沙箱代理 404 不得视作「空目录」输出假空结果
+        // 同型：glob 遍历对死沙箱代理 404 不得视作「空目录」输出假空结果
         var osb = mockOsb(mockExecution(0, "tree/x.md\t3\t0", ""));
         when(osb.files().listDirectory("tree")).thenThrow(sandboxNotFound404());
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);
@@ -1183,7 +1206,7 @@ class OpenSandboxTest {
 
         assertTrue(result.ok());
         assertEquals("tree/x.md\t3\t0", result.stdout(), "死沙箱代理 404 必须回落真 find，不得假空");
-        verify(osb.commands()).run(FIND_PROBE);
+        verify(osb.commands()).run(FIND_PROBE_L);
     }
 
     @Test
@@ -1197,7 +1220,7 @@ class OpenSandboxTest {
 
         assertTrue(result.ok());
         assertEquals("tree/x.md\t3\t0", result.stdout(), "真实形态死沙箱 404 必须回落真 find，不得假空");
-        verify(osb.commands()).run(FIND_PROBE);
+        verify(osb.commands()).run(FIND_PROBE_L);
     }
 
     // ---------- exec→execd 翻译器（P0-12，issue #290 收窄回归） ----------

@@ -177,33 +177,33 @@ func (c *Core) validateSandboxPoolBinding(name string) (string, error) {
 	return k8sName, nil
 }
 
-// guardBoundSandboxPool 删除服务前的绑定池复核（issue #359）：{k8sName}-pool 仍在上游
-// 运行 → ErrConflict 提示先删池（池模板 secretKeyRef 引用 {k8sName}-skillsync-token，
-// 服务删除连带删 Secret 会使池新 Pod 卡 CreateContainerConfigError、池容量静默退化）。
-// 上游 404（无绑定池）、501（非 kubernetes runtime 无池 API，不可能有池）、管理面未配置
-// （ErrSandboxNotConfigured，平台未接 OpenSandbox）放行；其余状态（不可达/5xx/限流）
-// fail-closed 拒绝删除——池状态未知即不动，与技能同步撤销链路口径一致。
-func (c *Core) guardBoundSandboxPool(k8sName string) error {
+// guardBoundSandboxPool 删除服务 / 撤销技能同步 token 前的绑定池复核（issue #359/#396）：
+// {k8sName}-pool 仍在上游运行 → ErrConflict 提示先删池（池模板 secretKeyRef 引用
+// {k8sName}-skillsync-token，删除 Secret 会使池新 Pod 卡 CreateContainerConfigError、
+// 池容量静默退化）。上游 404（无绑定池）、501（非 kubernetes runtime 无池 API，不可能有池）、
+// 管理面未配置（ErrSandboxNotConfigured，平台未接 OpenSandbox）放行；其余状态（不可达/5xx/
+// 限流）fail-closed 拒绝——池状态未知即不动，与技能同步撤销链路口径一致。
+func (c *Core) guardBoundSandboxPool(k8sName, action string) error {
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
 		if errors.Is(err, ErrSandboxNotConfigured) {
 			return nil
 		}
-		return fmt.Errorf("服务 %s 删除前绑定池探测失败（读管理面配置异常），已拒绝删除: %w", k8sName, err)
+		return fmt.Errorf("服务 %s %s前绑定池探测失败（读管理面配置异常），已拒绝: %w", k8sName, action, err)
 	}
 	status, _, err := cfg.do(http.MethodGet, "/v1/pools/"+k8sName+sandboxPoolServiceSuffix, nil, sandboxGetTimeout)
 	if err != nil {
-		return fmt.Errorf("服务 %s 删除前绑定池探测失败（opensandbox 管理面不可达），已拒绝删除：恢复管理面或先删池后重试: %w", k8sName, err)
+		return fmt.Errorf("服务 %s %s前绑定池探测失败（opensandbox 管理面不可达），已拒绝：恢复管理面或先删池后重试: %w", k8sName, action, err)
 	}
 	switch status {
 	case http.StatusOK:
 		poolName := k8sName + sandboxPoolServiceSuffix
-		return fmt.Errorf("%w: 绑定池 %s 仍在运行，先删池（DELETE /api/v1/admin/sandboxes/pools/%s）再删服务——池模板引用服务 token Secret，连带删除会使池新 Pod 卡 CreateContainerConfigError",
-			ErrConflict, poolName, poolName)
+		return fmt.Errorf("%w: 绑定池 %s 仍在运行，先删池（DELETE /api/v1/admin/sandboxes/pools/%s）再%s——池模板引用服务 token Secret，连带删除会使池新 Pod 卡 CreateContainerConfigError",
+			ErrConflict, poolName, poolName, action)
 	case http.StatusNotFound, http.StatusNotImplemented:
 		return nil
 	default:
-		return fmt.Errorf("服务 %s 删除前绑定池探测返回异常状态 HTTP %d，已拒绝删除：确认无绑定池（或先删池）后重试", k8sName, status)
+		return fmt.Errorf("服务 %s %s前绑定池探测返回异常状态 HTTP %d，已拒绝：确认无绑定池（或先删池）后重试", k8sName, action, status)
 	}
 }
 
