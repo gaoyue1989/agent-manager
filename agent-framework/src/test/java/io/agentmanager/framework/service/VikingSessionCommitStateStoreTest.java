@@ -1,17 +1,23 @@
 package io.agentmanager.framework.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -23,8 +29,9 @@ import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.state.State;
 
 /**
- * VikingSessionCommitStateStore 单测（覆盖审计补齐——此前零执行）：AGENT_STATE_KEY 过滤、
- * 新增消息 append、msg_id 幂等去重、非文本跳过、透传与 CAS 写路径。
+ * VikingSessionCommitStateStore 单测：AGENT_STATE_KEY 过滤、新增消息 append、msg_id 幂等
+ * 去重、非文本跳过、透传与 CAS 写路径；issue #418 三语义——delegate 落库先行不阻塞、
+ * OV session 键按会话隔离（A2A 不串写）、有界队列满丢弃不堆积。
  */
 class VikingSessionCommitStateStoreTest {
 
@@ -56,8 +63,8 @@ class VikingSessionCommitStateStoreTest {
         s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
         s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
         // 同一 state 二次 save：m1/m2 只 append 一次（msg_id 去重）
-        verify(client, times(1)).appendSessionMessage("u-1", "u-1", "user", "第一问");
-        verify(client, times(1)).appendSessionMessage("u-1", "u-1", "assistant", "第一答");
+        verify(client, timeout(2000).times(1)).appendSessionMessage("u-1", "u-1:s-1", "user", "第一问");
+        verify(client, timeout(2000).times(1)).appendSessionMessage("u-1", "u-1:s-1", "assistant", "第一答");
 
         // 增量 m3：只 append m3
         var state2 = stateWith(List.of(
@@ -65,8 +72,9 @@ class VikingSessionCommitStateStoreTest {
             msg("m2", MsgRole.ASSISTANT, "第一答"),
             msg("m3", MsgRole.USER, "第二问")));
         s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state2);
-        verify(client, times(1)).appendSessionMessage("u-1", "u-1", "user", "第二问");
-        verify(client, times(2)).appendSessionMessage(eq("u-1"), eq("u-1"), eq("user"), anyString());
+        verify(client, timeout(2000).times(1)).appendSessionMessage("u-1", "u-1:s-1", "user", "第二问");
+        verify(client, timeout(2000).times(2)).appendSessionMessage(eq("u-1"), eq("u-1:s-1"), eq("user"), anyString());
+        s.close();
     }
 
     @Test
@@ -75,7 +83,7 @@ class VikingSessionCommitStateStoreTest {
         store().save("u-1", "s-1", "other_state", state);
         store().save("u-1", "  ", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
         store().save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, (State) null);
-        verify(client, never()).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        verify(client, after(200).never()).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
     }
 
     @Test
@@ -84,7 +92,7 @@ class VikingSessionCommitStateStoreTest {
             msg("m1", MsgRole.USER, "  "),
             msg("m2", MsgRole.ASSISTANT, "内容")));
         store().save("", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
-        verify(client, never()).appendSessionMessage(any(), any(), any(), any());
+        verify(client, after(200).never()).appendSessionMessage(any(), any(), any(), any());
     }
 
     @Test
@@ -94,7 +102,7 @@ class VikingSessionCommitStateStoreTest {
             .thenReturn(8L);
         var out = store().saveIfVersion("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state, 7L);
         assertEquals(8L, out);
-        verify(client).appendSessionMessage("u-1", "u-1", "user", "问");
+        verify(client, timeout(2000)).appendSessionMessage("u-1", "u-1:s-1", "user", "问");
     }
 
     @Test
@@ -112,5 +120,93 @@ class VikingSessionCommitStateStoreTest {
         var state = stateWith(List.of(msg("m1", MsgRole.USER, "q")));
         s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
         verify(delegate).save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        s.close();
+    }
+
+    @Test
+    void saveMustNotBlockOnSlowOpenViking() throws Exception {
+        var gate = new CountDownLatch(1);
+        Mockito.doAnswer(inv -> {
+            gate.await(2, TimeUnit.SECONDS);
+            return null;
+        }).when(client).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        var s = store();
+        var state = stateWith(List.of(msg("m1", MsgRole.USER, "问")));
+        long start = System.nanoTime();
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        verify(delegate).save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        assertTrue(elapsedMs < 1000,
+            "save must return before OpenViking append completes, took " + elapsedMs + "ms");
+        gate.countDown();
+        verify(client, timeout(2000)).appendSessionMessage("u-1", "u-1:s-1", "user", "问");
+        s.close();
+    }
+
+    @Test
+    void a2aSessionsMustIsolateBySessionKey() {
+        var s = store();
+        s.save("u-1", "s-A", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("a1", MsgRole.USER, "会话A问"))));
+        s.save("u-1", "s-B", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("b1", MsgRole.USER, "会话B问"))));
+        verify(client, timeout(2000)).appendSessionMessage("u-1", "u-1:s-A", "user", "会话A问");
+        verify(client, timeout(2000)).appendSessionMessage("u-1", "u-1:s-B", "user", "会话B问");
+        s.close();
+    }
+
+    @Test
+    void realUserLookupResolvedOncePerBatch() {
+        when(sessionUserStore.findUserIdBySession("u-1")).thenReturn("real-u");
+        var s = store();
+        var state = stateWith(List.of(
+            msg("m1", MsgRole.USER, "一"),
+            msg("m2", MsgRole.ASSISTANT, "二")));
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        verify(client, timeout(2000)).appendSessionMessage("real-u", "u-1:s-1", "user", "一");
+        verify(client, timeout(2000)).appendSessionMessage("real-u", "u-1:s-1", "assistant", "二");
+        verify(sessionUserStore, times(1)).findUserIdBySession("u-1");
+        verify(sessionUserStore, after(200).never()).findUserIdBySession("s-1");
+        s.close();
+    }
+
+    @Test
+    void realUserLookupFallsBackWhenFirstMisses() {
+        when(sessionUserStore.findUserIdBySession(anyString())).thenReturn(null);
+        var s = store();
+        var state = stateWith(List.of(msg("m1", MsgRole.USER, "问")));
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        verify(client, timeout(2000)).appendSessionMessage("u-1", "u-1:s-1", "user", "问");
+        verify(sessionUserStore, times(1)).findUserIdBySession("u-1");
+        verify(sessionUserStore, times(1)).findUserIdBySession("s-1");
+        s.close();
+    }
+
+    @Test
+    void queueOverflowDropsWithoutBlocking() throws Exception {
+        var gate = new CountDownLatch(1);
+        var appended = new AtomicInteger();
+        Mockito.doAnswer(inv -> {
+            if (appended.incrementAndGet() == 1) {
+                gate.await(5, TimeUnit.SECONDS);
+            }
+            return null;
+        }).when(client).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        var s = store();
+        int total = VikingSessionCommitStateStore.QUEUE_CAPACITY + 20;
+        long start = System.nanoTime();
+        for (int i = 0; i < total; i++) {
+            s.save("u-1", "s-" + i, SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+                stateWith(List.of(msg("m" + i, MsgRole.USER, "内容" + i))));
+        }
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        assertTrue(elapsedMs < 2000,
+            total + " saves must not block on the single slow worker, took " + elapsedMs + "ms");
+        gate.countDown();
+        verify(client, timeout(5000).times(VikingSessionCommitStateStore.QUEUE_CAPACITY + 1))
+            .appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        verify(client, after(200).never())
+            .appendSessionMessage(anyString(), anyString(), anyString(), contains("内容" + (total - 1)));
+        s.close();
     }
 }

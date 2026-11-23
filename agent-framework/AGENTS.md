@@ -130,7 +130,7 @@ agent-framework/
 ### 1. AgentScopeConfig — Agent 装配
 
 创建 `HarnessAgent` Bean，配置：
-- **MysqlDistributedStore**: AgentState + 工作区文件统一持久化（AgentStateStore 装饰链自内向外：SandboxAwareMysqlAgentStateStore → SessionMessageArchiveStateStore【会话消息轨 write-through 归档 session_message，压缩后历史可查】→ AskingContentBackfillStateStore【最外层，ASKING content 回填】；归档开关 `AGENT_HISTORY_ARCHIVE_ENABLED`）
+- **MysqlDistributedStore**: AgentState + 工作区文件统一持久化（AgentStateStore 装饰链自内向外：MysqlAgentStateStore → VikingSessionCommitStateStore【OpenViking 会话归档异步 append，OVK_SESSION_COMMIT + AGENT_MEMORY_ENABLED 双开关门控；delegate 落库先行 + 有界队列 500 异步提交，OV session 键 = slot 复合键 `userId:sessionId`，createSession 失败负缓存 30s——issue #418】→ SessionMessageArchiveStateStore【会话消息轨 write-through 归档 session_message，压缩后历史可查】→ AskingContentBackfillStateStore【最外层，ASKING content 回填】；归档开关 `AGENT_HISTORY_ARCHIVE_ENABLED`）
 - **RemoteFilesystemSpec(IsolationScope.USER)**: 按 userId 多租户隔离
 - **MemoryConfig**: 记忆管理（MEMORY.md + memory/，flush 节流）
 - **CompactionConfig**: 上下文压缩（30 条或 80k token 任一命中触发——MCP 大结果场景靠 token 阈值兜底，保留 10 条；`AGENT_COMPACTION_TRIGGER_TOKENS`/`AGENT_COMPACTION_RESERVED_TOKENS` 可调）

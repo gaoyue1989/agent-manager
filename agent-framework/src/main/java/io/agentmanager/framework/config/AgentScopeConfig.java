@@ -422,6 +422,18 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.service.VikingMemoryClient(cfg);
     }
 
+    /**
+     * VikingSessionCommitStateStore 装配门控（issue #418 B-05c）：OpenViking 客户端在位 +
+     * OVK_SESSION_COMMIT 开启 + AGENT_MEMORY_ENABLED 开启三者齐备才装配会话归档层——
+     * 记忆总开关关闭时不得绕过（与 HarnessAgentFactory 的 memoryEnabled 判定同源语义）。
+     */
+    static boolean vikingSessionCommitEnabled(io.agentmanager.framework.service.VikingMemoryClient vikingClient,
+            io.agentmanager.framework.config.VikingConfig vikingCfg,
+            AgentManagerProperties.HarnessConfig harness) {
+        return vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit()
+            && harness != null && harness.memoryEnabled();
+    }
+
     @Bean
     @org.springframework.context.annotation.DependsOn("flywayInitializer")
     public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props,
@@ -430,6 +442,7 @@ public class AgentScopeConfig {
             org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.VikingMemoryClient> vikingClientProvider,
             org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.config.VikingConfig> vikingCfgProvider) {
         var dbName = props.checkpoint().resolvedDbName();
+        var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
         // AgentStateStore 装饰链（自内向外，顺序不可换）：
         //   ① MysqlAgentStateStore —— 真实 MySQL 存储（官方校验仅拒空/超长，
         //      沙箱 slot ID sandbox/user/{agentId}/{userId} 含 / 天然放行）
@@ -444,7 +457,7 @@ public class AgentScopeConfig {
                 dataSource, dbName, "agent_state", true);
         var vikingCfg = vikingCfgProvider.getIfAvailable();
         var vikingClient = vikingClientProvider.getIfAvailable();
-        if (vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit()) {
+        if (vikingSessionCommitEnabled(vikingClient, vikingCfg, harness)) {
             agentStateStore = new io.agentmanager.framework.service.VikingSessionCommitStateStore(
                 agentStateStore, vikingClient,
                 new io.agentmanager.framework.service.SessionUserStore(dataSource));
@@ -463,7 +476,7 @@ public class AgentScopeConfig {
             .build();
         log.info("DistributedStore initialized ({} . agent_state + agent_fs, historyArchive={}, vikingSessionCommit={})",
             dbName, historyConfig == null || historyConfig.archiveEnabled(),
-            vikingClient != null && vikingCfg != null && vikingCfg.sessionCommit());
+            vikingSessionCommitEnabled(vikingClient, vikingCfg, harness));
         return store;
     }
 

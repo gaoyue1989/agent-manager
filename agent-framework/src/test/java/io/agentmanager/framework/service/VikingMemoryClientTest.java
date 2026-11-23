@@ -53,17 +53,40 @@ class VikingMemoryClientTest {
     private final AtomicInteger registerCalls = new AtomicInteger();
     private volatile boolean retrievalError = false;
     private volatile boolean unregisteredUser = true;
+    private final AtomicInteger createSessionCalls = new AtomicInteger();
+    private final AtomicInteger appendMessageCalls = new AtomicInteger();
+    private volatile boolean failCreateSession = false;
 
     @BeforeEach
     void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(0), 0);
         server.createContext("/api/v1/search/search", this::handleSearch);
         server.createContext("/api/v1/admin/accounts", this::handleRegister);
+        server.createContext("/api/v1/sessions", this::handleSessions);
         server.createContext("/mcp", ex -> {
             send(ex, 200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":"
                 + "[{\"type\":\"text\",\"text\":\"Submitted 2 message(s)\"}]}}");
         });
         server.start();
+    }
+
+    private void handleSessions(HttpExchange ex) throws IOException {
+        var path = ex.getRequestURI().getPath();
+        if (path.equals("/api/v1/sessions")) {
+            createSessionCalls.incrementAndGet();
+            if (failCreateSession) {
+                send(ex, 500, "{\"status\":\"error\",\"error\":{\"code\":\"INTERNAL\"}}");
+                return;
+            }
+            send(ex, 200, "{\"status\":\"ok\",\"result\":{\"session_id\":\"ov-s-1\"}}");
+            return;
+        }
+        if (path.startsWith("/api/v1/sessions/") && path.endsWith("/messages")) {
+            appendMessageCalls.incrementAndGet();
+            send(ex, 200, "{\"status\":\"ok\"}");
+            return;
+        }
+        send(ex, 404, "{}");
     }
 
     @AfterEach
@@ -158,5 +181,28 @@ class VikingMemoryClientTest {
         assertFalse(cfg.enabled());
         var client = new VikingMemoryClient(cfg);
         assertNull(client.searchContext("u-1001", "q"));
+    }
+
+    @Test
+    void appendSessionCreatesOvSessionOnceThenReuses() {
+        unregisteredUser = false;
+        var client = new VikingMemoryClient(config());
+        client.appendSessionMessage("u-1001", "slot:sa", "user", "第一问");
+        client.appendSessionMessage("u-1001", "slot:sa", "assistant", "第一答");
+        assertEquals(1, createSessionCalls.get(), "同一会话必须复用同一个 OV session");
+        assertEquals(2, appendMessageCalls.get());
+    }
+
+    @Test
+    void createSessionFailureStopsRetryStormWithinCooldown() {
+        unregisteredUser = false;
+        failCreateSession = true;
+        var client = new VikingMemoryClient(config());
+        for (int i = 0; i < 5; i++) {
+            client.appendSessionMessage("u-1001", "slot:sb", "user", "内容" + i);
+        }
+        assertEquals(1, createSessionCalls.get(),
+            "createSession 失败必须负缓存，冷却期内不得重复外呼");
+        assertEquals(0, appendMessageCalls.get());
     }
 }
