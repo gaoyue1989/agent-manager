@@ -840,7 +840,9 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/status
 
 ### POST /files/upload
 
-multipart 单文件上传。校验（文件名 sanitize / MIME 白名单 / 大小上限 / pending 数量上限）→ 先写存储后端 → 落 `file_asset` 元数据（落库失败回滚存储对象）。非沙箱模式直接 `injected`；沙箱模式 `pending` 挂账，首次 exec 时注入沙箱。
+multipart 单文件上传。校验（文件名 sanitize / MIME 白名单 / 大小上限 / pending 数量上限）→ 先写存储后端 → 落 `file_asset` 元数据（落库失败回滚存储对象）。状态机统一（issue #345）：两种模式 upload 一律 `pending` 挂账——实际交付时才置 `injected`（沙箱=acquire 注入后；非沙箱=chat 写盘后）。
+
+会话归属校验（issue #411）：`sessionId` 非空时经 `session_user` 校验归属——已映射到他用户的会话返回 404 `session_not_found`（不泄露会话存在性，与 chat/subscribe 同口径）；无映射行放行（上传先于首聊是真实流，chat 首次引用时 bind-at-use 认领）。空值归 `null`（未绑定）；非空值经 PathSafe sanitize 对齐 chat 会话键命名空间。
 
 ```bash
 curl -X POST "http://localhost:8100/files/upload" \
@@ -851,7 +853,7 @@ curl -X POST "http://localhost:8100/files/upload" \
 |----------|------|------|
 | `file` | ✓ | 单文件（v1） |
 | `userId` | | 默认 `debug-user`（沙箱注入命名空间） |
-| `sessionId` | | 上传时绑定会话 |
+| `sessionId` | | 上传时绑定会话（空值归 `null`；非空经归属校验，他人会话 404） |
 
 **响应:**
 
@@ -859,7 +861,7 @@ curl -X POST "http://localhost:8100/files/upload" \
 {"file_id": "uuid", "file_name": "report.pdf", "mime_type": "application/pdf", "size": 10240}
 ```
 
-**错误码:** 403 `upload_disabled`、400 `no_file_uploaded`/`invalid_file_name`、415 `unsupported_file_type`、413 `file_too_large`、429 `too_many_pending_files`、500 `storage_write_failed`/`metadata_write_failed`。
+**错误码:** 403 `upload_disabled`、400 `no_file_uploaded`/`invalid_file_name`、415 `unsupported_file_type`、413 `file_too_large`、404 `session_not_found`、429 `too_many_pending_files`、500 `storage_write_failed`/`metadata_write_failed`。
 
 ### GET /files/{fileId}
 
