@@ -385,10 +385,28 @@ class McpToolRegistrarSharedClientTest {
 
         // B 路径 build 前 evict：清共享缓存但不清合成注册表——build 失败回滚窗口内
         // 旧 agent 的合成句柄仍可被看门狗探测/换芯/补偿（评审 P2；工厂闭包 env 派生、
-        // 世代间等价，残留无害）
+        // 同名未声明时世代间等价，残留无害）
         registrar.evictSharedWrappers();
         assertNull(registrar.sharedWrapper(synthetic.server()));
         assertTrue(registrar.syntheticServers().containsKey(synthetic.server()));
+    }
+
+    @Test
+    void removeSyntheticServersShouldDropResidualEntriesWithoutTouchingSharedCache() {
+        registrar.bases.add(healthyBase("ov"));
+        var synthetic = syntheticConfig();
+        registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory());
+        assertNotNull(registrar.sharedWrapper(synthetic.server()));
+
+        // 代际收口（reloadAgent swap 成功后）：同名已转 frontmatter 声明 → 残留项移除，
+        // 该名此后完全归属 declared 链路（rebuild/补偿/探测不再走 viking 工厂）；
+        // 共享缓存不触碰——清理点缓存已是新代 declared 句柄（gen1 合成句柄由旧代收尾关闭）
+        assertEquals(List.of("openviking"), registrar.removeSyntheticServers(List.of("openviking", "other")));
+        assertFalse(registrar.syntheticServers().containsKey(synthetic.server()));
+        assertNotNull(registrar.sharedWrapper(synthetic.server()));
+
+        // 幂等：已移除名再清理为 no-op
+        assertTrue(registrar.removeSyntheticServers(List.of("openviking")).isEmpty());
     }
 
     // ---------- clearServer 共享句柄不 close 契约（issue #348 防回归核心） ----------

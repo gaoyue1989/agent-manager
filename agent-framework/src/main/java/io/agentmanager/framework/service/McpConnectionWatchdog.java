@@ -81,8 +81,9 @@ public class McpConnectionWatchdog {
             probeOne(m);
         }
         // 合成 server（issue #415）：不由 frontmatter 声明，探测名单来自 registrar 注册表
-        // （config+factory）；注入守卫（HarnessAgentFactory）保证合成名与 declared 名单
-        // 不相交，无重复探测
+        // （config+factory）。不变量「合成名与 declared 名单不相交」由注入守卫（declared
+        // 时不注入）+ reloadAgent 代际收口（同名声明后移除残留项，removeSyntheticServers）
+        // 共同维护——收口前不存在双探测，收口后该名只走 declared 探测
         for (var synthetic : mcpToolRegistrar.syntheticServers().values()) {
             probeOne(synthetic.config());
         }

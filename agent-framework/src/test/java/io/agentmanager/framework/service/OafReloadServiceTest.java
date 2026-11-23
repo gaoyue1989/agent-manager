@@ -270,6 +270,39 @@ class OafReloadServiceTest {
         assertNotNull(result.error());
     }
 
+    // ---------- 合成注册表代际收口（issue #415 评审 g1） ----------
+
+    private void stubSyntheticResidual() {
+        when(registrar.syntheticServers()).thenReturn(java.util.Map.of("openviking",
+            new McpToolRegistrar.SyntheticServer(
+                new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false),
+                () -> null)));
+    }
+
+    /** gen1 合成注入的名在 gen2 frontmatter 同名声明：新代建立成功后残留项必须清理（declared 独占该名） */
+    @Test
+    void reloadAgentShouldCleanSyntheticResidualWhenSameNameDeclared() throws IOException {
+        stubSyntheticResidual();
+        when(loader.load()).thenReturn(oafWithMcpServers("openviking"));
+
+        service.reloadAgent();
+
+        org.mockito.Mockito.verify(registrar).removeSyntheticServers(java.util.List.of("openviking"));
+    }
+
+    /** build 失败回滚：不达清理点，残留注册表保留——回滚窗口内旧 agent 合成句柄仍有看门狗自愈（评审 P2） */
+    @Test
+    void reloadAgentFailureShouldKeepSyntheticResidualForRollbackWindow() throws IOException {
+        stubSyntheticResidual();
+        when(loader.load()).thenReturn(oafWithMcpServers("openviking"));
+        when(factory.build(any(), any(), any(), any(), any(), any(), any()))
+            .thenThrow(new RuntimeException("build failed"));
+
+        assertThrows(java.io.IOException.class, () -> service.reloadAgent());
+        org.mockito.Mockito.verify(registrar, org.mockito.Mockito.never())
+            .removeSyntheticServers(any());
+    }
+
     @Test
     void fingerprintShouldDetectMcpConfigFileChanges() throws IOException {
         var mcpDir = tempDir.resolve("mcp-configs/server-a");

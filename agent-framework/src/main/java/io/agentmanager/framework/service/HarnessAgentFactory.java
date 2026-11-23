@@ -485,8 +485,11 @@ public class HarnessAgentFactory {
      *
      * <p>frontmatter 已声明同名 MCP server 守卫（评审 P3）：包 frontmatter mcpServers
      * 显式声明 openviking 时（用户自带 OpenViking 直连声明）合成注入跳过——declared
-     * 声明优先，杜绝同名双注册、rebuildSharedWrapper 注册表串台换掉 declared 连接、
-     * 权限来源含混整类冲突（单点收口在注入处，不依赖下游各消费点防御）。
+     * 声明优先，杜绝同名双注入与权限来源含混。上一代合成注入的残留注册表项不在此
+     * 清理（注入点无法区分「本代首次构建」与「回滚窗口内的重复构建」）：由 reloadAgent
+     * 代际收口移除（{@code McpToolRegistrar.removeSyntheticServers}，swap 成功后调用），
+     * 构建期则由 collectPermissionRules 跳过 declared 同名兜底——串台/双探测/规则覆盖
+     * 三道防线各守其位。
      */
     private void registerVikingSharedContextMcp(io.agentscope.core.tool.Toolkit toolkit, OafConfig oafConfig) {
         if (oafConfig.mcpServers().stream()

@@ -170,7 +170,7 @@ MCP 工具中 `write/edit/forget/add_resource` 等具备写能力,per-OAF `permi
 
 - **权限**:包内 `mcp-configs/openviking/config.yaml` 仅 `permissions.tools` 节(permissions-only)即生效,注册时装载、`collectPermissionRules` 与 declared server 同款翻译为 `mcp__openviking__{tool}` 规则——上表「permissions 全套复用」的兑现;frontmatter `config.permission.tools` 不承载 MCP 工具(声明 MCP 注册名忽略并告警)
 - **句柄**:工厂产物 `UserScoped(EMPTY)` 装饰的 base,包 `ReconnectableMcpClientWrapper` 入共享缓存(与 declared 的 `buildBaseClient` 产物形态对称;注册与换芯共用同一工厂);McpConnectionWatchdog 探测名单含合成注册表,失联对句柄原地换芯,无句柄按 agent 有无分流补偿(单例在→工厂+registerSyntheticClient 补注册;纯会话隔离→仅 `cacheSyntheticClient` 入缓存,新会话 build 经 putIfAbsent 复用)
-- **生命周期**:A 路径 reload(`reloadMcpAll`)「声明已删除」循环豁免合成 server(不由 frontmatter 声明/撤销,下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更 + rollout);B 路径整包重建前 evict 共享缓存不清合成注册表——build 失败回滚窗口内旧 agent 的合成句柄仍可被看门狗自愈
+- **生命周期**:A 路径 reload(`reloadMcpAll`)「声明已删除」循环豁免合成 server(不由 frontmatter 声明/撤销,下线唯一入口是 OVK_MCP_SHARED_CONTEXT env 变更 + rollout);B 路径整包重建前 evict 共享缓存不清合成注册表——build 失败回滚窗口内旧 agent 的合成句柄仍可被看门狗自愈;名字被 frontmatter 转为同名声明时由 `reloadAgent` 在新代建立成功后移除注册表残留项(`removeSyntheticServers`,该名此后完全归属 declared 链路,杜绝注册表优先分流串台 declared 连接/双探测/陈旧权限覆盖;collectPermissionRules 构建期同步跳过 declared 同名兜底)
 - **补偿路径权限快照边界(平台既有行为,非合成特有)**:启动期/补偿期注册成功的工具,权限规则不在既有 agent 的 PermissionContextState 内(SDK 引擎构造期快照),DEFAULT 模式按未覆盖兜底 ASK——declared server 的 compensate 同样如此,不为它扩权限系统运行期可变语义
 
 ## 8. 部署形态(裁决 261116:OpenViking 由外部提供服务,平台不部署)

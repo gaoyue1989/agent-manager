@@ -3,6 +3,7 @@ package io.agentmanager.framework.service;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -122,7 +123,10 @@ public class McpToolRegistrar {
      * <p>生命周期：registerSyntheticClient 无条件登记（注册失败驱逐句柄但保留工厂，
      * 看门狗下周期补偿复活）；{@link #evictSharedWrappers()}（B 路径 build 前）不清本表
      * ——build 失败回滚窗口内旧 agent 的合成句柄仍可被看门狗自愈，与 declared 的
-     * compensate 兜底对称；工厂闭包 env 派生、世代间等价，残留无害。
+     * compensate 兜底对称；同名未声明时工厂闭包 env 派生、世代间等价，残留无害。
+     * 名字被 frontmatter 转为声明时由 reloadAgent 代际收口移除（{@link
+     * #removeSyntheticServers}）——guard 只挡新注入，残留共存会使注册表优先分流
+     * 串台 declared 连接，必须显式清理。
      */
     record SyntheticServer(OafConfig.McpServerConfig config, Supplier<McpClientWrapper> factory) {}
 
@@ -327,6 +331,34 @@ public class McpToolRegistrar {
     /** 合成 server 注册表只读视图（看门狗探测名单与补偿分流、A 路径 reload 豁免判据） */
     Map<String, SyntheticServer> syntheticServers() {
         return Collections.unmodifiableMap(syntheticRegistry);
+    }
+
+    /**
+     * 移除命中 declaredNames 的合成注册表项（代际收口，issue #415 评审 g1）：上一代合成
+     * 注入的名在本代 frontmatter 同名声明时，注入守卫只跳过注入、不清理残留——残项与
+     * declared server 同名共存会让 rebuildSharedWrapper/compensate 的注册表优先分流用
+     * viking 工厂静默换掉 declared config.yaml 连接、probeAll 同名双探测。调用点在
+     * reloadAgent 新代成功建立之后（swap + 会话工厂更新后）：该名此后完全归属 declared
+     * 链路（重建/补偿/探测全走 declared）；build 失败回滚不达此点，注册表残留保留，
+     * 回滚窗口内旧 agent 的合成句柄仍有看门狗自愈（评审 P2，与 evictSharedWrappers
+     * 不清本表同一决策）。A 路径 reloadMcpAll 不调本方法（mcpServers 声明在 frontmatter，
+     * A 路径不可能引入同名声明）。
+     *
+     * <p>只清注册表、不驱逐共享缓存：清理点该名的缓存已是新代 declared 句柄（registerAll
+     * 刚注册），gen1 合成句柄由旧代收尾路径关闭——驱逐缓存反而误杀 declared 连接。
+     *
+     * @return 实际移除的残留项名（无残留为空）
+     */
+    List<String> removeSyntheticServers(Collection<String> declaredNames) {
+        var removed = new ArrayList<String>();
+        for (var name : declaredNames) {
+            if (syntheticRegistry.remove(name) != null) {
+                removed.add(name);
+                log.info("[MCP] synthetic server '{}' removed from registry (now declared in frontmatter, "
+                    + "name belongs to declared chain)", name);
+            }
+        }
+        return removed;
     }
 
     /**
@@ -986,9 +1018,16 @@ public class McpToolRegistrar {
         }
         // 合成 server（issue #415）：权限在 registerSyntheticClient 时已从包内
         // mcp-configs/{server}/config.yaml permissions.tools（permissions-only）装载进缓存，
-        // 翻译/判存/冲突告警与 declared 同款。注入守卫（HarnessAgentFactory）保证合成名
-        // 与 frontmatter 声明名不相交，无同名含混
+        // 翻译/判存/冲突告警与 declared 同款。同名已转 frontmatter 声明的跳过（规则唯一
+        // 来自 declared 现读）——代际残留清理由 reloadAgent 收口负责（removeSyntheticServers），
+        // 残留存续期间（回滚窗口）本跳过防陈旧缓存值覆盖 declared 规则
+        var declaredNames = oafConfig.mcpServers().stream()
+            .map(OafConfig.McpServerConfig::server)
+            .collect(Collectors.toSet());
         for (var server : syntheticRegistry.keySet()) {
+            if (declaredNames.contains(server)) {
+                continue;
+            }
             collectServerToolPermissions(server, toolPermissions.getOrDefault(server, Map.of()), tools);
         }
         var mcpNames = new LinkedHashSet<String>();

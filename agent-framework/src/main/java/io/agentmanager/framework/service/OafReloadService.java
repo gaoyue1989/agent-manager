@@ -274,6 +274,17 @@ public class OafReloadService {
             sandboxSpecProvider.getIfAvailable()));
         agentRuntimeService.evictAllSessionAgents();
 
+        // 4.6 合成注册表代际收口（issue #415 评审 g1）：上一代合成注入、本代 frontmatter
+        //     同名声明的名，移除其残留注册表项——该名此后完全归属 declared 链路（rebuild/
+        //     补偿/探测不再被注册表优先分流到 viking 工厂）。必须在 swap 成功之后：build
+        //     失败回滚（抛在第 3 步）不达此点，回滚窗口内旧 agent 的合成句柄仍有看门狗
+        //     自愈（评审 P2）；reloadAgent synchronized + 看门狗让位，清理与代际切换原子
+        var cleaned = mcpToolRegistrar.removeSyntheticServers(
+            newConfig.mcpServers().stream().map(OafConfig.McpServerConfig::server).toList());
+        if (!cleaned.isEmpty()) {
+            log.info("[Reload] synthetic registry cleaned for names now declared in frontmatter: {}", cleaned);
+        }
+
         // 5. 旧 agent 的 MCP 连接收尾（旧 toolkit 无公开 closeMcpClients）：按 build 前
         //    捕获的旧 wrapper 对象直接 close，旧 toolkit 侧再 removeMcpClient 摘标准路径工具；
         //    按对象关闭（非按名字）——registrar 跟踪此刻已是新注册，按名会误杀新连接。
