@@ -179,6 +179,74 @@ func TestAgentGenMcpConfigDirectReturn(t *testing.T) {
 	}
 }
 
+func TestCreateAgentCarriesConnectorDirectReturnIntoPackage(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-454c", "直返生成空间")
+	owner := seedUserIn(t, c, "dr-owner", "user", ws.ID, "owner")
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+	mcp, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name: "order", Endpoint: "http://order-mcp.internal:9090/mcp",
+		Permissions:  json.RawMessage(`{"tools":{"render_confirm_card":"allow","lookup_order":"allow"}}`),
+		DirectReturn: json.RawMessage(`{"tools":["render_confirm_card"]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := goldenForm()
+	form.ModelConnections[0].ConnectionID = conn.ID
+	form.Skills, form.SubAgents = nil, nil
+	form.McpServers = []McpServerRef{{ConnectorID: mcp.ID}}
+
+	svc, pkg, err := c.CreateAgent(ws.ID, owner.ID, form)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	cfg, err := c.Packages.ReadFile(pkg, "mcp-configs/order/config.yaml")
+	if err != nil {
+		t.Fatalf("read connector config.yaml: %v", err)
+	}
+	for _, want := range []string{"direct_return:", "- render_confirm_card", "render_confirm_card: allow", "lookup_order: allow"} {
+		if !strings.Contains(string(cfg), want) {
+			t.Fatalf("config.yaml missing %q:\n%s", want, cfg)
+		}
+	}
+	if strings.Contains(string(cfg), "- lookup_order") {
+		t.Fatalf("non-direct tool leaked into direct_return:\n%s", cfg)
+	}
+	agentsMD, err := c.Packages.ReadFile(pkg, "AGENTS.md")
+	if err != nil {
+		t.Fatalf("read agents.md: %v", err)
+	}
+	if !strings.Contains(string(agentsMD), "configDir: mcp-configs/order") {
+		t.Fatalf("frontmatter mcpServers:\n%s", agentsMD)
+	}
+
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+	cleared := json.RawMessage(`{}`)
+	if _, err := c.UpdateMcpConnector(ws.ID, mcp.ID, PatchMcpConnectorInput{DirectReturn: &cleared}); err != nil {
+		t.Fatal(err)
+	}
+	edit := *form
+	_, pkgV2, err := c.UpdateAgent(ws.ID, owner.ID, svc.ID, &edit)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	cfgV2, err := c.Packages.ReadFile(pkgV2, "mcp-configs/order/config.yaml")
+	if err != nil {
+		t.Fatalf("read v2 connector config.yaml: %v", err)
+	}
+	if strings.Contains(string(cfgV2), "direct_return:") || strings.Contains(string(cfgV2), "- render_confirm_card") {
+		t.Fatalf("cleared direct_return must leave the regenerated package:\n%s", cfgV2)
+	}
+	if !strings.Contains(string(cfgV2), "render_confirm_card: allow") {
+		t.Fatalf("permissions must survive clearing direct_return:\n%s", cfgV2)
+	}
+}
+
 // TestAgentGenMcpConfigBearerAuth bearer 连接器必须输出 auth.token 占位符（issue #139）：
 // 真实 token 走服务 Secret env（MCP_TOKEN_<NAME>），包内只有运行时可解析的 ${ENV} 引用。
 // TestBuiltinPlatformDecl 内置 platform 声明策略（模板唯一真相源的派生锁）：
