@@ -661,12 +661,20 @@ func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, for
 	env := map[string]string{}
 	var secretKeys []string
 	// 平台默认配置预填（与发布向导「已预填平台默认配置」同语义，R3）：checkpoint/redis 等
-	// 运行必需 env 自动带入；下方模型连接 / MCP token 注入覆盖同名键（表单优先）
+	// 运行必需 env 自动带入；下方模型连接 / MCP token 注入覆盖同名键（表单优先）。
+	// 沙箱分组键（SANDBOX_*）只作用于开启沙箱的 Agent（issue #402）：关闭/未声明时不预填——
+	// 否则 env 落 CM/Pod，控制台编辑页/沙箱总览误当作该 Agent 的显式沙箱配置固化展示，且
+	// 与 m10 B3「关闭时无 SANDBOX_*」契约矛盾；开启时平台默认补空语义保留（表单值优先）
+	sandboxOn := form.Sandbox != nil && form.Sandbox.Enabled != nil && *form.Sandbox.Enabled
 	if defaults, err := c.GetPlatformDefaults(); err == nil {
 		for k, v := range defaults {
-			if v != "" {
-				env[k] = v
+			if v == "" {
+				continue
 			}
+			if !sandboxOn && strings.HasPrefix(k, "SANDBOX_") {
+				continue
+			}
+			env[k] = v
 		}
 	}
 	if def != nil {
