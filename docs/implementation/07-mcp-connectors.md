@@ -32,6 +32,7 @@ type McpConnector struct {
     TimeoutSec  int       `json:"timeoutSec"`                     // 默认 120
     ToolScope   string    `gorm:"type:json" json:"toolScope"`     // {"mode":"all"} | {"mode":"subset","tools":[…]}
     Permissions string    `gorm:"type:json" json:"permissions"`   // {"tools":{"ticket_query":"allow",…}} 三态默认策略
+    DirectReturn string   `gorm:"type:json" json:"directReturn"`   // {"tools":["render_confirm_card",…]} 结果直返工具（issue #454；存量行 NULL = 未配置）
     Status      string    `gorm:"size:16" json:"status"`          // verified | unverified | failed
     LastVerifyError string `gorm:"size:512" json:"lastVerifyError"` // 最近 verify 失败原因（512 rune 截断；复验成功清空）
     LastVerifiedAt *time.Time `json:"lastVerifiedAt"`
@@ -45,12 +46,12 @@ func (McpConnector) TableName() string { return "mcp_connectors" }
 
 ```
 GET    /api/v1/console/workspaces/:ws/tools
-  → {data:[{id,name,transport,endpoint,authType,timeoutSec,toolScope,permissions,status,lastVerifyError,lastVerifiedAt,refCount}]}
+  → {data:[{id,name,transport,endpoint,authType,timeoutSec,toolScope,permissions,directReturn,status,lastVerifyError,lastVerifiedAt,refCount}]}
      // refCount = 引用该连接器的生成包数（按 mcpServers 声明统计，粗粒度：统计 services 包 frontmatter 含 server 名）
 POST   /api/v1/console/workspaces/:ws/tools          （owner/admin）
-  {name, transport, endpoint, authType?, authToken?, timeoutSec?, toolScope?, permissions?}
-  → 201；name 冲突 400 duplicate_name；endpoint 须 http(s)
-PATCH  /api/v1/console/workspaces/:ws/tools/:id      （局部更新；authToken 传 "" = 清除）
+  {name, transport, endpoint, authType?, authToken?, timeoutSec?, toolScope?, permissions?, directReturn?}
+  → 201；name 冲突 400 duplicate_name；endpoint 须 http(s)；permissions / directReturn 形态非法 400（validatePermissions / validateDirectReturn）
+PATCH  /api/v1/console/workspaces/:ws/tools/:id      （局部更新；authToken 传 "" = 清除；directReturn 缺省 = 不变）
 POST   /api/v1/console/workspaces/:ws/tools/:id/verify
   → {data:{ok, toolCount, tools:[{name,description}], latencyMs, error}}
      // MCP initialize + tools/list 探测（Go 侧最小 MCP 客户端：POST {endpoint} initialize → tools/list）
@@ -77,8 +78,12 @@ connection:
 permissions:
   tools:
     <tool>: allow|ask|deny      # Permissions 列原样展开；mode=all 且未声明工具 → 不写 tools（运行时按未声明自动放行）
+direct_return:                   # DirectReturn.tools 非空才写；与 permissions 正交（执行前鉴权 / 执行后路由）
+  tools:
+    - <tool>
 ```
 
+- `direct_return` 的运行时语义（工具成功后结果原样直返前端并终止本轮）与前端契约见 [../design/mcp-direct-return-design-261123.md](../design/mcp-direct-return-design-261123.md)；
 - bearer token → 发布 env `MCP_TOKEN_<NAME大写>` 追加进 SecretKeys（M3 §2.3 已约定）；
 - `toolScope.mode=subset` → config.yaml 额外写 `tools.include: [...]`（对齐 OAF ActiveMCP 语义，若运行时不支持 include 则生成器降级为全量 + 前端提示——以 agent-framework McpToolRegistrar 实测为准，实施时核对）。
 
@@ -90,6 +95,7 @@ permissions:
 
 - 左列上：「已保存的连接器配置（工作空间级）」表（连接器/传输/Endpoint/工具数/状态徽标：已验证·未验证·失败/被引用数/编辑·验证·删除）；platform-mcp 内置行置顶（tag「平台内置」，无操作）；
 - 左列下：「工具权限默认策略（三态）」表，行 = 选中连接器的 verify 快照工具 ∪ 已声明 permissions 键（快照外键标注；快照存在但状态非 verified 时提示重验）；owner/admin 行内三态下拉 + 「保存策略」（对象形态 PATCH，按所见全量写入 permissions，issue #375）；platform-mcp 行点选只读查看内置声明策略；verify 失败徽章悬停显示 lastVerifyError；
+- 同表「结果直返」列（2026-11-23，issue #454）：owner/admin 逐工具勾选，草稿并入脏检测，随「保存策略」把 `permissions` 与 `directReturn:{tools:[…]}` 一并 PATCH；行集并入已声明直返的工具（不在快照/权限里的也出行，保存不丢）；只读角色以「直返」标签展示；
 - 右列：「新建连接器（表单）」卡片（名称/传输下拉/Endpoint/认证下拉（Bearer Token（存服务 Secret）/无认证）/超时/工具范围下拉（全部/指定子集——子集选项来自上次 verify 快照））+「保存并验证」提交 → 成功后左表新增行且 status=verified；
 - 底部说明条（demo 原文要点）：注入 = Agent 创建/更新勾选后写入生成包 `mcpServers` + `mcp-configs/`；认证凭据不落包，经 `{name}-env-secret` 注入运行时。
 

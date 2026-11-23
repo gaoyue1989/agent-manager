@@ -295,7 +295,7 @@ func buildAgentsMD(fm fmRoot, prompt string) (string, error) {
 // authType=bearer 时输出 auth.token 占位符：真实 token 走服务 Secret env
 // （buildPublishEnv 注入 MCP_TOKEN_<NAME>），运行时 McpToolRegistrar 对 ${ENV}
 // 占位符解析后带 Authorization: Bearer 连接（不落包明文，issue #139）。
-func mcpConfigYAML(name, transport, endpoint string, timeoutSec int, toolScope, permissions, authType string) string {
+func mcpConfigYAML(name, transport, endpoint string, timeoutSec int, toolScope, permissions, directReturn, authType string) string {
 	if timeoutSec <= 0 {
 		timeoutSec = 120
 	}
@@ -314,6 +314,9 @@ func mcpConfigYAML(name, transport, endpoint string, timeoutSec int, toolScope, 
 		Permissions struct {
 			Tools map[string]string `yaml:"tools,omitempty"`
 		} `yaml:"permissions,omitempty"`
+		DirectReturn *struct {
+			Tools []string `yaml:"tools"`
+		} `yaml:"direct_return,omitempty"`
 	}
 	var b block
 	b.Server = name
@@ -340,6 +343,15 @@ func mcpConfigYAML(name, transport, endpoint string, timeoutSec int, toolScope, 
 	_ = yamlOrJSONUnmarshal(permissions, &perm)
 	if len(perm.Tools) > 0 {
 		b.Permissions.Tools = perm.Tools
+	}
+	var direct struct {
+		Tools []string `json:"tools"`
+	}
+	_ = yamlOrJSONUnmarshal(directReturn, &direct)
+	if len(direct.Tools) > 0 {
+		b.DirectReturn = &struct {
+			Tools []string `yaml:"tools"`
+		}{Tools: direct.Tools}
 	}
 	var scope struct {
 		Mode  string   `json:"mode"`
@@ -502,7 +514,7 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 			return nil, fmt.Errorf("%w: mcp connector %d not found", ErrInvalidForm, ref.ConnectorID)
 		}
 		files["mcp-configs/"+conn.Name+"/config.yaml"] =
-			[]byte(mcpConfigYAML(conn.Name, conn.Transport, conn.Endpoint, conn.TimeoutSec, conn.ToolScope, conn.Permissions, conn.AuthType))
+			[]byte(mcpConfigYAML(conn.Name, conn.Transport, conn.Endpoint, conn.TimeoutSec, conn.ToolScope, conn.Permissions, conn.DirectReturn, conn.AuthType))
 	}
 	return files, nil
 }

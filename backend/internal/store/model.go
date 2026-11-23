@@ -240,6 +240,7 @@ type McpConnector struct {
 	TimeoutSec     int        `json:"timeoutSec"`
 	ToolScope      string     `gorm:"type:json" json:"toolScope"`   // {"mode":"all"} | {"mode":"subset","tools":[…]}
 	Permissions    string     `gorm:"type:json" json:"permissions"` // {"tools":{"t":"allow|ask|deny"}}
+	DirectReturn   string     `gorm:"type:json" json:"directReturn"`
 	Status          string     `gorm:"size:16" json:"status"`
 	LastVerifyError string     `gorm:"size:512" json:"lastVerifyError"`
 	LastVerifiedAt  *time.Time `json:"lastVerifiedAt"`

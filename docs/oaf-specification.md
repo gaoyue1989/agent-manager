@@ -389,6 +389,10 @@ permissions:
   deny_paths: ["/system", "/etc"]
   read_only: false
 
+direct_return:
+  tools:
+    - render_confirm_card
+
 userHeaders:
   headers:
     X-User-Id: userId
@@ -397,6 +401,14 @@ userHeaders:
     taskId: reqHeader:taskid
   on-missing: deny
 ```
+
+**direct_return（结果直返，与 `permissions` 正交）**：`tools` 列出远端工具裸名。命中的工具执行
+**成功**后，返回内容原样作为本轮最终输出下发给前端（不经 LLM 改写），并立即结束本轮、不再发起
+下一次推理。`permissions.tools` 管执行前鉴权，`direct_return.tools` 管执行后路由，可自由组合
+（如 `ask` + 直返：先 HITL 挂起，批准后执行并直返）。以下情况不触发直返，结果照常回喂模型：
+工具失败（`isError` / `DENIED` / 被中断）、成功但内容为空（归一化为 ERROR）、或模型把直返工具
+与普通工具放在**同一步**调用。SSE 标记与 history 字段见
+[docs/design/mcp-direct-return-design-261123.md](design/mcp-direct-return-design-261123.md)。
 
 **userHeaders（per-call 用户级注入，双通道）**：两个映射节共用取值源抽象
 （`header/参数名 ← McpMeta key`），可只声明其一：

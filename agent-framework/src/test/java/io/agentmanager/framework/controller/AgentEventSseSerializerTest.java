@@ -7,12 +7,15 @@ import org.junit.jupiter.api.Test;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.message.Base64Source;
 import io.agentscope.core.message.DataBlock;
+import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.message.URLSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -264,6 +267,58 @@ class AgentEventSseSerializerTest {
         assertSame(full, AgentEventSseSerializer.withSessionContext(full, "sid-5", "rid-5", true));
         // null 双参 → 原串返回
         assertEquals("{\"type\":\"x\"}", AgentEventSseSerializer.withSessionContext("{\"type\":\"x\"}", null, null, true));
+    }
+
+    @Test
+    void toolCallStartShouldCarryDirectReturnFlag() {
+        var tc = new ToolCallStartEvent("reply-d", "call-d", "mcp__order__render_confirm_card");
+
+        String json = AgentEventSseSerializer.payload(tc, "sid-9",
+            new McpToolRegistrar.ToolCallMeta(null, null, true));
+
+        assertTrue(json.contains("\"directReturn\":true"), json);
+        assertFalse(json.contains("\"ui\""), json);
+    }
+
+    @Test
+    void toolCallStartShouldCarryUiAndDirectReturnTogether() {
+        var tc = new ToolCallStartEvent("reply-d", "call-d", "mcp__order__form_card");
+
+        String json = AgentEventSseSerializer.payload(tc, "sid-9",
+            new McpToolRegistrar.ToolCallMeta("ui://order/form.html", "order", true));
+
+        assertTrue(json.contains("\"ui\""), json);
+        assertTrue(json.contains("\"resourceUri\":\"ui://order/form.html\""), json);
+        assertTrue(json.contains("\"server\":\"order\""), json);
+        assertTrue(json.contains("\"directReturn\":true"), json);
+    }
+
+    @Test
+    void toolCallStartShouldStayByteIdenticalWithoutToolConfig() {
+        var tc = new ToolCallStartEvent("reply-d", "call-d", "echo");
+
+        assertEquals(AgentEventSseSerializer.payload(tc, "sid-9"),
+            AgentEventSseSerializer.payload(tc, "sid-9", new McpToolRegistrar.ToolCallMeta(null, null, false)));
+    }
+
+    @Test
+    void textBlockDeltaShouldExposeGenerateReason() {
+        var delta = new TextBlockDeltaEvent("reply-d", "block-1", "{\"title\":")
+            .withMetadata(java.util.Map.of(AgentEvent.METADATA_GENERATE_REASON,
+                GenerateReason.TOOL_RETURN_DIRECT.name()));
+
+        String json = AgentEventSseSerializer.payload(delta, "sid-9");
+
+        assertTrue(json.contains("\"generateReason\":\"TOOL_RETURN_DIRECT\""), json);
+    }
+
+    @Test
+    void textBlockDeltaShouldStayByteIdenticalWithoutGenerateReason() {
+        var delta = new TextBlockDeltaEvent("reply-d", "block-1", "hello");
+        String plain = AgentEventSseSerializer.payload(delta, "sid-9");
+
+        assertEquals(plain, AgentEventSseSerializer.payload(
+            delta.withMetadata(java.util.Map.of("other", "x")), "sid-9"));
     }
 
 }

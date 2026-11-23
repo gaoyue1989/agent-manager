@@ -706,7 +706,7 @@ class McpToolRegistrarTest {
             Map.of(), Map.of("hidden_card_tool", "ui://x/card.html"),
             new McpToolRegistrar.UiCsp(List.of(), List.of()));
         var toolkit = org.mockito.Mockito.mock(Toolkit.class);
-        registrar.registerFilteredForTest(toolkit, wrapper, "cards-srv", null, mapping, false);
+        registrar.registerFilteredForTest(toolkit, wrapper, "cards-srv", null, mapping, false, Set.of());
 
         // app_only 工具仍不注册（隐藏于 LLM），但其余工具以"受权限评估"方式注册（注册名带 mcp__ 前缀）
         var captor = org.mockito.ArgumentCaptor.forClass(io.agentscope.core.tool.AgentTool.class);
@@ -717,7 +717,7 @@ class McpToolRegistrarTest {
         assertTrue(registrar.isAppOnly("cards-srv", "hidden_card_tool"));
     }
 
-    // ===== MCP Apps: resolveUiRef 裸名歧义 =====
+    // ===== MCP Apps: resolveToolCallMeta 裸名歧义 =====
 
     @Test
     void shouldResolveUiRefWhenUniqueUriAcrossServers() throws Exception {
@@ -741,10 +741,11 @@ class McpToolRegistrarTest {
         seedRegisteredToolsWithUi("srv-a", "get_weather", "ui://weather/mcp-app.html");
         seedRegisteredToolsWithUi("srv-b", "get_weather", "ui://weather/mcp-app.html");
 
-        var ref = registrar.resolveUiRef("get_weather");
+        var meta = registrar.resolveToolCallMeta("get_weather");
 
-        assertNotNull(ref);
-        assertEquals("ui://weather/mcp-app.html", ref.resourceUri());
+        assertNotNull(meta);
+        assertEquals("ui://weather/mcp-app.html", meta.uiResourceUri());
+        assertFalse(meta.directReturn());
     }
 
     @Test
@@ -769,7 +770,191 @@ class McpToolRegistrarTest {
         seedRegisteredToolsWithUi("srv-c", "get_weather", "ui://weather/mcp-app.html");
         seedRegisteredToolsWithUi("srv-d", "get_weather", "ui://stocks/mcp-app.html");
 
-        assertNull(registrar.resolveUiRef("get_weather"));
+        assertNull(registrar.resolveToolCallMeta("get_weather"));
+    }
+
+    @Test
+    void shouldLoadDirectReturnTools() throws Exception {
+        writeConfigYaml("order", """
+            connection:
+              type: streamableHttp
+              url: http://localhost:8813/mcp
+            direct_return:
+              tools:
+                - render_confirm_card
+                - show_summary
+            """);
+
+        assertEquals(Set.of("render_confirm_card", "show_summary"),
+            registrar.loadDirectReturnTools(mcp("order", "order")));
+    }
+
+    @Test
+    void shouldReturnEmptyDirectReturnWhenNotDeclared() throws Exception {
+        writeConfigYaml("plain", """
+            connection:
+              type: streamableHttp
+              url: http://localhost:8813/mcp
+            """);
+
+        assertTrue(registrar.loadDirectReturnTools(mcp("plain", "plain")).isEmpty());
+        assertTrue(registrar.loadDirectReturnTools(mcp("no-such-server", "no-such-server")).isEmpty());
+    }
+
+    @Test
+    void shouldIgnoreInvalidDirectReturnEntries() throws Exception {
+        writeConfigYaml("mixed", """
+            connection:
+              type: streamableHttp
+              url: http://localhost:8813/mcp
+            direct_return:
+              tools:
+                - render_confirm_card
+                - render_confirm_card
+                - "  "
+                - 42
+            """);
+
+        assertEquals(Set.of("render_confirm_card"),
+            registrar.loadDirectReturnTools(mcp("mixed", "mixed")));
+    }
+
+    private java.util.Map<String, io.agentscope.core.tool.AgentTool> registerFiltered(
+            String server, List<String> toolNames, McpToolRegistrar.UiMapping uiMapping,
+            Map<String, Boolean> activeMcp, Set<String> directReturn) {
+        var wrapper = mock(McpClientWrapper.class);
+        var tools = toolNames.stream()
+            .map(n -> new McpSchema.Tool(n, "", "desc", null, null, null, null))
+            .toList();
+        when(wrapper.initialize()).thenReturn(Mono.empty());
+        when(wrapper.listTools()).thenReturn(Mono.just(tools));
+        var toolkit = mock(Toolkit.class);
+        registrar.registerFilteredForTest(toolkit, wrapper, server, activeMcp, uiMapping, false, directReturn);
+        long skipped = toolNames.stream().filter(name -> uiMapping.appOnly().containsKey(name)
+            || (activeMcp != null && Boolean.FALSE.equals(activeMcp.get(name)))).count();
+        var captor = org.mockito.ArgumentCaptor.forClass(io.agentscope.core.tool.AgentTool.class);
+        org.mockito.Mockito.verify(toolkit, org.mockito.Mockito.times(toolNames.size() - (int) skipped))
+            .registerTool(captor.capture());
+        var byName = new java.util.LinkedHashMap<String, io.agentscope.core.tool.AgentTool>();
+        captor.getAllValues().forEach(tool -> byName.put(tool.getName(), tool));
+        return byName;
+    }
+
+    @Test
+    void shouldRegisterDirectReturnToolWithReturnDirectFlag() {
+        var registered = registerFiltered("order", List.of("render_confirm_card", "lookup_order"),
+            McpToolRegistrar.UiMapping.empty(), null, Set.of("render_confirm_card"));
+
+        assertTrue(registered.get("mcp__order__render_confirm_card").isReturnDirect());
+        assertFalse(registered.get("mcp__order__lookup_order").isReturnDirect());
+        assertTrue(registrar.isDirectReturn("mcp__order__render_confirm_card"));
+        assertTrue(registrar.isDirectReturn("render_confirm_card"));
+        assertFalse(registrar.isDirectReturn("mcp__order__lookup_order"));
+        assertFalse(registrar.isDirectReturn("unknown_tool"));
+        assertFalse(registrar.isDirectReturn(null));
+    }
+
+    @Test
+    void shouldExposeDirectReturnOnToolInfo() {
+        registerFiltered("order", List.of("render_confirm_card", "lookup_order"),
+            McpToolRegistrar.UiMapping.empty(), null, Set.of("render_confirm_card"));
+
+        var infos = registrar.getToolsByServer("order");
+        assertTrue(infos.stream().filter(t -> t.name().equals("render_confirm_card")).findFirst().orElseThrow().directReturn());
+        assertFalse(infos.stream().filter(t -> t.name().equals("lookup_order")).findFirst().orElseThrow().directReturn());
+    }
+
+    @Test
+    void shouldKeepDirectReturnRegistrationPermissionEvaluated() {
+        var registered = registerFiltered("order", List.of("render_confirm_card"),
+            McpToolRegistrar.UiMapping.empty(), null, Set.of("render_confirm_card"));
+
+        var tool = registered.get("mcp__order__render_confirm_card");
+        assertFalse(tool.isReadOnly());
+        assertEquals("order", ((io.agentscope.core.tool.ToolBase) tool).getMcpName());
+    }
+
+    @Test
+    void appOnlyShouldWinOverDirectReturn() {
+        var mapping = new McpToolRegistrar.UiMapping(Map.of(), Map.of("card_only", "ui://x/card.html"),
+            McpToolRegistrar.UiCsp.empty());
+        var registered = registerFiltered("cards", List.of("card_only"), mapping, null, Set.of("card_only"));
+
+        assertTrue(registered.isEmpty());
+        assertTrue(registrar.isAppOnly("cards", "card_only"));
+        assertFalse(registrar.isDirectReturn("mcp__cards__card_only"));
+    }
+
+    @Test
+    void directReturnShouldHaveNoEffectWhenToolIsNotRegistered() {
+        var registered = registerFiltered("order",
+            List.of("kept", "disabled_by_subset", "card_only"),
+            new McpToolRegistrar.UiMapping(Map.of(), Map.of("card_only", "ui://x/card.html"), McpToolRegistrar.UiCsp.empty()),
+            Map.of("disabled_by_subset", false), Set.of("kept", "disabled_by_subset", "card_only", "ghost"));
+
+        assertEquals(Set.of("mcp__order__kept"), registered.keySet());
+        assertTrue(registered.get("mcp__order__kept").isReturnDirect());
+        assertFalse(registrar.isDirectReturn("mcp__order__disabled_by_subset"));
+        assertFalse(registrar.isDirectReturn("mcp__order__ghost"));
+    }
+
+    @Test
+    void shouldCombineUiAndDirectReturnInToolCallMeta() {
+        var mapping = new McpToolRegistrar.UiMapping(Map.of("form_card", "ui://order/form.html"), Map.of(),
+            McpToolRegistrar.UiCsp.empty());
+        registerFiltered("order", List.of("form_card", "summary", "plain_query"), mapping, null,
+            Set.of("form_card", "summary"));
+
+        var form = registrar.resolveToolCallMeta("mcp__order__form_card");
+        assertEquals("ui://order/form.html", form.uiResourceUri());
+        assertEquals("order", form.uiServer());
+        assertTrue(form.directReturn());
+
+        var summary = registrar.resolveToolCallMeta("mcp__order__summary");
+        assertNull(summary.uiResourceUri());
+        assertNull(summary.uiServer());
+        assertTrue(summary.directReturn());
+
+        assertNull(registrar.resolveToolCallMeta("mcp__order__plain_query"));
+        assertNull(registrar.resolveToolCallMeta("no_such_tool"));
+        assertNull(registrar.resolveToolCallMeta(null));
+        assertNull(registrar.resolveToolCallMeta(" "));
+    }
+
+    @Test
+    void shouldOmitToolCallMetaWhenBareNameDirectReturnConflictsAcrossServers() {
+        registerFiltered("orders", List.of("summary"), McpToolRegistrar.UiMapping.empty(), null, Set.of("summary"));
+        registerFiltered("billing", List.of("summary"), McpToolRegistrar.UiMapping.empty(), null, Set.of());
+
+        assertNull(registrar.resolveToolCallMeta("summary"));
+        assertTrue(registrar.resolveToolCallMeta("mcp__orders__summary").directReturn());
+        assertFalse(registrar.isDirectReturn("mcp__billing__summary"));
+    }
+
+    @Test
+    void shouldKeepUiForBareNameWhenDirectReturnAgreesAcrossServers() {
+        var ordersUi = new McpToolRegistrar.UiMapping(Map.of("summary", "ui://orders/summary.html"), Map.of(),
+            McpToolRegistrar.UiCsp.empty());
+        registerFiltered("orders", List.of("summary"), ordersUi, null, Set.of());
+        registerFiltered("billing", List.of("summary"), McpToolRegistrar.UiMapping.empty(), null, Set.of());
+
+        var meta = registrar.resolveToolCallMeta("summary");
+
+        assertEquals("ui://orders/summary.html", meta.uiResourceUri());
+        assertEquals("orders", meta.uiServer());
+        assertFalse(meta.directReturn());
+    }
+
+    @Test
+    void shouldOmitToolCallMetaWhenUiServerDiffersAcrossServers() {
+        var ordersUi = new McpToolRegistrar.UiMapping(Map.of("summary", "ui://orders/summary.html"), Map.of(),
+            McpToolRegistrar.UiCsp.empty());
+        var billingUi = new McpToolRegistrar.UiMapping(Map.of("summary", "ui://billing/summary.html"), Map.of(),
+            McpToolRegistrar.UiCsp.empty());
+        registerFiltered("orders", List.of("summary"), ordersUi, null, Set.of("summary"));
+        registerFiltered("billing", List.of("summary"), billingUi, null, Set.of("summary"));
+
+        assertNull(registrar.resolveToolCallMeta("summary"));
     }
 
     // ===== MCP Apps: /tools 与 proxy 用到的查询 =====

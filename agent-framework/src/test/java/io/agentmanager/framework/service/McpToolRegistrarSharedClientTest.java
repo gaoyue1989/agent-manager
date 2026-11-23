@@ -561,6 +561,75 @@ class McpToolRegistrarSharedClientTest {
         assertTrue(toolkit.getToolNames().contains(displayName), "clearServer 后重注册必须恢复工具面");
 
         // 句柄未被 close 置死：换芯语义保持可用
-        assertTrue(handle.swap(healthyBase("base3")), "共享句柄不得被 clearServer 置 closed");
+        assertTrue(handle.swap(healthyBase("base3")), "共享句柄不得被 clearServer 置死");
+    }
+
+    private void writeServerConfig(String content) throws Exception {
+        var dir = tempDir.resolve(mcp.server());
+        java.nio.file.Files.createDirectories(dir);
+        java.nio.file.Files.writeString(dir.resolve("config.yaml"), content);
+    }
+
+    private McpClientWrapper healthyBaseServing(String... toolNames) {
+        var base = healthyBase("serving");
+        var tools = java.util.Arrays.stream(toolNames)
+            .map(name -> new McpSchema.Tool(name, "", "desc", null, null, null, null))
+            .toList();
+        when(base.listTools()).thenReturn(Mono.just(tools));
+        return base;
+    }
+
+    private static final String RENDER_CARD = "mcp__platform-publisher__render_confirm_card";
+    private static final String LOOKUP_ORDER = "mcp__platform-publisher__lookup_order";
+
+    @Test
+    void registerOneShouldTakeFilteredPathWhenDirectReturnDeclared() throws Exception {
+        writeServerConfig("""
+            direct_return:
+              tools:
+                - render_confirm_card
+            """);
+        registrar.bases.add(healthyBaseServing("render_confirm_card", "lookup_order"));
+
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+
+        assertTrue(toolkit.getTool(RENDER_CARD).isReturnDirect());
+        assertFalse(toolkit.getTool(LOOKUP_ORDER).isReturnDirect());
+        assertTrue(registrar.isDirectReturn(RENDER_CARD));
+        assertFalse(registrar.isDirectReturn(LOOKUP_ORDER));
+    }
+
+    @Test
+    void registerOneShouldKeepStandardPathWhenDirectReturnAbsent() throws Exception {
+        writeServerConfig("""
+            permissions:
+              tools:
+                render_confirm_card: allow
+            """);
+        registrar.bases.add(healthyBaseServing("render_confirm_card", "lookup_order"));
+
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+
+        assertFalse(toolkit.getTool(RENDER_CARD).isReturnDirect());
+        assertFalse(registrar.isDirectReturn(RENDER_CARD));
+    }
+
+    @Test
+    void reloadShouldFollowDirectReturnDeclarationChanges() throws Exception {
+        writeServerConfig("""
+            direct_return:
+              tools:
+                - render_confirm_card
+            """);
+        registrar.bases.add(healthyBaseServing("render_confirm_card"));
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        assertTrue(toolkit.getTool(RENDER_CARD).isReturnDirect());
+
+        assertTrue(registrar.clearServer(toolkit, mcp.server()));
+        writeServerConfig("permissions: {}\n");
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+
+        assertFalse(toolkit.getTool(RENDER_CARD).isReturnDirect());
+        assertFalse(registrar.isDirectReturn(RENDER_CARD));
     }
 }

@@ -145,7 +145,8 @@ class SessionStreamControllerTest {
     @Test
     void serializerShouldIncludeUiMetadataOnToolCallStart() {
         var tc = new io.agentscope.core.event.ToolCallStartEvent("reply-u", "call-u", "get_weather");
-        String json = AgentEventSseSerializer.payload(tc, "ui://weather/mcp-app.html", "weather");
+        String json = AgentEventSseSerializer.payload(tc, null,
+            new io.agentmanager.framework.service.McpToolRegistrar.ToolCallMeta("ui://weather/mcp-app.html", "weather", false));
         assertTrue(json.contains("\"ui\""), "TOOL_CALL_START 应携带 ui 字段: " + json);
         assertTrue(json.contains("\"resourceUri\":\"ui://weather/mcp-app.html\""), "应携带 resourceUri: " + json);
         assertTrue(json.contains("\"server\":\"weather\""), "应携带 server: " + json);
@@ -154,7 +155,8 @@ class SessionStreamControllerTest {
     @Test
     void serializerShouldNotIncludeUiWhenNull() {
         var tc = new io.agentscope.core.event.ToolCallStartEvent("reply-u", "call-u", "echo");
-        String json = AgentEventSseSerializer.payload(tc, null, null);
+        String json = AgentEventSseSerializer.payload(tc, null,
+            new io.agentmanager.framework.service.McpToolRegistrar.ToolCallMeta(null, null, false));
         assertTrue(!json.contains("\"ui\""), "无 UI 工具不应携带 ui 字段: " + json);
         assertTrue(json.contains("\"toolName\":\"echo\""), "原词表字段保持: " + json);
     }

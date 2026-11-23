@@ -699,5 +699,47 @@ class StateDataParserTest {
 
         assertEquals(1, list.size());
         assertFalse(list.get(0).containsKey("stopped"));
+        assertFalse(list.get(0).containsKey("generate_reason"));
+    }
+
+    @Test
+    void directReturnClosingMessageShouldCarryGenerateReason() {
+        var stateData = """
+            {"context":[
+               {"id":"u1","role":"USER","content":[{"type":"text","text":"确认订单"}]},
+               {"id":"a1","role":"ASSISTANT",
+                "content":[{"type":"tool_use","id":"c1","name":"mcp__order__render_confirm_card","input":{}}]},
+               {"id":"t1","role":"TOOL","content":[{"type":"tool_result","id":"c1","state":"success",
+                "output":[{"type":"text","text":"Tool call completed. The result has been presented to the user as the final output of this turn."}]}]},
+               {"id":"a2","role":"ASSISTANT",
+                "metadata":{"agentscope_generate_reason":"TOOL_RETURN_DIRECT","_tool_return_direct":true},
+                "content":[{"type":"text","text":"{\\"title\\":\\"确认订单\\"}"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(3, list.size());
+        var closing = list.get(2);
+        assertEquals("assistant", closing.get("role"));
+        assertEquals("{\"title\":\"确认订单\"}", closing.get("content"));
+        assertEquals("TOOL_RETURN_DIRECT", closing.get("generate_reason"));
+        assertFalse(closing.containsKey("stopped"));
+        assertFalse(list.get(1).containsKey("generate_reason"));
+    }
+
+    @Test
+    void interruptedRecoveryMessageShouldAlsoCarryGenerateReason() {
+        var stateData = """
+            {"context":[
+               {"id":"a1","role":"ASSISTANT",
+                "metadata":{"agentscope_generate_reason":"INTERRUPTED"},
+                "content":[{"type":"text","text":"I noticed that you have interrupted me."}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals("INTERRUPTED", list.get(0).get("generate_reason"));
     }
 }

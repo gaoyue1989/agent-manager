@@ -295,6 +295,25 @@ class ToolControllerTest {
     }
 
     @Test
+    void listToolsShouldExposeDirectReturnOnlyOnDeclaredTools() throws Exception {
+        when(mcpManager.loadConfigs(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(List.of(Map.of("server", "order")));
+        when(mcpToolRegistrar.getToolsByServer("order"))
+            .thenReturn(List.of(
+                new McpToolRegistrar.ToolInfo("render_confirm_card", "mcp__order__render_confirm_card",
+                    "Render", "order", null, null, false, true),
+                new McpToolRegistrar.ToolInfo("lookup_order", "mcp__order__lookup_order",
+                    "Lookup", "order")));
+
+        mockMvc.perform(get("/tools"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.tools[0].name").value("render_confirm_card"))
+            .andExpect(jsonPath("$.tools[0].directReturn").value(true))
+            .andExpect(jsonPath("$.tools[1].name").value("lookup_order"))
+            .andExpect(jsonPath("$.tools[1].directReturn").doesNotExist());
+    }
+
+    @Test
     void listToolsShouldSummarizeSessionToolsFromScopeService() throws Exception {
         // sessionTools 汇总 = MCP 可控集 ∪ 自定义集（与中间件收敛同源）；sdkInternal 恒 false
         when(sessionToolScope.mcpToolNames()).thenReturn(java.util.Set.of("query"));
