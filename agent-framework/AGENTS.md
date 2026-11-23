@@ -61,7 +61,7 @@ agent-framework/
 │   │   │   │   ├── SkillZipSupport.java         # 技能 zip 解压/定位/命名工具（全局上传与 L4 zip 上传共用）
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据 + userHeaders 解析/装饰)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
-│   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: ReconnectableMcpClientWrapper (可换芯连接句柄, issue #348 断联恢复) / UserScopedMcpClientWrapper (per-call header/参数注入 + reqHeader:* 出站剥离) / McpUserContextMiddleware (userId+reqHeader→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule (headers+arguments 双通道) / ChatRequestHeaders (chat 请求透传头捕获)
+│   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: ReconnectableMcpClientWrapper (可换芯连接句柄, issue #348 断联恢复) / UserScopedMcpClientWrapper (per-call header/参数注入 + reqHeader:* 出站剥离) / McpUserContextMiddleware (userId+reqHeader→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule (headers+arguments 双通道) / ChatRequestHeaders (chat 请求透传头捕获) / DirectReturnMcpTool (direct_return 工具装饰器: 打开 SDK returnDirect, 执行与权限判定委托 McpTool)
 │   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
 │   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
@@ -161,13 +161,14 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - **支持 `permissions.read_only: true`**: 非只读 MCP 工具被权限系统拦截时，强制注册为只读绕过 HITL
 - **支持 ActiveMCP.json 子集过滤**: `selectedTools` 中 `enabled: false` 的工具不注册到 Toolkit
 - **工具注册名**: 使用远端裸名（`tool.name()`），确保 `McpTool.callAsync` 正确执行；`mcp__{server}__{tool}` 前缀名仅用于 API 展示和注册缓存（因 `McpTool.getName()` 是 `final` 字段，无法分离 LLM 暴露名和执行名）
-- **MCP Apps (阶段一/二)**: config.yaml 支持 `ui.tools.{tool}.resource_uri`（`ui://xxx` 静态声明）与 `ui.app_only: true`（仅卡片展示、不入 LLM 工具集）；`resolveUiRef(toolName)` 供 SSE 序列化携带 `ui` 元数据；`/tools`、`/mcp` 接口输出 `uiResourceUri`/`appOnly`/`has_ui`；Manifest 动态发现（`tool.meta()` 的 `_meta`）用于 resourceUri 预检
+- **MCP Apps (阶段一/二)**: config.yaml 支持 `ui.tools.{tool}.resource_uri`（`ui://xxx` 静态声明）与 `ui.app_only: true`（仅卡片展示、不入 LLM 工具集）；`resolveToolCallMeta(toolName)` 供 SSE 序列化携带 `ui` 元数据（与直返标记同一次查询）；`/tools`、`/mcp` 接口输出 `uiResourceUri`/`appOnly`/`has_ui`；Manifest 动态发现（`tool.meta()` 的 `_meta`）用于 resourceUri 预检
 - **多租户按用户调用（userHeaders + `_meta` 双通道，PR #9）**: config.yaml `userHeaders.headers` 声明 `header 名 ← McpMeta key`（如 `X-User-Id: userId`）+ `on-missing`（缺省 deny，fail-closed）；`McpUserContextMiddleware`（唯一注入点，覆盖 Channel/invoke/A2A/confirm 全链路）把生效 userId 写入 `McpMeta` —— Channel 链路 `RuntimeContext.userId` 为网关 peer（=会话 id），按 `session_user` 表反查真实用户；业务调用经 `UserScopedMcpClientWrapper` 注入下游 HTTP header（静态 `auth.token` 仅用于连接初始化与 tools/list 发现），meta 同时随 `CallToolRequest._meta` 下传；stdio 传输告警忽略；stdio 同样常驻装饰（EMPTY rule，仅 _meta 剥离、无 header 注入，issue #225）；设计详见 [docs/mcp-user-scoped-headers-plan.md](docs/mcp-user-scoped-headers-plan.md)
 - **请求级透传（userHeaders 取值源 `reqHeader:<小写头名>`，2026-11）**: chat/confirm/AGUI 请求携带的同名 header 原值透传到该 server 工具调用，双通道可选（mcp-header-arguments-injection-design）：`headers` 节 → HTTP header（网关鉴权/审计）；`arguments` 节 → 工具入参 `params.arguments`（下游业务服务工具参数只从 arguments 取值——schema 门控：inputSchema 声明或允许追加才注入、schema 不可得 best-effort；args-win：显式参数优先只补缺；缺值恒跳过无 fail-closed；值恒字符串）。wrapper 出站把 `reqHeader:*` 从 `_meta` 剥离（userId 的 `_meta` 双通道不变）。捕获名单 = 各 server 两节声明并集（`getForwardHeaderNames()`，规则缓存随 registerOne/registerBuiltClient 装载、clearServer 移除——禁放 buildClient，会被 reload swap-on-success 的 clearServer 抹掉），未声明不捕获；平台 denylist（cookie/x-forwarded-*/sec-*/hop-by-hop）解析期剔除+捕获期二道防线；confirm 恢复按确认请求重新捕获（不存历史，双入口 ConfirmController+AGUI resumeRun）；A2A/invoke/子 agent turn 无透传头（deny 可达，配 passthrough 规避）。设计 [docs/mcp-chat-header-forward-design.md](docs/mcp-chat-header-forward-design.md) 与 [docs/mcp-header-arguments-injection-design.md](docs/mcp-header-arguments-injection-design.md)
+- **结果直返（`direct_return.tools`，2026-11-23）**: config.yaml 顶层声明远端工具裸名，与 `permissions` 正交。命中的 server 走手动注册路径，命中工具以 `DirectReturnMcpTool` 注册（仅打开 SDK `returnDirect` 标志；执行、多租户注入、权限判定全部委托原 McpTool）。执行成功后由 SDK 原生短路 ReAct 循环：收尾消息 = 工具输出原样、本轮结束不再调模型；失败 / DENIED / 被中断 / 成功但空内容（归一化为 ERROR）/ 与普通工具同批调用 均不短路，结果回喂模型。前端契约：`TOOL_CALL_START.directReturn` + `TEXT_BLOCK_DELTA.generateReason=TOOL_RETURN_DIRECT`（原样内容按 `toolCallId` 从 `TOOL_RESULT_TEXT_DELTA` 取），history 收尾消息带 `generate_reason`，`GET /tools` 输出 `directReturn`。控制面入口为 MCP 连接器 `directReturn`（工具管理页逐工具开关），设计/边界见 [../docs/design/mcp-direct-return-design-261123.md](../docs/design/mcp-direct-return-design-261123.md)
 
 ### 3.5 MCP Apps 运行链路（Debug 页卡片 + 4.7 静默更新）
 
-- **卡片渲染**: TOOL_CALL_START 事件带 `toolName` → `registrar.resolveUiRef` 解析 `ui://` 资源 → SSE payload 携带 `ui` 字段 → 前端 `mcp-app-host.js` 经 `McpResourceProxy` 拉取 HtmlResource（注入 CSP meta）→ 沙箱 iframe（srcdoc, sandbox=allow-scripts, opaque origin）→ JSON-RPC over postMessage（`ui/initialize` handshake → `tools/call` 转发 `McpProxyController` → `ui/update-model-context`）
+- **卡片渲染**: TOOL_CALL_START 事件带 `toolName` → `registrar.resolveToolCallMeta` 解析 `ui://` 资源 → SSE payload 携带 `ui` 字段 → 前端 `mcp-app-host.js` 经 `McpResourceProxy` 拉取 HtmlResource（注入 CSP meta）→ 沙箱 iframe（srcdoc, sandbox=allow-scripts, opaque origin）→ JSON-RPC over postMessage（`ui/initialize` handshake → `tools/call` 转发 `McpProxyController` → `ui/update-model-context`）
 - **卡片锚点（重要）**: 卡片必须挂 `r.contentEl`，不可挂 textEl —— `TEXT_BLOCK_DELTA` 会对 textEl `innerHTML` 整体重写，工具调用发生在文本输出之后时卡片会被误清
 - **4.7 ui_context**: `POST /mcp/ui-context` 写 `ui_context` 表（sessionId 维度覆盖写）→ 前端在用户消息 `metadata` 写入会话 key（`UiContextStore.METADATA_SESSION_KEY`）→ `UiContextInjectionHook` 在 PreCallEvent 阶段按会话查库 `appendSystemContent` 注入（HarnessAgent 拒绝 inputMessages 中 SYSTEM 消息，只能经 setSystemMessage/appendSystemContent）
 
@@ -255,6 +256,7 @@ deniedTools 过滤、HITL、/tools、OAF reload 整包重建全部自动生效�
 - 多租户: `userHeaders.headers`（header 名 ← McpMeta key）+ `userHeaders.arguments`（工具参数名 ← McpMeta key，参数注入通道——下游 MCP 业务服务工具参数只从 `params.arguments` 取值；schema 门控 + args-win 只补缺 + 缺值恒跳过）+ `on-missing: deny|passthrough`（缺省 deny，仅作用 headers 通道）；取值源 `userId` 内建身份 或 `reqHeader:<小写头名>` = chat 请求透传头（两节通用，进捕获名单并集）；userId 经 `McpUserContextMiddleware` 写入 McpMeta，双通道生效（HTTP header + `_meta`）；`reqHeader:*` 仅 headers/arguments 单通道（出站剥离）
 - 权限: `permissions.read_only: true` 强制只读
 - 子集: `mcp-configs/{server}/ActiveMCP.json` 的 `selectedTools.enabled` 控制注册子集
+- 结果直返: config.yaml 顶层 `direct_return.tools`——工具执行成功后结果原样直返前端并终止本轮（见上文 McpToolRegistrar 节）
 - 命名: Toolkit 注册用远端裸名；`/tools`、`/mcp` API 用 `mcp__{server}__{tool}` 展示名
 
 ### 工具过滤
@@ -503,7 +505,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 
 > 个人技能管理面用户身份一律取网关注入的 `X-User-Id` 头（不再走 URL 路径 userId）；跨用户越权由网关层负责。名称恰为 `content`/`toggle` 的窄边界见 `UserSkillController` 类注释。
 | GET | `/mcp` | MCP 服务器列表 |
-| GET | `/tools` | 工具列表（默认仅 MCP 段，`?includeInternal=true` 展开 internal 自定义段 + sdkInternal SDK 内置段，issue #39 口径）。会话级工具查询（session-tool-list-design §5）：MCP 条目补 `fullName`（`mcp__{server}__{tool}`，可传入 chat/A2A `tools` 字段的全名别名）与 `sessionControllable=true`（internal 段同为 true；sdkInternal 段恒 false——内置不受会话级 tools 控制，关闭走包级 deniedTools）；顶层 `sessionTools` 汇总可传清单（MCP 可控集 ∪ 自定义集，与 ToolFilterMiddleware 收敛同源 SessionToolScopeService——查询即所得）；可选 `?tools=`（逗号分隔，裸名/全名均可）：白名单预览只裁剪 MCP+自定义段，SDK 内置段不变，缺省/空=不过滤 |
+| GET | `/tools` | 工具列表（默认仅 MCP 段，`?includeInternal=true` 展开 internal 自定义段 + sdkInternal SDK 内置段，issue #39 口径）。会话级工具查询（session-tool-list-design §5）：MCP 条目补 `fullName`（`mcp__{server}__{tool}`，可传入 chat/A2A `tools` 字段的全名别名）与 `sessionControllable=true`（internal 段同为 true；sdkInternal 段恒 false——内置不受会话级 tools 控制，关闭走包级 deniedTools）；顶层 `sessionTools` 汇总可传清单（MCP 可控集 ∪ 自定义集，与 ToolFilterMiddleware 收敛同源 SessionToolScopeService——查询即所得）；可选 `?tools=`（逗号分隔，裸名/全名均可）：白名单预览只裁剪 MCP+自定义段，SDK 内置段不变，缺省/空=不过滤；直返工具条目补 `directReturn=true` |
 | POST | `/admin/reload?scope=auto\|mcp\|agent` | **OAF 配置动态 reload**（[docs/oaf-dynamic-reload-plan.md](docs/oaf-dynamic-reload-plan.md)）：auto=指纹比对自动分流（仅 MCP 配置变→原地 reload；AGENTS.md 变→整包重建 HarnessAgent）；mcp=仅 MCP 原地 reload（重解析 frontmatter，声明增删即时生效）；agent=强制整包重建。失败保持旧配置服务（500 + 结构化错误），生效语义=下一轮对话，进行中 turn 不打断 |
 | GET | `/admin/reload` | reload 只读状态：当前已注册 MCP server（connected/tool_count） |
 | GET | `/debug` | 调试页面（静态资源） |
@@ -629,7 +631,7 @@ mvn -o test  # 离线模式 (离线开发镜像内；2026-11-03 实跑同为 175
 
 | job | 内容 |
 |-----|------|
-| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI（必需检查） |
+| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / DR 结果直返 / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI（必需检查） |
 | e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账）+ U9（必需检查） |
 | e2e-sandbox | X 组沙箱（api-sandbox，mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流）（必需检查） |
 | e2e-protocol-multi | P 组协议多副本（api-protocol-multi：lead×2 + member×2 共享 MySQL/Redis，委派链路跨副本正确性 + EventBus 跨副本对账 + A2A Job 同键收敛）（必需检查） |

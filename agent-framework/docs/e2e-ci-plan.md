@@ -260,6 +260,7 @@ e2e/scripts/run.sh <group> # env-up → npx playwright test --project=<group> �
 | `[E2E:execute:fail]` | 失败命令（退出码非 0） | X7（命令失败传播） |
 | `[E2E:tool:write:sb](<file>,<content>)` / `[E2E:tool:read:sb](<path>)` | 沙箱档 write_file / read_file（独立录制件，供沙箱物化链路） | X3/X10/X11/X15 |
 | `[E2E:plugin:echo]` | 调插件工具 `echo_query`（registry 登记 `variants=["denied"]`） | e2e-plugin 三态权限（§5.9） |
+| `[E2E:direct:render]` / `[E2E:direct:fail]` / `[E2E:direct:empty]` / `[E2E:direct:plain]` / `[E2E:direct:submit]` / `[E2E:direct:mixed]` | 分别返回 order MCP 的 `render_confirm_card`（直返，单次调用即收尾）/ `broken_render`（直返但 isError）/ `empty_render`（直返但空内容）/ `lookup_order`（非直返对照）/ `submit_order`（ask + 直返，挂起于 permission_ask）/ 同批 `notify_warehouse` + `render_confirm_card` | DR1–DR8（§5.5b） |
 | `[E2E:proto:lead-spawn]` | lead 调 `agent_spawn` | P1（§5.12） |
 | `[E2E:proto:member-echo]` | member 调 `bench_echo` 回显 | P1/P3（§5.12） |
 | `[E2E:recall]` | 输出对上一轮 `[E2E:remember](<x>)` 的引用文本（多轮记忆回归） | S3 |
@@ -413,6 +414,21 @@ agent-config/
 | M4 | 卡片工具代理 | POST `/mcp/approval/tools/confirm_application`（app_only 工具） | 远端真实执行（MCP 状态变化）；对比：经 LLM 侧不可见（M6） |
 | M5 | 4.7 静默上下文更新 | POST `/mcp/ui-context` `{sessionId, content:"UICTX-MARK-1"}` → 同会话 `[E2E:plain]` | 响应 2xx 不触发回复；mock `/stats` 最新一次请求 `systemContent` 含 `UICTX-MARK-1`（Hook 注入直证）；不更新时（对照组会话）不含 |
 | M6 | app_only 隔离 | GET `/tools` | `confirm_application` 带 `appOnly:true` 标记且不出现在 LLM 可调集合语义中（对照 `ui.tools`/`app_only` 声明） |
+
+### 5.5b DR 组 — MCP 工具结果直返（e2e-core API 侧）
+
+order MCP mock（`mock/direct-return-mcp.py`，`GET /expected?tool=&order_id=` 给出该工具应返回的原文）承载 `direct_return` 各分支；设计见 [mcp-direct-return-design-261123.md](../../docs/design/mcp-direct-return-design-261123.md)。
+
+| # | 场景 | 标记 | 断言 |
+|---|------|------|------|
+| DR1 | 直返成功 | `direct:render` | `TOOL_CALL_START.directReturn=true`；带 `generateReason=TOOL_RETURN_DIRECT` 的收尾文本 = `TOOL_RESULT_TEXT_DELTA` 拼接 = mock `/expected` 原文；无模型正文；`MODEL_CALL_START` 恰 1 个，mock LLM 主对话请求恰 1 次 |
+| DR2 | history 与续传 | `direct:render` 后 GET history / subscribe | history 有且仅有一条 `generate_reason=TOOL_RETURN_DIRECT` 的 assistant 消息且 `content` 等于原样内容；回放保留两个标记 |
+| DR3 | 非直返对照 | `direct:plain` | `TOOL_CALL_START` 无 `directReturn`；模型继续收尾（主对话请求 2 次） |
+| DR4 | 直返工具失败 | `direct:fail` | `TOOL_RESULT_END.state=ERROR`；无直返文本；模型再次被调用说明失败 |
+| DR5 | 成功但空内容 | `direct:empty` | 结果归一化为 ERROR（文案含 `empty content`）；无直返文本 |
+| DR6 | HITL + 直返 | `direct:submit` → confirm-stream 批准 | 挂起前无直返、工具未执行；批准后 SUCCESS、直返回执 = `/expected`，恢复流不再调用模型 |
+| DR7 | 同批混合 | `direct:mixed` | 两个工具同一 `replyId`（同一步）均 SUCCESS；无直返文本；整批回喂模型（2 次调用） |
+| DR8 | `/tools` 标记 | GET `/tools` | order server 四个直返工具 `directReturn=true`，两个普通工具无该键 |
 
 ### 5.6 X 组 — 沙箱（e2e-sandbox job，mock OpenSandbox）
 

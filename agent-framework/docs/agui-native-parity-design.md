@@ -154,7 +154,7 @@ Controller 内等价调用 HarnessAgentFactory（含 collectPermissionRules 权�
 ### D7 平台特性对等
 
 - **MCP Apps `ui`**：自定义 `AguiEventEnricher` 往 TOOL_CALL_START 注入 `ui{resourceUri, server}`
-  （McpToolRegistrar.resolveUiRef 同源数据）。
+  （McpToolRegistrar.resolveToolCallMeta 同源数据）。
 - **合成帧**：AG-UI 轮挂与 native 相同的 TurnToolSummaryTracker（emitter 回调），`tool_call_summary` /
   `tool_result_preview` / `file_ready` 双写为 `CUSTOM{name=<原名>}`（p 侧词表不变）。
 - **审计**：emitDual 路径复用 toolAuditStore 审计埋点。
