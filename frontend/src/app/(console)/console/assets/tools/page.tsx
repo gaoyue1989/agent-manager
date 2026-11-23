@@ -151,9 +151,6 @@ export default function ToolsPage() {
       || effectiveDirect.length !== declaredDirect.length
       || effectiveDirect.some((n) => !declaredDirect.includes(n)));
 
-  const toggleDirect = (tool: string) => setDirectDraft(
-    effectiveDirect.includes(tool) ? effectiveDirect.filter((n) => n !== tool) : [...effectiveDirect, tool]);
-
   const savePerms = async () => {
     if (!selCn) return;
     const tools = Object.fromEntries(rowNames.map((n) => [n, effective[n] ?? "allow"]));
@@ -262,7 +259,7 @@ export default function ToolsPage() {
                 <td className="p-2.5">
                   {selCn && writable ? (
                     <input type="checkbox" checked={direct} data-testid={`direct-toggle-${tool}`}
-                      onChange={() => toggleDirect(tool)} />
+                      onChange={() => setDirectDraft(direct ? effectiveDirect.filter((n) => n !== tool) : [...effectiveDirect, tool])} />
                   ) : (direct && <Tag>直返</Tag>)}
                 </td>
                 <td className="p-2.5 text-xs text-gray-500">

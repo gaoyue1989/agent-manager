@@ -1,29 +1,26 @@
 import type { McpConnectorView } from "@/lib/api";
 
-export function parseToolPerms(cn: Pick<McpConnectorView, "permissions">): Record<string, string> {
+function connectorJson(raw: string | undefined): Record<string, unknown> {
   try {
-    const tools = JSON.parse(cn.permissions || "{}")?.tools;
-    if (tools && typeof tools === "object" && !Array.isArray(tools)) return tools;
-  } catch { /* 非 JSON（历史脏数据）按未声明处理 */ }
+    return JSON.parse(raw || "{}") ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export function parseToolPerms(cn: Pick<McpConnectorView, "permissions">): Record<string, string> {
+  const tools = connectorJson(cn.permissions).tools;
+  if (tools && typeof tools === "object" && !Array.isArray(tools)) return tools as Record<string, string>;
   return {};
 }
 
 export function parseSnapshotTools(cn: Pick<McpConnectorView, "toolScope">): string[] {
-  try {
-    const tools = JSON.parse(cn.toolScope || "{}")?.tools;
-    if (Array.isArray(tools)) return tools;
-  } catch { /* 非 JSON（历史脏数据）按无快照处理 */ }
-  return [];
+  const tools = connectorJson(cn.toolScope).tools;
+  return Array.isArray(tools) ? tools : [];
 }
 
 export function parseDirectReturn(cn: Pick<McpConnectorView, "directReturn">): string[] {
-  try {
-    const tools: unknown = JSON.parse(cn.directReturn || "{}")?.tools;
-    if (Array.isArray(tools)) {
-      return tools.filter((tool): tool is string => typeof tool === "string" && tool.trim() !== "");
-    }
-  } catch {
-    return [];
-  }
-  return [];
+  const tools = connectorJson(cn.directReturn).tools;
+  if (!Array.isArray(tools)) return [];
+  return tools.filter((tool): tool is string => typeof tool === "string" && tool.trim() !== "");
 }

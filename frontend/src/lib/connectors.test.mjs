@@ -38,3 +38,13 @@ test("direct return is independent of permissions and tool scope", () => {
   assert.deepEqual(parseSnapshotTools(row), ["a", "b"]);
   assert.deepEqual(parseDirectReturn(row), ["b"]);
 });
+
+test("the three parsers share one tolerant JSON entry point", () => {
+  for (const raw of ["", "null", "42", '"text"', "[]", "{}", "not json", "{broken"]) {
+    assert.deepEqual(parseToolPerms({ permissions: raw }), {}, `permissions ${raw}`);
+    assert.deepEqual(parseSnapshotTools({ toolScope: raw }), [], `toolScope ${raw}`);
+    assert.deepEqual(parseDirectReturn({ directReturn: raw }), [], `directReturn ${raw}`);
+  }
+  assert.deepEqual(parseToolPerms({}), {});
+  assert.deepEqual(parseSnapshotTools({}), []);
+});
