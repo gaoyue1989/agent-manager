@@ -37,17 +37,35 @@ func TestVikingAccountID(t *testing.T) {
 }
 
 // fakeOpenViking 模拟 Admin API、数据面 content/write 与记忆浏览 ls/read（PoC 实测
-// 响应形状），记录收到的 account 建户数、write URI 与 browse 入参 URI 供断言。未覆盖
-// 路径一律 404（测试内显式）。ls/read 条目 uri 模仿真机返回本人展开形态
+// 响应形状），记录收到的 account 建户/轮换/删除次数、write URI 与 browse 入参 URI 供
+// 断言。conflict 模拟 account 已存在（CONFLICT → EnsureAccount 轮换分支）；deleteErr/
+// writeErr 注入对应端点故障；onCreate 为建户前置钩子（发布链路时序断言）。未覆盖路径
+// 一律 404（测试内显式）。ls/read 条目 uri 模仿真机返回本人展开形态
 // viking://user/u-1001/…；plan.md 的 size 取 2^53+1 探测出参重序列化数字精度。
 type fakeOpenViking struct {
 	mu        sync.Mutex
 	creates   int
+	rotates   int
+	deletes   int
 	writeURI  []string
 	browseURI []string
+	conflict  bool
+	deleteErr bool
+	writeErr  bool
+	onCreate  func()
 }
 
-func (f *fakeOpenViking) recordCreate() { f.mu.Lock(); f.creates++; f.mu.Unlock() }
+func (f *fakeOpenViking) recordCreate() {
+	f.mu.Lock()
+	f.creates++
+	hook := f.onCreate
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+func (f *fakeOpenViking) recordRotate() { f.mu.Lock(); f.rotates++; f.mu.Unlock() }
+func (f *fakeOpenViking) recordDelete() { f.mu.Lock(); f.deletes++; f.mu.Unlock() }
 func (f *fakeOpenViking) recordWrite(uri string) {
 	f.mu.Lock()
 	f.writeURI = append(f.writeURI, uri)
@@ -59,6 +77,8 @@ func (f *fakeOpenViking) recordBrowse(uri string) {
 	f.mu.Unlock()
 }
 func (f *fakeOpenViking) createCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.creates }
+func (f *fakeOpenViking) rotateCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.rotates }
+func (f *fakeOpenViking) deleteCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.deletes }
 func (f *fakeOpenViking) uris() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -71,28 +91,51 @@ func (f *fakeOpenViking) browseURIs() []string {
 }
 func (f *fakeOpenViking) resetBrowse() { f.mu.Lock(); f.browseURI = nil; f.mu.Unlock() }
 
-func (f *fakeOpenViking) handler(okWrites bool) http.HandlerFunc {
+func (f *fakeOpenViking) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v1/admin/accounts" && r.Method == http.MethodPost:
+			f.mu.Lock()
+			isConflict := f.conflict
+			f.mu.Unlock()
+			if isConflict {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "error",
+					"error": map[string]string{"code": "CONFLICT", "message": "account exists"}})
+				return
+			}
 			f.recordCreate()
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
 				"result": map[string]string{"user_key": "ak-test"}})
+		case strings.HasSuffix(r.URL.Path, "/key") && r.Method == http.MethodPost:
+			f.recordRotate()
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
+				"result": map[string]string{"user_key": "ak-rotated"}})
 		case strings.HasSuffix(r.URL.Path, "/users") && r.Method == http.MethodPost:
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
 				"result": map[string]string{"user_key": "x"}})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/admin/accounts/") && r.Method == http.MethodDelete:
+			f.recordDelete()
+			if f.deleteErr {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "result": nil})
 		case r.URL.Path == "/api/v1/content/write":
 			var body struct {
 				URI string `json:"uri"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.recordWrite(body.URI)
-			if okWrites {
-				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
-					"result": map[string]string{}})
-			} else {
+			f.mu.Lock()
+			bad := f.writeErr
+			f.mu.Unlock()
+			if bad {
 				w.WriteHeader(http.StatusBadGateway)
+				return
 			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
+				"result": map[string]string{}})
 		case r.URL.Path == "/api/v1/fs/ls" && r.Method == http.MethodGet:
 			f.recordBrowse(r.URL.Query().Get("uri"))
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "result": []map[string]any{
@@ -166,7 +209,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 // 发布端到端（平台启用默认接管）：建户 → env/Secret 注入 → knowledge 导入 → 幂等 UpdateEnv。
 func TestPublishWithOpenVikingProvision(t *testing.T) {
 	fake := &fakeOpenViking{}
-	core, baseURL := newVikingTestCore(t, fake.handler(true))
+	core, baseURL := newVikingTestCore(t, fake.handler())
 
 	zip := buildTestZip(map[string]string{
 		"AGENTS.md":             testAgentsMD,
@@ -235,7 +278,7 @@ func TestPublishWithOpenVikingProvision(t *testing.T) {
 
 func TestIssueMemoryKey(t *testing.T) {
 	fake := &fakeOpenViking{}
-	core, _ := newVikingTestCore(t, fake.handler(true))
+	core, _ := newVikingTestCore(t, fake.handler())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest", Name: "svc"})
 	if err != nil {
@@ -262,15 +305,8 @@ func TestIssueMemoryKey(t *testing.T) {
 }
 
 func TestDeleteRemovesAccount(t *testing.T) {
-	var deletes atomicCounter
-	core, _ := newVikingTestCore(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/admin/accounts/oaf-svc" {
-			deletes.add(1)
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "result": nil})
-			return
-		}
-		(&fakeOpenViking{}).handler(true)(w, r)
-	})
+	fake := &fakeOpenViking{}
+	core, _ := newVikingTestCore(t, fake.handler())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest", Name: "svc"})
 	if err != nil {
@@ -280,23 +316,17 @@ func TestDeleteRemovesAccount(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for deletes.load() == 0 && time.Now().Before(deadline) {
+	for fake.deleteCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if deletes.load() != 1 {
-		t.Fatalf("delete must remove openviking account, deletes=%d", deletes.load())
+	if fake.deleteCount() != 1 {
+		t.Fatalf("delete must remove openviking account, deletes=%d", fake.deleteCount())
 	}
 }
 
 // OpenViking 故障不阻断删除（best-effort 语义）。
 func TestDeleteToleratesVikingOutage(t *testing.T) {
-	core, _ := newVikingTestCore(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		(&fakeOpenViking{}).handler(true)(w, r)
-	})
+	core, _ := newVikingTestCore(t, (&fakeOpenViking{deleteErr: true}).handler())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest", Name: "svc"})
 	if err != nil {
@@ -330,20 +360,12 @@ func waitForVikingTerminal(t *testing.T, c *Core, id uint) store.ServiceEntity {
 	}
 }
 
-// atomicCounter 最小计数器（atomic.Int32 等价，避免测试内多 import 版本差异）。
-type atomicCounter struct {
-	mu sync.Mutex
-	n  int
-}
-
-func (c *atomicCounter) add(_ int) { c.mu.Lock(); c.n++; c.mu.Unlock() }
-func (c *atomicCounter) load() int { c.mu.Lock(); defer c.mu.Unlock(); return c.n }
 
 // UpdateEnv 全量覆盖回显含保留键不再死锁（真机验证发现的实现缺陷）：剥离后 provider
 // 切换成功、派生键重建；平台未启用时显式设置注入键仍被拒绝（恶意值进不来）。
 func TestUpdateEnvSwitchProviderWithReservedEcho(t *testing.T) {
 	fake := &fakeOpenViking{}
-	core, baseURL := newVikingTestCore(t, fake.handler(true))
+	core, baseURL := newVikingTestCore(t, fake.handler())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest", Name: "svc"})
 	if err != nil {
@@ -367,18 +389,21 @@ func TestUpdateEnvSwitchProviderWithReservedEcho(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update env with reserved echo must not deadlock: %v", err)
 	}
-	var upPlain map[string]string
+	var upPlain, upSecret map[string]string
 	_ = json.Unmarshal([]byte(up.EnvJSON), &upPlain)
+	_ = json.Unmarshal([]byte(up.EnvSecretJSON), &upSecret)
 	if upPlain[AgentMemoryProviderEnv] != MemoryProviderLocal {
 		t.Fatalf("provider must switch to local, got %q", upPlain[AgentMemoryProviderEnv])
 	}
 	if _, ok := upPlain[OpenVikingAccountEnv]; ok {
 		t.Fatalf("local opt-out must clear stale account key")
 	}
+	if upSecret[OvkAdminKeyEnv] != "" || upSecret[OvkUserSeedEnv] != "" {
+		t.Fatalf("local opt-out must clear derived secret keys (issue #430): %v", upSecret)
+	}
 
-	// 切回 openviking:幂等补装（Secret sticky,不重建 account）
+	// 切回 openviking:secret 已清空 → 重新供给（远端 account 数据保留,切回恢复供给）
 	waitForVikingTerminal(t, core, svc.ID)
-	createsBefore := fake.createCount()
 	echo2 := map[string]string{}
 	for k, v := range upPlain {
 		echo2[k] = v
@@ -388,13 +413,140 @@ func TestUpdateEnvSwitchProviderWithReservedEcho(t *testing.T) {
 	if err != nil {
 		t.Fatalf("switch back: %v", err)
 	}
-	var up2Plain map[string]string
+	var up2Plain, up2Secret map[string]string
 	_ = json.Unmarshal([]byte(up2.EnvJSON), &up2Plain)
+	_ = json.Unmarshal([]byte(up2.EnvSecretJSON), &up2Secret)
 	if up2Plain[OpenVikingAccountEnv] != "oaf-svc" || up2Plain[OpenVikingURLEnv] != baseURL {
 		t.Fatalf("derived keys must be re-derived: %v", up2Plain)
 	}
-	if fake.createCount() != createsBefore {
-		t.Fatalf("switch back must not re-provision (sticky secret)")
+	if up2Secret[OvkAdminKeyEnv] == "" || up2Secret[OvkUserSeedEnv] == "" {
+		t.Fatalf("switch back must re-provision secret keys: %v", up2Secret)
+	}
+}
+
+// 发布链路供给时序与失败回滚（issue #430 B-03a/B-03b）：
+//   - 占位先行不变量——EnsureAccount 只允许发生在 DB 占位事务之后，并发同名发布败者在
+//     唯一键冲突处失败，零建户零轮换（胜者在线 ADMIN key 不被轮换失效）
+//   - 供给失败回滚——占位后任一环节失败，本次新建的 account 回滚删除、占位行与
+//     ref_count 清理（DB 零残留、无外部孤儿 account）
+//   - 回滚边界——EnsureAccount 走 CONFLICT 轮换分支（account 已存在，持有者在用）时
+//     失败绝不删除 account
+func TestPublishProvisionOrderingAndRollback(t *testing.T) {
+	publishImport := func(t *testing.T, c *Core) *store.OafPackage {
+		t.Helper()
+		zip := buildTestZip(map[string]string{
+			"AGENTS.md":          testAgentsMD,
+			"knowledge/guide.md": "# 指南",
+		})
+		pkg, err := c.Packages.Upload("demo.zip", bytesReader(zip))
+		if err != nil {
+			t.Fatalf("upload pkg: %v", err)
+		}
+		_, err = c.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+			Name: "svc", Env: map[string]string{OvkKnowledgeImportEnv: "true"}})
+		if err == nil {
+			t.Fatalf("publish must fail on knowledge import error")
+		}
+		return pkg
+	}
+	assertNoRows := func(t *testing.T, c *Core, pkgID uint) {
+		t.Helper()
+		var cnt int64
+		if err := c.DB.Model(&store.ServiceEntity{}).Where("k8s_name = ?", "oaf-svc").Count(&cnt).Error; err != nil {
+			t.Fatal(err)
+		}
+		if cnt != 0 {
+			t.Fatalf("failed publish must leave zero DB rows, got %d", cnt)
+		}
+		var pkgRow store.OafPackage
+		if err := c.DB.First(&pkgRow, pkgID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if pkgRow.RefCount != 0 {
+			t.Fatalf("ref_count must be restored after rollback, got %d", pkgRow.RefCount)
+		}
+	}
+
+	t.Run("ensure account runs after DB placeholder", func(t *testing.T) {
+		fake := &fakeOpenViking{}
+		core, _ := newVikingTestCore(t, fake.handler())
+		pkg := uploadTestPkg(t, core, "")
+		invoked := false
+		fake.onCreate = func() {
+			var cnt int64
+			if err := core.DB.Model(&store.ServiceEntity{}).Where("k8s_name = ?", "oaf-svc").Count(&cnt).Error; err != nil {
+				t.Errorf("placeholder check: %v", err)
+			}
+			if cnt != 1 {
+				t.Errorf("EnsureAccount must run after DB placeholder transaction, placeholder rows = %d", cnt)
+			}
+			invoked = true
+		}
+		svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest", Name: "svc"})
+		if err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		if !invoked {
+			t.Fatalf("ensure account never invoked")
+		}
+		waitForVikingTerminal(t, core, svc.ID)
+	})
+
+	t.Run("provision failure rolls back new account and placeholder", func(t *testing.T) {
+		fake := &fakeOpenViking{writeErr: true}
+		core, _ := newVikingTestCore(t, fake.handler())
+		pkg := publishImport(t, core)
+		assertNoRows(t, core, pkg.ID)
+		if fake.deleteCount() != 1 {
+			t.Fatalf("newly created account must be rolled back on provision failure, deletes=%d", fake.deleteCount())
+		}
+	})
+
+	t.Run("rotated existing account never deleted on failure", func(t *testing.T) {
+		fake := &fakeOpenViking{conflict: true, writeErr: true}
+		core, _ := newVikingTestCore(t, fake.handler())
+		pkg := publishImport(t, core)
+		assertNoRows(t, core, pkg.ID)
+		if fake.rotateCount() != 1 {
+			t.Fatalf("conflict path must rotate key, rotates=%d", fake.rotateCount())
+		}
+		if fake.deleteCount() != 0 {
+			t.Fatalf("pre-existing account (key rotated, holder in use) must not be deleted, deletes=%d", fake.deleteCount())
+		}
+	})
+}
+
+// 切 local 后签发入口按 provider 校验拒绝（issue #430 B-04b）：secret 派生键已随切换
+// 清理，不再凭残留凭据签发无对应供给的 userKey（openVikingUrl 为空的悬空凭证）。
+func TestSwitchLocalBlocksMemoryKeyIssue(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, _ := newVikingTestCore(t, fake.handler())
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", WorkspaceID: 7})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+
+	if _, err := core.IssueMemoryKey(svc.ID, "u-1001"); err != nil {
+		t.Fatalf("issue before switch: %v", err)
+	}
+	rec, err := core.Get(svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := map[string]string{}
+	_ = json.Unmarshal([]byte(rec.EnvJSON), &echo)
+	echo[AgentMemoryProviderEnv] = MemoryProviderLocal
+	if _, err := core.UpdateEnv(svc.ID, echo, nil); err != nil {
+		t.Fatalf("switch local: %v", err)
+	}
+	if _, err := core.IssueMemoryKey(svc.ID, "u-1001"); err == nil {
+		t.Fatalf("issue after local switch must be rejected")
+	}
+	if _, err := core.ConsoleIssueMemoryKey(7, svc.ID, 1001); err == nil {
+		t.Fatalf("console issue after local switch must be rejected")
 	}
 }
 
@@ -402,7 +554,7 @@ func TestUpdateEnvSwitchProviderWithReservedEcho(t *testing.T) {
 // key 与推导公式一致且可重复。
 func TestConsoleIssueMemoryKey(t *testing.T) {
 	fake := &fakeOpenViking{}
-	core, baseURL := newVikingTestCore(t, fake.handler(true))
+	core, baseURL := newVikingTestCore(t, fake.handler())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
 		Name: "svc", WorkspaceID: 7})
@@ -459,7 +611,7 @@ func mustRead(t *testing.T, c *Core, id uint, col string) string {
 // 记忆供给聚合(Console/Admin 共用映射)+ 浏览代理(归属/前缀白名单/provider 校验)。
 func TestMemorySupplyAndBrowse(t *testing.T) {
 	fake := &fakeOpenViking{}
-	core, baseURL := newVikingTestCore(t, fake.handler(true))
+	core, baseURL := newVikingTestCore(t, fake.handler())
 	pkg := uploadTestPkg(t, core, "")
 	ov, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
 		Name: "svc-ov", WorkspaceID: 7})
@@ -527,7 +679,7 @@ func mustDecodeBrowseList(t *testing.T, raw json.RawMessage) []map[string]any {
 // 出参条目统一 ~/ 契约口径、他人形态拒绝且绝不触上游、read 回传闭环、白名单闸门不变。
 func TestMemoryBrowseURINormalization(t *testing.T) {
 	fake := &fakeOpenViking{}
-	core, _ := newVikingTestCore(t, fake.handler(true))
+	core, _ := newVikingTestCore(t, fake.handler())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
 		Name: "svc", WorkspaceID: 7})
@@ -614,7 +766,7 @@ func TestMemoryBrowseURINormalization(t *testing.T) {
 // 文件名中的点（a..b/.hidden）与合法单段不受影响。
 func TestMemoryBrowseRejectsPathTraversal(t *testing.T) {
 	fake := &fakeOpenViking{}
-	core, _ := newVikingTestCore(t, fake.handler(true))
+	core, _ := newVikingTestCore(t, fake.handler())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
 		Name: "svc", WorkspaceID: 7})
