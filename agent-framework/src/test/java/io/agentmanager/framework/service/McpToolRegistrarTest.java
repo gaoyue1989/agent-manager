@@ -773,8 +773,6 @@ class McpToolRegistrarTest {
         assertNull(registrar.resolveToolCallMeta("get_weather"));
     }
 
-    // ===== direct_return：config.yaml 解析 =====
-
     @Test
     void shouldLoadDirectReturnTools() throws Exception {
         writeConfigYaml("order", """
@@ -820,8 +818,6 @@ class McpToolRegistrarTest {
         assertEquals(Set.of("render_confirm_card"),
             registrar.loadDirectReturnTools(mcp("mixed", "mixed")));
     }
-
-    // ===== direct_return：注册与查询 =====
 
     private java.util.Map<String, io.agentscope.core.tool.AgentTool> registerFiltered(
             String server, List<String> toolNames, McpToolRegistrar.UiMapping uiMapping,

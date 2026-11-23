@@ -702,8 +702,6 @@ class StateDataParserTest {
         assertFalse(list.get(0).containsKey("generate_reason"));
     }
 
-    // ========== direct_return：SDK returnDirect 收尾消息的历史标识 ==========
-
     @Test
     void directReturnClosingMessageShouldCarryGenerateReason() {
         var stateData = """
