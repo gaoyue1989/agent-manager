@@ -449,6 +449,9 @@ func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri
 	if err != nil {
 		return nil, err
 	}
+	if err := vikingRejectTraversalSegments(uri); err != nil {
+		return nil, err
+	}
 	const prefix = "viking://~/"
 	if !strings.HasPrefix(uri, prefix) {
 		return nil, fmt.Errorf("%w: uri must start with %s (own space only)", ErrInvalidForm, prefix)
@@ -497,6 +500,20 @@ func vikingNormalizeBrowseInput(uri, ownUserPrefix string) (string, error) {
 	}
 	return "", fmt.Errorf("%w: uri %q is not own space, expected prefix %s",
 		ErrInvalidForm, uri, strings.TrimSuffix(ownUserPrefix, "/"))
+}
+
+// vikingRejectTraversalSegments 拒绝路径穿越段（issue #420）：任一路径段为 `..` 或
+// 其百分号编码形态（%2e%2e，大小写不敏感）即 ErrInvalidForm。~/ 前缀闸门只验首段
+// 形态，`viking://~/../u-9999/…`（含自有 user/{uid}/../ 改写产物）会带着穿越段通过
+// 并被代理上游——仅本人空间闸门可被越权；段级精确匹配不误伤文件名中的点（a..b）。
+func vikingRejectTraversalSegments(uri string) error {
+	rest, _ := strings.CutPrefix(uri, "viking://~/")
+	for _, seg := range strings.Split(rest, "/") {
+		if seg == ".." || strings.EqualFold(seg, "%2e%2e") {
+			return fmt.Errorf("%w: uri %q contains path traversal segment %q", ErrInvalidForm, uri, seg)
+		}
+	}
+	return nil
 }
 
 // vikingNormalizeListOutput 出参条目 URI 归一（仅 action=list，issue #374）：OpenViking
