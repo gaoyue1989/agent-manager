@@ -247,8 +247,11 @@ func VikingAccountID(k8sName string) string {
 //     轮换只发生在显式删除 Secret 重发布）；OVK_KNOWLEDGE_IMPORT / OVK_SHARED_SKILLS
 //     为 true 时同步导入包内 knowledge//skills/。
 //
-// 与 applyIsolationEnv 同语义：用户显式 AGENT_MEMORY_PROVIDER=local 即退出（无任何注入）。
-func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, secret map[string]string) error {
+// 返回 created 供调用方在后续环节失败时回滚本次新建的 account（issue #475：回滚唯一
+// 入口是调用方的 rollbackProvision，本函数失败一律不自行删户）；调用方须持有服务锁
+// （lockServiceOps）——锁内串行保证 created 语义与本进程并发事实一致。与
+// applyIsolationEnv 同语义：用户显式 AGENT_MEMORY_PROVIDER=local 即退出（无任何注入）。
+func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, secret map[string]string) (bool, error) {
 	explicit := plain[AgentMemoryProviderEnv]
 	if explicit == MemoryProviderLocal {
 		// 显式退出：清掉全部派生键（plain 与 secret 双侧；secret 残留曾让签发入口凭
@@ -257,24 +260,24 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 		delete(plain, OpenVikingAccountEnv)
 		delete(secret, OvkAdminKeyEnv)
 		delete(secret, OvkUserSeedEnv)
-		return nil
+		return false, nil
 	}
 	provider := explicit
 	if provider == "" {
 		if c.Viking == nil {
-			return nil // 平台未启用且用户未要求 → 零接触（issue #414）
+			return false, nil // 平台未启用且用户未要求 → 零接触（issue #414）
 		}
 		provider = MemoryProviderOpenViking // 平台启用即默认接管（显式 local 可退出）
 	}
 	if provider != MemoryProviderOpenViking {
-		return fmt.Errorf("%w: %s must be %q or %q, got %q",
+		return false, fmt.Errorf("%w: %s must be %q or %q, got %q",
 			ErrInvalidForm, AgentMemoryProviderEnv, MemoryProviderLocal, MemoryProviderOpenViking, provider)
 	}
 	if c.Viking == nil {
 		if secret[OvkAdminKeyEnv] != "" && secret[OvkUserSeedEnv] != "" && plain[OpenVikingURLEnv] != "" {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("%w: %s=%s requires OPENVIKING_ENABLED/OPENVIKING_BASE_URL/OPENVIKING_ROOT_API_KEY on platform",
+		return false, fmt.Errorf("%w: %s=%s requires OPENVIKING_ENABLED/OPENVIKING_BASE_URL/OPENVIKING_ROOT_API_KEY on platform",
 			ErrInvalidForm, AgentMemoryProviderEnv, MemoryProviderOpenViking)
 	}
 
@@ -283,7 +286,7 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 	if secret[OvkAdminKeyEnv] == "" || secret[OvkUserSeedEnv] == "" {
 		adminKey, isNew, err := c.Viking.EnsureAccount(account)
 		if err != nil {
-			return fmt.Errorf("openviking provision account %s: %w", account, err)
+			return false, fmt.Errorf("openviking provision account %s: %w", account, err)
 		}
 		created = isNew
 		seed := secret[OvkUserSeedEnv]
@@ -298,23 +301,37 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 	plain[OpenVikingAccountEnv] = account
 	if plain[OvkKnowledgeImportEnv] == "true" && pkg != nil {
 		if err := c.importPackageDirWith(secret, pkg, "knowledge", "resources/"+pkg.Slug); err != nil {
-			c.rollbackProvision(account, created)
-			return fmt.Errorf("openviking knowledge import: %w", err)
+			return created, fmt.Errorf("openviking knowledge import: %w", err)
 		}
 	}
 	if plain[OvkSharedSkillsEnv] == "true" && pkg != nil {
 		if err := c.importPackageDirWith(secret, pkg, "skills", "agent/skills/"+pkg.Slug); err != nil {
-			c.rollbackProvision(account, created)
-			return fmt.Errorf("openviking skills import: %w", err)
+			return created, fmt.Errorf("openviking skills import: %w", err)
 		}
 	}
-	return nil
+	return created, nil
+}
+
+// vikingKeyRevoked 判断错误是否为 ADMIN key 失效语义（HTTP 401 / UNAUTHORIZED）：
+// key 已被其他持有者轮换，账户归属不再属于本次调用。
+func vikingKeyRevoked(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "UNAUTHORIZED")
 }
 
 // rollbackProvision 供给失败回滚（issue #430）：仅删除本次新建的 account（best-effort，
-// 失败仅告警）；CONFLICT 轮换分支（account 已存在、持有者在用）绝不删除。
-func (c *Core) rollbackProvision(account string, created bool) {
+// 失败仅告警）；CONFLICT 轮换分支（account 已存在、持有者在用）绝不删除；失败原因呈
+// 401（key 已被他者轮换接管，issue #475）同样绝不删除——本进程发布链路持锁串行后
+// 401 只能来自外部轮换，删除会毁掉接管方正在使用的账户与记忆数据。
+func (c *Core) rollbackProvision(account string, created bool, cause error) {
 	if !created {
+		return
+	}
+	if vikingKeyRevoked(cause) {
+		log.Printf("[openviking] skip rollback account %s: admin key revoked by another holder (401), account left for manual inspection", account)
 		return
 	}
 	if err := c.Viking.DeleteAccount(account); err != nil {
