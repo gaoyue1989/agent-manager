@@ -630,7 +630,7 @@ data: {"type":"AGENT_END","session_id":"...","replyId":"...","usage":{"input_tok
 |------|------|
 | `session_created` | 新会话创建（仅当请求未传 `sessionId`，作为首个事件下发） |
 | `waiting` | 排队等待（同 session 有活跃 turn 时，每 15s 一帧） |
-| `TEXT_BLOCK_DELTA` | 文本 token（流式累加）。直返收尾文本（`direct_return` 工具结果原样作为本轮最终输出）额外携带 `generateReason: "TOOL_RETURN_DIRECT"`，前端据此与模型正文区分；纯图片直返（SDK 只对 TextBlock 发该信号）由框架在 `AGENT_END` 前补一帧 `delta` 为空的合成信号帧（`generateReason` 同值），该帧仍为本轮以直返结束的权威信号 |
+| `TEXT_BLOCK_DELTA` | 文本 token（流式累加）。直返收尾文本（`direct_return` 工具结果原样作为本轮最终输出）额外携带 `generateReason: "TOOL_RETURN_DIRECT"`，前端据此与模型正文区分；多块直返（单工具多 text 块或同批多个直返工具）时块间以 `\n` 分隔，与 /history 的 content 拼接逐字符一致（issue #494）；纯图片直返（SDK 只对 TextBlock 发该信号）由框架在 `AGENT_END` 前补一帧 `delta` 为空的合成信号帧（`generateReason` 同值），该帧仍为本轮以直返结束的权威信号 |
 | `THINKING_BLOCK_DELTA` | 深度思考内容增量（`LLM_ENABLE_THINKING=true` 时出现） |
 | `MODEL_CALL_END` | 模型调用结束，携带 `inputTokens`/`outputTokens`/`totalTokens`（usage 为 null 时三字段缺省） |
 | `TOOL_CALL_START` | 工具调用开始（MCP Apps 工具携带 `ui` 元数据；`direct_return` 工具携带 `directReturn: true`） |

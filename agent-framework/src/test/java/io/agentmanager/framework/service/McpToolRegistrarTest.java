@@ -1088,4 +1088,31 @@ class McpToolRegistrarTest {
         assertThrows(IllegalStateException.class,
             () -> registrar.registerAll(toolkit, oafWithServer("strict-svc")));
     }
+
+    /**
+     * issue #494：registerFiltered 与 registerStandard 同受 registerOne 的 fail-soft
+     * catch 保护，initialize/listTools 必须带 {@link McpToolRegistrar#RELOAD_BLOCK_TIMEOUT_SECONDS}
+     * 上限——否则 TCP half-open 的 MCP server 会无限期卡死 synchronized reload 锁与
+     * per-session agent 初始化锁（阻断全部会话创建）。
+     */
+    @Test
+    void registerFilteredShouldTimeOutWhenInitializeHangs() {
+        var wrapper = mock(McpClientWrapper.class);
+        when(wrapper.initialize()).thenReturn(Mono.never());
+        assertTimeoutPreemptively(java.time.Duration.ofSeconds(20), () ->
+            assertThrows(IllegalStateException.class, () ->
+                registrar.registerFilteredForTest(new Toolkit(), wrapper, "hang-init-srv",
+                    null, McpToolRegistrar.UiMapping.empty(), false, java.util.Set.of())));
+    }
+
+    @Test
+    void registerFilteredShouldTimeOutWhenListToolsHangs() {
+        var wrapper = mock(McpClientWrapper.class);
+        when(wrapper.initialize()).thenReturn(Mono.empty());
+        when(wrapper.listTools()).thenReturn(Mono.never());
+        assertTimeoutPreemptively(java.time.Duration.ofSeconds(20), () ->
+            assertThrows(IllegalStateException.class, () ->
+                registrar.registerFilteredForTest(new Toolkit(), wrapper, "hang-list-srv",
+                    null, McpToolRegistrar.UiMapping.empty(), false, java.util.Set.of())));
+    }
 }

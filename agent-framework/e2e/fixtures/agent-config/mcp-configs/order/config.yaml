@@ -16,6 +16,7 @@ permissions:
     lookup_order: allow
     notify_warehouse: allow
     render_chart_png: allow
+    render_two_part_card: allow
 
 direct_return:
   tools:
@@ -24,3 +25,4 @@ direct_return:
     - broken_render
     - empty_render
     - render_chart_png
+    - render_two_part_card
