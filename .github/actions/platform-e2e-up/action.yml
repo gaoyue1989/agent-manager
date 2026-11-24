@@ -1,7 +1,7 @@
 name: 平台 E2E 环境拉起
 description: >-
   构建 CI 镜像并在 kind 集群拉起平台（backend/frontend/mock/MySQL/Redis/router/ingress），
-  供平台 E2E 各分片使用；镜像后台并行构建，与集群创建重叠。
+  供平台 E2E 各分片使用；镜像构建与 ingress 安装后台执行，与集群初始化重叠。
 inputs:
   dockerhub-user:
     description: Docker Hub 用户名（基础镜像缓存站未命中时回落拉取）
@@ -23,7 +23,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: 配置 Docker Hub 缓存站（免费版限额 200 次拉取/6h，命中缓存站不计）
+    - name: 配置 Docker Hub 缓存站（免费版限额 200 次拉取/小时，命中缓存站不计）
       shell: bash
       run: |
         set -euo pipefail
