@@ -564,6 +564,91 @@ class McpToolRegistrarSharedClientTest {
         assertTrue(handle.swap(healthyBase("base3")), "共享句柄不得被 clearServer 置死");
     }
 
+    /** 标准路径可注册的连接桩（listTools 返回 1 个工具，供真实 Toolkit 登记 mcpClients 条目） */
+    private McpClientWrapper registrableBase(String marker) {
+        var tool = new McpSchema.Tool("get_time", "", "desc", null, null, null, null);
+        var base = mock(McpClientWrapper.class);
+        when(base.getName()).thenReturn(marker);
+        when(base.initialize()).thenReturn(Mono.empty());
+        when(base.listTools()).thenReturn(Mono.just(List.of(tool)));
+        return base;
+    }
+
+    @Test
+    void reloadAfterFailedRegisterOneShouldNotKillRebuiltSharedHandle() {
+        registrar.bases.add(registrableBase("base1"));
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var handle = (ReconnectableMcpClientWrapper) registrar.sharedWrapper(mcp.server());
+
+        // Reload #1：换芯成功 → clearServer（SDK mcpClients 条目滞留指向句柄）→ registerOne 瞬时失败（毒化、registeredWrappers 无条目）
+        var base2 = registrableBase("base2");
+        registrar.bases.add(base2);
+        assertTrue(registrar.rebuildSharedWrapper(mcp.server(), mcp));
+        assertTrue(registrar.clearServer(toolkit, mcp.server()));
+        doReturn(Mono.error(new RuntimeException("server flapping"))).when(base2).initialize();
+        assertNull(registrar.registerOne(toolkit, mcp), "Reload #1 re-registration fails transiently");
+        assertTrue(handle.poisoned());
+        assertFalse(handle.isClosed());
+        assertNull(registrar.getRegisteredWrapper(mcp.server()),
+            "失败滞留态：registeredWrappers 无条目而 SDK 条目仍指向缓存句柄");
+
+        // Reload #2（服务恢复）：换芯清毒化 → clearServer 不得因 oldWrapper==null 透传 SDK removeMcpClient 误杀刚换芯的句柄
+        var base3 = registrableBase("base3");
+        registrar.bases.add(base3);
+        assertTrue(registrar.rebuildSharedWrapper(mcp.server(), mcp));
+        assertSame(base3, handle.delegate());
+        assertFalse(handle.poisoned());
+
+        assertFalse(registrar.clearServer(toolkit, mcp.server()), "滞留态无 tracked 条目，返回 false");
+        assertFalse(handle.isClosed(), "clearServer 不得误杀刚换芯的共享句柄（SDK 条目滞留经 removeMcpClient close）");
+        verify(base3, never()).close();
+
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp), "重注册必须复用换芯后的健康句柄");
+        assertSame(handle, registrar.sharedWrapper(mcp.server()));
+        assertSame(base3, handle.delegate());
+        assertFalse(((ReconnectableMcpClientWrapper) registrar.sharedWrapper(mcp.server())).poisoned());
+    }
+
+    @Test
+    void sharedClientShouldEvictClosedNonPoisonedHandle() {
+        var base1 = healthyBase("b1");
+        registrar.bases.add(base1);
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var dead = (ReconnectableMcpClientWrapper) registrar.sharedWrapper(mcp.server());
+        dead.close();
+
+        var fresh = healthyBase("fresh");
+        registrar.bases.add(fresh);
+        var next = registrar.sharedClient(mcp);
+        assertNotSame(dead, next, "closed 未毒化句柄不得作为活连接复用（守卫不得嵌套在 poisoned 内）");
+        var handle = registrar.sharedWrapper(mcp.server());
+        assertNotSame(dead, handle);
+        assertInstanceOf(ReconnectableMcpClientWrapper.class, handle);
+        assertSame(fresh, ((ReconnectableMcpClientWrapper) handle).delegate());
+        assertFalse(((ReconnectableMcpClientWrapper) handle).poisoned());
+    }
+
+    @Test
+    void syntheticPrevClosedShouldReplaceWithFreshBuild() {
+        var synthetic = syntheticConfig();
+        registrar.bases.add(healthyBase("ov1"));
+        assertEquals(synthetic.server(), registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
+        var dead = (ReconnectableMcpClientWrapper) registrar.sharedWrapper(synthetic.server());
+        dead.close();
+
+        var fresh = healthyBase("ov2");
+        registrar.bases.add(fresh);
+        assertEquals(synthetic.server(),
+            registrar.registerSyntheticClient(new Toolkit(), synthetic, scopedFactory()),
+            "closed 死句柄必须被新建连接顶替，不得复用");
+        var handle = registrar.sharedWrapper(synthetic.server());
+        assertNotSame(dead, handle, "缓存现任必须是新建句柄而非死 prev");
+        var delegate = ((ReconnectableMcpClientWrapper) handle).delegate();
+        assertInstanceOf(io.agentmanager.framework.mcp.UserScopedMcpClientWrapper.class, delegate);
+        assertEquals("ov2", delegate.getName());
+        verify(fresh, never()).close();
+    }
+
     private void writeServerConfig(String content) throws Exception {
         var dir = tempDir.resolve(mcp.server());
         java.nio.file.Files.createDirectories(dir);
