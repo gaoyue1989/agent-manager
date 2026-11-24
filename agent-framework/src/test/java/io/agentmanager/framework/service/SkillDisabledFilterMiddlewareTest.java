@@ -112,6 +112,35 @@ class SkillDisabledFilterMiddlewareTest {
     }
 
     @Test
+    void l2DirNameDisableShouldBlockCanonicalSkillName(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir)
+            throws java.io.IOException {
+        var skillsDir = tempDir.resolve("skills");
+        java.nio.file.Files.createDirectories(skillsDir);
+        var dir = skillsDir.resolve("my-dir-name");
+        java.nio.file.Files.createDirectories(dir);
+        java.nio.file.Files.writeString(dir.resolve("SKILL.md"),
+            "---\nname: my-frontmatter-name\ndescription: m\n---\n# body\n");
+        var props = new io.agentmanager.framework.config.AgentManagerProperties(
+            null, null, null, tempDir.toString(), null, null, null, null, null);
+        var manage = new SkillManageService(props);
+        manage.toggleSkill("my-dir-name");
+
+        var mw = new SkillDisabledFilterMiddleware(
+            manage, mock(UserSkillService.class), mock(SessionKeyResolver.class));
+        var ctx = RuntimeContext.builder().sessionId("gw-x").userId("peer-y").build();
+
+        mw.onAgent(mock(io.agentscope.core.agent.Agent.class), ctx,
+            mock(AgentInput.class), in -> Flux.empty()).blockLast();
+
+        var filter = ctx.get(SkillFilter.class);
+        assertNotNull(filter);
+        assertEquals(java.util.Set.of("my-frontmatter-name"), mw.disabledSkillNames(ctx));
+        assertFalse(filter.isAllowed("my-frontmatter-name"),
+            "按目录名禁用必须拦住规范名（SDK 按 skill.getName() 匹配）");
+        assertTrue(filter.isAllowed("other"));
+    }
+
+    @Test
     void disabledSetShouldOverlayExistingSkillListWhitelist() {
         // session-skill-list-design §4：先由 SkillFilterMiddleware 立本轮白名单，禁用集再 overlay 剔除
         var l2 = mock(SkillManageService.class);
