@@ -1,6 +1,7 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -35,6 +36,13 @@ public final class SkillSyncGate {
     private volatile boolean lastRuntimeInjected;
     /** 容器 skills/{name}/{relPath} → 字节大小（回写差分快照；只增不删，消失条目由回写遍历收敛） */
     private final ConcurrentHashMap<String, Long> manifest = new ConcurrentHashMap<>();
+    /**
+     * 快照条目来自 P1-5 基线回填、L4 尚无该技能任何记录的技能名集合。
+     * 基线跳过时快照记录的是容器基线清单（非已落库状态），若不作区分，用户仅改资源文件时
+     * 差分会漏读 SKILL.md、按「快照已含主文件」增量落库，留下管理面不可见不可删的孤儿资源行。
+     * 技能被用户真实修改后由回写侧清除标记并强制全量晋升（SKILL.md 先写的完整落库）。
+     */
+    private final Set<String> baselineOnlySkills = ConcurrentHashMap.newKeySet();
     /**
      * 软链农场会话级二值判定（skills-syncd B-1，§6.2/§6.4）：null = 未判定；farm=false 的
      * 降级会话不中途翻转，恢复以会话为粒度（新 sandboxId 换新 gate 重新判定）。
@@ -80,5 +88,9 @@ public final class SkillSyncGate {
 
     public Map<String, Long> manifest() {
         return manifest;
+    }
+
+    public Set<String> baselineOnlySkills() {
+        return baselineOnlySkills;
     }
 }

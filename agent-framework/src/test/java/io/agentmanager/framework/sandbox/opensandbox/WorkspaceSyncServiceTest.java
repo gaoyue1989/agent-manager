@@ -977,4 +977,109 @@ class WorkspaceSyncServiceTest {
         assertTrue(fs.read(ctx, "/modified-skill/SKILL.md", 0, -1).isSuccess(),
             "用户改过的技能必须回写 L4");
     }
+
+    private record BaselineScene(Filesystem files, String baselineMd) {
+    }
+
+    private static BaselineScene baselineScene(java.nio.file.Path packageDir, String skillMd,
+                                               String script) throws Exception {
+        var skillDir = packageDir.resolve("demo-a");
+        java.nio.file.Files.createDirectories(skillDir.resolve("scripts"));
+        java.nio.file.Files.writeString(skillDir.resolve("SKILL.md"), skillMd);
+        java.nio.file.Files.writeString(skillDir.resolve("scripts/run.sh"), script);
+        var files = mock(Filesystem.class);
+        var skillEntry = dirEntry("/workspace/skills/demo-a");
+        var mdEntry = fileEntry("/workspace/skills/demo-a/SKILL.md", skillMd.getBytes(StandardCharsets.UTF_8).length);
+        var scriptsEntry = dirEntry("/workspace/skills/demo-a/scripts");
+        var runShEntry = fileEntry("/workspace/skills/demo-a/scripts/run.sh",
+            script.getBytes(StandardCharsets.UTF_8).length);
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(skillEntry));
+        when(files.listDirectory("/workspace/skills/demo-a")).thenReturn(List.of(mdEntry, scriptsEntry));
+        when(files.listDirectory("/workspace/skills/demo-a/scripts")).thenReturn(List.of(runShEntry));
+        when(files.readFile("/workspace/skills/demo-a/SKILL.md")).thenReturn(skillMd);
+        when(files.readFile("/workspace/skills/demo-a/scripts/run.sh")).thenReturn(script);
+        return new BaselineScene(files, skillMd);
+    }
+
+    private static WorkspaceSyncService baselineService(java.nio.file.Path packageDir,
+                                                        io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore store) {
+        return new WorkspaceSyncService(new WorkspaceReader(distributedStore(store), AGENT), true, packageDir, true);
+    }
+
+    /** 仅改包内基线技能的资源文件（SKILL.md 未动）→ 必须连 SKILL.md 一起完整晋升落库，不得留孤儿资源行 */
+    @Test
+    void syncBackShouldPromoteBaselineSkillFullyWhenResourceFileEdited() throws Exception {
+        var store = new InMemoryStore();
+        var packageDir = java.nio.file.Files.createTempDirectory("sync-baseline-promote");
+        var scene = baselineScene(packageDir, "---\nname: demo-a\n---\nbase", "echo base");
+        var files = scene.files();
+        var gate = new SkillSyncGate();
+        var svc = baselineService(packageDir, store);
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+
+        svc.syncBack(USER, osbOf(files), gate);
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "SKILL.md"), "纯基线副本不落库（P1-5）");
+
+        var editedScript = "echo edited-by-user";
+        var editedEntry = fileEntry("/workspace/skills/demo-a/scripts/run.sh",
+            editedScript.getBytes(StandardCharsets.UTF_8).length);
+        when(files.listDirectory("/workspace/skills/demo-a/scripts")).thenReturn(List.of(editedEntry));
+        when(files.readFile("/workspace/skills/demo-a/scripts/run.sh")).thenReturn(editedScript);
+        svc.syncBack(USER, osbOf(files), gate);
+
+        assertEquals(scene.baselineMd(), reader.readUserSkillFile(USER, "demo-a", "SKILL.md"),
+            "资源修改必须触发含 SKILL.md 的完整晋升落库（否则孤儿资源行管理面不可见不可删）");
+        assertEquals(editedScript, reader.readUserSkillFile(USER, "demo-a", "scripts/run.sh"));
+    }
+
+    /** 基线跳过后容器无任何修改 → 保持零内容读、零回写（P1-5 优化语义不得被晋升逻辑破坏） */
+    @Test
+    void syncBackShouldKeepUnmodifiedBaselineSkillOutOfKv() throws Exception {
+        var store = new InMemoryStore();
+        var packageDir = java.nio.file.Files.createTempDirectory("sync-baseline-keep");
+        var scene = baselineScene(packageDir, "---\nname: demo-a\n---\nbase", "echo base");
+        var gate = new SkillSyncGate();
+        var svc = baselineService(packageDir, store);
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+
+        svc.syncBack(USER, osbOf(scene.files()), gate);
+        svc.syncBack(USER, osbOf(scene.files()), gate);
+
+        verify(scene.files(), never()).readFile(anyString());
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "SKILL.md"));
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "scripts/run.sh"));
+    }
+
+    /** 基线跳过后用户删了 SKILL.md 只改资源 → 不算技能，L4 必须保持无记录（不得落孤儿资源行） */
+    @Test
+    void syncBackShouldNotWriteOrphanWhenSkillMdRemovedAfterBaselineSkip() throws Exception {
+        var store = new InMemoryStore();
+        var packageDir = java.nio.file.Files.createTempDirectory("sync-baseline-orphan");
+        var scene = baselineScene(packageDir, "---\nname: demo-a\n---\nbase", "echo base");
+        var files = scene.files();
+        var gate = new SkillSyncGate();
+        var svc = baselineService(packageDir, store);
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+
+        svc.syncBack(USER, osbOf(files), gate);
+
+        var editedScript = "echo edited-by-user";
+        var scriptsOnlyEntry = dirEntry("/workspace/skills/demo-a/scripts");
+        var editedEntry = fileEntry("/workspace/skills/demo-a/scripts/run.sh",
+            editedScript.getBytes(StandardCharsets.UTF_8).length);
+        when(files.listDirectory("/workspace/skills/demo-a")).thenReturn(List.of(scriptsOnlyEntry));
+        when(files.listDirectory("/workspace/skills/demo-a/scripts")).thenReturn(List.of(editedEntry));
+        when(files.readFile("/workspace/skills/demo-a/scripts/run.sh")).thenReturn(editedScript);
+        svc.syncBack(USER, osbOf(files), gate);
+
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "scripts/run.sh"),
+            "无 SKILL.md 的资源覆盖不得落库（孤儿行管理面看不到也删不掉）");
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "SKILL.md"));
+    }
+
+    private static Sandbox osbOf(Filesystem files) {
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+        return osb;
+    }
 }
