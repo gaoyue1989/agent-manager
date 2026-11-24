@@ -1052,6 +1052,10 @@ public class OpenSandbox extends AbstractBaseSandbox
      */
     private Boolean translateExists(String relPath) throws Exception {
         var normalized = normalizeRel(relPath);
+        boolean trailingSlash = normalized.length() > 1 && normalized.endsWith("/");
+        if (trailingSlash) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
         // 父目录列举仅对工作区相对路径/工作区内绝对路径生效：非工作区绝对路径（/etc/hosts 等）
         // 不得改写成 /workspace 镜像路径判存在，直接回落旧两步实现
         var workspaceScoped = !relPath.startsWith("/") || relPath.startsWith(getWorkspaceRoot() + "/");
@@ -1067,18 +1071,18 @@ public class OpenSandbox extends AbstractBaseSandbox
                             if ("symlink".equalsIgnoreCase(e.getType())) {
                                 return null;
                             }
-                            return true;
+                            return !trailingSlash || "directory".equalsIgnoreCase(e.getType());
                         }
                     }
-                    return memoryKvExists(relPath);
+                    return memoryKvExists(normalized);
                 }
             } catch (Exception ignoreParent) {
                 // 父目录列举失败（适配器差异等）→ 回落旧两步实现
             }
         }
         try {
-            osbSandbox.files().readByteArray(relPath);
-            return true;
+            osbSandbox.files().readByteArray(normalized);
+            return !trailingSlash;
         } catch (SandboxApiException e) {
             // 404 = 确定不是文件 → 继续目录探测；其余异常向上抛，交外层回落真 exec（issue #296）
             if (!isPathMissing(e)) {
@@ -1086,12 +1090,15 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         try {
-            var entries = osbSandbox.files().listDirectory(relPath);
-            return entries != null ? Boolean.TRUE : memoryKvExists(relPath);
+            var entries = osbSandbox.files().listDirectory(normalized);
+            if (entries != null) {
+                return Boolean.TRUE;
+            }
+            return memoryKvExists(normalized);
         } catch (SandboxApiException e) {
             // 两层均 404 = 确定缺失 → 记忆路径回落 KV；其余异常向上抛回落真 exec（test -e / test -d）
             if (isPathMissing(e)) {
-                return memoryKvExists(relPath);
+                return memoryKvExists(normalized);
             }
             throw e;
         }

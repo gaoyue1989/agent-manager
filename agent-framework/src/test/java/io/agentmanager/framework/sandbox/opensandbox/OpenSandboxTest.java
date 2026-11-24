@@ -1795,6 +1795,31 @@ class OpenSandboxTest {
             "容器全缺失 + KV 清单有 memory/ 文件 → 目录探测 yes（回落语义保持）");
     }
 
+    /** issue #502：读穿模式带尾斜杠的 memory/ 目录探测必须与不带斜杠同口径（KV 清单回落） */
+    @Test
+    void readThroughTestExistsTrailingSlashMemoryDirShouldFallBackToKv() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "memory/2026-11-24.md", "# daily note\n");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).readByteArray(org.mockito.ArgumentMatchers.anyString());
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).listDirectory(org.mockito.ArgumentMatchers.anyString());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        assertEquals("yes", sandbox.exec(ctx, "test -e '/workspace/memory/' && echo yes || echo no", 30).stdout(),
+            "带尾斜杠 memory/ 必须与 test -e memory 同口径依 KV 清单答 yes（issue #502）");
+        assertEquals("yes", sandbox.exec(ctx, "test -e 'memory/' && echo yes || echo no", 30).stdout(),
+            "工作区相对路径形态同判（issue #502）");
+    }
+
     /** issue #498 主回归：读穿模式下 glob 对 memory/ 必须呈现「容器 ∪ KV」合并视图 */
     @Test
     void readThroughGlobShouldMergeContainerFreshAndKvHistoryMemory() throws Exception {
