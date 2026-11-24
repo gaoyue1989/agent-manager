@@ -213,6 +213,12 @@ public class HarnessAgentFactory {
             // 属性都记成运行时路由键——前者按 sid 查不到（issue #44），后者按会话过滤失效
             var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
 
+            // 运行期 toolkit 引用（issue #485）：初始为 build 前实例（自定义 + MCP），build()
+            // 完成后切换到 agent.getToolkit()（Harness 在 copy 后才注册内置工具，原实例永远
+            // 不含它们；watchdog 补偿注册 MCP 工具也写在运行期实例上）——观测中间件的基数
+            // 封顶名单经下方 lambda 每次计数时实时读取该引用
+            var activeToolkit = new java.util.concurrent.atomic.AtomicReference<>(toolkit);
+
             // OpenViking 记忆供给分支（openviking-memory-integration-design §11.1）：
             // AGENT_MEMORY_PROVIDER=openviking 且配置齐备时接管记忆——SDK 文件记忆全关
             // （与 memory-enabled=false 同款双关），换为 VikingMemoryClient 链路
@@ -284,14 +290,17 @@ public class HarnessAgentFactory {
                 .middleware(new io.agentmanager.framework.service.protocol.ProtocolDenyRulesMiddleware())
                 // 工具调用观测（指标计数 + 审计单一写点，覆盖全部协议链路）：置于工具过滤链
                 // 内侧（ToolFilter/ProtocolDeny 短路不经过本层），只计真实执行的调用；
-                // sessionKeyResolver 复用上方同一实例（turn 级 memo 共享）；toolkit 名单
-                // 懒取（harness 内置工具构造后才注册），未注册/幻觉工具名指标归 __unknown__
+                // sessionKeyResolver 复用上方同一实例（turn 级 memo 共享）；toolkit 名单经
+                // activeToolkit 懒取——build() 内部 toolkit.copy() 后 Harness 才注册内置工具、
+                // watchdog 补偿注册也写在 agent.getToolkit()，名单供给必须指向运行期实例
+                // （issue #485：绑 build 前实例会让全部内置工具误归 __unknown__），
+                // 未注册/幻觉工具名指标归 __unknown__
                 .middleware(new ToolCallObservabilityMiddleware(
                     meterRegistryProvider != null ? meterRegistryProvider.getIfAvailable() : null,
                     toolAuditStore,
                     sessionKeyResolver,
                     oafConfig.slug(),
-                    toolkit::getToolNames))
+                    () -> activeToolkit.get().getToolNames()))
                 // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
                 // 供 MCP 工具调用走 _meta / userHeaders 双通道（Channel 链路按 session 反查真实 userId）
                 .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))
@@ -458,6 +467,7 @@ public class HarnessAgentFactory {
                 // 技能自学习
                 .enableSkillManageTool(true)
                 .build();
+            activeToolkit.set(agent.getToolkit());
 
             // 权限覆盖校验（仅启用权限系统时）：内置白名单 vs 实际注册集，SDK 升级漂移时 ERROR 提示
             if (permissionContext != null) {
