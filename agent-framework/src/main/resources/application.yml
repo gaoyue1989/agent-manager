@@ -98,6 +98,7 @@ agent:
     request-timeout-seconds: ${SANDBOX_REQUEST_TIMEOUT_SECONDS:30}
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
+    entrypoint: ${SANDBOX_ENTRYPOINT:/opt/code-interpreter/code-interpreter.sh}
     execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
     projection-enabled: ${SANDBOX_PROJECTION_ENABLED:true}
     guard-enabled: ${SANDBOX_GUARD_ENABLED:true}
