@@ -235,6 +235,39 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 			t.Fatalf("invalid provider must fail")
 		}
 	})
+
+	t.Run("disabled switch legacy provision maintained", func(t *testing.T) {
+		c := &Core{} // Viking=nil
+		plain := map[string]string{
+			AgentMemoryProviderEnv: MemoryProviderOpenViking,
+			OpenVikingURLEnv:       "http://ov-legacy:8300",
+			OpenVikingAccountEnv:   "oaf-svc",
+		}
+		secret := map[string]string{OvkAdminKeyEnv: "ak-legacy", OvkUserSeedEnv: "seed-legacy"}
+		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+			t.Fatalf("legacy provisioned service must stay maintainable under disabled switch: %v", err)
+		}
+		if plain[OpenVikingURLEnv] != "http://ov-legacy:8300" || plain[OpenVikingAccountEnv] != "oaf-svc" ||
+			secret[OvkAdminKeyEnv] != "ak-legacy" || secret[OvkUserSeedEnv] != "seed-legacy" {
+			t.Fatalf("legacy maintain must be zero touch: %v %v", plain, secret)
+		}
+	})
+
+	t.Run("disabled switch explicit local clears derived keys", func(t *testing.T) {
+		c := &Core{} // Viking=nil
+		plain := map[string]string{
+			AgentMemoryProviderEnv: MemoryProviderLocal,
+			OpenVikingURLEnv:       "http://ov-legacy:8300",
+			OpenVikingAccountEnv:   "oaf-svc",
+		}
+		secret := map[string]string{OvkAdminKeyEnv: "ak-legacy", OvkUserSeedEnv: "seed-legacy"}
+		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+			t.Fatalf("explicit local opt-out must stay available under disabled switch: %v", err)
+		}
+		if len(plain) != 1 || len(secret) != 0 {
+			t.Fatalf("opt-out must clear all derived keys plain and secret: %v %v", plain, secret)
+		}
+	})
 }
 
 // 发布端到端（平台启用默认接管）：建户 → env/Secret 注入 → knowledge 导入 → 幂等 UpdateEnv。
@@ -832,5 +865,96 @@ func TestMemoryBrowseRejectsPathTraversal(t *testing.T) {
 	}
 	if got := fake.browseURIs(); len(got) != 1 || got[0] != "viking://~/memories/a..b.md" {
 		t.Fatalf("legit uri must reach upstream verbatim, got %v", got)
+	}
+}
+
+// 总开关关闭后的存量已建户服务生命周期（issue #477，PR #472 回归三场景）：
+//   - 无关 Republish（改副本/升镜像/换包）不再被 DB 事实 provider=openviking 锁死 400——
+//     凭据齐备走「存量维持」（零外呼、env 原样），无凭据的新建供给仍 fail-fast 拒绝
+//   - 显式切回 local 无条件清理全部派生键（plain URL/ACCOUNT + secret ADMIN/SEED 双侧），
+//     总开关关闭不再跳过清理导致 OVK 密钥永久残留 DB env_secret_json 与 K8s Secret
+//   - ConsoleMemoryBrowse 对齐 issueMemoryKeyFor 总开关门控：关闭后拒绝且零上游调用
+//     （紧急回退止血，不再以残留凭据外呼 OpenViking）
+func TestDisabledSwitchLegacyServiceLifecycle(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, baseURL := newVikingTestCore(t, fake.handler())
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", WorkspaceID: 7})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+	creations := fake.createCount()
+	core.Viking = NewVikingAdmin(false, baseURL, "root-key-test") // 紧急回退：总开关关闭
+
+	// ① 记忆浏览对齐总开关门控：拒绝且绝不外呼（评审 Finding 2b）
+	fake.resetBrowse()
+	if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://~/memories"); err == nil {
+		t.Fatalf("browse must be gated by the platform switch when disabled")
+	}
+	if got := fake.browseURIs(); len(got) != 0 {
+		t.Fatalf("disabled switch must stop upstream browse calls, got %v", got)
+	}
+
+	// ② 无关 Republish 走存量维持（评审 Finding 2a）：不再 400、env/Secret 原样、零外呼
+	replicas := int32(2)
+	up, err := core.Republish(svc.ID, RepublishOptions{Replicas: &replicas})
+	if err != nil {
+		t.Fatalf("unrelated republish on legacy provisioned service must pass: %v", err)
+	}
+	if fake.createCount() != creations {
+		t.Fatalf("legacy maintain must be zero touch, creates=%d", fake.createCount())
+	}
+	if up.Replicas != 2 {
+		t.Fatalf("replicas must update, got %d", up.Replicas)
+	}
+	var upPlain, upSecret map[string]string
+	_ = json.Unmarshal([]byte(up.EnvJSON), &upPlain)
+	_ = json.Unmarshal([]byte(up.EnvSecretJSON), &upSecret)
+	if upPlain[AgentMemoryProviderEnv] != MemoryProviderOpenViking || upPlain[OpenVikingURLEnv] != baseURL ||
+		upPlain[OpenVikingAccountEnv] != "oaf-svc" {
+		t.Fatalf("legacy plain env must stay intact across republish: %v", upPlain)
+	}
+	if upSecret[OvkAdminKeyEnv] == "" || upSecret[OvkUserSeedEnv] == "" {
+		t.Fatalf("legacy secret must stay intact across republish: %v", upSecret)
+	}
+
+	// ③ 显式切回 local 无条件清理派生键（评审 Finding 2c）：DB 双侧清空 + supply 不再误报
+	waitForVikingTerminal(t, core, svc.ID)
+	var rec store.ServiceEntity
+	if err := core.DB.First(&rec, svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	echo := map[string]string{}
+	_ = json.Unmarshal([]byte(rec.EnvJSON), &echo)
+	echo[AgentMemoryProviderEnv] = MemoryProviderLocal
+	if _, err := core.UpdateEnv(svc.ID, echo, nil); err != nil {
+		t.Fatalf("switch local under disabled switch must pass: %v", err)
+	}
+	var fin store.ServiceEntity
+	if err := core.DB.First(&fin, svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var finPlain, finSecret map[string]string
+	_ = json.Unmarshal([]byte(fin.EnvJSON), &finPlain)
+	_ = json.Unmarshal([]byte(fin.EnvSecretJSON), &finSecret)
+	if finPlain[AgentMemoryProviderEnv] != MemoryProviderLocal {
+		t.Fatalf("provider must switch to local, got %q", finPlain[AgentMemoryProviderEnv])
+	}
+	if finPlain[OpenVikingURLEnv] != "" || finPlain[OpenVikingAccountEnv] != "" {
+		t.Fatalf("switch local must clear plain derived keys: %v", finPlain)
+	}
+	if finSecret[OvkAdminKeyEnv] != "" || finSecret[OvkUserSeedEnv] != "" {
+		t.Fatalf("switch local must clear secret derived keys (issue #477): %v", finSecret)
+	}
+	rows, err := core.ConsoleMemorySupply(7, "")
+	if err != nil {
+		t.Fatalf("supply: %v", err)
+	}
+	for _, r := range rows {
+		if r.ServiceID == svc.ID && (r.Provider != MemoryProviderLocal || r.Provisioned) {
+			t.Fatalf("supply must report local non-provisioned after switch: %+v", r)
+		}
 	}
 }

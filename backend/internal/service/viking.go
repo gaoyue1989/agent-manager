@@ -236,7 +236,12 @@ func VikingAccountID(k8sName string) string {
 // ---- 发布链路 env 注入 ----
 
 // applyOpenVikingEnv 就地派生 OpenViking env（Publish/UpdateEnv/Republish 共用，幂等）：
-//   - 平台未启用：用户显式 openviking → 400（fail-fast，不留半配置服务）；否则零接触。
+//   - 显式 local：无条件退出并清掉全部派生键（plain 与 secret 双侧；总开关关闭同样
+//     可用——存量服务须能干净退回 local，issue #477）。
+//   - 平台未启用：无显式 provider → 零接触（issue #414）；显式 openviking → 凭据齐备
+//     （ADMIN key + seed + URL）的存量已建户服务维持现状、零外呼（紧急回退不得锁死
+//     存量服务的扩缩容/升级，issue #477），否则属新建供给、无法建户，400 fail-fast
+//     （不留半配置服务）。
 //   - 生效 provider=openviking（用户显式或平台默认）：注入 URL/account（plain）、
 //     OVK_ADMIN_KEY/OVK_USER_SEED（secret，sticky：两者齐备即跳过建户，保证 key 稳定、
 //     轮换只发生在显式删除 Secret 重发布）；OVK_KNOWLEDGE_IMPORT / OVK_SHARED_SKILLS
@@ -245,19 +250,7 @@ func VikingAccountID(k8sName string) string {
 // 与 applyIsolationEnv 同语义：用户显式 AGENT_MEMORY_PROVIDER=local 即退出（无任何注入）。
 func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, secret map[string]string) error {
 	explicit := plain[AgentMemoryProviderEnv]
-	if c.Viking == nil {
-		if explicit == MemoryProviderOpenViking {
-			return fmt.Errorf("%w: %s=%s requires OPENVIKING_ENABLED/OPENVIKING_BASE_URL/OPENVIKING_ROOT_API_KEY on platform",
-				ErrInvalidForm, AgentMemoryProviderEnv, MemoryProviderOpenViking)
-		}
-		return nil
-	}
-	provider := explicit
-	if provider == "" {
-		provider = MemoryProviderOpenViking // 平台启用即默认接管（显式 local 可退出）
-	}
-	switch provider {
-	case MemoryProviderLocal:
+	if explicit == MemoryProviderLocal {
 		// 显式退出：清掉全部派生键（plain 与 secret 双侧；secret 残留曾让签发入口凭
 		// 旧凭据继续签发无对应供给的 userKey——issue #430）
 		delete(plain, OpenVikingURLEnv)
@@ -265,10 +258,24 @@ func (c *Core) applyOpenVikingEnv(k8sName string, pkg *store.OafPackage, plain, 
 		delete(secret, OvkAdminKeyEnv)
 		delete(secret, OvkUserSeedEnv)
 		return nil
-	case MemoryProviderOpenViking:
-	default:
+	}
+	provider := explicit
+	if provider == "" {
+		if c.Viking == nil {
+			return nil // 平台未启用且用户未要求 → 零接触（issue #414）
+		}
+		provider = MemoryProviderOpenViking // 平台启用即默认接管（显式 local 可退出）
+	}
+	if provider != MemoryProviderOpenViking {
 		return fmt.Errorf("%w: %s must be %q or %q, got %q",
 			ErrInvalidForm, AgentMemoryProviderEnv, MemoryProviderLocal, MemoryProviderOpenViking, provider)
+	}
+	if c.Viking == nil {
+		if secret[OvkAdminKeyEnv] != "" && secret[OvkUserSeedEnv] != "" && plain[OpenVikingURLEnv] != "" {
+			return nil
+		}
+		return fmt.Errorf("%w: %s=%s requires OPENVIKING_ENABLED/OPENVIKING_BASE_URL/OPENVIKING_ROOT_API_KEY on platform",
+			ErrInvalidForm, AgentMemoryProviderEnv, MemoryProviderOpenViking)
 	}
 
 	account := VikingAccountID(k8sName)
@@ -583,8 +590,12 @@ func vikingNormalizeListOutput(raw json.RawMessage, ownUserPrefix string) json.R
 	return out
 }
 
-// memoryBrowseClient 校验供给并返回 (数据面地址, 本人推导 key)。
+// memoryBrowseClient 校验供给并返回 (数据面地址, 本人推导 key)。总开关关闭即拒绝
+// （对齐 issueMemoryKeyFor 门控，issue #477：紧急回退须止血，不得以 DB 残留凭据外呼）。
 func (c *Core) memoryBrowseClient(workspaceID, serviceID uint, userID string) (string, string, error) {
+	if c.Viking == nil {
+		return "", "", fmt.Errorf("%w: OpenViking not enabled on platform", ErrInvalidForm)
+	}
 	var secret, plain map[string]string
 	var rec store.ServiceEntity
 	if err := c.DB.First(&rec, serviceID).Error; err != nil {

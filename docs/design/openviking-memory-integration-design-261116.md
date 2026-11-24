@@ -130,6 +130,7 @@ platform-router(introspect)→ X-User-Id → agent-framework Pod
 | Publish 成功(服务就绪) | `POST /admin/accounts` `{account_id, admin_user_id: "svc-system"}`(root key) | 响应中的 `user_key`(ADMIN key)与平台生成的 `OV_USER_SEED`(随机)经敏感键自动路由服务 Secret;非敏感 env 注入 `OPENVIKING_URL` / `OPENVIKING_ACCOUNT`。admin_user(`svc-system`)即服务身份,承载共享 resources/skills 与 MCP 连接 |
 | Publish 中途失败(实现现状 2026-11-24 回填,issue #430) | 失败即回滚 | DB `k8s_name` 唯一键占位**先行**(并发同名发布败者在占位事务唯一键冲突处失败,零建户零轮换——胜者在线 ADMIN key 不被轮换失效);占位后供给(knowledge/skills 导入)/env 回写任一失败,本次**新建** account 回滚删除 + 占位行/ref_count 清理(DB 零残留、无外部孤儿);EnsureAccount 走 CONFLICT 轮换分支(account 已存在、持有者在用)时失败**绝不删除**。provider 切 `local` 时 plain/secret 派生键双侧清空,memory-key 签发按 provider 事实校验拒绝 |
 | Republish / update_env | 无动作 | account 幂等已存在(409 视为成功),Secret 不变 |
+| 总开关关闭后对存量已建户服务 Republish / 切 local(实现现状 2026-11-24 回填,issue #477) | 零外呼(Admin API 不可达) | `OPENVIKING_ENABLED=false`(`NewVikingAdmin` 返回 nil)后:①无关 Republish(改副本/升镜像/换包)对凭据齐备(ADMIN key+seed+URL)的存量已建户服务走「存量维持」放行(env 原样、零外呼),凭据不全的新建供给仍 400 fail-fast;②显式切 `local` 无条件清理 plain/secret 全部四个派生键(URL/ACCOUNT/ADMIN key/seed,总开关关闭不再跳过清理——OVK 密钥不残留 DB env_secret_json 与 K8s Secret,记忆供给总览不再误报 provisioned);③`ConsoleMemoryBrowse` 对齐签发门控(`issueMemoryKeyFor`),关闭后拒绝且零上游调用(紧急回退止血) |
 | Unpublish(下线) | 无动作 | 数据保留,与「下线不删数据」语义一致 |
 | Delete(删除) | `DELETE /admin/accounts/{id}`(root key) | 与服务数据同生命周期;删除前可选导出(二期) |
 | workspace 成员变更 | 无动作 | 用户开户由业务面 lazy 完成(见 §4),无需成员同步 |
