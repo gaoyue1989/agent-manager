@@ -87,7 +87,8 @@
 ```
 present_url(file_name, url, mime_type?, size?)
   → 前缀白名单（FILE_EXTERNAL_URL_PREFIXES，逗号分隔；空=禁用）+ http(s) 校验
-  → file_asset 插入 {storage_type: "external", storage_key: url, origin: "generated", status: "injected"}
+  → ExternalUrlGuard.allowlisted：URI 解析 + normalize 后段边界前缀裁决（见 4.3），登记规范化 URL
+  → file_asset 插入 {storage_type: "external", storage_key: 规范化url, origin: "generated", status: "injected"}
   → 返回 {file_id, file_name, mime_type, size}（与 present_file 同构，走同一条 file_ready 合成）
 ```
 
@@ -98,9 +99,17 @@ present_url(file_name, url, mime_type?, size?)
 
 ### 4.3 新增：/files/{id} external 代理分支（FileController）
 
-- `storage_type=external` 行：URL 前缀白名单校验（与 present_url 同一配置，SSRF 收敛）→
-  `java.net.http.HttpClient`（5s 连接 / 60s 请求超时，跟随重定向）拉取并流式转发；
+- `storage_type=external` 行：URL 白名单裁决（`ExternalUrlGuard.allowlisted`，与 present_url
+  同一配置与同一裁决函数，SSRF 收敛，issue #483）→ `java.net.http.HttpClient`
+  （5s 连接 / 60s 请求超时，重定向 `Redirect.NEVER`）拉取并流式转发；
   上游非 2xx → 502，白名单不匹配 → 403。
+- **白名单裁决规则**（单一真相源 `util/ExternalUrlGuard`，字符串前缀比较已被弃用——
+  `<prefix>/../` 变体可越出白名单）：URL 解析为 URI 后 scheme/authority 与前缀完全一致，
+  且 `normalize()` 后的路径落在前缀路径之下（段边界前缀）才放行；`normalize()` 不解码
+  percent-encoding，穿越类编码段（`%2e`/`%2f`/`%5c`）与 `\` 显式拒绝；字面 `.`/`..` 段由
+  normalize + 段边界裁决处理。通过即以规范化 URI 发起请求（上游收到即裁决目标）。
+- **重定向逐跳语义**：每跳 `Location` resolve 后重过同一白名单裁决——白名单内跳转放行
+  （≤5 跳，循环收敛 502），任一跳越出白名单 → 403，禁止自动跟随 3xx。
 - Content-Type/Length 取上游响应头（缺失回落 asset 元数据）；Disposition 规则与本地下载一致。
 
 ### 4.4 环境变量

@@ -235,7 +235,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | `get_current_time(timezone)` | 返回指定时区当前时间 |
 | `echo(text)` | 回显输入 |
 | `present_file(file_path, file_content_base64?)` | 工作区产物注册到平台供用户下载（结果由 SSE 层合成 file_ready 帧）。非沙箱 KV 读取命名空间键单一可信裁决：`SessionKeyResolver.realUserId` 反查（缺失/未命中回退入口裁决 userId），RuntimeContext 原值（peer/sessionId，客户端可控）禁止作为候选——issue #473 |
-| `present_url(file_name, url, mime_type?, size?)` | 外部系统产物（http(s) URL）登记为下载卡片；`/files/{id}` 服务端代理回源（前缀白名单，SSRF 收敛） |
+| `present_url(file_name, url, mime_type?, size?)` | 外部系统产物（http(s) URL）登记为下载卡片；`/files/{id}` 服务端代理回源。白名单裁决单一真相源 `util/ExternalUrlGuard`：URI 解析 + normalize 后段边界前缀裁决（拒绝 `%2e`/`%2f`/`%5c`/`\` 编码穿越），登记与请求一律用规范化 URL——字符串前缀比较可被 `<prefix>/../` 越出白名单（issue #483 SSRF），已弃用 |
 
 > OAF 打包工具（`check_oaf_package` / `create_oaf_zip`）2026-09 迁至平台 backend 的 platform-publisher MCP
 > （直建包返回 packageId/download_url，零 base64 经 LLM），发布助手经 `present_url` 交付；
@@ -400,7 +400,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | （JVM 属性）`agent.sandbox.lifecycle.registry-overage-minutes` | `120` | | 续期注册表 bornAt 超龄剔除下限（剔除阈值 = max(TTL×2, 下限)）；e2e 压至 2min 使 L16 分钟级可测 |
 | `AGENT_CLEANUP_SANDBOX_BINDING_RETENTION_DAYS` | `7` | | 绑定行保留天数（SessionCleanupService 定时清理 §4.1.2）：过期超窗行删 + 计数锚行锁内重算 + 空锚行删 |
 | `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
-| `FILE_EXTERNAL_URL_PREFIXES` | 空(禁用) | | present_url 外部交付物与 /files/{id} 代理下载共用的 URL 前缀白名单（逗号分隔）；发布助手集群内必配 `http://oaf-platform-backend.agent-platform.svc.cluster.local:8080`（Helm 部署的后端 Service 名） |
+| `FILE_EXTERNAL_URL_PREFIXES` | 空(禁用) | | present_url 外部交付物与 /files/{id} 代理下载共用的 URL 白名单（逗号分隔；裁决规则见工具表 present_url 行与 oaf-tools-extraction-design.md §4.3——代理重定向 `Redirect.NEVER`，每跳 Location 重过白名单，越界 403/循环 502）；发布助手集群内必配 `http://oaf-platform-backend.agent-platform.svc.cluster.local:8080`（Helm 部署的后端 Service 名） |
 | `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_HISTORY_ARCHIVE_ENABLED` | `true` | | 会话消息轨归档开关：AgentState 落库时把 context 消息 write-through 归档到 session_message，history 返回双源合并视图（压缩后历史可查）；false 完全回退现状（见 docs/session-history-archive-design.md） |
