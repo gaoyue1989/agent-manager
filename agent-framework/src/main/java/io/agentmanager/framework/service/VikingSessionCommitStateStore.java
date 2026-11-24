@@ -101,6 +101,17 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
     // ---- 其余方法原样透传（与 SessionMessageArchiveStateStore 同理）----
 
     @Override
+    public boolean supportsVersioning() {
+        return delegate.supportsVersioning();
+    }
+
+    @Override
+    public <T extends State> io.agentscope.core.state.VersionedState<T> getVersioned(
+            String userId, String sessionId, String stateKey, Class<T> type) {
+        return delegate.getVersioned(userId, sessionId, stateKey, type);
+    }
+
+    @Override
     public <T extends State> java.util.Optional<T> get(String userId, String sessionId, String stateKey, Class<T> type) {
         return delegate.get(userId, sessionId, stateKey, type);
     }
