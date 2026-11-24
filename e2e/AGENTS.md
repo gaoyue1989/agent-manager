@@ -80,8 +80,10 @@ cd e2e && npm ci && BASE=http://localhost:30080/api/v1 FRONTEND=http://localhost
 - 触发：指向 master 的 PR + master push；路径过滤 `backend/**`、`frontend/**`、`manifests/**`、`e2e/**`、`.github/actions/**` 与本工作流
 - 运行环境：`ubuntu-latest` + `kind` 单节点（NodePort 30080/30880/30881 映射到 localhost）+
   `manifests/ci` overlay（本地构建镜像、mock LLM、`oaf-platform-backend` 别名 Service）；
-  环境拉起统一走 `.github/actions/platform-e2e-up`（镜像后台并行构建；基础镜像经 `mirror.gcr.io`
-  缓存站拉取——Docker Hub 免费版限额 200 次拉取/6h，分片不得各自直连消耗额度）
+  环境拉起统一走 `.github/actions/platform-e2e-up`：先 apply `manifests/ci-infra`（= `ci` 减去依赖
+  本地构建镜像的 Deployment），让 MySQL/Redis/router 在镜像构建期间初始化，再 apply 全量 `ci`
+- Docker Hub 额度：账号为免费版（200 次拉取/6h），宿主 docker 与 kind 节点 containerd 均配置
+  `mirror.gcr.io` 缓存站（节点侧见 `e2e/ci/kind-config.yaml`），基础镜像不得直连 Docker Hub 消耗额度
 - 业务镜像解析顺序：`E2E_AGENT_IMAGE` → Docker Hub `gaoyue1989/agent-framework` 最新
   `agentscope-*` tag（拉取/导入各 300s 超时）→ 失败回落 `mock-agent:ci`（`E2E_AGENT_RUNTIME=mock`，
   跳过会话类断言）

@@ -61,7 +61,6 @@ runs:
         build frontend docker build -t platform-frontend:ci frontend
         build mock-llm docker build -t mock-llm:ci e2e/ci/mock-llm
         build mock-sandbox docker build -t mock-sandbox:ci e2e/ci/mock-sandbox
-        build mock-agent docker build -t mock-agent:ci e2e/ci/mock-agent
 
     - name: 创建 kind 集群
       uses: helm/kind-action@v1
@@ -71,17 +70,10 @@ runs:
         config: e2e/ci/kind-config.yaml
         wait: 5m
 
-    - name: 预拉集群基础镜像（规避集群内匿名拉取限流）
+    - name: 先行部署基础设施（MySQL/Redis/router 随集群初始化，与镜像构建重叠）
       shell: bash
       run: |
-        set -uo pipefail
-        for img in nginx:1.27.1-alpine mysql:8.0 redis:7.2-alpine; do
-          if timeout 180 docker pull "$img"; then
-            timeout 180 kind load docker-image "$img" --name agent-manager || true
-          else
-            echo "::warning::预拉 $img 失败，交给集群内拉取"
-          fi
-        done
+        kubectl kustomize --load-restrictor=LoadRestrictionsNone manifests/ci-infra | kubectl apply -f -
 
     - name: 安装 ingress-nginx（kind provider）并暴露 NodePort 30080/30443
       shell: bash
@@ -92,26 +84,6 @@ runs:
           -l app.kubernetes.io/component=controller --timeout=240s
         # provider 清单默认 hostPort 80/443；仓库脚本统一用 localhost:30080
         kubectl -n ingress-nginx patch svc ingress-nginx-controller --type merge -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":80,"targetPort":"http","nodePort":30080},{"name":"https","port":443,"targetPort":"https","nodePort":30443}]}}'
-
-    - name: 等待镜像构建
-      shell: bash
-      run: |
-        set -euo pipefail
-        while read -r name; do
-          while [ ! -f "$BUILD_DIR/$name.rc" ]; do sleep 2; done
-          cat "$BUILD_DIR/$name.log"
-          if [ "$(cat "$BUILD_DIR/$name.rc")" != 0 ]; then
-            echo "::error::镜像构建失败：$name"; exit 1
-          fi
-        done < "$BUILD_DIR/names"
-
-    - name: 导入本地镜像到 kind
-      shell: bash
-      run: |
-        set -euo pipefail
-        for img in platform-backend:ci platform-frontend:ci mock-llm:ci mock-sandbox:ci mock-agent:ci; do
-          kind load docker-image "$img" --name agent-manager
-        done
 
     - name: 解析业务镜像（优先拉取真实 agent-framework，超时/失败回落 mock）
       id: agent-image
@@ -158,6 +130,8 @@ runs:
         fi
 
         if [ -z "$IMAGE" ]; then
+          docker build -t mock-agent:ci e2e/ci/mock-agent
+          kind load docker-image mock-agent:ci --name agent-manager
           IMAGE="mock-agent:ci"
           echo "::warning::真实 agent-framework 镜像不可用，使用 mock-agent；运行时会话类断言将跳过"
         else
@@ -167,6 +141,26 @@ runs:
         echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
         echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
         echo "resolved=$IMAGE runtime=$RUNTIME"
+
+    - name: 等待镜像构建
+      shell: bash
+      run: |
+        set -euo pipefail
+        while read -r name; do
+          while [ ! -f "$BUILD_DIR/$name.rc" ]; do sleep 2; done
+          cat "$BUILD_DIR/$name.log"
+          if [ "$(cat "$BUILD_DIR/$name.rc")" != 0 ]; then
+            echo "::error::镜像构建失败：$name"; exit 1
+          fi
+        done < "$BUILD_DIR/names"
+
+    - name: 导入本地镜像到 kind
+      shell: bash
+      run: |
+        set -euo pipefail
+        for img in platform-backend:ci platform-frontend:ci mock-llm:ci mock-sandbox:ci; do
+          kind load docker-image "$img" --name agent-manager
+        done
 
     - name: 渲染 CI 清单（注入业务镜像）
       shell: bash
