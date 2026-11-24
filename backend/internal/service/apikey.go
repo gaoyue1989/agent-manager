@@ -41,10 +41,17 @@ type ApiKeyView struct {
 	CreatedAt   time.Time  `json:"createdAt"`
 }
 
-// IssueApiKey 签发并返回一次性明文。
+// IssueApiKey 签发并返回一次性明文。agentId 必须指向本空间真实 Agent（issue #488，
+// 不存在/跨空间一律 ErrNotFound，不泄露他空间服务存在性）。
 func (c *Core) IssueApiKey(in IssueApiKeyInput) (*store.ApiKey, string, error) {
 	if in.Name == "" {
 		return nil, "", fmt.Errorf("%w: name is required", ErrInvalidForm)
+	}
+	if in.AgentID != nil {
+		svc, err := c.Get(*in.AgentID)
+		if err != nil || svc.WorkspaceID != in.WorkspaceID {
+			return nil, "", ErrNotFound
+		}
 	}
 	suffix := make([]byte, 12)
 	if _, err := rand.Read(suffix); err != nil {
@@ -154,8 +161,8 @@ func agentShortFromURI(raw string) string {
 // Introspect 处理 GET /api/v1/auth/introspect：
 //   - Authorization: Bearer <JWT> → 校验签名/过期（不验空间，M9 回填决议）；
 //   - Authorization: Bearer ak-… → sha256 查 api_keys（active+未过期）；
-//     agentId 作用域按 X-Original-URI 归一化反解 /agent/{short} 裁决，并以 router 路由
-//     捕获 X-Agent-Short 交叉校验（issue #407）；
+//     作用域按 X-Original-URI 归一化反解 /agent/{short} + router 路由捕获 X-Agent-Short
+//     交叉校验裁决，单 Agent key 限绑定 Agent、空间级 key 限本空间（issue #407/#488）；
 //   - Authorization 缺失时回落 oaf_session cookie（JWT 通道，issue #373）。
 //
 // 200 回写 X-User-Id 响应头（nginx auth_request_set 取用）；401/403 fail-closed。
@@ -195,25 +202,31 @@ func (c *Core) Introspect(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"code":403,"message":"key expired"}`, http.StatusForbidden)
 			return
 		}
-		// 作用域裁决（issue #407，fail-closed）：X-Original-URI 是 nginx 透传的原始请求
-		// URI（未归一化，可含 query/穿越段），按 nginx 同口径反解目标 short 后裁决；
-		// X-Agent-Short 是 router 归一化匹配出的路由捕获，非空时与反解交叉校验，
-		// 不一致（穿越/篡改/口径分叉）一律拒绝。
+		// 作用域裁决（issue #407 同口径 + issue #488 空间归属，fail-closed）：
+		// X-Original-URI 是 nginx 透传的原始请求 URI（未归一化，可含 query/穿越段），
+		// 按 nginx 同口径反解目标 short；X-Agent-Short 是 router 归一化匹配出的路由捕获，
+		// 非空时与反解交叉校验，不一致（穿越/篡改/口径分叉）一律拒绝。单 Agent key 要求
+		// 目标即绑定 Agent；空间级 key（nil=空间内全部 Agent）按目标 short 反查服务后
+		// 裁决归属——未命中/跨空间一律拒绝（存量越权 key 在此 fail-closed）。
+		target := agentShortFromURI(r.Header.Get("X-Original-URI"))
+		if hs := r.Header.Get("X-Agent-Short"); hs != "" && hs != target {
+			http.Error(w, `{"code":403,"message":"key scope mismatch"}`, http.StatusForbidden)
+			return
+		}
+		var svc *store.ServiceEntity
+		var err error
 		if key.AgentID != nil {
-			svc, err := c.Get(*key.AgentID)
-			if err != nil {
-				http.Error(w, `{"code":403,"message":"agent not found"}`, http.StatusForbidden)
-				return
-			}
-			target := agentShortFromURI(r.Header.Get("X-Original-URI"))
-			if hs := r.Header.Get("X-Agent-Short"); hs != "" && hs != target {
-				http.Error(w, `{"code":403,"message":"key scope mismatch"}`, http.StatusForbidden)
-				return
-			}
-			if target == "" || target != svc.ShortName {
-				http.Error(w, `{"code":403,"message":"key scope mismatch"}`, http.StatusForbidden)
-				return
-			}
+			svc, err = c.Get(*key.AgentID)
+		} else {
+			svc, err = c.GetByShortName(target)
+		}
+		if err != nil || svc.WorkspaceID != key.WorkspaceID {
+			http.Error(w, `{"code":403,"message":"agent not found"}`, http.StatusForbidden)
+			return
+		}
+		if target == "" || target != svc.ShortName {
+			http.Error(w, `{"code":403,"message":"key scope mismatch"}`, http.StatusForbidden)
+			return
 		}
 		c.touchApiKey(key.ID)
 		setHeader(key.UserID)
