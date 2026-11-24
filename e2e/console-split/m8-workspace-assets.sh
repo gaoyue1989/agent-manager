@@ -24,15 +24,12 @@ assert_eq "KeyPrefix=明文前 8 位" "$(echo "$K" | jqr "['data']['keyPrefix']"
 LIST=$(req GET /console/workspaces/$WS/api-keys "" "$OT")
 assert_contains "列表含前缀" "$LIST" "${PLAIN:0:8}"
 assert_not_contains "列表不含明文" "$LIST" "$PLAIN"
-# 作用域过滤：绑定单 Agent 的 key 只出现在该作用域查询（建第二个 key 绑定不存在 agent 的行为=无 agent 断言全局）
+# 作用域过滤：全局 key 出现在任意作用域查询；#488 起 agentId 必须指向本空间真实 Agent，
+# 不存在/跨空间 agentId 拒签 404（作用域过滤细节由单测覆盖）
 K2=$(req POST /console/workspaces/$WS/api-keys '{"name":"m8keyall"}' "" "$OT" | jqr "['data']['id']")
-# 绑定单 Agent（88888 为纯过滤值）的 key：只出现在该作用域查询
-KB=$(req POST /console/workspaces/$WS/api-keys '{"name":"m8-key-scoped","agentId":88888}' "" "$OT" | jqr "['data']['id']")
+assert_eq "不存在 agentId 拒签 404（#488 工作空间守卫）" "$(code POST /console/workspaces/$WS/api-keys '{"name":"m8-key-scoped","agentId":88888}' "" "$OT")" "404"
 SCOPED=$(req GET "/console/workspaces/$WS/api-keys?agentId=99999" "" "$OT")
 assert_contains "全局 key 出现在任意作用域查询" "$SCOPED" "m8keyall"
-assert_not_contains "单 Agent 作用域不含他 Agent 绑定 key" "$SCOPED" '"m8-key-scoped"'
-HIT=$(req GET "/console/workspaces/$WS/api-keys?agentId=88888" "" "$OT")
-assert_contains "绑定作用域查询命中" "$HIT" '"m8-key-scoped"'
 
 # ---- 过期惰性判定（改库不可行——用 0 天=永不过期 + 吊销态断言；过期走单测覆盖）----
 assert_eq "吊销 200" "$(code DELETE /console/workspaces/$WS/api-keys/$KID "" "$OT")" "200"

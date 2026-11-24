@@ -419,6 +419,100 @@ func TestBackfillMarksDefaultModelDeliveries(t *testing.T) {
 	}
 }
 
+// TestBackfillRespectsExplicitDefaultModelDeliveries issue #487：服务已存在显式
+// is_default=true 行时 Backfill 第 9 步必须整服务跳过——同 modelId+baseUrl 多连接
+// （key-a 小 id / key-b 大 id）用户显式选 key-b 为默认后，重启回填不得翻回最小 id，
+// 否则删除守卫错位（真默认可删、非默认反被拦）；尚无默认行（NULL 形态）的服务照常补位。
+func TestBackfillRespectsExplicitDefaultModelDeliveries(t *testing.T) {
+	db := newMigrateDB(t)
+	ws := Workspace{Slug: "ws-expd0001", Name: "显式默认空间", Status: "active", QuotaJSON: "{}"}
+	if err := db.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+	svcA := ServiceEntity{K8sName: "oaf-expd-a", DisplayName: "expd-a", WorkspaceID: ws.ID,
+		EnvJSON: `{"LLM_MODEL":"m1","LLM_BASE_URL":"http://b1/v1"}`}
+	svcB := ServiceEntity{K8sName: "oaf-expd-b", DisplayName: "expd-b", WorkspaceID: ws.ID,
+		EnvJSON: `{"LLM_MODEL":"m1","LLM_BASE_URL":"http://b1/v1"}`}
+	for _, s := range []*ServiceEntity{&svcA, &svcB} {
+		if err := db.Create(s).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	keyA := ModelConnection{WorkspaceID: ws.ID, Name: "key-a", ModelID: "m1", BaseURL: "http://b1/v1"}
+	keyB := ModelConnection{WorkspaceID: ws.ID, Name: "key-b", ModelID: "m1", BaseURL: "http://b1/v1"}
+	for _, mc := range []*ModelConnection{&keyA, &keyB} {
+		if err := db.Create(mc).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// svcA：显式默认形态——keyA 行 false、keyB 行 true（用户显式选择）、同模型第三行
+	// keyB 复用 NULL（裸 SQL INSERT，同存量 NULL 形态）；svcB：同模型双行全 NULL（补位对照组）
+	if err := db.Create(&ModelDelivery{ConnectionID: keyA.ID, ServiceID: svcA.ID, Status: "synced"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&ModelDelivery{ConnectionID: keyB.ID, ServiceID: svcA.ID, Status: "synced", IsDefault: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO model_deliveries (connection_id, service_id, status, created_at) VALUES (?, ?, 'synced', CURRENT_TIMESTAMP)",
+		keyB.ID, svcA.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, connID := range []uint{keyA.ID, keyB.ID} {
+		if err := db.Exec("INSERT INTO model_deliveries (connection_id, service_id, status, created_at) VALUES (?, ?, 'synced', CURRENT_TIMESTAMP)",
+			connID, svcB.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	flagOf := func(connID uint, svcID uint) *bool {
+		var d ModelDelivery
+		if err := db.Where("connection_id = ? AND service_id = ?", connID, svcID).Order("id ASC").First(&d).Error; err != nil {
+			t.Fatal(err)
+		}
+		return &d.IsDefault
+	}
+	if *flagOf(keyA.ID, svcA.ID) {
+		t.Fatal("svcA key-a must stay false: explicit default (key-b) must not be flipped to min connection_id")
+	}
+	if !*flagOf(keyB.ID, svcA.ID) {
+		t.Fatal("svcA key-b explicit is_default=true must survive backfill")
+	}
+	var third struct{ IsDefault *bool }
+	if err := db.Table("model_deliveries").Select("is_default").
+		Where("service_id = ? AND connection_id = ?", svcA.ID, keyB.ID).
+		Order("id DESC").Scan(&third).Error; err != nil {
+		t.Fatal(err)
+	}
+	if third.IsDefault != nil {
+		t.Fatalf("svcA third row must stay NULL (whole-service skip), got %v", *third.IsDefault)
+	}
+	if !*flagOf(keyA.ID, svcB.ID) {
+		t.Fatal("svcB without any default row must still be backfilled (key-a min id)")
+	}
+	if *flagOf(keyB.ID, svcB.ID) {
+		t.Fatal("svcB key-b must stay false after backfill")
+	}
+	before := snapshotDB(t, db)
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if after := snapshotDB(t, db); after != before {
+		t.Fatalf("second backfill must be a no-op: before=%s after=%s", before, after)
+	}
+}
+
+func snapshotDB(t *testing.T, db *gorm.DB) string {
+	t.Helper()
+	var all []ModelDelivery
+	if err := db.Order("id").Find(&all).Error; err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(all)
+	return string(b)
+}
+
 func TestNewSlugShape(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 20; i++ {
