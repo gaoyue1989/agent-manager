@@ -1,6 +1,7 @@
 package io.agentmanager.framework.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -93,6 +94,43 @@ class VikingSessionCommitStateStoreTest {
             msg("m2", MsgRole.ASSISTANT, "内容")));
         store().save("", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
         verify(client, after(200).never()).appendSessionMessage(any(), any(), any(), any());
+    }
+
+    @Test
+    void versioningCapabilityPassesThroughToDelegate() {
+        var state = stateWith(List.of(msg("m1", MsgRole.USER, "问")));
+        when(delegate.supportsVersioning()).thenReturn(true);
+        when(delegate.getVersioned("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, State.class))
+            .thenReturn(new io.agentscope.core.state.VersionedState<>(state, 7L));
+        var s = store();
+        assertTrue(s.supportsVersioning());
+        assertEquals(7L, s.getVersioned("u-1", "s-1",
+            SessionMessageArchiveStateStore.AGENT_STATE_KEY, State.class).version());
+        verify(delegate).getVersioned("u-1", "s-1",
+            SessionMessageArchiveStateStore.AGENT_STATE_KEY, State.class);
+    }
+
+    @Test
+    void versioningCapabilityReflectsDelegateWithoutFalseAdvertising() {
+        when(delegate.supportsVersioning()).thenReturn(false);
+        assertFalse(store().supportsVersioning());
+    }
+
+    @Test
+    void fullDecoratorChainPassesVersioningThrough() {
+        var state = stateWith(List.of(msg("m1", MsgRole.USER, "问")));
+        when(delegate.supportsVersioning()).thenReturn(true);
+        when(delegate.getVersioned(anyString(), anyString(), anyString(), any(Class.class)))
+            .thenReturn(new io.agentscope.core.state.VersionedState<>(state, 7L));
+        var chain = new io.agentmanager.framework.sandbox.opensandbox.AskingContentBackfillStateStore(
+            new SessionMessageArchiveStateStore(
+                new VikingSessionCommitStateStore(delegate, client, sessionUserStore),
+                Mockito.mock(SessionMessageStore.class)));
+        assertTrue(chain.supportsVersioning());
+        assertEquals(7L, chain.getVersioned("u-1", "s-1",
+            SessionMessageArchiveStateStore.AGENT_STATE_KEY, State.class).version());
+        verify(delegate).getVersioned("u-1", "s-1",
+            SessionMessageArchiveStateStore.AGENT_STATE_KEY, State.class);
     }
 
     @Test
