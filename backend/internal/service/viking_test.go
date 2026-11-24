@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"agent-manager/backend/internal/k8s/k8sfake"
 	"agent-manager/backend/internal/store"
 )
 
@@ -38,10 +40,14 @@ func TestVikingAccountID(t *testing.T) {
 
 // fakeOpenViking 模拟 Admin API、数据面 content/write 与记忆浏览 ls/read（PoC 实测
 // 响应形状），记录收到的 account 建户/轮换/删除次数、write URI 与 browse 入参 URI 供
-// 断言。conflict 模拟 account 已存在（CONFLICT → EnsureAccount 轮换分支）；deleteErr/
-// writeErr 注入对应端点故障；onCreate 为建户前置钩子（发布链路时序断言）。未覆盖路径
-// 一律 404（测试内显式）。ls/read 条目 uri 模仿真机返回本人展开形态
-// viking://user/u-1001/…；plan.md 的 size 取 2^53+1 探测出参重序列化数字精度。
+// 断言。conflict 模拟 account 已存在（CONFLICT → EnsureAccount 轮换分支）；accounts
+// 按名记账（issue #475：同名二次建户真实走 CONFLICT 轮换分支，与真机语义一致）；
+// deleteErr/writeErr 注入对应端点故障；onCreate 为建户前置钩子（发布链路时序断言）。
+// ensureDelay 拖长建户窗口构造并发交叉；checkWriteKey 启用 ADMIN key 轮换失效语义
+// （write 校验 X-API-Key == currentKey，旧 key 401）；rotateAfterCreate 模拟建户与
+// 导入之间 key 被外部接管；inFlight/overlap 记录上游调用并发度。未覆盖路径一律 404
+// （测试内显式）。ls/read 条目 uri 模仿真机返回本人展开形态 viking://user/u-1001/…；
+// plan.md 的 size 取 2^53+1 探测出参重序列化数字精度。
 type fakeOpenViking struct {
 	mu        sync.Mutex
 	creates   int
@@ -53,19 +59,36 @@ type fakeOpenViking struct {
 	deleteErr bool
 	writeErr  bool
 	onCreate  func()
+
+	accounts          map[string]bool
+	ensureDelay       time.Duration
+	checkWriteKey     bool
+	currentKey        string
+	rotateAfterCreate bool
+	inFlight          int
+	overlap           bool
 }
 
-func (f *fakeOpenViking) recordCreate() {
+func (f *fakeOpenViking) enter() func() {
 	f.mu.Lock()
-	f.creates++
-	hook := f.onCreate
+	f.inFlight++
+	if f.inFlight > 1 {
+		f.overlap = true
+	}
 	f.mu.Unlock()
-	if hook != nil {
-		hook()
+	return func() {
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
 	}
 }
-func (f *fakeOpenViking) recordRotate() { f.mu.Lock(); f.rotates++; f.mu.Unlock() }
-func (f *fakeOpenViking) recordDelete() { f.mu.Lock(); f.deletes++; f.mu.Unlock() }
+
+func (f *fakeOpenViking) overlapped() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.overlap
+}
+
 func (f *fakeOpenViking) recordWrite(uri string) {
 	f.mu.Lock()
 	f.writeURI = append(f.writeURI, uri)
@@ -93,10 +116,21 @@ func (f *fakeOpenViking) resetBrowse() { f.mu.Lock(); f.browseURI = nil; f.mu.Un
 
 func (f *fakeOpenViking) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		defer f.enter()()
 		switch {
 		case r.URL.Path == "/api/v1/admin/accounts" && r.Method == http.MethodPost:
+			var body struct {
+				AccountID string `json:"account_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if f.ensureDelay > 0 {
+				time.Sleep(f.ensureDelay)
+			}
 			f.mu.Lock()
-			isConflict := f.conflict
+			if f.accounts == nil {
+				f.accounts = map[string]bool{}
+			}
+			isConflict := f.conflict || f.accounts[body.AccountID]
 			f.mu.Unlock()
 			if isConflict {
 				w.WriteHeader(http.StatusConflict)
@@ -104,18 +138,45 @@ func (f *fakeOpenViking) handler() http.HandlerFunc {
 					"error": map[string]string{"code": "CONFLICT", "message": "account exists"}})
 				return
 			}
-			f.recordCreate()
+			f.mu.Lock()
+			f.creates++
+			f.accounts[body.AccountID] = true
+			key := "ak-test"
+			if f.checkWriteKey {
+				key = fmt.Sprintf("ak-create-%d", f.creates)
+				f.currentKey = key
+				if f.rotateAfterCreate {
+					f.currentKey = "ak-external-rotated"
+				}
+			}
+			hook := f.onCreate
+			f.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
-				"result": map[string]string{"user_key": "ak-test"}})
+				"result": map[string]string{"user_key": key}})
 		case strings.HasSuffix(r.URL.Path, "/key") && r.Method == http.MethodPost:
-			f.recordRotate()
+			f.mu.Lock()
+			f.rotates++
+			if f.checkWriteKey {
+				f.currentKey = "ak-rotated"
+			}
+			f.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
 				"result": map[string]string{"user_key": "ak-rotated"}})
 		case strings.HasSuffix(r.URL.Path, "/users") && r.Method == http.MethodPost:
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok",
 				"result": map[string]string{"user_key": "x"}})
 		case strings.HasPrefix(r.URL.Path, "/api/v1/admin/accounts/") && r.Method == http.MethodDelete:
-			f.recordDelete()
+			f.mu.Lock()
+			f.deletes++
+			for id := range f.accounts {
+				if strings.HasSuffix(r.URL.Path, "/"+id) {
+					delete(f.accounts, id)
+				}
+			}
+			f.mu.Unlock()
 			if f.deleteErr {
 				w.WriteHeader(http.StatusBadGateway)
 				return
@@ -129,7 +190,14 @@ func (f *fakeOpenViking) handler() http.HandlerFunc {
 			f.recordWrite(body.URI)
 			f.mu.Lock()
 			bad := f.writeErr
+			keyOK := !f.checkWriteKey || f.currentKey == "" || r.Header.Get("X-API-Key") == f.currentKey
 			f.mu.Unlock()
+			if !keyOK {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "error",
+					"error": map[string]string{"code": "UNAUTHORIZED", "message": "invalid api key"}})
+				return
+			}
 			if bad {
 				w.WriteHeader(http.StatusBadGateway)
 				return
@@ -163,6 +231,17 @@ func newVikingTestCore(t *testing.T, h http.HandlerFunc) (*Core, string) {
 	return core, srv.URL
 }
 
+// newVikingTestCoreWithFake 同 newVikingTestCore，另返回 fake K8s（apply/restart 失败注入）。
+func newVikingTestCoreWithFake(t *testing.T, h http.HandlerFunc) (*Core, *k8sfake.FakeK8s, string) {
+	t.Helper()
+	core, fk, cleanup := newTestCore(t)
+	t.Cleanup(cleanup)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	core.Viking = NewVikingAdmin(true, srv.URL, "root-key-test")
+	return core, fk, srv.URL
+}
+
 // 总开关门控（issue #414）：OPENVIKING_ENABLED=false 时即使 URL/RootKey 齐备也不装配
 // Admin 客户端——装配即默认 provider=openviking，总开关失效 = 紧急回退/灰度手段失效。
 func TestNewVikingAdminEnabledGate(t *testing.T) {
@@ -184,7 +263,7 @@ func TestNewVikingAdminEnabledGate(t *testing.T) {
 	core, _ := newVikingTestCore(t, fake.handler())
 	core.Viking = NewVikingAdmin(false, "http://127.0.0.1:1", "root-key") // 开关关闭覆盖
 	plain, secret := map[string]string{}, map[string]string{}
-	if err := core.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+	if _, err := core.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
 		t.Fatalf("disabled platform publish must be zero touch: %v", err)
 	}
 	if len(plain) != 0 || len(secret) != 0 {
@@ -200,7 +279,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 	t.Run("platform disabled zero touch", func(t *testing.T) {
 		c := &Core{} // Viking=nil
 		plain, secret := map[string]string{}, map[string]string{}
-		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+		if _, err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
 			t.Fatalf("disabled + no explicit provider must be zero touch: %v", err)
 		}
 		if len(plain) != 0 || len(secret) != 0 {
@@ -211,7 +290,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 	t.Run("platform disabled explicit openviking rejected", func(t *testing.T) {
 		c := &Core{}
 		plain := map[string]string{AgentMemoryProviderEnv: MemoryProviderOpenViking}
-		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, map[string]string{}); err == nil {
+		if _, err := c.applyOpenVikingEnv("oaf-svc", nil, plain, map[string]string{}); err == nil {
 			t.Fatalf("explicit provider without platform config must fail")
 		}
 	})
@@ -220,7 +299,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 		c := &Core{Viking: NewVikingAdmin(true, "http://unused", "k")} // 退出路径不触网
 		plain := map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}
 		secret := map[string]string{}
-		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+		if _, err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
 			t.Fatalf("explicit local: %v", err)
 		}
 		if len(plain) != 1 || len(secret) != 0 {
@@ -231,7 +310,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 	t.Run("invalid provider rejected", func(t *testing.T) {
 		c := &Core{Viking: NewVikingAdmin(true, "http://unused", "k")}
 		plain := map[string]string{AgentMemoryProviderEnv: "redis"}
-		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, map[string]string{}); err == nil {
+		if _, err := c.applyOpenVikingEnv("oaf-svc", nil, plain, map[string]string{}); err == nil {
 			t.Fatalf("invalid provider must fail")
 		}
 	})
@@ -244,7 +323,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 			OpenVikingAccountEnv:   "oaf-svc",
 		}
 		secret := map[string]string{OvkAdminKeyEnv: "ak-legacy", OvkUserSeedEnv: "seed-legacy"}
-		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+		if _, err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
 			t.Fatalf("legacy provisioned service must stay maintainable under disabled switch: %v", err)
 		}
 		if plain[OpenVikingURLEnv] != "http://ov-legacy:8300" || plain[OpenVikingAccountEnv] != "oaf-svc" ||
@@ -261,7 +340,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 			OpenVikingAccountEnv:   "oaf-svc",
 		}
 		secret := map[string]string{OvkAdminKeyEnv: "ak-legacy", OvkUserSeedEnv: "seed-legacy"}
-		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+		if _, err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
 			t.Fatalf("explicit local opt-out must stay available under disabled switch: %v", err)
 		}
 		if len(plain) != 1 || len(secret) != 0 {
@@ -956,5 +1035,274 @@ func TestDisabledSwitchLegacyServiceLifecycle(t *testing.T) {
 		if r.ServiceID == svc.ID && (r.Provider != MemoryProviderLocal || r.Provisioned) {
 			t.Fatalf("supply must report local non-provisioned after switch: %+v", r)
 		}
+	}
+}
+
+// ---- 并发 Republish 与多失败路径的账户生命周期（issue #475，PR #467 回归）----
+
+// uploadVikingImportPkg 上传带 knowledge/guide.md 的测试包（导入链路共用）。
+func uploadVikingImportPkg(t *testing.T, c *Core) *store.OafPackage {
+	t.Helper()
+	zip := buildTestZip(map[string]string{
+		"AGENTS.md":          testAgentsMD,
+		"knowledge/guide.md": "# 指南",
+	})
+	pkg, err := c.Packages.Upload("demo.zip", bytesReader(zip))
+	if err != nil {
+		t.Fatalf("upload pkg: %v", err)
+	}
+	return pkg
+}
+
+// 并发 Republish 同一服务（双击/超时重试/脚本重放）必须按服务串行化：修复前两个供给
+// 流并发进入 EnsureAccount，后到者 CONFLICT 轮换 ADMIN key 使先建户方 401 失败，其
+// rollbackProvision(created=true) 误删他者已上线的在用 account；修复后锁内串行，先
+// 到者完整供给成功、后到者凭据 sticky 零外呼，账户全程存活、零删除。
+func TestRepublishConcurrentProvisionSerialized(t *testing.T) {
+	fake := &fakeOpenViking{checkWriteKey: true, ensureDelay: 80 * time.Millisecond}
+	core, baseURL := newVikingTestCore(t, fake.handler())
+	pkg := uploadVikingImportPkg(t, core)
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+
+	switchEnv := map[string]string{
+		AgentMemoryProviderEnv: MemoryProviderOpenViking,
+		OvkKnowledgeImportEnv:  "true",
+	}
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = core.Republish(svc.ID, RepublishOptions{Env: switchEnv})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("republish[%d] must succeed under serialization: %v", i, err)
+		}
+	}
+	if fake.overlapped() {
+		t.Fatalf("concurrent republish on one service must be serialized, upstream saw overlapping calls")
+	}
+	if fake.deleteCount() != 0 {
+		t.Fatalf("live account must never be deleted by a losing concurrent request, deletes=%d", fake.deleteCount())
+	}
+	if fake.createCount() != 1 {
+		t.Fatalf("loser must reuse sticky credentials, creates=%d", fake.createCount())
+	}
+	var got store.ServiceEntity
+	if err := core.DB.First(&got, svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var secret map[string]string
+	_ = json.Unmarshal([]byte(got.EnvSecretJSON), &secret)
+	var plain map[string]string
+	_ = json.Unmarshal([]byte(got.EnvJSON), &plain)
+	if secret[OvkAdminKeyEnv] == "" || plain[OpenVikingURLEnv] != baseURL {
+		t.Fatalf("service must stay provisioned: plain=%v secret=%v", plain, secret)
+	}
+}
+
+// ADMIN key 在建户与导入之间被外部轮换（运维手工轮换/他者接管）时，导入 401 失败的
+// 回滚绝不能删除账户——401 语义 = key 已被他人持有轮换，账户归属不再属于本次调用
+// （issue #475：修复前 rollbackProvision(created=true) 无条件 DeleteAccount）。
+func TestRollbackSkipsWhenKeyRevokedExternally(t *testing.T) {
+	fake := &fakeOpenViking{checkWriteKey: true, rotateAfterCreate: true}
+	core, _ := newVikingTestCore(t, fake.handler())
+	pkg := uploadVikingImportPkg(t, core)
+
+	_, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", Env: map[string]string{OvkKnowledgeImportEnv: "true"}})
+	if err == nil {
+		t.Fatalf("publish must fail when admin key was rotated externally mid-provision")
+	}
+	if fake.deleteCount() != 0 {
+		t.Fatalf("401 (key revoked by another holder) must never delete the account, deletes=%d", fake.deleteCount())
+	}
+	var cnt int64
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("k8s_name = ?", "oaf-svc").Count(&cnt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("failed publish must leave zero DB rows, got %d", cnt)
+	}
+	var pkgRow store.OafPackage
+	if err := core.DB.First(&pkgRow, pkg.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if pkgRow.RefCount != 0 {
+		t.Fatalf("ref_count must be restored, got %d", pkgRow.RefCount)
+	}
+}
+
+// UpdateEnv 切换供给成功建户后，落库前任一环节失败（applyServiceEnvObjects /
+// RestartDeployment）必须回滚本次新建账户（issue #475：修复前泄漏外部孤儿 account）。
+func TestUpdateEnvFailureRollsBackNewAccount(t *testing.T) {
+	t.Run("applyServiceEnvObjects failure", func(t *testing.T) {
+		fake := &fakeOpenViking{}
+		core, fk, _ := newVikingTestCoreWithFake(t, fake.handler())
+		pkg := uploadVikingImportPkg(t, core)
+		svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+			Name: "svc", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+		if err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		waitForVikingTerminal(t, core, svc.ID)
+		fk.FailNextEnsure(1, fmt.Errorf("k8s cm failure"))
+
+		if _, err := core.UpdateEnv(svc.ID, map[string]string{
+			AgentMemoryProviderEnv: MemoryProviderOpenViking,
+			OvkKnowledgeImportEnv:  "true",
+		}, nil); err == nil {
+			t.Fatalf("update env must fail")
+		}
+		if fake.createCount() != 1 {
+			t.Fatalf("provision must have created account, creates=%d", fake.createCount())
+		}
+		if fake.deleteCount() != 1 {
+			t.Fatalf("newly created account must be rolled back on later failure, deletes=%d", fake.deleteCount())
+		}
+		after, err := core.Get(svc.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plain map[string]string
+		_ = json.Unmarshal([]byte(after.EnvJSON), &plain)
+		if plain[AgentMemoryProviderEnv] != MemoryProviderLocal {
+			t.Fatalf("failed update must leave env untouched, got %v", plain)
+		}
+	})
+
+	t.Run("restart failure", func(t *testing.T) {
+		fake := &fakeOpenViking{}
+		core, fk, _ := newVikingTestCoreWithFake(t, fake.handler())
+		pkg := uploadVikingImportPkg(t, core)
+		svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+			Name: "svc", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+		if err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		waitForVikingTerminal(t, core, svc.ID)
+		fk.FailNextRestart(1, fmt.Errorf("k8s restart failure"))
+
+		if _, err := core.UpdateEnv(svc.ID, map[string]string{
+			AgentMemoryProviderEnv: MemoryProviderOpenViking,
+		}, nil); err == nil {
+			t.Fatalf("update env must fail")
+		}
+		if fake.deleteCount() != 1 {
+			t.Fatalf("newly created account must be rolled back on restart failure, deletes=%d", fake.deleteCount())
+		}
+	})
+}
+
+// Republish 建户后 DB 落库失败（事务 abort）必须回滚本次新建账户（issue #475）。
+func TestRepublishDBFailureRollsBackNewAccount(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, _ := newVikingTestCore(t, fake.handler())
+	pkg := uploadVikingImportPkg(t, core)
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+	if err := core.DB.Exec("CREATE TRIGGER block_svc_update BEFORE UPDATE ON services " +
+		"BEGIN SELECT RAISE(ABORT, 'blocked for test'); END;").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{
+		AgentMemoryProviderEnv: MemoryProviderOpenViking,
+	}}); err == nil {
+		t.Fatalf("republish must fail on db abort")
+	}
+	if fake.createCount() != 1 {
+		t.Fatalf("provision must have created account, creates=%d", fake.createCount())
+	}
+	if fake.deleteCount() != 1 {
+		t.Fatalf("newly created account must be rolled back when db commit fails, deletes=%d", fake.deleteCount())
+	}
+	after, err := core.Get(svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain map[string]string
+	_ = json.Unmarshal([]byte(after.EnvJSON), &plain)
+	if plain[AgentMemoryProviderEnv] != MemoryProviderLocal {
+		t.Fatalf("failed republish must leave env untouched, got %v", plain)
+	}
+}
+
+// Republish 的 K8s apply 失败发生在 DB 已提交之后：env/账户已归属服务，失败只转 error
+// 状态，账户绝不回滚（下次 StartAgain/Republish 复用）——修复不得误伤该语义。
+func TestRepublishApplyFailureKeepsAccount(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, fk, _ := newVikingTestCoreWithFake(t, fake.handler())
+	pkg := uploadVikingImportPkg(t, core)
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "svc", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+	fk.FailNextEnsure(1, fmt.Errorf("k8s apply failure"))
+
+	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{
+		AgentMemoryProviderEnv: MemoryProviderOpenViking,
+	}}); err == nil {
+		t.Fatalf("republish must fail on apply error")
+	}
+	if fake.deleteCount() != 0 {
+		t.Fatalf("committed account belongs to the service, must not be rolled back, deletes=%d", fake.deleteCount())
+	}
+	after, err := core.Get(svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain map[string]string
+	_ = json.Unmarshal([]byte(after.EnvJSON), &plain)
+	if plain[AgentMemoryProviderEnv] != MemoryProviderOpenViking {
+		t.Fatalf("committed env must stay, got %v", plain)
+	}
+}
+
+// rollbackPublishPlaceholder 仅在占位行删除成功（RowsAffected>0）时递减 ref_count：
+// 并发 Delete 已先行删行减计数时，迟到的回滚不得再误减他人引用（issue #475）。
+func TestRollbackPublishPlaceholderChecksRowsAffected(t *testing.T) {
+	core, _ := newVikingTestCore(t, (&fakeOpenViking{}).handler())
+	pkg := uploadTestPkg(t, core, "")
+	if err := core.DB.Model(&store.OafPackage{}).Where("id = ?", pkg.ID).
+		UpdateColumn("ref_count", 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &store.ServiceEntity{K8sName: "oaf-ghost", DisplayName: "ghost", PackageID: pkg.ID,
+		Status: store.StatusDeploying, AgentCardJSON: "{}", SkillsJSON: "[]"}
+	if err := core.DB.Create(svc).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := core.DB.Delete(&store.ServiceEntity{}, svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	core.rollbackPublishPlaceholder(svc)
+
+	var pkgRow store.OafPackage
+	if err := core.DB.First(&pkgRow, pkg.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if pkgRow.RefCount != 1 {
+		t.Fatalf("stale placeholder rollback must not decrement ref_count owned by others, got %d", pkgRow.RefCount)
 	}
 }
