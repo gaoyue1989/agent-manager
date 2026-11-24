@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"agent-manager/backend/internal/service/platformconfig"
 	"agent-manager/backend/internal/store"
 )
 
@@ -683,20 +684,22 @@ func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, for
 }
 
 // platformDefaultEnv 平台默认配置预填（与发布向导「已预填平台默认配置」同语义，R3）：
-// checkpoint/redis 等运行必需 env 自动带入。沙箱分组键（SANDBOX_*）只作用于开启沙箱的
-// Agent（issue #402）：关闭/未声明时不预填——否则 env 落 CM/Pod，控制台编辑页/沙箱总览
-// 误当作该 Agent 的显式沙箱配置固化展示，且与 m10 B3「关闭时无 SANDBOX_*」契约矛盾；
-// 开启时平台默认补空语义保留（表单值优先）。编辑链路仅作缺省补位（UpdateAgent，
-// issue #478：用户显式值优先，平台默认只填既有 env 尚不存在的键）。
+// checkpoint/redis 等运行必需 env 自动带入。sandbox 分组键（SANDBOX_* / OPENSANDBOX_*）
+// 只作用于开启沙箱的 Agent（issue #402/#489）：关闭/未声明时整组不预填——否则管理面
+// 地址与 OPENSANDBOX_API_KEY 凭据落 CM/Secret/Pod，违背最小权限，且与 m10 B3
+// 「关闭时无 SANDBOX_*」契约矛盾；开启时平台默认补空语义保留（表单值优先）。
+// 编辑链路仅作缺省补位（UpdateAgent，issue #478：用户显式值优先，平台默认只填既有
+// env 尚不存在的键）。
 func (c *Core) platformDefaultEnv(form *AgentForm) map[string]string {
 	env := map[string]string{}
 	sandboxOn := form.Sandbox != nil && form.Sandbox.Enabled != nil && *form.Sandbox.Enabled
+	sandboxGroup := platformconfig.GroupKeys("sandbox")
 	if defaults, err := c.GetPlatformDefaults(); err == nil {
 		for k, v := range defaults {
 			if v == "" {
 				continue
 			}
-			if !sandboxOn && strings.HasPrefix(k, "SANDBOX_") {
+			if !sandboxOn && sandboxGroup[k] {
 				continue
 			}
 			env[k] = v
@@ -1212,6 +1215,11 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	}
 	for k, v := range formEnv {
 		oldPlain[k] = v
+	}
+	if form.Sandbox != nil && form.Sandbox.Enabled != nil && !*form.Sandbox.Enabled {
+		for k := range platformconfig.GroupKeys("sandbox") {
+			oldPlain[k] = ""
+		}
 	}
 	if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {
 		for _, k := range clearKeys { // 表单显式默认/关：清除既有显式键（切回平台派生）

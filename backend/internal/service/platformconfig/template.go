@@ -143,6 +143,20 @@ func SensitiveKeys() map[string]bool {
 	return out
 }
 
+// GroupKeys 返回指定分组全部键集合；分组名不存在返回空集。
+func GroupKeys(group string) map[string]bool {
+	out := map[string]bool{}
+	for _, g := range template {
+		if g.Name != group {
+			continue
+		}
+		for _, f := range g.Fields {
+			out[f.EnvKey] = true
+		}
+	}
+	return out
+}
+
 // Split 按 Sensitive 把键值对拆为非敏感/敏感两份；extraSecret 中指定的任意键强制归敏感份
 // （publish/update-env 的 secretKeys 逃生门）。拆分后两份互斥，非敏感份用于 CM/env_json，
 // 敏感份用于 Secret/env_secret_json。
