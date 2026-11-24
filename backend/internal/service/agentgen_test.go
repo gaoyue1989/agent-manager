@@ -465,6 +465,83 @@ func TestUpdateAgentCopyOnWrite(t *testing.T) {
 	}
 }
 
+// TestUpdateAgentKeepsUserExplicitEnv 编辑保存用户显式 env 优先（issue #478）：
+// 用户经 UpdateEnv 显式自定义 CHECKPOINT_JDBC_URL（独立业务库）/ AGENT_REDIS_URL（敏感份）/
+// SANDBOX_SKILLS_SHARED_STORE=off（关技能农场）后，UpdateAgent 仅用表单管辖键覆盖既有 env，
+// 平台默认值只对 plain 与 secret 均缺失的键补位——修复前 buildPublishEnv 无条件灌入平台默认
+// 覆盖用户值，且 Republish 出口 applyIsolationEnv 见值等于平台默认把 checkpoint 改派生共享库，
+// 服务静默切库、会话与历史记忆不可见。
+func TestUpdateAgentKeepsUserExplicitEnv(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-478-keep", "显式env空间")
+	owner := seedUserIn(t, c, "keep478", "user", ws.ID, "owner")
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+	if _, err := c.UpdatePlatformConfig(map[string]string{
+		"CHECKPOINT_JDBC_URL":            "jdbc:mysql://shared-mysql:3306/oaf_checkpoint",
+		"AGENT_REDIS_URL":                "redis://shared-redis:6379",
+		"AGENT_REDIS_COMMAND_TIMEOUT_MS": "2000",
+		"SANDBOX_SKILLS_SHARED_STORE":    "/skills-store",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	on := true
+	form := goldenForm()
+	form.ModelConnections[0].ConnectionID = conn.ID
+	form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+	form.Sandbox = &SandboxForm{Enabled: &on}
+	svc, _, err := c.CreateAgent(ws.ID, owner.ID, form)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.UpdateEnv(svc.ID, map[string]string{
+		"CHECKPOINT_JDBC_URL":         "jdbc:mysql://dedicated-customer-mysql:3306/cust_db",
+		"AGENT_REDIS_URL":             "redis://dedicated-redis:6379",
+		"SANDBOX_SKILLS_SHARED_STORE": "off",
+	}, nil); err != nil {
+		t.Fatalf("update env: %v", err)
+	}
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	edit := *form
+	edit.Prompt = "只改提示词。"
+	updated, _, err := c.UpdateAgent(ws.ID, owner.ID, svc.ID, &edit)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	plain := map[string]string{}
+	if err := jsonUnmarshalStrict(updated.EnvJSON, &plain); err != nil {
+		t.Fatal(err)
+	}
+	secret := map[string]string{}
+	if err := jsonUnmarshalStrict(updated.EnvSecretJSON, &secret); err != nil {
+		t.Fatal(err)
+	}
+	if plain["CHECKPOINT_JDBC_URL"] != "jdbc:mysql://dedicated-customer-mysql:3306/cust_db" {
+		t.Fatalf("issue #478：用户显式 checkpoint URL 被平台默认覆盖/改派生：%q", plain["CHECKPOINT_JDBC_URL"])
+	}
+	if secret["AGENT_REDIS_URL"] != "redis://dedicated-redis:6379" {
+		t.Fatalf("issue #478：用户显式 Redis URL（敏感份）被平台默认覆盖：%q", secret["AGENT_REDIS_URL"])
+	}
+	if plain["SANDBOX_SKILLS_SHARED_STORE"] != "off" {
+		t.Fatalf("issue #478：用户显式关闸被平台默认覆盖：%q", plain["SANDBOX_SKILLS_SHARED_STORE"])
+	}
+	if plain["LLM_MODEL"] != "qwen-plus" {
+		t.Fatalf("表单管辖键必须照常覆盖：%q", plain["LLM_MODEL"])
+	}
+	if plain["AGENT_REDIS_COMMAND_TIMEOUT_MS"] != "2000" {
+		t.Fatalf("平台默认应对缺失键补位：%q", plain["AGENT_REDIS_COMMAND_TIMEOUT_MS"])
+	}
+}
+
 func TestEditFormCrossWorkspace(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()
