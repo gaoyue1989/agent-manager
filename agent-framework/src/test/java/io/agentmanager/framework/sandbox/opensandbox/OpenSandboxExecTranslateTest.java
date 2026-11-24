@@ -352,4 +352,51 @@ class OpenSandboxExecTranslateTest {
         assertEquals("tree/sub/x.py\t3\t1730000000", r.stdout());
         verify(osb.commands(), never()).run(anyString());
     }
+
+    // ---------- 受控缓存子树不进 glob 视野（issue #500，农场软链信任模型细化）----------
+
+    @Test
+    void rootGlobOverFarmSymlinkCacheShouldKeepFastPath() throws Exception {
+        // ⑥ issue #500：.skills-cache 是平台受控技能缓存投影（软链农场，skills-syncd §6.2），
+        // 根 glob 遍历不进入受控子树——农场软链不得触发整树回落（回落即快路径失效 +
+        // 冗余 listDirectory RTT + 读穿漏 KV），农场 /skills-store 内部文件也不得混入用户视野
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("/workspace")).thenReturn(List.of(
+            new EntryInfo("/workspace/.skills-cache", 493, "root", "root", 0, epoch(), epoch(), "directory"),
+            new EntryInfo("/workspace/notes.md", 420, "root", "root", 7, epoch(), epoch(), "file")));
+        when(files.listDirectory(".skills-cache")).thenReturn(List.of(
+            symlinkEntry("/workspace/.skills-cache/sess/oaf-package/demo")));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var r = sandbox.translateForProbe(findTemplate("/workspace", "*.md"));
+        assertNotNull(r, "受控缓存子树必须跳过：农场软链不得触发整树回落（issue #500 主缺陷）");
+        assertEquals(0, r.exitCode());
+        assertEquals("notes.md\t7\t1730000000", r.stdout(),
+            "根 glob 视野不含受控缓存内部文件（农场软链解引用文件不得混入）");
+        verify(osb.commands(), never()).run(anyString());
+        verify(files, never()).listDirectory(".skills-cache");
+    }
+
+    @Test
+    void globWithRootInsideSkillsCacheShouldStillFallBackToFindL() throws Exception {
+        // ⑦ issue #500 回归边界：root 本身在受控缓存子树内（显式枚举技能文件）时，
+        // 农场软链照旧整树回落 find -L（#394 技能枚举语义不动）
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("/workspace/.skills-cache/sess")).thenReturn(List.of(
+            symlinkEntry("/workspace/.skills-cache/sess/oaf-package/demo")));
+        stubRealExec(osb, mockExecution(0, ".skills-cache/sess/oaf-package/demo/SKILL.md\t12\t0"));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var probe = findTemplate("/workspace/.skills-cache/sess", "*.md");
+        assertNull(sandbox.translateForProbe(probe), "root 在受控缓存内的软链必须照旧回落（#394 语义）");
+
+        var r = sandbox.exec(io.agentscope.core.agent.RuntimeContext.builder().userId("u1").build(),
+            probe, 30);
+        assertEquals(0, r.exitCode());
+        assertEquals(".skills-cache/sess/oaf-package/demo/SKILL.md\t12\t0", r.stdout(),
+            "结果必须取自真 exec stub（回落生效）");
+        verify(osb.commands()).run(findLTemplate("/workspace/.skills-cache/sess", "*.md"));
+    }
 }

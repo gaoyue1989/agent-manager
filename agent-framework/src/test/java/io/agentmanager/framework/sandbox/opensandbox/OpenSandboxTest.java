@@ -906,6 +906,20 @@ class OpenSandboxTest {
             + "printf 'FILE:%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; fi; done; fi";
     }
 
+    /** glob 回落命令参数化形态（doExec normalizeSymlinkHostileFind 契约：回落真 exec 必带 -L） */
+    private static String findLProbeForm(String root, String pattern) {
+        return "find -L '" + root + "' -type f -name '" + pattern + "' 2>/dev/null | sort | while IFS= read -r f; do"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
+    }
+
+    /** symlink 条目（type 对齐 execd Lstat 语义，OpenSandboxExecTranslateTest 同款） */
+    private static EntryInfo symlinkEntry(String path) {
+        var epoch = java.time.OffsetDateTime.ofInstant(java.time.Instant.EPOCH, java.time.ZoneOffset.UTC);
+        return new EntryInfo(path, 493, "root", "root", 0, epoch, epoch, "symlink");
+    }
+
     /** e2e mock 空 body 404 形态：SDK 对空 body 解析出 UNEXPECTED_RESPONSE（非 FILE_NOT_FOUND） */
     private static SandboxApiException sandboxApi404() {
         return new SandboxApiException("HTTP 404 Not Found", null, 404,
@@ -1606,6 +1620,91 @@ class OpenSandboxTest {
         var memorySubtree = sandbox.exec(ctx, findProbeForm("/workspace/memory", "*.md"), 30);
         assertFalse(memorySubtree.stdout().contains("MEMORY.md"),
             "memory/ 子树 glob 不得混入根级 MEMORY.md");
+    }
+
+    /** 农场形态容器根：.skills-cache 受控缓存目录（子树软链）+ 一个真实工作区文件 */
+    private static void stubFarmWorkspaceRoot(Sandbox osb) throws Exception {
+        var filesMock = osb.files();
+        when(filesMock.listDirectory("/workspace")).thenReturn(List.of(
+            dirEntry("/workspace/.skills-cache"),
+            fileEntry("/workspace/notes.md")));
+        when(filesMock.listDirectory(".skills-cache")).thenReturn(List.of(
+            symlinkEntry("/workspace/.skills-cache/sess/oaf-package/demo")));
+    }
+
+    /** 读穿 KV 基建：InMemoryStore + RemoteFilesystem（u1）+ 已写入 MEMORY.md，返回 ctx */
+    private static RuntimeContext readThroughKvWithMemoryMd(
+            io.agentscope.harness.agent.DistributedStore[] dsOut) throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        fs.write(RuntimeContext.builder().userId("u1").build(), "MEMORY.md", "# kv memory line1\nline2\n");
+        dsOut[0] = ds;
+        return RuntimeContext.builder().userId("u1").build();
+    }
+
+    @Test
+    void readThroughRootGlobWithFarmSymlinkShouldStillMergeKvMemoryMd() throws Exception {
+        // issue #500 主缺陷：农场软链（.skills-cache 受控子树）不得让根 glob 整树回落真 exec——
+        // 回落既令 P0-12 翻译快路径失效（先 4 次 listDirectory 再 exec），又跳过
+        // fillGlobFromMemoryRootFile 且 looksLikeMemoryAccess 对 *.md glob 不命中（懒注入
+        // 不触发），真 find -L 漏报 KV 中的 MEMORY.md（回归 #356）
+        var ds = new io.agentscope.harness.agent.DistributedStore[1];
+        var ctx = readThroughKvWithMemoryMd(ds);
+        var osb = mockOsb(mockExecution(0, "FALLBACK_EXEC", ""));
+        stubFarmWorkspaceRoot(osb);
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds[0]);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var r = sandbox.exec(ctx, findProbeForm("/workspace", "*.md"), 30);
+
+        assertFalse(r.stdout().contains("FALLBACK_EXEC"),
+            "农场软链不得触发真 exec 回落（快路径失效即本 issue 缺陷）");
+        assertTrue(r.stdout().contains("notes.md"), "真实工作区文件必须照常枚举");
+        assertTrue(r.stdout().contains("MEMORY.md\t24\t0"),
+            "读穿根 glob 必须并入 KV MEMORY.md（#356 回归），got: " + r.stdout());
+        verify(osb.commands(), never()).run(anyString());
+    }
+
+    @Test
+    void readThroughRootGlobFallbackOverUserSymlinkShouldLazyInjectMemory() throws Exception {
+        // issue #500 兜底（修复建议 A 懒注入变体）：用户内容软链触发根 glob 回落真 exec 前，
+        // 根级 *.md 模式视作记忆访问触发 D1 懒注入——find -L 地面真相包含已注入的
+        // MEMORY.md，读穿在回落路径不漏 KV（既有 CAS 一次性机制，无新增合并输出路径）
+        var ds = new io.agentscope.harness.agent.DistributedStore[1];
+        var ctx = readThroughKvWithMemoryMd(ds);
+        var osb = mockOsb(mockExecution(0, "link-target.md\t3\t0", ""));
+        var filesMock = osb.files();
+        when(filesMock.listDirectory("/workspace")).thenReturn(List.of(
+            symlinkEntry("/workspace/user-link")));
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds[0]);
+        var sandbox = readerInstance(osb, reader, true);
+
+        sandbox.exec(ctx, findProbeForm("/workspace", "*.md"), 30);
+
+        verify(osb.commands()).run(findLProbeForm("/workspace", "*.md"));
+        verify(osb.files()).write(anyList());
+    }
+
+    @Test
+    void readThroughOffRootGlobFallbackShouldNotLazyInject() throws Exception {
+        // 读穿关闭（默认）：根 glob 回落真 exec 不触发懒注入分支（D1 门短路），容器侧
+        // 预热注入已含 MEMORY.md、真 find 地面真相自足——回归边界即回落语义不变
+        var ds = new io.agentscope.harness.agent.DistributedStore[1];
+        var ctx = readThroughKvWithMemoryMd(ds);
+        var osb = mockOsb(mockExecution(0, "link-target.md\t3\t0", ""));
+        var filesMock = osb.files();
+        when(filesMock.listDirectory("/workspace")).thenReturn(List.of(
+            symlinkEntry("/workspace/user-link")));
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds[0]);
+        var sandbox = readerInstance(osb, reader, false);
+
+        var r = sandbox.exec(ctx, findProbeForm("/workspace", "*.md"), 30);
+
+        assertEquals("link-target.md\t3\t0", r.stdout(), "读穿关闭时回落真 exec（结果取自 stub）");
+        verify(osb.commands()).run(findLProbeForm("/workspace", "*.md"));
     }
 
     /** 口径一致性：KV 空 MEMORY.md → test -e yes 且 read __EMPTY__（两侧同判「存在但空」） */

@@ -466,6 +466,23 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 > read 探测（KV 应答有）与 glob 回落应答短暂矛盾，懒注入后自愈；爆炸半径有限且与
 > §6.2-4 已接受的容器态盲点同姿态，显式接受，不为 KV-真 exec 结果合并增加复杂度。
 
+> 补记（2026-11-25，issue #500）：上段「已接受的连带影响」在 SkillsFarm 默认开启
+> （#392）后升级为正式缺陷——工作区根 glob 必然穿透 `.skills-cache` 命中农场软链整树
+> 回落，P0-12 翻译快路径对根 glob 100% 失效（先 4 次 listDirectory 再 exec），读穿开启
+> 时根级 MEMORY.md 100% 漏报（#356 回归）。修复（信任模型细化，#394 用户内容软链防护
+> 不变）：`walkFilesSkippingDirs` 遍历根不在 `.skills-cache` 内时对该受控缓存目录整目
+> 跳过——`.skills-cache` 是 SDK MarketplaceStager 技能缓存投影（软链目标 = 平台守护目
+> 录 /skills-store），不属于用户工作区数据语义，与 supportsFileTransfer 的排除口径同源
+> （#394「禁路径前缀嗅探」约束针对软链**识别判据**，目录级信任裁决与之正交）；效果 =
+> 农场软链不再触发整树回落（快路径 + 读穿根级 KV 合并恢复），农场内部文件也不再经
+> find -L 解引用混入用户根 glob 视野（旧回落的暴露面，本就非预期语义）。root 位于
+> `.skills-cache` 内的显式枚举照旧软链回落（技能文件枚举走 find -L）。残余边界（如实
+> 披露）：用户自建软链触发回落的根 glob，find -L 仍穿透农场链（真 exec 地面真相，#394
+> 归一化语义）——与翻译应答存在不一致窗口，触发需用户软链+根 glob 同时成立，罕见；
+> 该场景的 MEMORY.md 漏报由懒注入触发判据按语义补齐收口（`looksLikeRootGlobOverMemory`：
+> P_FIND 完整模板 + 工作区根 + pattern 可命中 MEMORY.md，复用既有 CAS 一次性机制，
+> 仍不做 KV-真 exec 结果合并），见 first-reasoning-memory-readthrough §3.1 补记。
+
 ### 6.4 回退与开关
 
 | 开关 | 默认 | 语义 |
