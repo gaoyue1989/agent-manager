@@ -154,6 +154,51 @@ class McpToolRegistrarSharedClientTest {
     }
 
     @Test
+    void staleFailureAfterWatchdogSwapShouldNotRepoisonFreshDelegate() {
+        // issue #493 缺陷①：会话 B 持旧连接（base1）注册期间，看门狗已对句柄换芯健康
+        // base2 并清毒化；B 的旧连接随后失败进入 catch——无版本 markPoisoned 会把刚换芯
+        // 的健康 delegate 重新毒化，触发下一次会话不必要的销毁重建
+        var base1 = mock(McpClientWrapper.class);
+        when(base1.getName()).thenReturn("base1");
+        when(base1.initialize()).thenReturn(Mono.empty());
+        when(base1.listTools()).thenReturn(Mono.just(List.<McpSchema.Tool>of()));
+        registrar.bases.add(base1);
+        assertEquals(mcp.server(), registrar.registerOne(toolkit, mcp));
+        var handle = (ReconnectableMcpClientWrapper) registrar.sharedWrapper(mcp.server());
+
+        // 会话 B：registerFiltered 路径 listTools 触发时，看门狗换芯 base2 后旧连接才失败
+        var base2 = healthyBase("base2");
+        when(base1.listTools()).thenAnswer(inv -> {
+            registrar.bases.add(base2);
+            assertTrue(registrar.rebuildSharedWrapper(mcp.server(), mcp));
+            throw new RuntimeException("stale base1 connection dropped");
+        });
+        registrar.activeMcpOverride = Map.of("t1", true);
+        assertNull(registrar.registerOne(new Toolkit(), mcp));
+
+        assertFalse(handle.poisoned(), "换芯后的健康 delegate 不得被旧连接的失败毒化");
+        assertSame(base2, handle.delegate());
+        verify(base2, never()).close();
+    }
+
+    @Test
+    void poisonedHandleReusedWithSuccessfulRegistrationShouldClearPoison() {
+        // issue #493 伴随语义：毒化句柄 rebuild 失败（队列空）后复用注册成功——注册过程
+        // 即验证当前 delegate 可用，毒化标记必须失效，否则残留触发后续会话无谓换芯
+        var base = healthyBase("b1");
+        registrar.bases.add(base);
+        doReturn(Mono.error(new RuntimeException("server flapping"))).when(base).initialize();
+        assertNull(registrar.registerOne(toolkit, mcp));
+        var handle = (ReconnectableMcpClientWrapper) registrar.sharedWrapper(mcp.server());
+        assertTrue(handle.poisoned());
+
+        doReturn(Mono.empty()).when(base).initialize();
+        assertEquals(mcp.server(), registrar.registerOne(new Toolkit(), mcp));
+        assertFalse(handle.poisoned(), "注册成功 = 当前 delegate 已验证，毒化失效");
+        assertSame(base, handle.delegate());
+    }
+
+    @Test
     void registerOneSuccessShouldCacheHandleAndReuseAcrossSessions() {
         var base = healthyBase("b1");
         registrar.bases.add(base);
@@ -390,8 +435,10 @@ class McpToolRegistrarSharedClientTest {
         var registry = registrar.syntheticServers();
         assertTrue(registry.containsKey(synthetic.server()));
 
-        // 复活（issue #417 新会话换芯）：同一工厂产出健康连接 → putIfAbsent 命中毒化句柄
-        // → 本会话新连接直接 swap 换芯 → 注册成功、句柄实例稳定
+        // 复活（issue #417 新会话换芯，issue #493 语义对称化）：毒化句柄经 rebuildSharedWrapper
+        // 换芯（工厂产出经握手后 swap）→ 注册成功、句柄实例稳定；工厂被调用两次（本地构建
+        // 被拒关闭 + rebuild 构建换入）
+        registrar.bases.add(healthyBase("revived-local"));
         registrar.bases.add(healthyBase("revived"));
         assertEquals(synthetic.server(),
             registrar.registerSyntheticClient(new Toolkit(), synthetic,
@@ -401,6 +448,46 @@ class McpToolRegistrarSharedClientTest {
         var delegate = ((ReconnectableMcpClientWrapper) handle).delegate();
         assertInstanceOf(io.agentmanager.framework.mcp.UserScopedMcpClientWrapper.class, delegate);
         assertEquals("revived", delegate.getName());
+    }
+
+    @Test
+    void syntheticPoisonedHandleRebuildMustHandshakeBeforeSwap() {
+        // issue #493 缺陷②：毒化合成句柄的换芯不得绕过握手与单飞直接 swap——未握手连接
+        // 换入会覆盖看门狗刚换入的健康新芯。统一走 rebuildSharedWrapper：握手失败不换芯
+        // （坏连接关闭防泄漏），复用句柄注册成功即清毒化
+        var good = healthyBase("ov-good");
+        registrar.bases.add(good);
+        var synthetic = syntheticConfig();
+        assertEquals(synthetic.server(), registrar.registerSyntheticClient(toolkit, synthetic, scopedFactory()));
+        var handle = (ReconnectableMcpClientWrapper) registrar.sharedWrapper(synthetic.server());
+
+        // 故障期注册失败毒化句柄（工厂产物为本地构建的被拒 wrapper，注册走 good 失败）
+        doReturn(Mono.error(new RuntimeException("MCP session closed"))).when(good).initialize();
+        registrar.bases.add(healthyBase("rejected-local"));
+        assertNull(registrar.registerSyntheticClient(new Toolkit(), synthetic, scopedFactory()));
+        assertTrue(handle.poisoned(), "毒化预备：复用句柄注册失败毒化");
+
+        // 恢复期：good 已健康但毒化未清；工厂产两个握手失败坏连接（本地构建被拒 + rebuild
+        // 握手失败）→ 修复后换芯经 rebuildSharedWrapper，握手失败不换芯、good 保持现役
+        doReturn(Mono.empty()).when(good).initialize();
+        var badLocal = mock(McpClientWrapper.class);
+        when(badLocal.getName()).thenReturn("bad-local");
+        when(badLocal.initialize()).thenReturn(Mono.error(new RuntimeException("handshake failed 1")));
+        var badRebuild = mock(McpClientWrapper.class);
+        when(badRebuild.getName()).thenReturn("bad-rebuild");
+        when(badRebuild.initialize()).thenReturn(Mono.error(new RuntimeException("handshake failed 2")));
+        registrar.bases.add(badLocal);
+        registrar.bases.add(badRebuild);
+
+        assertEquals(synthetic.server(),
+            registrar.registerSyntheticClient(new Toolkit(), synthetic, scopedFactory()));
+
+        var delegate = handle.delegate();
+        assertInstanceOf(io.agentmanager.framework.mcp.UserScopedMcpClientWrapper.class, delegate);
+        assertEquals("ov-good", delegate.getName(), "握手失败的坏连接不得换入句柄");
+        verify(badRebuild, times(1)).close();
+        assertFalse(handle.poisoned(), "复用句柄注册成功 = 当前 delegate 已验证，毒化失效");
+        assertFalse(handle.isClosed());
     }
 
     @Test
