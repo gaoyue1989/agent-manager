@@ -1,6 +1,7 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -12,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
 
+import io.agentmanager.framework.service.SkillZipSupport;
 import io.agentmanager.framework.service.WorkspaceReader;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
@@ -221,8 +223,8 @@ final class SkillsFarm {
      * 农场链候选（相对 scope 的 ns/name，排序稳定；端点 manifest 制）：候选名单来自端点
      * version 响应 {@code skills}（与 bundle 打包同源枚举——包技能移除/新增经版本变化传导）。
      * 禁用名（{@link #disabledSkillNames} 同源）与 L4 同名（规则 1 真实文件保护）不建链；
-     * 含单引号/空白/{@code ..} 的相对路径跳过并 WARN 留痕——tar 物化已退役，farm 侧静默缺失
-     * 即会话内真实缺失，必须留痕可观测。
+     * 非白名单（{@link #isShellSafeRelPath}，issue #501）的相对路径跳过并 WARN 留痕——tar
+     * 物化已退役，farm 侧静默缺失即会话内真实缺失，必须留痕可观测。
      */
     private List<String> linkCandidates(List<String> endpointSkills, Set<String> disabledNames,
                                         Set<String> l4Names) {
@@ -370,8 +372,9 @@ final class SkillsFarm {
      * ——随收敛 exec 在 shell 内枚举+差集删除（不增加 exec 数，D-10 稳态 0 exec 不受影响）。
      * 禁用目录由 {@link #disabledRmCmd} 负责（B-2 同语义，候选集外差集与其自然重合、双删无害）。
      * 真实场景实测（kind 三路径验收）揪出 PR-4a 起的缺口：包技能移除后守护 GC 正确、容器孤儿链
-     * 永久滞留。候选名已过 {@link #isShellSafeRelPath}（无引号/空白/glob 元字符风险由 quoted
-     * case 模式兜底），`${__rel}` 展开在 case 模式的带引号段内按字面匹配。
+     * 永久滞留。候选名已过 {@link #isShellSafeRelPath} 白名单——候选名不含 {@code |}，
+     * {@code |} 分隔字面集的 case 边界无歧义（issue #501），`${__rel}` 展开在 case 模式的
+     * 带引号段内按字面匹配。
      */
     private String orphanDiffCmd(String scope, List<String> candidates, String workspaceRoot) {
         String scopeAll = workspaceRoot + "/" + SkillCacheScope.CACHE_DIR + "/" + scope;
@@ -426,7 +429,7 @@ final class SkillsFarm {
 
     /**
      * 容器内禁用技能目录的清理命令段（当前 scope 内；空集返回空串）。路径单引号包裹，
-     * 含单引号/控制字符/{@code ..} 的相对路径直接跳过（防御性：技能名来自 SDK stage 落盘）。
+     * 非白名单（{@link #isShellSafeRelPath}）的相对路径直接跳过（防御性：技能名来自端点清单）。
      */
     private static String disabledRmCmd(String scope, Set<String> disabledNames, String workspaceRoot) {
         if (disabledNames.isEmpty()) {
@@ -447,14 +450,12 @@ final class SkillsFarm {
         return sb.toString();
     }
 
-    /** 相对路径是否可安全内插 shell 单引号段：拒绝空白/控制字符/单引号/路径穿越 */
+    /** 相对路径是否可安全内插 shell 单引号段：按段过 {@link SkillZipSupport#isShellSafeSegment} 白名单（issue #501） */
     private static boolean isShellSafeRelPath(String path) {
-        if (path == null || path.isBlank() || path.startsWith("/")) {
+        if (path == null || path.isBlank()) {
             return false;
         }
-        if (path.contains("'") || path.contains("..")) {
-            return false;
-        }
-        return path.chars().allMatch(c -> c > 32);
+        return Arrays.stream(path.split("/"))
+            .allMatch(SkillZipSupport::isShellSafeSegment);
     }
 }
