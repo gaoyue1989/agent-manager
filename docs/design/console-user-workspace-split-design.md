@@ -186,6 +186,14 @@ AGENT 协作
 - **一期（控制台内）**：用户侧调试/会话请求由 frontend `proxy.ts` 代理 `/agent/{short}/*` 时校验 cookie JWT 并注入 `X-User-Id: u-{userId}`（替代现在硬编码的 `"webui"`）。绕过 frontend 的直连调用仍可行（与今天同等暴露面），但控制台路径上身份可信。
 - **二期（API Key 网关）**：platform-router nginx 增加 `auth_request /_auth` 子请求 → backend `GET /api/v1/auth/introspect`（校验 JWT 或 `Authorization: Bearer ak-...` API Key，返回注入 `X-User-Id`）。auth 子请求是短平快元数据调用，业务流量本体不经 backend，不违反原则一；`introspect` 失败策略 fail-closed（可配）。此步落地后 `api_keys` 才真正对对外调用生效。
 
+#### 5.4.1 业务面身份裁决规则（issue #474，2026-11-24 起）
+
+网关（router `auth_request` / frontend proxy）注入的 `X-User-Id` 是唯一可信身份源；请求体携带的 `userId` 属客户端自报，永不越过同请求的头。业务面各端点统一按「**头 > 请求体回落 > `debug-user`**」解析身份（`ChatStreamController` / `AguiRunController` / `FileController` 同款），并以此身份做会话归属裁决（`SessionAccessGuard.ownedBy`）。此前唯一豁免的 A2A 入口（`A2AController` POST /）已于 issue #474 对齐：
+
+- `message/send` / `message/stream` 在兼容归一时，头存在即**强制覆盖**请求体全部 userId 通道（`params.userId` / `message.metadata.userId` / `params.metadata.userId`），SDK 执行身份与 `session_user` 认领只认头值；
+- 分发与落表前对非空 `sessionId` 做归属校验，不符返回 JSON-RPC 错误 `-32001`（语义 = task/session not found，不泄露存在性），拒绝执行与覆写——封堵「伪造请求体 userId 接管他人会话/冒充任意用户」两条攻击链（#411 归属校验在 A2A 面的前置失效点）；
+- 头存在但 body 非 JSON 时 fail-closed 拒绝（身份覆盖无法保证不透传）；无头（host 模式 ingress / `ROUTER_AUTH_MODE=off` 自报 / 直连调试）回落请求体身份，与 §5.4 所列「绕过 frontend 的直连调用仍可行（与今天同等暴露面）」的既有信任边界一致，不为 A2A 单独加严造成行为分叉。
+
 ---
 
 ## 6. 数据模型与迁移

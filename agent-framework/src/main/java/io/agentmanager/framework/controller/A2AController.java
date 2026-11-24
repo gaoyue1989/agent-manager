@@ -53,6 +53,8 @@ public class A2AController {
     /** 分组键前缀：messageId 与保留键碰撞时（issue #294）给分组键加此前缀避开覆盖 */
     private static final String GROUP_KEY_PREFIX = "_agentscope_group_";
 
+    private static final int SESSION_ACCESS_DENIED_CODE = -32001;
+
     private final AgentScopeA2aServer agentScopeA2aServer;
     private final SessionUserStore sessionUserStore;
 
@@ -69,12 +71,17 @@ public class A2AController {
             produces = {MediaType.APPLICATION_JSON_VALUE, MediaType.TEXT_EVENT_STREAM_VALUE})
     public Object handleRequest(
             @RequestBody String body,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestHeader Map<String, String> header) {
-        // message/send 兼容转换：SDK 反序列化要求 kind/messageId/parts.kind，旧客户端缺失时补全
-        var converted = normalizeMessageSendBody(body);
+        var converted = normalizeMessageSendBody(body, headerUserId);
+        if (converted == null) {
+            return sessionAccessDenied(null);
+        }
 
-        // ★ 记录会话-用户映射，供 GET /threads?userId=xxx 过滤
-        recordSessionUser(converted);
+        var rejection = recordSessionUser(converted, headerUserId);
+        if (rejection != null) {
+            return rejectionFor(converted, rejection);
+        }
 
         Object result = getJsonRpcHandler().handleRequest(converted, header, Map.of());
         if (result instanceof Flux<?> fluxResult) {
@@ -86,6 +93,38 @@ public class A2AController {
         return result;
     }
 
+    private Object rejectionFor(String convertedBody, Object rejection) {
+        if (convertedBody != null && "message/stream".equals(methodOf(convertedBody))) {
+            return Flux.just(convertToSseResponse(rejection));
+        }
+        return rejection;
+    }
+
+    private String methodOf(String body) {
+        try {
+            @SuppressWarnings("unchecked")
+            var req = MAPPER.readValue(body, Map.class);
+            return (String) req.get("method");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private ServerSentEvent<String> convertToSseResponse(Object response) {
+        try {
+            return ServerSentEvent.<String>builder()
+                .data(Utils.OBJECT_MAPPER.writeValueAsString(response))
+                .event("jsonrpc")
+                .build();
+        } catch (Exception e) {
+            log.error("Error converting response to SSE: {}", e.getMessage());
+            return ServerSentEvent.<String>builder()
+                .data("{\"error\":\"Internal conversion error\"}")
+                .event("error")
+                .build();
+        }
+    }
+
     /**
      * message/send 与 message/stream 兼容转换：
      * 1. message.kind = "message"（EventKind 多态类型标识，缺失则 -32602）
@@ -95,8 +134,9 @@ public class A2AController {
      * 5. 顶层 userId/sessionId → message.metadata + 5.1/5.2 msg 分组字段 skills/tools 归一
      *    （SDK 从 message.metadata 按 msg id 分组读取；取值源链见 5.1/5.2）
      * 6. 兼容旧格式 params.metadata.thread_id/userId → message.metadata.sessionId/userId
+     * 7. 网关 X-User-Id 头存在时强制覆盖全部 userId 通道（issue #474：请求体身份永不采信）
      */
-    private String normalizeMessageSendBody(String body) {
+    private String normalizeMessageSendBody(String body, String headerUserId) {
         try {
             @SuppressWarnings("unchecked")
             var req = MAPPER.readValue(body, Map.class);
@@ -173,12 +213,19 @@ public class A2AController {
                     meta.put("userId", uid.toString());
                 }
             }
+            if (headerUserId != null && !headerUserId.isBlank()) {
+                meta.put("userId", headerUserId);
+                params.put("userId", headerUserId);
+                if (legacyMeta != null) {
+                    legacyMeta.put("userId", headerUserId);
+                }
+            }
             message.put("metadata", meta);
 
             return MAPPER.writeValueAsString(req);
         } catch (Exception e) {
             log.warn("normalizeMessageSendBody failed, use original body: {}", e.getMessage());
-            return body;
+            return (headerUserId == null || headerUserId.isBlank()) ? body : null;
         }
     }
 
@@ -286,11 +333,15 @@ public class A2AController {
     }
 
     private ServerSentEvent<String> convertToSse(JSONRPCResponse<?> response) {
+        return convertToSseResponse(response, response.getId());
+    }
+
+    private ServerSentEvent<String> convertToSseResponse(Object response, Object eventId) {
         try {
             String data = Utils.OBJECT_MAPPER.writeValueAsString(response);
             var builder = ServerSentEvent.<String>builder().data(data).event("jsonrpc");
-            if (response.getId() != null) {
-                builder.id(response.getId().toString());
+            if (eventId != null) {
+                builder.id(eventId.toString());
             }
             return builder.build();
         } catch (Exception e) {
@@ -306,19 +357,21 @@ public class A2AController {
      * 从 A2A 请求体提取 userId / sessionId 并写入 session_user 表，
      * 使 GET /threads?userId=xxx 能正确过滤 A2A 发起的会话。
      * 提取顺序与 normalizeMessageSendBody 对齐：message.metadata → params 顶层。
+     *
+     * @return 归属校验拒绝时返回 JSON-RPC 错误响应；null = 放行（已落表或无需落表）
      */
     @SuppressWarnings("unchecked")
-    private void recordSessionUser(String body) {
+    private Object recordSessionUser(String body, String headerUserId) {
         try {
             var req = MAPPER.readValue(body, Map.class);
             var method = (String) req.get("method");
             if (!"message/send".equals(method) && !"message/stream".equals(method)) {
-                return;
+                return null;
             }
             var params = (Map<String, Object>) req.get("params");
-            if (params == null) return;
+            if (params == null) return null;
             var message = (Map<String, Object>) params.get("message");
-            if (message == null) return;
+            if (message == null) return null;
 
             // 从 message.metadata 中提取（normalizeMessageSendBody 已将顶层参数挪入 metadata）
             String userId = null;
@@ -332,14 +385,33 @@ public class A2AController {
             if (userId == null && params.get("userId") instanceof String uid && !uid.isBlank()) userId = uid;
             if (sessionId == null && params.get("sessionId") instanceof String sid && !sid.isBlank()) sessionId = sid;
 
-            if (sessionId != null && userId != null) {
-                sessionUserStore.upsert(
-                    io.agentmanager.framework.util.PathSafe.sanitize(sessionId),
-                    io.agentmanager.framework.util.PathSafe.sanitize(userId));
-                log.debug("[A2A] session_user upsert: sid={}, uid={}", sessionId, userId);
+            if (sessionId == null) {
+                return null;
             }
+            var sanitizedSid = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+            if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                    sessionUserStore, sanitizedSid, userId)) {
+                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, userId);
+                return sessionAccessDenied(req.get("id"));
+            }
+            if (userId != null) {
+                sessionUserStore.upsert(sanitizedSid, io.agentmanager.framework.util.PathSafe.sanitize(userId));
+                log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, userId);
+            }
+            return null;
         } catch (Exception e) {
             log.debug("[A2A] recordSessionUser skipped: {}", e.getMessage());
+            return null;
         }
+    }
+
+    private Object sessionAccessDenied(Object requestId) {
+        var response = new java.util.LinkedHashMap<String, Object>();
+        response.put("jsonrpc", "2.0");
+        response.put("id", requestId);
+        response.put("error", Map.of(
+            "code", SESSION_ACCESS_DENIED_CODE,
+            "message", "session not found or not owned by requester"));
+        return response;
     }
 }
