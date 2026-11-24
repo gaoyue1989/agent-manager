@@ -3,8 +3,9 @@
 //   - 顶部 StatCard：池总数 / warm available / allocated / Running 沙箱数（/summary 聚合）
 //   - 池卡片区：capacitySpec vs status 水位条（黄 = available < bufferMin 预热不足；
 //     红 = allocated 达 poolMax 池满）+ 调整容量（PUT 仅四值）/ 删除（确认对话，终止 warm Pod）/
-//     创建池（名称/镜像（预填平台 SANDBOX_IMAGE）/容量四值；评审 d7：recycleStrategy 非
-//     上游 POST /v1/pools 字段，契约不收，回收策略取 CRD 默认 Delete）
+//     创建池（名称/主镜像（预填平台 SANDBOX_IMAGE）/两个 initContainer 镜像/技能同步三键/
+//     容量四值；评审 d7：recycleStrategy 非上游 POST /v1/pools 字段，契约不收，回收策略
+//     取 CRD 默认 Delete）
 //   - 沙箱表格：id / state / 服务 / session / expiresAt 倒计时 / createdAt / 销毁（确认对话）
 //   - 5s 轮询 + 手动刷新；错误引导：未配置 503 → /settings、配置错误 502、429/5xx 透传
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -31,6 +32,16 @@ const LEVEL_TEXT_STYLE: Record<string, string> = {
 };
 
 const EMPTY_FORM: CapacityForm = { bufferMin: "", bufferMax: "", poolMin: "", poolMax: "" };
+// 创建池表单（镜像/技能同步字段留空 = 后端缺省：init 镜像内置 installer 版本、BASE_URL 按
+// 池名派生、INTERVAL 1m、STORE_DIR 不注入即守护缺省）
+interface CreateForm extends CapacityForm {
+  name: string; image: string; taskExecutorImage: string; execdImage: string;
+  skillsyncBaseUrl: string; skillsyncInterval: string; skillsyncStoreDir: string;
+}
+const EMPTY_CREATE_FORM: CreateForm = {
+  name: "", image: "", taskExecutorImage: "", execdImage: "",
+  skillsyncBaseUrl: "", skillsyncInterval: "", skillsyncStoreDir: "", ...EMPTY_FORM,
+};
 
 export default function AdminSandboxesPage() {
   const [summary, setSummary] = useState<SandboxSummary | null>(null);
@@ -48,8 +59,7 @@ export default function AdminSandboxesPage() {
   const [capErr, setCapErr] = useState("");
   // 创建池表单
   const [creating, setCreating] = useState(false);
-  const [createForm, setCreateForm] = useState<{ name: string; image: string } & CapacityForm>(
-    { name: "", image: "", ...EMPTY_FORM });
+  const [createForm, setCreateForm] = useState<CreateForm>(EMPTY_CREATE_FORM);
   const [createErr, setCreateErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -118,13 +128,21 @@ export default function AdminSandboxesPage() {
     if (verr) { setCreateErr(verr); return; }
     setBusy(true); setCreateErr("");
     try {
+      const skillsync = {
+        baseUrl: createForm.skillsyncBaseUrl.trim() || undefined,
+        interval: createForm.skillsyncInterval.trim() || undefined,
+        storeDir: createForm.skillsyncStoreDir.trim() || undefined,
+      };
       await api.admin.sandboxes.createPool({
         name: createForm.name.trim(),
         image: createForm.image.trim() || undefined,
+        taskExecutorImage: createForm.taskExecutorImage.trim() || undefined,
+        execdImage: createForm.execdImage.trim() || undefined,
         capacitySpec: capacityFromForm(createForm),
+        skillsync: skillsync.baseUrl || skillsync.interval || skillsync.storeDir ? skillsync : undefined,
       });
       setCreating(false);
-      setCreateForm({ name: "", image: defaultImage, ...EMPTY_FORM });
+      setCreateForm({ ...EMPTY_CREATE_FORM, image: defaultImage });
       await load();
     } catch (e: any) {
       setCreateErr(e?.message ?? String(e));
@@ -196,7 +214,7 @@ export default function AdminSandboxesPage() {
       {/* 池卡片区 */}
       <Card title="池" className="mb-4">
         <div className="mb-3 flex items-center gap-2">
-          <button onClick={() => { setCreating(true); setCreateForm({ name: "", image: defaultImage, ...EMPTY_FORM }); setCreateErr(""); }}
+          <button onClick={() => { setCreating(true); setCreateForm({ ...EMPTY_CREATE_FORM, image: defaultImage }); setCreateErr(""); }}
             data-testid="pool-create-open" disabled={busy}
             className="rounded-md bg-blue-600 px-3 py-1.5 text-[13px] text-white hover:bg-blue-700 disabled:opacity-50">
             创建池
@@ -212,6 +230,26 @@ export default function AdminSandboxesPage() {
               <label className="text-xs text-gray-600 md:col-span-2">镜像（缺省 = 平台默认 SANDBOX_IMAGE{defaultImage ? `：${defaultImage}` : "（未配置）"}）
                 <input data-testid="create-image" value={createForm.image} onChange={(e) => setCreateForm({ ...createForm, image: e.target.value })}
                   placeholder={defaultImage || "opensandbox/code-interpreter:v1.1.0"} className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">init 镜像 · task-executor（留空 = 内置缺省）
+                <input data-testid="create-task-executor-image" value={createForm.taskExecutorImage}
+                  onChange={(e) => setCreateForm({ ...createForm, taskExecutorImage: e.target.value })}
+                  placeholder="docker.io/opensandbox/task-executor:release-1.1.0" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">init 镜像 · execd（留空 = 内置缺省）
+                <input data-testid="create-execd-image" value={createForm.execdImage}
+                  onChange={(e) => setCreateForm({ ...createForm, execdImage: e.target.value })}
+                  placeholder="docker.io/opensandbox/execd:release-1.1.0" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">SKILLSYNC_BASE_URL（留空 = 按池名派生）
+                <input data-testid="create-skillsync-base-url" value={createForm.skillsyncBaseUrl}
+                  onChange={(e) => setCreateForm({ ...createForm, skillsyncBaseUrl: e.target.value })}
+                  placeholder="{服务}-svc 集群内地址（:8100）" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">SKILLSYNC_INTERVAL（留空 = 1m）
+                <input data-testid="create-skillsync-interval" value={createForm.skillsyncInterval}
+                  onChange={(e) => setCreateForm({ ...createForm, skillsyncInterval: e.target.value })}
+                  placeholder="1m" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">SKILLSYNC_STORE_DIR（留空 = 守护缺省）
+                <input data-testid="create-skillsync-store-dir" value={createForm.skillsyncStoreDir}
+                  onChange={(e) => setCreateForm({ ...createForm, skillsyncStoreDir: e.target.value })}
+                  placeholder="/skills-store" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
               {(["poolMin", "bufferMin", "bufferMax", "poolMax"] as const).map((k) => (
                 <label key={k} className="text-xs text-gray-600">{k}
                   <input data-testid={`create-${k}`} value={createForm[k]} onChange={(e) => setCreateForm({ ...createForm, [k]: e.target.value })}
@@ -219,7 +257,7 @@ export default function AdminSandboxesPage() {
               ))}
             </div>
             {createErr && <p className="mt-2 text-xs text-red-600" data-testid="create-error">{createErr}</p>}
-            <p className="mt-1 text-[11px] text-gray-400">Pod 模板由平台预设（官方 sample 形状）；容量链 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax</p>
+            <p className="mt-1 text-[11px] text-gray-400">Pod 模板由平台预设（官方 sample 形状）；容量链 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax；SKILLSYNC_STORE_DIR 改动须与平台配置 SANDBOX_SKILLS_SHARED_STORE 同值</p>
             <div className="mt-2 flex gap-2">
               <button onClick={submitCreate} disabled={busy} data-testid="create-submit"
                 className="rounded bg-blue-600 px-3 py-1 text-[13px] text-white hover:bg-blue-700 disabled:opacity-50">创建</button>
