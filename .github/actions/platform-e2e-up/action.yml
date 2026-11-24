@@ -52,15 +52,11 @@ runs:
         set -euo pipefail
         BUILD_DIR=$(mktemp -d)
         echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
-        build() {
-          local name=$1; shift
-          echo "$name" >> "$BUILD_DIR/names"
-          ( "$@" > "$BUILD_DIR/$name.log" 2>&1; echo $? > "$BUILD_DIR/$name.rc" ) >/dev/null 2>&1 </dev/null &
-        }
-        build backend docker build --build-arg GOPROXY=https://proxy.golang.org,direct -t platform-backend:ci backend
-        build frontend docker build -t platform-frontend:ci frontend
-        build mock-llm docker build -t mock-llm:ci e2e/ci/mock-llm
-        build mock-sandbox docker build -t mock-sandbox:ci e2e/ci/mock-sandbox
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        bg images backend docker build --build-arg GOPROXY=https://proxy.golang.org,direct -t platform-backend:ci backend
+        bg images frontend docker build -t platform-frontend:ci frontend
+        bg images mock-llm docker build -t mock-llm:ci e2e/ci/mock-llm
+        bg images mock-sandbox docker build -t mock-sandbox:ci e2e/ci/mock-sandbox
 
     - name: 创建 kind 集群
       uses: helm/kind-action@v1
@@ -75,15 +71,12 @@ runs:
       run: |
         kubectl kustomize --load-restrictor=LoadRestrictionsNone manifests/ci-infra | kubectl apply -f -
 
-    - name: 安装 ingress-nginx（kind provider）并暴露 NodePort 30080/30443
+    - name: 后台安装 ingress-nginx（kind provider）
       shell: bash
       run: |
         set -euo pipefail
-        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/kind/deploy.yaml
-        kubectl -n ingress-nginx wait --for=condition=ready pod \
-          -l app.kubernetes.io/component=controller --timeout=240s
-        # provider 清单默认 hostPort 80/443；仓库脚本统一用 localhost:30080
-        kubectl -n ingress-nginx patch svc ingress-nginx-controller --type merge -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":80,"targetPort":"http","nodePort":30080},{"name":"https","port":443,"targetPort":"https","nodePort":30443}]}}'
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        bg cluster ingress bash "$GITHUB_ACTION_PATH/ingress-nginx.sh"
 
     - name: 解析业务镜像（优先拉取真实 agent-framework，超时/失败回落 mock）
       id: agent-image
@@ -146,13 +139,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        while read -r name; do
-          while [ ! -f "$BUILD_DIR/$name.rc" ]; do sleep 2; done
-          cat "$BUILD_DIR/$name.log"
-          if [ "$(cat "$BUILD_DIR/$name.rc")" != 0 ]; then
-            echo "::error::镜像构建失败：$name"; exit 1
-          fi
-        done < "$BUILD_DIR/names"
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        wait_group images
 
     - name: 导入本地镜像到 kind
       shell: bash
@@ -236,3 +224,10 @@ runs:
         LLM_MODEL=e2e-mock
         LLM_ENDPOINT=http://mock-llm.agent-platform.svc.cluster.local:8080/v1
         EOF
+
+    - name: 等待 ingress-nginx 就绪
+      shell: bash
+      run: |
+        set -euo pipefail
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        wait_group cluster
