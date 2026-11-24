@@ -150,6 +150,7 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
 
         @Override
         public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data, boolean last) {
+            webSocket.request(1);
             byte[] chunk = new byte[data.remaining()];
             data.get(chunk);
             synchronized (binaryFragment) {
@@ -165,6 +166,7 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
 
         @Override
         public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+            webSocket.request(1);
             synchronized (textFragment) {
                 textFragment.append(data);
                 if (last) {
@@ -233,7 +235,8 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
                     }
                 }
             } catch (Exception e) {
-                log.debug("[browser-view] downstream send failed: {}", e.getMessage());
+                log.warn("[browser-view] downstream send failed (sid={}): {}",
+                    downstream.getId(), e.getMessage());
             }
         }
 
