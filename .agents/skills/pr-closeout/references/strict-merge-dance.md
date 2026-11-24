@@ -5,7 +5,7 @@
 ## 轮转节奏
 
 - strict 模式：任何 master 合并都使其余 open PR 变 `BEHIND`，无法绕过，只能逐轮「`gh pr update-branch` → 等 CI → 合并」。
-- 一轮 CI 耗时：agent-framework PR（mvn + E2E 矩阵）约 12 分钟；前端/后端 PR 约 5-10 分钟；`E2E 平台（kind + 控制台全功能）` 约 20-40 分钟。修一个 PR 的等待窗口足够做下一个 PR 的 CR。
+- 一轮 CI 耗时：agent-framework PR（mvn + E2E 矩阵）约 12 分钟；前端/后端 PR 约 5-10 分钟；`E2E 平台（kind + 控制台全功能）` 约 6-7 分钟（2026-11-24 起五个分片并行，此前 20-40 分钟）。修一个 PR 的等待窗口足够做下一个 PR 的 CR。
 
 ## 状态语义
 
