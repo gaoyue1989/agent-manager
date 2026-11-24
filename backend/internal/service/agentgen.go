@@ -667,16 +667,29 @@ func (c *Core) validateModelConnections(workspaceID uint, refs []ModelConnRef) (
 	return def, conns, nil
 }
 
-// buildPublishEnv 默认连接 → LLM_* env + SecretKeys（M3 §2.5）；
-// bearer 连接器 token → MCP_TOKEN_<NAME>；集成认证头 → AGENT_REMOTE_HEADERS_JSON。
+// buildPublishEnv 创建态发布 env（CreateAgent/CreateAgentImport）：平台默认配置全量预填
+// + 表单管辖键覆盖（M3 §2.5）。编辑链路不走此函数——UpdateAgent 用 buildFormEnv +
+// platformDefaultEnv 补位语义保用户显式值优先（issue #478）。
 func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, form *AgentForm) (map[string]string, []string, error) {
+	formEnv, secretKeys, err := c.buildFormEnv(workspaceID, def, form)
+	if err != nil {
+		return nil, nil, err
+	}
+	env := c.platformDefaultEnv(form)
+	for k, v := range formEnv {
+		env[k] = v
+	}
+	return env, secretKeys, nil
+}
+
+// platformDefaultEnv 平台默认配置预填（与发布向导「已预填平台默认配置」同语义，R3）：
+// checkpoint/redis 等运行必需 env 自动带入。沙箱分组键（SANDBOX_*）只作用于开启沙箱的
+// Agent（issue #402）：关闭/未声明时不预填——否则 env 落 CM/Pod，控制台编辑页/沙箱总览
+// 误当作该 Agent 的显式沙箱配置固化展示，且与 m10 B3「关闭时无 SANDBOX_*」契约矛盾；
+// 开启时平台默认补空语义保留（表单值优先）。编辑链路仅作缺省补位（UpdateAgent，
+// issue #478：用户显式值优先，平台默认只填既有 env 尚不存在的键）。
+func (c *Core) platformDefaultEnv(form *AgentForm) map[string]string {
 	env := map[string]string{}
-	var secretKeys []string
-	// 平台默认配置预填（与发布向导「已预填平台默认配置」同语义，R3）：checkpoint/redis 等
-	// 运行必需 env 自动带入；下方模型连接 / MCP token 注入覆盖同名键（表单优先）。
-	// 沙箱分组键（SANDBOX_*）只作用于开启沙箱的 Agent（issue #402）：关闭/未声明时不预填——
-	// 否则 env 落 CM/Pod，控制台编辑页/沙箱总览误当作该 Agent 的显式沙箱配置固化展示，且
-	// 与 m10 B3「关闭时无 SANDBOX_*」契约矛盾；开启时平台默认补空语义保留（表单值优先）
 	sandboxOn := form.Sandbox != nil && form.Sandbox.Enabled != nil && *form.Sandbox.Enabled
 	if defaults, err := c.GetPlatformDefaults(); err == nil {
 		for k, v := range defaults {
@@ -689,6 +702,15 @@ func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, for
 			env[k] = v
 		}
 	}
+	return env
+}
+
+// buildFormEnv 表单显式管辖键：默认连接 → LLM_* env + SecretKeys（M3 §2.5）；
+// bearer 连接器 token → MCP_TOKEN_<NAME>；集成认证头 → AGENT_REMOTE_HEADERS_JSON；
+// 沙箱表单资源项；记忆供给键。UpdateAgent 仅以这些键覆盖既有服务 env。
+func (c *Core) buildFormEnv(workspaceID uint, def *store.ModelConnection, form *AgentForm) (map[string]string, []string, error) {
+	env := map[string]string{}
+	var secretKeys []string
 	if def != nil {
 		env["LLM_BASE_URL"] = def.BaseURL
 		env["LLM_MODEL"] = def.ModelID
@@ -1170,15 +1192,25 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 		}
 	}
 	// 模型链路：默认连接 env 更新（LLM_* 全量覆盖语义）+ 勾选集增量登记
-	env, secretKeys, err := c.buildPublishEnv(workspaceID, def, form)
+	formEnv, secretKeys, err := c.buildFormEnv(workspaceID, def, form)
 	if err != nil {
 		return nil, nil, err
 	}
-	oldPlain, _, err := c.partitionServiceEnv(svc)
+	oldPlain, oldSecret, err := c.partitionServiceEnv(svc)
 	if err != nil {
 		return nil, nil, err
 	}
-	for k, v := range env { // 仅覆盖表单管的键，其余用户 env sticky
+	// 平台默认仅缺省补位（issue #478）：用户显式自定义（plain 或 secret 份）零影响，
+	// 否则 buildPublishEnv 预填的共享默认会覆盖用户值，且 Republish 出口 applyIsolationEnv
+	// 见值等于平台默认把 checkpoint 再派生——服务静默切库；表单管辖键照常覆盖，其余 sticky
+	for k, v := range c.platformDefaultEnv(form) {
+		_, inPlain := oldPlain[k]
+		_, inSecret := oldSecret[k]
+		if !inPlain && !inSecret {
+			oldPlain[k] = v
+		}
+	}
+	for k, v := range formEnv {
 		oldPlain[k] = v
 	}
 	if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {
