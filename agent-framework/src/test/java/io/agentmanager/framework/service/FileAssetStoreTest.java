@@ -164,6 +164,16 @@ class FileAssetStoreTest {
     }
 
     @Test
+    void resetInjectedToPendingShouldReturnNegativeOneWhenDbFails() throws Exception {
+        // issue #497：异常路径返回 -1 与「成功且 0 行」区分——调用方（middleware 换代记账）
+        // 凭 -1 识别 DB 更新未确证成功，不得写入 7 天 ResetMark（否则重建沙箱后上传件永久不再注入）
+        var conn = dataSource.getConnection();
+        when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("transient DB timeout"));
+
+        assertEquals(-1, store.resetInjectedToPending("s1"));
+    }
+
+    @Test
     void updateWorkspacePathShouldPersist() throws Exception {
         var conn = dataSource.getConnection();
         var ps = mock(PreparedStatement.class);

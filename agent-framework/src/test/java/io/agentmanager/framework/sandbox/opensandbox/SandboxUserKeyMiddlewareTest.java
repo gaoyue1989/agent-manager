@@ -304,6 +304,38 @@ class SandboxUserKeyMiddlewareTest {
     }
 
     @Test
+    void shouldNotMarkResetWhenDbUpdateFailsAndRetryNextTurn() {
+        // issue #497：reset 的 DB 更新瞬时失败（返回 -1）= 重置未真正执行——此时写入
+        // 7 天 ResetMarkStore 会把「该代已 reset」错误记账，后续所有 turn/副本凭命中跳过
+        // reset，历史上传件在重建容器内永久缺失。失败 turn 不记账（本代保持未 reset，
+        // 下 turn 重试），DB 恢复后的 turn 才完成 reset 并记账。
+        var spec = new OpenSandboxFilesystemSpec();
+        var shared = mock(ResetMarkStore.class);
+        when(shared.marked(anyString(), anyString())).thenReturn(false);
+        spec.resetMarkStore(shared);
+        var sandbox = mockSandbox("sbx-gen-11");
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        when(store.resetInjectedToPending("front-sid")).thenReturn(-1).thenReturn(1);
+        spec.fileAssetStore(store);
+        var sessionStore = mock(SessionUserStore.class);
+        when(sessionStore.findUserIdBySession(anyString())).thenReturn(null);
+        when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
+
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+
+        verify(store, times(1)).resetInjectedToPending("front-sid");
+        verify(shared, never()).mark(anyString(), anyString());
+        verify(sandbox, never()).invalidatePendingUploadMemo();
+
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+
+        verify(store, times(2)).resetInjectedToPending("front-sid");
+        verify(shared).mark("front-sid", "sbx-gen-11");
+        verify(sandbox).invalidatePendingUploadMemo();
+    }
+
+    @Test
     void shouldBindOnlyItsOwnTurnSandboxUnderConcurrency() {
         // 并发串沙箱回归：两个并发 turn 各自 ctx 持有自己的沙箱，onAgent 只重绑本 turn 的沙箱
         // （历史上 spec.latestSandbox 进程级指针会被其他用户 create/resume 覆盖 → 误绑他人沙箱）
