@@ -38,6 +38,9 @@ public class ScopedFingerprintStore {
     /** 指纹记录 TTL：沙箱代生命周期上界（Server TTL 默认 30min~60min；7 天远超且防泄漏积累） */
     private static final Duration TTL = Duration.ofDays(7);
 
+    /** prune 墓碑记账值（issue #481）：模式段恒不匹配任何真实投放模式——槽值非空使 DEL 语义的「缺失=fail-open 未知」通道不复存在 */
+    private static final String PRUNED_TOMBSTONE = "__pruned__|";
+
     /** null 实例（无 Redis / 装配关闭时）——所有操作 no-op，行为回到纯 Pod 级 */
     public static final ScopedFingerprintStore NOOP = new ScopedFingerprintStore(null);
 
@@ -103,21 +106,29 @@ public class ScopedFingerprintStore {
     }
 
     /**
-     * 清除某沙箱代某 scope 的共享层记账（同 Pod prune 其它 scope 后调用，issue #416）：
-     * 单槽语义下仅当槽指向该 scope 时 DEL——其他 scope 无共享记账可清；失败仅告警。
+     * 广播 prune 后的现役 scope（issue #481）：单槽原子覆写为 {@code keepScope|__pruned__|}
+     * 非空墓碑。执行 prune 的副本可能从未收敛过被删 scope——本地记账遍历（issue #416 路径）
+     * 够不到他副本写入的槽；且 DEL 的缺失态被读取侧 fail-open 与「Redis 不可达」混同，其他
+     * 副本的陈旧本地记录永失效路径。墓碑的现役 scope 段 = keepScope，经 {@code slotScope}
+     * 权威否定所有副本的陈旧记录；keepScope 自身记账值为墓碑（模式段不匹配 farm），端点恢复
+     * 后必须重收敛。槽已指向 keepScope 的正常记账时保留——收敛周期内 record 先行写槽（容器
+     * 内 pruneCmd 保留 keepScope 目录，记账与实态一致），覆写墓碑即击穿稳态短路。失败仅告警
+     * （漏广播的后果=他副本多走一次慢路径，与无共享层等价）。
      */
-    public void remove(String sandboxId, String scope) {
-        if (facade == null || sandboxId == null || sandboxId.isBlank() || scope == null
-                || scope.isBlank()) {
+    public void markPruned(String sandboxId, String keepScope) {
+        if (facade == null || sandboxId == null || sandboxId.isBlank() || keepScope == null
+                || keepScope.isBlank()) {
             return;
         }
         try {
+            String tombstone = keepScope + "|" + PRUNED_TOMBSTONE;
             String slot = slot(sandboxId);
-            if (slot != null && slot.startsWith(scope + "|")) {
-                facade.sync().del(key(sandboxId));
+            if (slot != null && !slot.equals(tombstone) && slot.startsWith(keepScope + "|")) {
+                return;
             }
+            facade.sync().setex(key(sandboxId), TTL.toSeconds(), tombstone);
         } catch (RedisException | IllegalStateException e) {
-            log.warn("[scoped-fp-store] remove failed ({}|{}): {}", sandboxId, scope, e.getMessage());
+            log.warn("[scoped-fp-store] markPruned failed ({}|{}): {}", sandboxId, keepScope, e.getMessage());
         }
     }
 
