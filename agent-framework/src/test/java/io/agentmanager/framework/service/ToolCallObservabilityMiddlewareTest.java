@@ -2,6 +2,7 @@ package io.agentmanager.framework.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -365,5 +366,61 @@ class ToolCallObservabilityMiddlewareTest {
 
         assertEquals(1.0, registry.find("oaf.tool.calls")
             .tag("tool", "hallucinated_tool_0").tag("result", "error").counter().count());
+    }
+
+    // ===== issue #485：名单供给必须在每次计数时实时求值（HarnessAgentFactory 以
+    // AtomicReference 在 build() 后切换到 agent.getToolkit()——内置工具与 watchdog
+    // 补偿注册的 MCP 工具只在运行期 toolkit 上，快照式名单会让它们全部误归 __unknown__）=====
+
+    /**
+     * 名单供给懒取语义锚点：同一中间件实例在名单切换前后，归名必须跟随最新名单。
+     * 切换前 read_file 不在名单（build 前 toolkit 无内置工具）→ __unknown__；
+     * 切换后（activeToolkit.set(agent.getToolkit())）→ 实名。名单供给若被实现成
+     * 构造期快照，本测试即红。
+     */
+    @Test
+    void shouldFollowLatestRegisteredNamesOnSupplierSwitch() {
+        var names = new java.util.concurrent.atomic.AtomicReference<>(Set.of("weather"));
+        var middleware = new ToolCallObservabilityMiddleware(
+            registry, auditStore, resolver, "my-agent", () -> names.get());
+
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "read_file"))),
+                i -> stream(new ToolResultEndEvent("r1", "call-1", "read_file",
+                    ToolResultState.SUCCESS)))
+            .blockLast();
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "__unknown__").tag("result", "success").counter().count());
+
+        names.set(Set.of("weather", "read_file"));
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-2", "read_file"))),
+                i -> stream(new ToolResultEndEvent("r1", "call-2", "read_file",
+                    ToolResultState.SUCCESS)))
+            .blockLast();
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "read_file").tag("result", "success").counter().count(),
+            "名单切换后同内置工具必须归实名（build 后 toolkit 名单生效）");
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "__unknown__").tag("result", "success").counter().count(),
+            "切换前已落 __unknown__ 序列保持不变（不追溯改写历史计数）");
+    }
+
+    /** 名单含内置工具名时内置工具按实名计数（封顶语义不变：名单外仍归 __unknown__） */
+    @Test
+    void shouldKeepHarnessBuiltinToolRealNameWhenRegistered() {
+        var middleware = middlewareWithRegisteredTools("read_file", "execute", "weather");
+
+        middleware.onActing(mock(Agent.class), ctx(),
+                new ActingInput(List.of(toolCall("call-1", "read_file"))),
+                i -> stream(new ToolResultEndEvent("r1", "call-1", "read_file",
+                    ToolResultState.SUCCESS)))
+            .blockLast();
+
+        assertEquals(1.0, registry.find("oaf.tool.calls")
+            .tag("tool", "read_file").tag("result", "success").counter().count());
+        assertNull(registry.find("oaf.tool.calls")
+                .tag("tool", "__unknown__").tag("result", "success").counter(),
+            "内置工具实名命中名单，不得再落 __unknown__ 序列");
     }
 }

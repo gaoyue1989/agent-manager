@@ -402,6 +402,83 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
                 + " obs=" + obsIdx + "）");
     }
 
+    /**
+     * 基数封顶名单接线回归锚点（issue #485）：观测中间件的 registeredToolNames 供给在
+     * agent build 完成后必须解析出运行期 toolkit 的真实名单（含 Harness 内置工具）。
+     * HarnessAgent.Builder.build() 首步 toolkit.copy()，23 个内置工具只注册进拷贝后的
+     * agent.getToolkit()，build 前实例永远不含它们——供给若绑在 build 前 toolkit 上，
+     * read_file/execute 等内置工具调用会被全部折叠进 tool="__unknown__"（封顶把已知
+     * 内置工具也误杀，ByTool 面板对内置工具完全失真）。
+     */
+    @Test
+    void toolObservabilityRegisteredNamesMustCoverBuiltinToolsAfterBuild() throws Exception {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("tool-obs-names"));
+        var mcp = mock(McpToolRegistrar.class);
+        when(mcp.collectPermissionRules(oaf))
+            .thenReturn(new PermissionRuleResult(
+                io.agentscope.core.permission.PermissionMode.DEFAULT,
+                java.util.Map.of(), java.util.Set.of()));
+
+        var store = mock(DistributedStore.class);
+        when(store.baseStore())
+            .thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        when(store.agentStateStore())
+            .thenReturn(mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var props = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
+            new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
+            new AgentManagerProperties.CheckpointConfig(
+                "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p", "agent_manager_test"),
+            java.nio.file.Files.createTempDirectory("tool-obs-names-config").toString(),
+            "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
+            new AgentManagerProperties.FileConfig(true, 20, 20,
+                "image/*,text/plain,text/markdown,text/csv,application/pdf",
+                5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+            AgentManagerProperties.HarnessConfig.defaults(),
+            AgentManagerProperties.AgentProtocolSettings.defaults());
+
+        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(),
+            mock(RemoteConfirmBridge.class), null, null,
+            mock(SessionToolScopeService.class));
+        var agent = factory.build(oaf, store, new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+
+        var obs = middlewaresOf(agent).stream()
+            .filter(ToolCallObservabilityMiddleware.class::isInstance)
+            .map(ToolCallObservabilityMiddleware.class::cast)
+            .findFirst().orElseThrow();
+        Field namesField = ToolCallObservabilityMiddleware.class.getDeclaredField("registeredToolNames");
+        namesField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var supplier = (java.util.function.Supplier<java.util.Set<String>>) namesField.get(obs);
+
+        var runtimeNames = agent.getToolkit().getToolNames();
+        for (String builtin : List.of("read_file", "write_file", "edit_file", "list_files",
+                "web_search", "agent_spawn", "load_skill_through_path")) {
+            assertTrue(runtimeNames.contains(builtin),
+                "前置校验：SDK 内置工具 " + builtin + " 应在运行期 toolkit（SDK 升级漂移时同步更新本清单）");
+        }
+
+        var supplied = supplier.get();
+        assertNotNull(supplied, "registeredToolNames 供给必须可用");
+        assertTrue(supplied.containsAll(runtimeNames),
+            "build 后名单供给必须覆盖运行期 toolkit 全部工具（含内置）；缺失: "
+                + new java.util.TreeSet<>(new java.util.HashSet<>(runtimeNames)).stream()
+                    .filter(n -> !supplied.contains(n)).toList());
+    }
+
+
     @Test
     void skillFilterMiddlewareMustComeBeforeDisabledMiddleware() throws Exception {
         // session-skill-list-design §4 顺序约束：本轮白名单先立，禁用中间件再以
