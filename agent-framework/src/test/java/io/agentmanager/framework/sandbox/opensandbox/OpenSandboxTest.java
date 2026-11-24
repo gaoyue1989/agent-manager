@@ -2195,7 +2195,7 @@ class OpenSandboxTest {
     @Test
     void farmDaemonAliveButSyncFailedShouldDegradeAsEndpointDown() throws Exception {
         // S15：store 目录由守护启动时创建——目录存在但无 CURRENT = 守护活着但同步失败，
-        // 第一根因即守护→端点链路不可达（token 漂移 401 / 端点关闭 404 / egress 断网），
+        // 第一根因即守护→端点链路不可达（egress 断网），
         // 归 degraded_endpoint_down（runbook 信号直指端点链路），不得归 store_missing
         var host = java.nio.file.Files.createTempDirectory("farm-dead-endpoint");
         writeHostSkill(host, "sess-A", "demo-a");

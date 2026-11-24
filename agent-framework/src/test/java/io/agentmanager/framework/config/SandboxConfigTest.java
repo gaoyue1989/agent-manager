@@ -55,10 +55,9 @@ class SandboxConfigTest {
             Duration.ofMillis(100),
             true, true, 900,
             true, true, true, true, 500, 30,
-            "tok", "/tmp/skills-bundle-cache", "/skills-store",
+            "/tmp/skills-bundle-cache", "/skills-store",
             new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
         assertEquals("/skills-store", on.skillsSharedStore());
-        assertEquals("tok", on.skillsSyncToken());
         assertEquals("/tmp/skills-bundle-cache", on.skillsBundleCacheDir());
     }
 

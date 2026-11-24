@@ -74,14 +74,6 @@ var template = []Group{
 			{EnvKey: "SANDBOX_POOL_REF", Label: "服务端池名", Placeholder: "空 = 不用服务端池（create 不带 poolRef）"},
 			{EnvKey: "SANDBOX_USER_QUOTA", Label: "单用户配额", Placeholder: "5（0 = 不限，仅关配额）"},
 			{EnvKey: "SANDBOX_RENEW_INTERVAL_SECONDS", Label: "在途续期间隔(秒)", Placeholder: "60"},
-			// SKILLSYNC_TOKEN（skills-syncd 设计 §5.2/§9.1，对齐 protocol 组敏感键先例）：
-			// 进敏感集是 per-service token Secret 的前置——发布/编辑链路据此把该键路由进
-			// 服务 Secret（publish.go applyServiceEnvObjects 同值 Ensure
-			// {k8sName}-skillsync-token 于池 workload ns（k8s.SandboxWorkloadNamespace，消费方），
-			// 池模板 secretKeyRef 引用）；漏路由则 token 明文落 CM 且 Secret 不产出，
-			// 池 Pod secretKeyRef 解析失败卡 CreateContainerConfigError。
-			{EnvKey: "SKILLSYNC_TOKEN", Label: "技能同步 Token", Sensitive: true,
-				Placeholder: "池化沙箱 skills-syncd 拉取鉴权（空 = 内部端点关闭 404，撤销 = 池 ns token Secret 同步删除）"},
 			// SANDBOX_SKILLS_SHARED_STORE（issue #392）：软链农场总闸，框架缺省 /skills-store
 			// （与守护 SKILLSYNC_STORE_DIR 缺省对齐）。入模板仅为表单预填/显式关闸入口——非敏感、
 			// 不经运行时注入（R3 语义）。关闸值只能填 off（框架哨兵）：平台 env 写路径空串=删除
