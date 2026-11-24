@@ -159,9 +159,40 @@ func newVikingTestCore(t *testing.T, h http.HandlerFunc) (*Core, string) {
 	t.Cleanup(cleanup)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	core.Cfg.OpenVikingEnabled = true
-	core.Viking = NewVikingAdmin(srv.URL, "root-key-test")
+	core.Viking = NewVikingAdmin(true, srv.URL, "root-key-test")
 	return core, srv.URL
+}
+
+// 总开关门控（issue #414）：OPENVIKING_ENABLED=false 时即使 URL/RootKey 齐备也不装配
+// Admin 客户端——装配即默认 provider=openviking，总开关失效 = 紧急回退/灰度手段失效。
+func TestNewVikingAdminEnabledGate(t *testing.T) {
+	if v := NewVikingAdmin(false, "http://127.0.0.1:1", "root-key"); v != nil {
+		t.Fatalf("OPENVIKING_ENABLED=false must not assemble VikingAdmin, got %v", v)
+	}
+	if v := NewVikingAdmin(true, "", "root-key"); v != nil {
+		t.Fatalf("enabled but missing URL must stay nil")
+	}
+	if v := NewVikingAdmin(true, "http://127.0.0.1:1", ""); v != nil {
+		t.Fatalf("enabled but missing root key must stay nil")
+	}
+	if v := NewVikingAdmin(true, "http://127.0.0.1:1", "root-key"); v == nil {
+		t.Fatalf("enabled with full config must assemble")
+	}
+
+	// 行为面复现（repro B-02）：开关关闭后发布链路零接触——不建户、不改 provider
+	fake := &fakeOpenViking{}
+	core, _ := newVikingTestCore(t, fake.handler())
+	core.Viking = NewVikingAdmin(false, "http://127.0.0.1:1", "root-key") // 开关关闭覆盖
+	plain, secret := map[string]string{}, map[string]string{}
+	if err := core.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
+		t.Fatalf("disabled platform publish must be zero touch: %v", err)
+	}
+	if len(plain) != 0 || len(secret) != 0 {
+		t.Fatalf("env mutated under disabled switch: %v %v", plain, secret)
+	}
+	if fake.createCount() != 0 {
+		t.Fatalf("disabled platform must not provision OpenViking, creates=%d", fake.createCount())
+	}
 }
 
 // applyOpenVikingEnv 行为矩阵（Publish/UpdateEnv/Republish 共用同一函数）。
@@ -186,7 +217,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 	})
 
 	t.Run("explicit local opt-out", func(t *testing.T) {
-		c := &Core{Viking: NewVikingAdmin("http://unused", "k")} // 退出路径不触网
+		c := &Core{Viking: NewVikingAdmin(true, "http://unused", "k")} // 退出路径不触网
 		plain := map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}
 		secret := map[string]string{}
 		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, secret); err != nil {
@@ -198,7 +229,7 @@ func TestApplyOpenVikingEnvMatrix(t *testing.T) {
 	})
 
 	t.Run("invalid provider rejected", func(t *testing.T) {
-		c := &Core{Viking: NewVikingAdmin("http://unused", "k")}
+		c := &Core{Viking: NewVikingAdmin(true, "http://unused", "k")}
 		plain := map[string]string{AgentMemoryProviderEnv: "redis"}
 		if err := c.applyOpenVikingEnv("oaf-svc", nil, plain, map[string]string{}); err == nil {
 			t.Fatalf("invalid provider must fail")

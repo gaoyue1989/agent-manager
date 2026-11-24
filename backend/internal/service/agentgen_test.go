@@ -1098,7 +1098,6 @@ func TestConsoleSandboxOverview(t *testing.T) {
 func TestAgentMemoryFormLifecycle(t *testing.T) {
 	core, _, cleanup := newTestCore(t)
 	defer cleanup()
-	core.Cfg.OpenVikingEnabled = true
 	ovSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v1/admin/accounts":
@@ -1112,7 +1111,7 @@ func TestAgentMemoryFormLifecycle(t *testing.T) {
 		}
 	}))
 	defer ovSrv.Close()
-	core.Viking = NewVikingAdmin(ovSrv.URL, "root")
+	core.Viking = NewVikingAdmin(true, ovSrv.URL, "root")
 	ws := seedWs(t, core, "ws-mem", "记忆空间")
 	if err := core.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: 1, Role: "owner"}).Error; err != nil {
 		t.Fatal(err)
