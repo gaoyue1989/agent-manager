@@ -12,6 +12,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -56,10 +57,16 @@ class VikingMemoryClientTest {
     private final AtomicInteger createSessionCalls = new AtomicInteger();
     private final AtomicInteger appendMessageCalls = new AtomicInteger();
     private volatile boolean failCreateSession = false;
+    private volatile boolean hangRegister = false;
 
     @BeforeEach
     void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
+            var t = new Thread(r);
+            t.setDaemon(true);
+            return t;
+        }));
         server.createContext("/api/v1/search/search", this::handleSearch);
         server.createContext("/api/v1/admin/accounts", this::handleRegister);
         server.createContext("/api/v1/sessions", this::handleSessions);
@@ -112,6 +119,13 @@ class VikingMemoryClientTest {
     private void handleRegister(HttpExchange ex) throws IOException {
         if (ex.getRequestURI().getPath().endsWith("/users")) {
             registerCalls.incrementAndGet();
+            if (hangRegister) {
+                try {
+                    Thread.sleep(6000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             unregisteredUser = false; // 开户后同 key 可用
             send(ex, 200, "{\"status\":\"ok\",\"result\":{\"user_key\":\"x\"}}");
             return;
@@ -204,5 +218,55 @@ class VikingMemoryClientTest {
         assertEquals(1, createSessionCalls.get(),
             "createSession 失败必须负缓存，冷却期内不得重复外呼");
         assertEquals(0, appendMessageCalls.get());
+    }
+
+    /**
+     * issue #496：ensureUser 必须有请求读超时——search 快速 401 后开户端点挂死时，
+     * searchContext 必须在 searchTimeoutMs + 开户超时上限内有界降级返回 null，
+     * 不得无限期挂死首推理线程与单线程 commitWorker。
+     */
+    @Test
+    void ensureUserHangMustDegradeWithinRequestTimeoutBound() {
+        hangRegister = true;
+        var client = new VikingMemoryClient(config());
+        long start = System.nanoTime();
+        var text = client.searchContext("u-1001", "用户的回复偏好");
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        assertNull(text);
+        assertTrue(elapsedMs < 4500,
+            "ensureUser 挂死时 searchContext 必须有界降级（开户超时上限），took " + elapsedMs + "ms");
+    }
+
+    /** issue #496：OV session 映射缓存有界（LRU 淘汰，丢失仅导致重建 session，语义无损） */
+    @Test
+    void ovSessionCacheMustStayBounded() throws Exception {
+        unregisteredUser = false;
+        var client = new VikingMemoryClient(config());
+        concurrentlyAppend(client, 1200, "slot:ov-");
+        assertTrue(client.ovSessionIds.size() <= VikingMemoryClient.SESSION_CACHE_CAPACITY,
+            "ovSessionIds 无界增长：实际 " + client.ovSessionIds.size());
+    }
+
+    /** issue #496：createSession 失败负缓存同样有界 */
+    @Test
+    void failedSessionCacheMustStayBounded() throws Exception {
+        unregisteredUser = false;
+        failCreateSession = true;
+        var client = new VikingMemoryClient(config());
+        concurrentlyAppend(client, 1200, "slot:fail-");
+        assertTrue(client.failedSessionAt.size() <= VikingMemoryClient.SESSION_CACHE_CAPACITY,
+            "failedSessionAt 无界增长：实际 " + client.failedSessionAt.size());
+    }
+
+    private static void concurrentlyAppend(VikingMemoryClient client, int total, String slotPrefix)
+            throws Exception {
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(16);
+        for (int i = 0; i < total; i++) {
+            final int idx = i;
+            pool.submit(() -> client.appendSessionMessage("u-1001", slotPrefix + idx, "user", "内容" + idx));
+        }
+        pool.shutdown();
+        assertTrue(pool.awaitTermination(60, TimeUnit.SECONDS),
+            "并发 append 必须在时限内全部完成（fail-soft，不得挂死）");
     }
 }
