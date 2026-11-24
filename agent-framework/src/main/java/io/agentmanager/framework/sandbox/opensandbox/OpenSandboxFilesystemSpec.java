@@ -204,9 +204,10 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     /**
      * 同 Pod prune 其它 scope 后的记账清理（issue #416）：容器内 pruneCmd 已删除非现役 scope
      * 目录，Pod 级/共享层的对应记账若保留，切回时稳态判定（记账==指纹 && 现役==scope）恒 true
-     * → 软链缺失被稳态短路锁死。清 Pod 级同 sandboxId 的其它 scope 记账、现役 scope 槽（指向
-     * 非 keepScope 时）与共享层单槽；跨副本残余由 {@link #scopedSkillCacheFingerprint} 的单槽
-     * 交叉核验兜底（issue #393）。
+     * → 软链缺失被稳态短路锁死。清 Pod 级同 sandboxId 的其它 scope 记账与现役 scope 记录；
+     * 共享层单槽经 {@link ScopedFingerprintStore#markPruned} 覆写为 keepScope 墓碑广播（issue
+     * #481：执行副本可能从未收敛过被删 scope，本地 stale 遍历够不到他副本写入的槽，DEL 缺失
+     * 态又被 fail-open 混同——墓碑的非空现役段才能权威否定其他副本的陈旧本地记录）。
      */
     public void pruneScopedSkillCacheFingerprintsExcept(String sandboxId, String keepScope) {
         if (sandboxId == null || sandboxId.isBlank()) {
@@ -223,12 +224,12 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         }
         for (var scope : stale) {
             scopedSkillCacheFingerprints.remove(prefix + scope);
-            sharedFingerprintStore.remove(sandboxId, scope);
         }
         var cur = hydratedScopedScopes.get(sandboxId);
         if (cur != null && !cur.equals(keepScope)) {
             hydratedScopedScopes.remove(sandboxId, cur);
         }
+        sharedFingerprintStore.markPruned(sandboxId, keepScope);
     }
 
     /** 本沙箱代当前已投放的 scope（null = 本代尚未投放过任何 scope；跨副本经共享指纹层兜底，无需共享 scope 表） */

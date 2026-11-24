@@ -291,4 +291,67 @@ class OpenSandboxFilesystemSpecTest {
         spec.recordScopedSkillCacheFingerprint("sbx-z", "sess-C", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-2");
         assertEquals("fp-2", spec.scopedSkillCacheFingerprint("sbx-z", "sess-C", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM));
     }
+
+    // ==================== issue #481：ERR- prune 的跨副本失效广播 ====================
+
+    /** 内存 map 假 Redis：真 ScopedFingerprintStore 落共享 HashMap（模拟跨副本共享槽） */
+    @SuppressWarnings("unchecked")
+    private static ScopedFingerprintStore sharedStoreOver(java.util.Map<String, String> data) {
+        var sync = org.mockito.Mockito.mock(io.lettuce.core.cluster.api.sync.RedisClusterCommands.class);
+        org.mockito.Mockito.when(sync.get(org.mockito.ArgumentMatchers.anyString()))
+            .thenAnswer(inv -> data.get((String) inv.getArgument(0)));
+        org.mockito.Mockito.doAnswer(inv -> {
+            data.put((String) inv.getArgument(0), (String) inv.getArgument(2));
+            return "OK";
+        }).when(sync).setex(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyString());
+        var facade = org.mockito.Mockito.mock(io.agentmanager.framework.redis.RedisConnectionFacade.class);
+        org.mockito.Mockito.when(facade.sync()).thenReturn(sync);
+        org.mockito.Mockito.when(facade.key(org.mockito.ArgumentMatchers.anyString()))
+            .thenAnswer(inv -> inv.getArgument(0));
+        return new ScopedFingerprintStore(facade);
+    }
+
+    @Test
+    void pruneShouldBroadcastTombstoneEvenWhenExecutorHasNoLocalStaleEntries() {
+        // issue #481（复现 01a/01b）：ERR- prune 执行副本（Pod2）从未收敛过被删 scope →
+        // 本地 stale 表为空，共享槽残留记账副本（Pod1）写入的记录；修复前即便 remove DEL
+        // 了槽，其他副本也把槽缺失 fail-open 混同为不可达而维持陈旧信念。修复 = markPruned
+        // 无条件把单槽覆写为 keepScope 墓碑：现役 scope 段权威否定所有副本陈旧记录 + 墓碑
+        // 模式段不匹配 farm 使 keepScope 自身也必须重收敛
+        var data = new java.util.HashMap<String, String>();
+        var shared = sharedStoreOver(data);
+        var pod1 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(shared);
+        pod1.recordScopedSkillCacheFingerprint("sbx-1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-a");
+        pod1.markHydratedScopedScope("sbx-1", "sess-A");
+
+        var pod2 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(shared);
+        pod2.pruneScopedSkillCacheFingerprintsExcept("sbx-1", "sess-B");
+
+        assertEquals("sess-B", shared.slotScope("sbx-1"),
+            "非记账副本 prune 也必须把现役 scope 广播到共享槽（不依赖本 Pod 本地记账遍历）");
+        assertNull(pod1.scopedSkillCacheFingerprint("sbx-1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "墓碑权威否定记账副本陈旧信念（修复前返回 fp-a 稳态锁死）");
+        assertNull(pod1.hydratedScopedScope("sbx-1"), "陈旧现役 scope 记录一并清除");
+        assertNull(pod2.scopedSkillCacheFingerprint("sbx-1", "sess-B", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "keepScope 墓碑模式段不匹配 farm：端点恢复后 keepScope 自身也必须重收敛");
+    }
+
+    @Test
+    void pruneShouldKeepKeptScopeLocalBookkeepingAndRouteThroughMarkPruned() {
+        // 收敛周期内 record 先行写槽（SkillsFarm：record → pruneExcept）：执行副本自己收敛过
+        // keepScope 时槽正常记账 = 容器实态（pruneCmd 保留 keepScope 目录），markPruned 保留
+        // 不覆写——稳态短路不被墓碑击穿；本地 keepScope 记账与现役 scope 记录同步保留
+        var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
+        var pod = new OpenSandboxFilesystemSpec().sharedFingerprintStore(shared);
+        pod.recordScopedSkillCacheFingerprint("sbx-k", "sess-B", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-b");
+        pod.markHydratedScopedScope("sbx-k", "sess-B");
+
+        pod.pruneScopedSkillCacheFingerprintsExcept("sbx-k", "sess-B");
+
+        org.mockito.Mockito.verify(shared).markPruned("sbx-k", "sess-B");
+        assertEquals("fp-b", pod.scopedSkillCacheFingerprint("sbx-k", "sess-B", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "keepScope 本 Pod 记账保留");
+        assertEquals("sess-B", pod.hydratedScopedScope("sbx-k"), "keepScope 现役 scope 记录保留");
+    }
 }

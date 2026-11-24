@@ -144,4 +144,58 @@ class ScopedFingerprintStoreTest {
         assertNull(store.slotScope("sbx-1"),
             "Redis 不可达必须 fail-open 返回 null（未知不动 Pod 级信念，不得清除本地记录）");
     }
+
+    @Test
+    void markPrunedShouldOverwriteForeignScopeSlotWithTombstone() {
+        // issue #481（复现 01a 根因②）：ERR- prune 执行副本从未收敛过被删 scope → 本地
+        // stale 表为空，槽仍残留记账副本写入的记录 → 端点恢复后陈旧稳态锁死。markPruned
+        // 不依赖本 Pod 本地记账，直接把单槽覆写为 keepScope 墓碑（非空值权威广播）
+        var data = new HashMap<String, String>();
+        var store = new ScopedFingerprintStore(identityKeyFacade(mapBackedSync(data)));
+        store.put("sbx-1", "sess-A", "farm|fp-a");
+
+        store.markPruned("sbx-1", "sess-B");
+
+        assertEquals("sess-B|__pruned__|", data.get("sbx:scopedfp:sbx-1"),
+            "槽被他 scope 占据必须覆写为非空墓碑而非 DEL（DEL 的缺失被 fail-open 混同为不可达，#481 根因③）");
+        assertEquals("sess-B", store.slotScope("sbx-1"), "墓碑现役 scope 段 = keepScope（跨副本权威裁决值）");
+        assertNull(store.get("sbx-1", "sess-A"), "被 prune scope 的记账必须失效");
+        assertEquals("__pruned__|", store.get("sbx-1", "sess-B"),
+            "keepScope 墓碑记账模式段不匹配 farm：端点恢复后 keepScope 自身也必须重收敛");
+    }
+
+    @Test
+    void markPrunedShouldKeepBookkeepingWhenSlotAlreadyPointsAtKeepScope() {
+        // 收敛周期内 record 先于 pruneExcept 写槽（SkillsFarm 时序）：槽已指向 keepScope 的
+        // 正常 farm 记账 = 容器实态（pruneCmd 保留 keepScope 目录），markPruned 不得覆盖——
+        // 否则稳态短路被墓碑击穿，每次收敛后立即失效
+        var data = new HashMap<String, String>();
+        var store = new ScopedFingerprintStore(identityKeyFacade(mapBackedSync(data)));
+        store.put("sbx-1", "sess-B", "farm|fp-b");
+
+        store.markPruned("sbx-1", "sess-B");
+
+        assertEquals("sess-B|farm|fp-b", data.get("sbx:scopedfp:sbx-1"),
+            "keepScope 正常记账必须保留（稳态正确性由指纹比对承担）");
+    }
+
+    @Test
+    void markPrunedShouldFillMissingSlotAndSwallowRedisFailure() {
+        var data = new HashMap<String, String>();
+        var store = new ScopedFingerprintStore(identityKeyFacade(mapBackedSync(data)));
+
+        store.markPruned("sbx-1", "sess-B");
+        assertEquals("sess-B|__pruned__|", data.get("sbx:scopedfp:sbx-1"),
+            "槽缺失同样落墓碑：缺失=fail-open 未知正是 #481 锁死链的一环，prune 后不得再出现槽缺失态");
+
+        assertDoesNotThrow(() -> ScopedFingerprintStore.NOOP.markPruned("sbx-1", "sess-B"),
+            "未装配 = no-op");
+
+        var sync = mock(RedisClusterCommands.class);
+        when(sync.get(anyString())).thenThrow(new RedisException("connection down"));
+        doThrow(new RedisException("connection down")).when(sync).setex(anyString(), anyLong(), anyString());
+        var broken = new ScopedFingerprintStore(identityKeyFacade(sync));
+        assertDoesNotThrow(() -> broken.markPruned("sbx-1", "sess-B"),
+            "Redis 不可达仅告警，不得抛出（prune 主路径不受共享层故障影响）");
+    }
 }

@@ -2927,6 +2927,66 @@ class OpenSandboxTest {
     }
 
     @Test
+    void farmErrPruneShouldBroadcastTombstoneSoCrossReplicaStaleBookkeepingReconverges() throws Exception {
+        // 回归钉子（issue #481，复现 T1-01a/01b）：多副本下 ERR- prune 的执行副本（Pod2）
+        // 从未收敛过被删 scope 时本地 stale 表为空，共享槽残留记账副本（Pod1）写入的 sess-A
+        // 记账；修复前即便删了槽，Pod1 也把槽缺失 fail-open 混同为不可达而维持陈旧两表——
+        // 端点恢复后 Pod1 的 scope-A 三条件（Pod 级记账==指纹 && 槽核验 && 现役==scope）全
+        // true 稳态短路，容器内 scope-A 已被 pruneCmd 删除，该会话技能执行面永久 404。修复
+        // = pruneExcept 经 markPruned 把单槽覆写为 keepScope 非空墓碑：现役 scope 段权威否定
+        // 所有副本的陈旧信念（槽缺失 fail-open 通道不复存在）
+        var host = java.nio.file.Files.createTempDirectory("farm-err-prune");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-err-prune-cfg");
+        bundleSkill(cfg, "demo-a");
+        var healthySvc = bundleServiceLive(cfg);
+        var version = healthySvc.currentVersion().version();
+        var osb = farmOsb("v-" + version);
+        var data = new java.util.HashMap<String, String>();
+        var store = new ScopedFingerprintStore(fakeScopedFpFacade(data));
+        String id = "sbx-err-prune";
+
+        // Pod1 健康收敛 scope-A（converge=1），Pod 级两表与共享槽均记 sess-A
+        var spec1 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
+        var call1 = new OpenSandbox(farmState(host, id), osb,
+            farmOptions(healthySvc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            null, null, spec1);
+        bindFarmSession(call1, "sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+        assertEquals(1, farmConvergeCommands(osb).size(), "Pod1 scope-A 首轮收敛");
+        assertEquals("sess-A", store.slotScope(id), "共享槽现役 scope = sess-A");
+
+        // Pod2（新 spec = 新副本，同代池化容器复用）在 ERR- 窗口收敛 scope-B：gate 携带健康
+        // 窗口判定的 farm 记忆（判定健康、收敛时端点已 ERR- 的真实窗口）→ 收敛 exec =
+        // pruneCmd 删容器内 scope-A，record 对 null 指纹 no-op 不覆盖槽
+        var brokenSvc = org.mockito.Mockito.mock(SkillBundleService.class);
+        org.mockito.Mockito.when(brokenSvc.currentVersion())
+            .thenReturn(new SkillBundleService.SkillVersion(
+                SkillBundleService.ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0, 0, java.util.List.of()));
+        var spec2 = new OpenSandboxFilesystemSpec().sharedFingerprintStore(store);
+        spec2.skillSyncGate("sess-B", id)
+            .setSkillFarmState(new SkillSyncGate.SkillFarmState(true, java.util.Set.of()));
+        var call2 = new OpenSandbox(farmState(host, id), osb,
+            farmOptions(brokenSvc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            null, null, spec2);
+        bindFarmSession(call2, "sess-B");
+        call2.exec(RuntimeContext.builder().userId("sess-B").build(), "ls /workspace/.skills-cache", 30);
+        assertEquals("sess-B", store.slotScope(id),
+            "ERR- prune 也必须把现役 scope 墓碑广播到共享槽（修复前槽仍=sess-A，PRUNED 墓碑=keepScope）");
+
+        // 端点恢复：scope-A 回落 Pod1（Pod 级两表仍记 A）→ 墓碑现役=B 权威否定 → 重收敛
+        // （converge=2）；修复前槽核验过+指纹相等+现役=sess-A 三条件全 true 稳态短路（converge
+        // 停在 1）必红
+        var call3 = new OpenSandbox(farmState(host, id), osb,
+            farmOptions(healthySvc, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), null),
+            null, null, spec1);
+        bindFarmSession(call3, "sess-A");
+        call3.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+        assertEquals(2, farmConvergeCommands(osb).size(),
+            "恢复后 scope-A 必须重收敛（陈旧记账被墓碑否定），不得伪造稳态短路");
+    }
+
+    @Test
     void farmTtlEdgeShouldUseSingleVersionSnapshot() throws Exception {
         // issue #416a：hydrate 多次读取 currentVersion（指纹一次 + 候选两次，5s TTL 内
         // 缓存过期重算即分裂）——首次健康 V、随后 ERR+空清单的组合会以健康指纹执行孤儿
