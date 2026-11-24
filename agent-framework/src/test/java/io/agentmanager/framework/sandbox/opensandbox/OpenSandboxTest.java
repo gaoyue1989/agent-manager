@@ -2601,6 +2601,49 @@ class OpenSandboxTest {
     }
 
     @Test
+    void farmShouldSkipUnsafeNamesFromManifestWithoutBreakingConverge() throws Exception {
+        // issue #501 farm 侧防线：端点 manifest 直接携带不安全规范名（包内目录名本身含 |，
+        // 无 frontmatter → 规范名回落目录名）——| 是孤儿差集 case 字面集分隔符，若进候选集，
+        // 孤儿 oaf-package/foo 会误命中 |oaf-package/foo|dir| 边界而永久滞留。不安全名整体
+        // 跳过（会话内缺失 + WARN 留痕），合法技能建链与差集清理不受影响
+        var host = java.nio.file.Files.createTempDirectory("farm-unsafe-name");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-unsafe-name-cfg");
+        bundleSkill(cfg, "demo-a");
+        var pipeDir = cfg.resolve("skills").resolve("pipe|dir");
+        java.nio.file.Files.createDirectories(pipeDir);
+        java.nio.file.Files.writeString(pipeDir.resolve("SKILL.md"), "# 无 frontmatter\n");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        assertEquals(java.util.List.of("demo-a", "pipe|dir"),
+            svc.currentVersion().skills(), "前置：manifest 确实携带不安全目录名");
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                return mockExecution(0, "v-" + version, "");
+            }
+            return mockExecution(0, "", "");
+        });
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-unsafe"), osb,
+            farmOptions(svc, null, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var cmd = farmConvergeCommands(osb).get(0);
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a' "
+                + "'/workspace/.skills-cache/sess-A/oaf-package/demo-a'"),
+            "合法技能照常建链（不安全名不得中断 && 链）：" + cmd);
+        assertFalse(cmd.contains("pipe|dir"), "不安全名不得进入收敛命令任何段（建链/禁用清理/孤儿差集）：" + cmd);
+        assertTrue(cmd.contains("case '|oaf-package/demo-a|' in"),
+            "孤儿差集字面集只含合法候选，| 分隔符无歧义：" + cmd);
+    }
+
+    @Test
     void farmConvergeShouldRebuildRealFileAndDanglingLink() throws Exception {
         // D-2/§10.2「悬空链重建 + 降级会话 tar 物化残留真实文件统一收敛为软链」：农场对 manifest
         // 内包技能路径有全权，路径现存任何物目标态一律 rm -rf + ln -s 重建为软链，不得因「已存在」

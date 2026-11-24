@@ -435,18 +435,43 @@ class SkillBundleServiceTest {
 
     @Test
     void unsafeCanonicalNameShouldFallBackToDirName() throws Exception {
-        // 规范名进入 tar rel 与容器命令拼接（farm 建链引号路径段），与 SkillsFarm
-        // isShellSafeRelPath 同防线：含 '..'、引号、空白、'/'、以 / 开头一律回落目录名
+        // 规范名进入 tar rel 与容器命令拼接（farm 建链引号路径段 + 孤儿差集 | 分隔符），
+        // 与 SkillsFarm isShellSafeRelPath 同白名单：`.`/`.` 开头/含 `..`/`|`/`\`/引号/空白/`/`
+        // 一律回落目录名——name: . 曾生成 rm -rf '<cache>/oaf-package/.'（GNU rm 拒绝删除 .），
+        // && 链中断导致整沙箱农场收敛失败；含 | 曾污染孤儿差集边界（issue #501）
         var service = service(Duration.ZERO);
         skill("escape-dir", "---\nname: ../../escape\n---\n# x\n");
         skill("quote-dir", "---\nname: has'quote\n---\n# x\n");
         skill("space-dir", "---\nname: has space\n---\n# x\n");
         skill("slash-dir", "---\nname: a/b\n---\n# x\n");
+        skill("dot-dir", "---\nname: .\n---\n# x\n");
+        skill("hidden-dir", "---\nname: .hidden\n---\n# x\n");
+        skill("dotdot-dir", "---\nname: a..b\n---\n# x\n");
+        skill("pipe-dir", "---\nname: foo|bar\n---\n# x\n");
+        skill("bslash-dir", "---\nname: a\\b\n---\n# x\n");
 
         var version = service.currentVersion();
 
-        assertEquals(List.of("escape-dir", "quote-dir", "slash-dir", "space-dir"), version.skills(),
+        assertEquals(List.of("bslash-dir", "dot-dir", "dotdot-dir", "escape-dir", "hidden-dir",
+            "pipe-dir", "quote-dir", "slash-dir", "space-dir"), version.skills(),
             "不安全规范名回落目录名");
+        assertEquals(List.of(
+            "bslash-dir/SKILL.md", "dot-dir/SKILL.md", "dotdot-dir/SKILL.md", "escape-dir/SKILL.md",
+            "hidden-dir/SKILL.md", "pipe-dir/SKILL.md", "quote-dir/SKILL.md", "slash-dir/SKILL.md",
+            "space-dir/SKILL.md"), bundleEntryNames(service, version.version()),
+            "回落名 = 目录名：bundle 顶层不得出现 './' 等不安全名 tar 条目");
+    }
+
+    @Test
+    void whitelistFrontmatterNameShouldStayCanonical() throws Exception {
+        var service = service(Duration.ZERO);
+        skill("dir-x", "---\nname: v1.0-beta_x\n---\n# x\n");
+        skill("dir-cn", "---\nname: 数据分析\n---\n# x\n");
+
+        var version = service.currentVersion();
+
+        assertEquals(List.of("v1.0-beta_x", "数据分析"), version.skills(),
+            "白名单字符（字母/数字/下划线/中文/点/连字符）的 frontmatter 名不误伤");
     }
 
     @Test
