@@ -63,6 +63,39 @@ class AgentEventSseSerializerTest {
         assertTrue(!json.contains("\"data\""), "URLSource 不应输出 data: " + json);
     }
 
+    @Test
+    void toolResultDataDeltaShouldSerializeImageBlockBase64Source() {
+        // issue #492：MCP ImageContent 经 SDK 转换为 ImageBlock（非 DataBlock），帧必须同样携带图片数据
+        var imageBlock = io.agentscope.core.message.ImageBlock.builder()
+            .source(Base64Source.builder()
+                .mediaType("image/png")
+                .data("aGVsbG8=")
+                .build())
+            .build();
+        var ev = new ToolResultDataDeltaEvent("reply-3", "call-3", "render_chart_png", imageBlock);
+
+        String json = AgentEventSseSerializer.payload(ev);
+        assertTrue(json.contains("\"tool_call_id\":\"call-3\""), "tool_call_id: " + json);
+        assertTrue(json.contains("\"media_type\":\"image/png\""), "media_type: " + json);
+        assertTrue(json.contains("\"data\":\"aGVsbG8=\""), "ImageBlock base64 data 内联: " + json);
+    }
+
+    @Test
+    void toolResultDataDeltaShouldSerializeImageBlockUrlSource() {
+        var imageBlock = io.agentscope.core.message.ImageBlock.builder()
+            .source(URLSource.builder()
+                .mimeType("image/jpeg")
+                .url("https://example.com/a.jpg")
+                .build())
+            .build();
+        var ev = new ToolResultDataDeltaEvent("reply-4", "call-4", "render_chart_png", imageBlock);
+
+        String json = AgentEventSseSerializer.payload(ev);
+        assertTrue(json.contains("\"media_type\":\"image/jpeg\""), "media_type: " + json);
+        assertTrue(json.contains("\"url\":\"https://example.com/a.jpg\""), "ImageBlock url 引用: " + json);
+        assertTrue(!json.contains("\"data\""), "URLSource 不应输出 data: " + json);
+    }
+
     // ===== withReplyId：与收口前读端算法的字节一致性 oracle（设计 §3.4-1） =====
 
     /**
