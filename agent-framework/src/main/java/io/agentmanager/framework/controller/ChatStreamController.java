@@ -624,6 +624,10 @@ public class ChatStreamController {
                 mcpToolRegistrar::resolveToolCallMeta,
                 (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
 
+            // 直返多块文本分隔（issue #494）：SDK 直返 delta 块间无分隔而 /history 以
+            // 换行拼接，实时流按 /history 口径重写。turn 闭包局部对象，随 turn 丢弃。
+            var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
+
             // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
             // 见 TurnFinalizer#abortSetup 的教训注释。
             // 该路径 replyId 尚未产出任何事件、无本 turn 桶可清，turnBucketKeys 必为空
@@ -741,7 +745,7 @@ public class ChatStreamController {
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
                             finalUserId, sink, turnEnded, turnStartedAt, sandboxRebuildNotified,
                             turnBucketKeys, toolSummary, forwardedPrefix, body.skills(), usage,
-                            directReturnSignal),
+                            directReturnSignal, directReturnJoiner),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             cancelHeartbeat(heartbeat);
@@ -865,7 +869,8 @@ public class ChatStreamController {
                                     String forwardedPrefix,
                                     java.util.List<String> turnSkills,
                                     io.agentmanager.framework.service.TurnUsageTracker usage,
-                                    io.agentmanager.framework.service.DirectReturnSignalTracker directReturnSignal) {
+                                    io.agentmanager.framework.service.DirectReturnSignalTracker directReturnSignal,
+                                    io.agentmanager.framework.service.DirectReturnDeltaJoiner directReturnJoiner) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             if (turnStopWatcher != null) {
@@ -873,6 +878,9 @@ public class ChatStreamController {
             }
             return;
         }
+
+        // 直返多块文本分隔（issue #494）：先于一切消费方重写，SSE/落库/回放同帧一致
+        event = directReturnJoiner.apply(event);
 
         // 直返完成信号跟踪（issue #492）：纯图片直返轮 SDK 零文本帧，AGENT_END 前由
         // tracker 合成 generateReason=TOOL_RETURN_DIRECT 信号帧（落库可回放）

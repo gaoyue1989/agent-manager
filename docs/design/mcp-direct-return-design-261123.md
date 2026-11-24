@@ -57,7 +57,7 @@ issue 提案与初版设计都打算新增 `directReturnTools` 缓存。实际�
 |------|------|------|
 | `TOOL_CALL_START` | `directReturn: true` | 该工具配置了直返 |
 | `TOOL_RESULT_TEXT_DELTA` | 无变更 | 原样内容，按 `toolCallId` 拼接 |
-| `TEXT_BLOCK_DELTA` | `generateReason: "TOOL_RETURN_DIRECT"` | **本轮以直返结束的权威信号**，只有真的短路才出现 |
+| `TEXT_BLOCK_DELTA` | `generateReason: "TOOL_RETURN_DIRECT"` | **本轮以直返结束的权威信号**，只有真的短路才出现；多块时块间以 `\n` 分隔（与 /history 拼接一致，issue #494） |
 | history assistant 消息 | `generate_reason: "TOOL_RETURN_DIRECT"` | 收尾消息，`content` 即原样内容；纯图片直返 `content` 为空、图片经 `blocks[]` 的 `image` 块下发 |
 
 判定规则：
@@ -68,7 +68,9 @@ issue 提案与初版设计都打算新增 `directReturnTools` 缓存。实际�
 
 **纯图片直返的信号补发（issue #492）**：SDK 的收尾文本事件只遍历 `TextBlock`（`publishReturnDirectTextEvents`），纯图片直返轮不会发出上述信号——与空输出不可区分。框架在短路成立（直返工具成功结束且其后无模型回喂）而 SDK 未发信号时，于 `AGENT_END` 前补一帧 `delta` 为空的合成信号帧（`generateReason` 同值，经合成帧落库、订阅回放与续传一致）；判定规则 2 不变，空 `delta` 对既有前端零影响。
 
-**归属关系（实施中更正）**：初版设计称 `TOOL_CALL_START` 与工具结果共用 `replyId`，实测不成立。`TOOL_CALL_START` 产生于推理阶段，带的是推理 `replyId`；`TOOL_RESULT_*` 与收尾文本产生于执行阶段，三者共用执行 `replyId`。前端用 `toolCallId` 关联调用与结果，用执行 `replyId` 关联结果与收尾文本。同批多个直返调用时，各工具的内容在各自的 `TOOL_RESULT_TEXT_DELTA` 里，不会粘连；SDK 的收尾文本只是按序拼接，不带分隔符。
+**归属关系（实施中更正）**：初版设计称 `TOOL_CALL_START` 与工具结果共用 `replyId`，实测不成立。`TOOL_CALL_START` 产生于推理阶段，带的是推理 `replyId`；`TOOL_RESULT_*` 与收尾文本产生于执行阶段，三者共用执行 `replyId`。前端用 `toolCallId` 关联调用与结果，用执行 `replyId` 关联结果与收尾文本。同批多个直返调用时，各工具的内容在各自的 `TOOL_RESULT_TEXT_DELTA` 里，不会粘连。
+
+**收尾文本多块分隔（issue #494 更正）**：初版设计约定收尾文本「按序拼接，不带分隔符」，但 SDK 把同批直返结果的所有 `TextBlock` 合成**一条**收尾 assistant 消息，而 /history 对该消息的非空 text 块以 `\n` 拼接（`StateDataParser.extractContentText`）——单工具多 TextContent 或同批多个直返工具都会触发刷新前后内容漂移。框架在事件入口按 /history 口径重写直返 delta（`DirectReturnDeltaJoiner`，两处 chat 流同接线）：非空块之间插 `\n`，blank 块归一为空文本帧，块内文本零改动；重写后落库，实时流、订阅回放、/history 三面一致。
 
 不提供 issue 提到的 `sourceTool` 字段：上述两个 id 已足够归组。
 
@@ -127,4 +129,4 @@ issue 提案与初版设计都打算新增 `directReturnTools` 缓存。实际�
 | `agent.interrupt()` 式强停 | 语义是「用户中断」，会产生恢复话术与 `cancelled` 终态 |
 | 新造带全文的合成帧 | 见 §2.4 |
 | 注册期对权限为 `ask` 的直返工具告警 | `ask` + 直返是 issue 明确支持的组合；未声明时的默认行为取决于权限模式，告警会误报 |
-| 多个直返工具的结果用 `\n\n` 拼接 | SDK 按序拼接不带分隔符；前端按 `toolCallId` 取各自内容，无需分隔符 |
+| 多个直返工具的结果用 `\n\n` 拼接 | 多块以 `\n` 分隔对齐 /history 拼接口径（issue #494，见 §3）；前端按 `toolCallId` 取各自 `TOOL_RESULT_TEXT_DELTA` 内容的展示面不变 |

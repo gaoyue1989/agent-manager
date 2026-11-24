@@ -56,6 +56,13 @@ def render_chart_png(params):
     return {"content": [{"type": "image", "data": PNG_1X1_BASE64, "mimeType": "image/png"}], "isError": False}
 
 
+def render_two_part_card(params):
+    return {"content": [
+        {"type": "text", "text": "订单确认卡上半部分：机械键盘 x1、USB-C 数据线 x2"},
+        {"type": "text", "text": "订单确认卡下半部分：合计 409.0 元，确认后即可发货"},
+    ], "isError": False}
+
+
 def render_confirm_card(params):
     return text_result(json.dumps(card_payload(order_id_of(params)), ensure_ascii=False, indent=2))
 
@@ -118,6 +125,11 @@ TOOLS = [
         "description": "渲染订单金额占比图并直接展示给用户。调用后图片会原样显示在用户界面上，本轮对话到此结束。参数 order_id。",
         "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
     },
+    {
+        "name": "render_two_part_card",
+        "description": "把订单确认卡片分上下两部分展示给用户。调用后两部分内容会原样显示在用户界面上，本轮对话到此结束。参数 order_id。",
+        "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
+    },
 ]
 
 HANDLERS = {
@@ -128,6 +140,7 @@ HANDLERS = {
     "lookup_order": lookup_order,
     "notify_warehouse": notify_warehouse,
     "render_chart_png": render_chart_png,
+    "render_two_part_card": render_two_part_card,
 }
 
 

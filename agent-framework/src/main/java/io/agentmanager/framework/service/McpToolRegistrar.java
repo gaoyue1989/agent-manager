@@ -1255,8 +1255,8 @@ public class McpToolRegistrar {
     private void registerFiltered(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
                                   Map<String, Boolean> activeMcpConfig, UiMapping uiMapping,
                                   boolean readOnlyHint, Set<String> directReturn) {
-        wrapper.initialize().block();
-        var tools = wrapper.listTools().block();
+        wrapper.initialize().block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
+        var tools = wrapper.listTools().block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
         if (tools == null) {
             log.warn("MCP {} listTools returned null", serverName);
             return;
