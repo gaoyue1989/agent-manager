@@ -1077,6 +1077,89 @@ class WorkspaceSyncServiceTest {
         assertNull(reader.readUserSkillFile(USER, "demo-a", "SKILL.md"));
     }
 
+    private record NestedBaselineScene(Filesystem files, String baselineMd, String script, String dataTxt) {
+    }
+
+    /** 技能含嵌套元数据文件（scripts/__init__.py、assets/.gitkeep、根 .gitkeep），容器与包基线完全一致 */
+    private static NestedBaselineScene nestedMetadataBaselineScene(java.nio.file.Path packageDir, String skillMd,
+                                                                   String script, String dataTxt) throws Exception {
+        var skillDir = packageDir.resolve("demo-a");
+        java.nio.file.Files.createDirectories(skillDir.resolve("scripts"));
+        java.nio.file.Files.createDirectories(skillDir.resolve("assets"));
+        java.nio.file.Files.writeString(skillDir.resolve("SKILL.md"), skillMd);
+        java.nio.file.Files.writeString(skillDir.resolve(".gitkeep"), "");
+        java.nio.file.Files.writeString(skillDir.resolve("scripts/run.sh"), script);
+        java.nio.file.Files.writeString(skillDir.resolve("scripts/__init__.py"), "");
+        java.nio.file.Files.writeString(skillDir.resolve("assets/data.txt"), dataTxt);
+        java.nio.file.Files.writeString(skillDir.resolve("assets/.gitkeep"), "");
+        var files = mock(Filesystem.class);
+        var skillEntry = dirEntry("/workspace/skills/demo-a");
+        var mdEntry = fileEntry("/workspace/skills/demo-a/SKILL.md", skillMd.getBytes(StandardCharsets.UTF_8).length);
+        var rootGitkeep = fileEntry("/workspace/skills/demo-a/.gitkeep", 0);
+        var scriptsEntry = dirEntry("/workspace/skills/demo-a/scripts");
+        var assetsEntry = dirEntry("/workspace/skills/demo-a/assets");
+        var runShEntry = fileEntry("/workspace/skills/demo-a/scripts/run.sh",
+            script.getBytes(StandardCharsets.UTF_8).length);
+        var initPyEntry = fileEntry("/workspace/skills/demo-a/scripts/__init__.py", 0);
+        var dataEntry = fileEntry("/workspace/skills/demo-a/assets/data.txt",
+            dataTxt.getBytes(StandardCharsets.UTF_8).length);
+        var assetsGitkeep = fileEntry("/workspace/skills/demo-a/assets/.gitkeep", 0);
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(skillEntry));
+        when(files.listDirectory("/workspace/skills/demo-a"))
+            .thenReturn(List.of(mdEntry, rootGitkeep, scriptsEntry, assetsEntry));
+        when(files.listDirectory("/workspace/skills/demo-a/scripts")).thenReturn(List.of(runShEntry, initPyEntry));
+        when(files.listDirectory("/workspace/skills/demo-a/assets")).thenReturn(List.of(dataEntry, assetsGitkeep));
+        when(files.readFile("/workspace/skills/demo-a/SKILL.md")).thenReturn(skillMd);
+        when(files.readFile("/workspace/skills/demo-a/scripts/run.sh")).thenReturn(script);
+        when(files.readFile("/workspace/skills/demo-a/assets/data.txt")).thenReturn(dataTxt);
+        return new NestedBaselineScene(files, skillMd, script, dataTxt);
+    }
+
+    @Test
+    void syncBackShouldSkipBaselineWithNestedMetadataFiles() throws Exception {
+        var store = new InMemoryStore();
+        var packageDir = java.nio.file.Files.createTempDirectory("sync-baseline-nested-meta");
+        var scene = nestedMetadataBaselineScene(packageDir, "---\nname: demo-a\n---\nbase", "echo base", "data");
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+
+        baselineService(packageDir, store).syncBack(USER, osbOf(scene.files()));
+
+        verify(scene.files(), never()).readFile(anyString());
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "SKILL.md"),
+            "含 scripts/__init__.py、.gitkeep 的技能与基线一致时必须判纯基线跳过，不得每轮整份回写 L4");
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "scripts/__init__.py"));
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "assets/.gitkeep"));
+    }
+
+    @Test
+    void syncBackShouldPromoteBaselineSkillWithNestedMetadataWhenResourceEdited() throws Exception {
+        var store = new InMemoryStore();
+        var packageDir = java.nio.file.Files.createTempDirectory("sync-baseline-nested-promote");
+        var scene = nestedMetadataBaselineScene(packageDir, "---\nname: demo-a\n---\nbase", "echo base", "data");
+        var files = scene.files();
+        var gate = new SkillSyncGate();
+        var svc = baselineService(packageDir, store);
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+
+        svc.syncBack(USER, osbOf(files), gate);
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "SKILL.md"), "纯基线副本不落库（P1-5）");
+
+        var editedScript = "echo edited-by-user";
+        var editedEntry = fileEntry("/workspace/skills/demo-a/scripts/run.sh",
+            editedScript.getBytes(StandardCharsets.UTF_8).length);
+        var initPyEntry = fileEntry("/workspace/skills/demo-a/scripts/__init__.py", 0);
+        when(files.listDirectory("/workspace/skills/demo-a/scripts"))
+            .thenReturn(List.of(editedEntry, initPyEntry));
+        when(files.readFile("/workspace/skills/demo-a/scripts/run.sh")).thenReturn(editedScript);
+        svc.syncBack(USER, osbOf(files), gate);
+
+        assertEquals(scene.baselineMd(), reader.readUserSkillFile(USER, "demo-a", "SKILL.md"),
+            "资源修改必须触发含 SKILL.md 的完整晋升落库（否则孤儿资源行管理面不可见不可删）");
+        assertEquals(editedScript, reader.readUserSkillFile(USER, "demo-a", "scripts/run.sh"));
+        assertEquals(scene.dataTxt(), reader.readUserSkillFile(USER, "demo-a", "assets/data.txt"));
+        assertNull(reader.readUserSkillFile(USER, "demo-a", "scripts/__init__.py"), "元数据文件不得落库");
+    }
+
     private static Sandbox osbOf(Filesystem files) {
         var osb = mock(Sandbox.class);
         when(osb.files()).thenReturn(files);
