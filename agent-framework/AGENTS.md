@@ -178,6 +178,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - **HITL 限制（2026-09-18 声明）**：A2A 通道**不支持** permission `ask` 工具（publish/update_env/republish/unpublish/delete）——挂起态只存 harness checkpoint、不落平台 confirm_context，A2A 客户端无法批准，且同会话后续请求会持续 `IllegalStateException`。该限制已写入注册卡 description（`AgentCardNotes.A2A_CHANNEL_LIMITATION`）；变更类操作必须走 `/threads/chat` + `/threads/{sid}/confirm-stream`
 - 实现参考官方 `agentscope-a2a-spring-boot-starter` 的 `A2aJsonRpcController`
 - 兼容转换：message/send 与 message/stream 自动补全 SDK 反序列化必需字段（`kind:"message"`、`messageId`、parts `kind:"text"`、`blocking:true`），顶层 `userId`/`sessionId` → `message.metadata`
+- **身份信任模型（issue #474，2026-11-24）**：`X-User-Id` 头是唯一可信身份源，头存在时兼容归一**强制覆盖**请求体全部 userId 通道（`params.userId` / `message.metadata.userId` / `params.metadata.userId`），SDK 执行身份与 `session_user` 认领只认头值；分发与落表前对非空 `sessionId` 经 `SessionAccessGuard.ownedBy` 归属校验，不符返回 JSON-RPC 错误 `-32001`（不泄露存在性）拒绝执行与覆写；头存在但 body 非 JSON fail-closed 拒绝；无头回落请求体身份（与 `/threads/chat`「头 > body > debug-user」同口径，host 模式/off 模式信任边界见 [../docs/design/console-user-workspace-split-design.md](../docs/design/console-user-workspace-split-design.md) §5.4.1）
 - `MySqlTaskStore` 注入 SDK：tasks/get 从 agent_state 表读取构造 A2A Task（save no-op，消息已由 AgentScope 自动持久化）
 - 多租户：SDK 从 `message.metadata.userId` / `message.metadata.sessionId` 读取（AgentScopeAgentExecutor）
 

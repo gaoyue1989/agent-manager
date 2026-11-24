@@ -15,6 +15,7 @@ import io.agentmanager.framework.service.SessionUserStore;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -587,5 +588,211 @@ class A2AControllerTest {
         var partMeta = (java.util.Map<String, Object>) ((java.util.Map<String, Object>) parts.get(0)).get("metadata");
         org.junit.jupiter.api.Assertions.assertEquals("_agentscope_group_userId", partMeta.get("_agentscope_msg_id"),
             "part 标签与前缀键一致");
+    }
+
+    // ---------- 身份信任模型（issue #474）：X-User-Id 头唯一可信，归属校验拒绝越权 ----------
+
+    private java.util.Map<String, Object> capturedForwardedBody() throws Exception {
+        var captor = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(wrapper, org.mockito.Mockito.atLeastOnce()).handleRequest(captor.capture(), anyMap(), any());
+        var forwarded = captor.getAllValues().get(captor.getAllValues().size() - 1);
+        return (java.util.Map<String, Object>) new com.fasterxml.jackson.databind.ObjectMapper()
+            .readValue(forwarded, java.util.Map.class);
+    }
+
+    @Test
+    void messageSendShouldRejectSessionOwnershipTakeoverFromAnotherUser() throws Exception {
+        when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "mallory")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"50","method":"message/send",
+                     "params":{"sessionId":"alice-sess","userId":"mallory",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error.code").value(-32001));
+
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendShouldForceGatewayHeaderUserIdOverForgedBodyUserId() throws Exception {
+        when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"51","method":"message/send",
+                     "params":{"sessionId":"alice-sess","userId":"mallory",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+                         "metadata":{"userId":"mallory"}}}}
+                    """))
+            .andExpect(status().isOk());
+
+        var req = capturedForwardedBody();
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals("alice", meta.get("userId"),
+            "message.metadata.userId 必须被网关头强制覆盖");
+        org.junit.jupiter.api.Assertions.assertEquals("alice", params.get("userId"),
+            "params.userId 必须被网关头强制覆盖");
+        verify(sessionUserStore).upsert("alice-sess", "alice");
+    }
+
+    @Test
+    void messageSendShouldOverrideLegacyParamsMetadataUserIdWithHeader() throws Exception {
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"52","method":"message/send",
+                     "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]},
+                       "metadata":{"thread_id":"a2a-legacy-uid","userId":"mallory"}}}
+                    """))
+            .andExpect(status().isOk());
+
+        var req = capturedForwardedBody();
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals("alice", meta.get("userId"),
+            "旧格式 params.metadata.userId 通道同样被网关头强制覆盖");
+        var legacyMeta = (java.util.Map<String, Object>) params.get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals("alice", legacyMeta.get("userId"),
+            "params.metadata.userId 原位覆盖");
+        verify(sessionUserStore).upsert("a2a-legacy-uid", "alice");
+    }
+
+    @Test
+    void messageStreamShouldRejectSessionOwnershipTakeover() throws Exception {
+        when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "mallory")
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .content("""
+                    {"jsonrpc":"2.0","id":"53","method":"message/stream",
+                     "params":{"sessionId":"alice-sess","userId":"mallory",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+            .andExpect(content().string(org.hamcrest.Matchers.containsString("-32001")));
+
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendWithoutHeaderStillAcceptsBodyUserIdForUnclaimedSession() throws Exception {
+        when(sessionUserStore.findUserIdBySession("a2a-new-sess")).thenReturn(null);
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"54","method":"message/send",
+                     "params":{"sessionId":"a2a-new-sess","userId":"alice",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        var req = capturedForwardedBody();
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals("alice", meta.get("userId"),
+            "无头直连调试回落请求体身份（既有兼容）");
+        verify(sessionUserStore).upsert("a2a-new-sess", "alice");
+    }
+
+    @Test
+    void messageSendWithoutHeaderCanContinueSessionClaimedBySameBodyUser() throws Exception {
+        when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"55","method":"message/send",
+                     "params":{"sessionId":"alice-sess","userId":"alice",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        verify(wrapper).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendWithoutHeaderCannotTakeOverSessionClaimedByAnotherBodyUser() throws Exception {
+        when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"57","method":"message/send",
+                     "params":{"sessionId":"alice-sess","userId":"mallory",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error.code").value(-32001));
+
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendWithGatewayHeaderAndMalformedBodyShouldFailClosed() throws Exception {
+        when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("not-json"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error.code").value(-32001));
+
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendShouldClaimPlaceholderRowOnFirstRealMessage() throws Exception {
+        when(sessionUserStore.findUserIdBySession("a2a-ph-sess"))
+            .thenReturn(io.agentmanager.framework.service.SessionUserStore.PLACEHOLDER_USER);
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"56","method":"message/send",
+                     "params":{"sessionId":"a2a-ph-sess",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        verify(sessionUserStore).upsert("a2a-ph-sess", "alice");
     }
 }
