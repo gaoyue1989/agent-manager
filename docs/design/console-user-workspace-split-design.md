@@ -185,6 +185,7 @@ AGENT 协作
 
 - **一期（控制台内）**：用户侧调试/会话请求由 frontend `proxy.ts` 代理 `/agent/{short}/*` 时校验 cookie JWT 并注入 `X-User-Id: u-{userId}`（替代现在硬编码的 `"webui"`）。绕过 frontend 的直连调用仍可行（与今天同等暴露面），但控制台路径上身份可信。
 - **二期（API Key 网关）**：platform-router nginx 增加 `auth_request /_auth` 子请求 → backend `GET /api/v1/auth/introspect`（校验 JWT 或 `Authorization: Bearer ak-...` API Key，返回注入 `X-User-Id`）。auth 子请求是短平快元数据调用，业务流量本体不经 backend，不违反原则一；`introspect` 失败策略 fail-closed（可配）。此步落地后 `api_keys` 才真正对对外调用生效。
+- **API Key 空间归属裁决（issue #488，2026-11-24 起）**：签发时 `agentId` 必须指向本空间真实 Agent（不存在/跨空间一律 `ErrNotFound`，不泄露他空间服务存在性）；introspect 数据面按 `X-Original-URI` 反解目标 short（`X-Agent-Short` 路由捕获交叉校验，issue #407 同口径）裁决——单 Agent key 限绑定 Agent、空间级 key（`agentId=null` = 空间内全部 Agent，签发语义即如此）按目标 short 反查服务后校验 `svc.WorkspaceID == key.WorkspaceID`，未命中/跨空间一律 403，修复前签出的存量越权 key 数据面即时 fail-closed、无需数据迁移。JWT 通道不验空间维持 M9 回填决议不变（见上）。
 
 #### 5.4.1 业务面身份裁决规则（issue #474，2026-11-24 起）
 
