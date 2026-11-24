@@ -280,13 +280,13 @@ public class McpToolRegistrar {
                     wrapper = prev;
                 }
             } else if (prev instanceof ReconnectableMcpClientWrapper reconnectable && reconnectable.poisoned()) {
-                // 毒化句柄换芯（issue #417）：本会话手握工厂新连接，直接 swap 进既有句柄
-                // 复用（随后的注册过程即握手验证），不走 rebuildSharedWrapper 多建一次；
-                // 被拒 wrapper 不 close——其 delegate 已被换入既有句柄
-                if (reconnectable.swap(base)) {
+                // 毒化句柄换芯（issue #417，issue #493 与 rebuildSharedWrapper 语义对称化）：
+                // 统一走 rebuildSharedWrapper 的 per-server 单飞 + initialize 握手（注册表
+                // 工厂同源，本方法已登记）——本会话未握手直连 swap 会在看门狗在途/刚完成的
+                // 健康换芯上覆盖死连接；本地构建的连接从未入缓存即刻关闭
+                closeQuietly(wrapper);
+                if (rebuildSharedWrapper(mcp.server(), mcp)) {
                     log.info("[MCP] synthetic server '{}' poisoned shared handle rebuilt in place", mcp.server());
-                } else {
-                    closeQuietly(base);
                 }
                 wrapper = prev;
             } else {
@@ -298,10 +298,15 @@ public class McpToolRegistrar {
                 wrapper = prev;
             }
         }
+        // 毒化比对基准快照（issue #493）：注册期间看门狗换芯后，旧连接的迟到失败不得毒化新 delegate
+        var poisonTarget = wrapper instanceof ReconnectableMcpClientWrapper r ? r.delegate() : null;
         try {
             registerStandard(toolkit, wrapper, mcp.server());
             recordRegisteredTools(wrapper, mcp.server());
             registeredWrappers.put(mcp.server(), wrapper);
+            if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
+                reconnectable.clearPoison();
+            }
             log.info("[MCP] synthetic client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
         } catch (Exception e) {
@@ -310,9 +315,11 @@ public class McpToolRegistrar {
             if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
                 if (reconnectable.isClosed()) {
                     sharedWrappers.remove(mcp.server(), wrapper);
-                } else {
-                    reconnectable.markPoisoned();
+                } else if (reconnectable.markPoisonedIfSame(poisonTarget)) {
                     log.warn("[MCP] synthetic server '{}' registration failed, poisoned shared client for in-place rebuild: {}",
+                        mcp.server(), e.getMessage());
+                } else {
+                    log.warn("[MCP] synthetic server '{}' registration failed on superseded delegate, poison skipped: {}",
                         mcp.server(), e.getMessage());
                 }
             }
@@ -409,6 +416,8 @@ public class McpToolRegistrar {
             log.warn("[MCP] skipped server '{}': client build failed", mcp.server());
             return null;
         }
+        // 毒化比对基准快照（issue #493）：注册期间看门狗换芯后，旧连接的迟到失败不得毒化新 delegate
+        var poisonTarget = wrapper instanceof ReconnectableMcpClientWrapper r ? r.delegate() : null;
         // MCP 是外部依赖：默认 fail-soft（连接失败仅告警并跳过该 server 的工具，
         // 不阻断 agent 启动）；config.yaml 声明 startup.required=true 时才严格失败
         try {
@@ -434,6 +443,9 @@ public class McpToolRegistrar {
                 // 会话持有且生命周期归缓存）时不得 close——close 会强杀存活句柄
                 closeQuietly(prev);
             }
+            if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
+                reconnectable.clearPoison();
+            }
             log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
         } catch (Exception e) {
@@ -441,15 +453,18 @@ public class McpToolRegistrar {
             // 会话句柄脱管——看门狗不再探测（恢复后丢工具且永不自愈），且后续
             // registeredWrappers.put 的 closeQuietly(prev) 会把存活句柄强杀。改为毒化标记：
             // 句柄留缓存原地换芯（sharedClient/看门狗对毒化句柄 swap 新连接，#348 的自愈
-            // 语义经换芯达成），毒化清除换芯成功即自愈。fresh 与复用句柄同型处理（复用句柄
-            // 失败同样可能是死连接毒化）；仅 closed 终态句柄（无法再换芯）移出缓存防无限
-            // 复用死对象
+            // 语义经换芯达成）。毒化带 delegate 版本防混淆（issue #493）：仅当前 delegate
+            // 仍是注册开始时的快照才毒化——换芯后的健康新芯不被旧连接迟到失败误标；
+            // fresh 与复用句柄同型处理（复用句柄失败同样可能是死连接毒化）；仅 closed
+            // 终态句柄（无法再换芯）移出缓存防无限复用死对象
             if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
                 if (reconnectable.isClosed()) {
                     sharedWrappers.remove(mcp.server(), wrapper);
-                } else {
-                    reconnectable.markPoisoned();
+                } else if (reconnectable.markPoisonedIfSame(poisonTarget)) {
                     log.warn("[MCP] server '{}' registration failed, poisoned shared client for in-place rebuild: {}",
+                        mcp.server(), e.getMessage());
+                } else {
+                    log.warn("[MCP] server '{}' registration failed on superseded delegate, poison skipped: {}",
                         mcp.server(), e.getMessage());
                 }
             }

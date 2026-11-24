@@ -104,10 +104,35 @@ class ReconnectableMcpClientWrapperTest {
         var fresh = stubBase("fresh");
         var handle = new ReconnectableMcpClientWrapper("s", old);
         assertFalse(handle.poisoned());
-        handle.markPoisoned();
+        assertTrue(handle.markPoisonedIfSame(old));
         assertTrue(handle.poisoned());
         assertTrue(handle.swap(fresh));
         assertFalse(handle.poisoned(), "成功换芯 = 连接已重建，毒化应清除");
+    }
+
+    @Test
+    void markPoisonedIfSameShouldIgnoreStaleFailureAfterSwap() {
+        // issue #493 缺陷①：会话持旧 delegate 调用失败期间，看门狗已换芯健康新连接——
+        // 旧连接的迟到失败不得把新 delegate 重新毒化（否则触发不必要的销毁重建风暴）
+        var old = stubBase("old");
+        var fresh = stubBase("fresh");
+        var handle = new ReconnectableMcpClientWrapper("s", old);
+        var staleSnapshot = handle.delegate();
+        assertTrue(handle.swap(fresh));
+
+        assertFalse(handle.markPoisonedIfSame(staleSnapshot), "delegate 已换芯，旧失败必须被拒");
+        assertFalse(handle.poisoned(), "换芯后的健康 delegate 不得被旧连接的失败毒化");
+        assertTrue(handle.markPoisonedIfSame(fresh), "对当前 delegate 的失败仍应毒化");
+        assertTrue(handle.poisoned());
+    }
+
+    @Test
+    void markPoisonedIfSameShouldIgnoreWhenClosed() {
+        var base = stubBase("base");
+        var handle = new ReconnectableMcpClientWrapper("s", base);
+        handle.close();
+
+        assertFalse(handle.markPoisonedIfSame(base), "closed 终态句柄无换芯价值，毒化无意义");
     }
 
     @Test
