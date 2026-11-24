@@ -895,6 +895,17 @@ class OpenSandboxTest {
             + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
     }
 
+    /** ls 目录探测模板参数化形态（P_LS 同形，memory/ 目录合并视图用例构造，issue #498） */
+    private static String lsProbeForm(String dir) {
+        return "if [ ! -e '" + dir + "' ]; then echo '__NOT_EXISTS__'; elif [ ! -d '" + dir
+            + "' ]; then echo '__NOT_A_DIR__'; else for f in '" + dir + "'/*; do "
+            + "if [ -d \"$f\" ]; then mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf 'DIR:%s\\t%s\\n' \"$f\" \"$mtime\"; elif [ -f \"$f\" ]; then "
+            + "size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0); "
+            + "mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0); "
+            + "printf 'FILE:%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; fi; done; fi";
+    }
+
     /** e2e mock 空 body 404 形态：SDK 对空 body 解析出 UNEXPECTED_RESPONSE（非 FILE_NOT_FOUND） */
     private static SandboxApiException sandboxApi404() {
         return new SandboxApiException("HTTP 404 Not Found", null, 404,
@@ -1683,6 +1694,141 @@ class OpenSandboxTest {
 
         assertEquals("yes", sandbox.exec(ctx, "test -e '/workspace/memory' && echo yes || echo no", 30).stdout(),
             "容器全缺失 + KV 清单有 memory/ 文件 → 目录探测 yes（回落语义保持）");
+    }
+
+    /** issue #498 主回归：读穿模式下 glob 对 memory/ 必须呈现「容器 ∪ KV」合并视图 */
+    @Test
+    void readThroughGlobShouldMergeContainerFreshAndKvHistoryMemory() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "memory/old.md", "# kv history\n");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        // 容器内本轮新写 fresh.md：memory 目录存在（不再 404），仅见容器文件
+        when(filesMock.listDirectory("/workspace/memory"))
+            .thenReturn(List.of(fileEntry("/workspace/memory/fresh.md", 14)));
+        when(filesMock.readByteArray("/workspace/memory/fresh.md"))
+            .thenReturn("fresh insight\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(filesMock.readByteArray("/workspace/memory/old.md")).thenThrow(sandboxApi404());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var glob = sandbox.exec(ctx, findProbeForm("/workspace/memory", "*.md"), 30);
+        assertTrue(glob.stdout().contains("memory/fresh.md"),
+            "glob 必须看到容器本轮新写文件（修复前 KV-only 视角不可见），got: " + glob.stdout());
+        assertTrue(glob.stdout().contains("memory/old.md"),
+            "glob 必须并入 KV 历史文件，got: " + glob.stdout());
+    }
+
+    /** issue #498 主回归：读穿模式下 ls 对 memory/ 必须呈现「容器 ∪ KV」合并视图 */
+    @Test
+    void readThroughLsShouldMergeContainerFreshAndKvHistoryMemory() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "memory/old.md", "# kv history\n");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        when(filesMock.listDirectory("/workspace/memory"))
+            .thenReturn(List.of(fileEntry("/workspace/memory/fresh.md", 14)));
+        when(filesMock.readByteArray("/workspace/memory/fresh.md"))
+            .thenReturn("fresh insight\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(filesMock.readByteArray("/workspace/memory/old.md")).thenThrow(sandboxApi404());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var ls = sandbox.exec(ctx, lsProbeForm("/workspace/memory"), 30);
+        assertTrue(ls.stdout().contains("FILE:memory/fresh.md"),
+            "ls 必须看到容器本轮新写文件，got: " + ls.stdout());
+        assertTrue(ls.stdout().contains("FILE:memory/old.md"),
+            "ls 必须并入 KV 历史文件（修复前容器目录存在即隐藏 KV），got: " + ls.stdout());
+    }
+
+    /** issue #498 同路径去重与容器优先：glob/ls 对 memory/ 呈现一致视图且与 exists/read 自洽 */
+    @Test
+    void readThroughMemoryViewShouldBeUnifiedAndContainerPreferred() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "memory/old.md", "# kv history\n");
+        fs.write(ctx, "memory/dual.md", "kv");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        // 容器内 fresh.md（新写）与 dual.md（与 KV 同路径不同元数据，size=99 vs KV size=2）
+        when(filesMock.listDirectory("/workspace/memory")).thenReturn(List.of(
+            fileEntry("/workspace/memory/fresh.md", 14),
+            fileEntry("/workspace/memory/dual.md", 99)));
+        when(filesMock.readByteArray("/workspace/memory/fresh.md"))
+            .thenReturn("fresh insight\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(filesMock.readByteArray("/workspace/memory/dual.md"))
+            .thenReturn("container".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(filesMock.readByteArray("/workspace/memory/old.md")).thenThrow(sandboxApi404());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var glob = sandbox.exec(ctx, findProbeForm("/workspace/memory", "*.md"), 30);
+        assertTrue(glob.stdout().contains("memory/dual.md\t99\t"),
+            "同路径双份时 glob 必须以容器元数据为准（size=99 非 KV size=2），got: " + glob.stdout());
+        assertEquals(3, glob.stdout().split("\n").length,
+            "glob 应恰好列出 fresh/dual/old 三个文件各一次，got: " + glob.stdout());
+
+        var ls = sandbox.exec(ctx, lsProbeForm("/workspace/memory"), 30);
+        assertEquals(3, ls.stdout().split("\n").length,
+            "ls 应恰好列出 fresh/dual/old 三个文件各一次（同路径去重），got: " + ls.stdout());
+        assertEquals(1, ls.stdout().split("memory/dual.md", -1).length - 1,
+            "dual.md 在 ls 输出中不得重复（容器条目优先去重）");
+
+        assertEquals("yes", sandbox.exec(ctx, "test -e '/workspace/memory/old.md' && echo yes || echo no", 30).stdout(),
+            "test -e 对 KV-only 历史文件必须 yes（issue #423 口径）");
+        assertEquals("yes", sandbox.exec(ctx, "test -e '/workspace/memory/fresh.md' && echo yes || echo no", 30).stdout(),
+            "test -e 对容器新写文件必须 yes");
+        var readOld = sandbox.exec(ctx, probeRead("/workspace/memory/old.md", 10), 30);
+        assertEquals("# kv history", readOld.stdout(), "read 对 KV-only 文件必须回落 KV 内容");
+        var readFresh = sandbox.exec(ctx, probeRead("/workspace/memory/fresh.md", 10), 30);
+        assertEquals("fresh insight", readFresh.stdout(), "read 对容器新写文件必须容器优先");
+    }
+
+    /** issue #498 对照组：容器整树缺失时 glob/ls 纯 KV 视图保持（回落语义不因合并改动回退） */
+    @Test
+    void readThroughGlobAndLsShouldServePureKvWhenContainerMissing() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "memory/kv-only.md", "kv only file\n");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).readByteArray(org.mockito.ArgumentMatchers.anyString());
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).listDirectory(org.mockito.ArgumentMatchers.anyString());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var glob = sandbox.exec(ctx, findProbeForm("/workspace/memory", "*.md"), 30);
+        assertEquals("memory/kv-only.md\t13\t0", glob.stdout(),
+            "容器整树缺失时 glob 必须纯 KV 应答（404 视作空目录）");
+
+        var ls = sandbox.exec(ctx, lsProbeForm("/workspace/memory"), 30);
+        assertEquals("FILE:memory/kv-only.md\t13\t0", ls.stdout(),
+            "容器整树缺失时 ls 必须纯 KV 应答（回落语义保持）");
+
+        assertEquals("yes", sandbox.exec(ctx, "test -e '/workspace/memory/kv-only.md' && echo yes || echo no", 30).stdout(),
+            "test -e KV 回落保持（issue #423 对照组口径）");
+        assertEquals("kv only file", sandbox.exec(ctx, probeRead("/workspace/memory/kv-only.md", 10), 30).stdout(),
+            "read KV 回落保持");
     }
 
     /** D1：SDK edit_file 形态（python3 -c + base64 载荷，路径不可见）的真实 exec 也要触发补注入 */

@@ -796,7 +796,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         var truncated = new AtomicBoolean(false);
         var memoryRoot = memoryRelUnder(root);
         if (memoryRoot != null) {
-            // D1 读穿：memory/ 目录容器为空，从 KV 清单应答（path/size，mtime=0）
+            // D1 读穿（issue #498）：容器遍历 ∪ KV 清单并集（walk 对容器 404 视作空目录；
+            // 容器条目先入 TreeSet、同 rel 的 KV 条目被拒 = 容器元数据优先），与
+            // translateRead/translateExists 的「容器优先 + KV 补全」同口径（issue #423 先例）
+            if (!walkFilesSkippingDirs(root, pattern, files, 0, truncated, java.util.Set.of())) {
+                return null;
+            }
             fillGlobFromMemoryKv(memoryRoot, pattern, files);
         } else {
             // D4：SKILL.md 探针模式下缓存已覆盖的技能目录跳过容器遍历、合并缓存条目；
@@ -922,7 +927,9 @@ public class OpenSandbox extends AbstractBaseSandbox
 
     /**
      * ls 目录翻译：__NOT_EXISTS__/__NOT_A_DIR__/DIR:path\tmtime + FILE:path\tsize\tmtime。
-     * 容器缺失的 memory/ 目录在读穿模式下从 KV 清单应答（first-reasoning D1，mtime=0）。
+     * 容器缺失的 memory/ 目录在读穿模式下从 KV 清单应答（first-reasoning D1，mtime=0）；
+     * memory/ 目录容器存在时同样并入 KV 条目（issue #498：容器 ∪ KV 合并视图，同 rel
+     * 容器条目优先去重，与 translateRead/translateExists 口径一致）。
      *
      * @return null = 目录含 type=symlink 条目，翻译层不可裁决（无 link target），整目录
      *         回落原 P_LS 真 exec——shell [ -d ]/[ -f ] 解引用语义兜底（issue #394）
@@ -943,6 +950,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             return readThroughMemoryLs(dir);
         }
         var sb = new StringBuilder();
+        var seen = new java.util.HashSet<String>();
         for (var e : entries) {
             if ("symlink".equalsIgnoreCase(e.getType())) {
                 return null;
@@ -952,6 +960,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 continue;
             }
             p = normalizeRel(p);
+            seen.add(p);
             boolean isDir = "directory".equalsIgnoreCase(e.getType()) || "dir".equalsIgnoreCase(e.getType());
             long mtime = epochSeconds(e);
             if (!sb.isEmpty()) {
@@ -963,7 +972,38 @@ public class OpenSandbox extends AbstractBaseSandbox
                 sb.append("FILE:").append(p).append('\t').append(Math.max(e.getSize(), 0)).append('\t').append(mtime);
             }
         }
+        if (WorkspaceReader.MEMORY_DIR.equals(normalizeRel(dir))) {
+            fillLsFromMemoryKv(seen, sb);
+        }
         return new ExecResult(0, sb.toString(), "", false);
+    }
+
+    /**
+     * D1 读穿 ls 的 KV 条目补全（issue #498）：KV 运行时清单里 memory/ 一级 .md 拼装
+     * 与容器同构的 FILE: 行（path\tsize\tmtime=0），skip 中的 rel（容器已有条目）跳过；
+     * KV 查询失败时静默跳过（容器列举结果已足够，fail-soft）。@return false = KV 查询异常。
+     */
+    private boolean fillLsFromMemoryKv(java.util.Set<String> skip, StringBuilder sb) {
+        if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()) {
+            return true;
+        }
+        try {
+            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
+                var rel = entry.getKey();
+                if (!rel.startsWith(WorkspaceReader.MEMORY_DIR + "/") || skip.contains(rel)) {
+                    continue;
+                }
+                if (!sb.isEmpty()) {
+                    sb.append('\n');
+                }
+                sb.append("FILE:").append(rel).append('\t')
+                    .append(entry.getValue() == null ? 0 : entry.getValue()).append('\t').append(0);
+            }
+            return true;
+        } catch (Exception e) {
+            log.debug("[sandbox-open] read-through memory ls failed: {}", e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -977,22 +1017,8 @@ public class OpenSandbox extends AbstractBaseSandbox
             return new ExecResult(0, "__NOT_EXISTS__", "", false);
         }
         var sb = new StringBuilder();
-        try {
-            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
-                if (!entry.getKey().startsWith(WorkspaceReader.MEMORY_DIR + "/")) {
-                    continue;
-                }
-                if (!sb.isEmpty()) {
-                    sb.append('\n');
-                }
-                sb.append("FILE:").append(entry.getKey()).append('\t')
-                    .append(entry.getValue() == null ? 0 : entry.getValue()).append('\t').append(0);
-            }
-        } catch (Exception e) {
-            log.debug("[sandbox-open] read-through memory ls failed: {}", e.getMessage());
-            return new ExecResult(0, "__NOT_EXISTS__", "", false);
-        }
-        return new ExecResult(0, sb.toString(), "", false);
+        boolean ok = fillLsFromMemoryKv(java.util.Set.of(), sb);
+        return new ExecResult(0, ok ? sb.toString() : "__NOT_EXISTS__", "", false);
     }
 
     /**
