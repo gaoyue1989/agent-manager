@@ -3,8 +3,8 @@
 #   ① /settings 沙箱组模板断言（新 3 键 + SANDBOX_TIMEOUT_MINUTES placeholder 30）→ 配置落 platform_config；
 #   ② admin 代理八端点：summary 聚合 / 创建池（池名-服务绑定契约 {服务k8s名}-pool + 预设模板+容量，mock 载荷断言）/
 #      容量调整（PUT 仅 capacitySpec）/ 删除池 / 沙箱列表（state 过滤）/ 销毁；管理操作各产生一条审计记录；
-#   ②' skillsync 默认开启链路（PR-4a 环境级，issue 测试缺口 T5）：opensandbox ns/token Secret 幂等 bootstrap →
-#      补配 token 重建池 default-on（三键 env + D-1 守卫）与删 Secret 重建 no-token（legacy 无 SKILLSYNC_ 键）灰度对偶；
+#   ②' skillsync 默认开启链路（环境级）：建池只经上游 API，不依赖 OpenSandbox ns 的 Secret/RBAC →
+#      缺省两键 + D-1 守卫；disableSyncd 显式关闭 → 历史形态；backend SA 对 opensandbox ns 零 RBAC；
 #   ③ console 只读端点：metadata.service ∈ ws 服务集合过滤（空集合滤空 + mysql 造服务行正向断言）+ 无操作端点；
 #   ④ 上游故障注入：mock 501 → 503（kubernetes runtime 文案）、401 → 502（指向 /settings）；
 #   ⑤ 未配置 URL（platform_config 行直删）→ 503 + /settings 引导文案；console 端点同态断言
@@ -50,7 +50,6 @@ cleanup_m12() {
     code DELETE /admin/sandboxes/$id "" "$TOKEN" >/dev/null 2>&1
   done
   if [ "$KUBE_OK" = "1" ]; then
-    kubectl -n opensandbox delete secret "$SVC-skillsync-token" --ignore-not-found >/dev/null 2>&1
     kubectl -n $KNS exec deploy/oaf-mysql -- mysql -h127.0.0.1 -uoaf -pOafPlatform2026 oaf_platform \
       -e "DELETE FROM services WHERE k8s_name IN ('$SVC','$SVC2'); DELETE FROM workspace_members WHERE workspace_id IN ($WS,$WS2); DELETE FROM workspaces WHERE id IN ($WS,$WS2);" >/dev/null 2>&1
   fi
@@ -149,58 +148,56 @@ else
   skip "mock 载荷断言需 kubectl（KUBE_OK=0）"
 fi
 
-# ---- ②' skillsync 默认开启链路（PR-4a，环境级）：真集群 RBAC（ClusterRole
-# platform-backend-skillsync）→ SecretExists（RealClient 命中/未命中两分支）→ mock 载荷
-# 三键+守卫——FakeK8s 单测拦不住 RBAC 装配错（先例 3ad2371：建池 SecretExists 403 致 500）。
-# opensandbox ns 为池 workload 固定落点（k8s.SandboxWorkloadNamespace），manifests/ci 的
-# kustomize namespace transformer 会把 Namespace 对象改写为 agent-platform，故 ns/Secret
-# 在此幂等 bootstrap（CI/本地集群同形，workflow 无需改）
+# ---- ②' skillsync 默认开启链路（环境级）：建池只经上游 API——opensandbox ns 在位、backend 对其
+# 无任何 RBAC 时缺省注入两键 + D-1 守卫照常（FakeK8s 单测拦不住 RBAC 装配错，先例 3ad2371）。
+# opensandbox ns 为 OpenSandbox workload 固定落点，manifests/ci 的 kustomize namespace
+# transformer 会把 Namespace 对象改写为 agent-platform，故 ns 在此幂等 bootstrap
+#（CI/本地集群同形，workflow 无需改）
 if [ "$KUBE_OK" = "1" ]; then
   kubectl create ns opensandbox --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
-  kubectl -n opensandbox create secret generic "$SVC-skillsync-token" --from-literal=token=t5-e2e \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
+  BD=$(kubectl -n $KNS get deploy oaf-platform-backend -o name 2>/dev/null \
+    || kubectl -n $KNS get deploy platform-backend -o name)
+  BSA=$(kubectl -n $KNS get $BD -o jsonpath='{.spec.template.spec.serviceAccountName}')
+  CAN=$(kubectl auth can-i get secrets -n opensandbox --as="system:serviceaccount:$KNS:${BSA:-default}" 2>/dev/null)
+  assert_eq "backend SA 对 opensandbox ns 无 secrets 读权限（OpenSandbox 是外部服务，零 RBAC 耦合）" "$CAN" "no"
 
-  # 用例 1 default-on：补配 token 重建池即默认开启（PR-4a 灰度重建语义，opensandboxproxy.go 注释）
-  code DELETE /admin/sandboxes/pools/$POOL "" "$TOKEN" >/dev/null
-  CR=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
-  assert_eq "skillsync 默认开启：补配 token Secret 后重建池 → 201" "$CR" "201"
+  # 用例 1 default-on：绑定服务的新建池缺省即开启（上方首次建池即此形态）
   PT=$(mock_pool_last "$POOL")
   KEYS=$(echo "$PT" | python3 -c "
 import sys,json
 c=json.load(sys.stdin)['template']['spec']['containers'][0]
 env={e['name']:e for e in c['env']}
-sk=env.get('SKILLSYNC_TOKEN',{}).get('valueFrom',{}).get('secretKeyRef',{})
 print(len(c['args']))
+print(len(c['env']))
+print(sum(1 for e in c['env'] if 'valueFrom' in e))
 print(env.get('SKILLSYNC_BASE_URL',{}).get('value',''))
-print(json.dumps(sk,sort_keys=True,separators=(',',':')))
 print(env.get('SKILLSYNC_INTERVAL',{}).get('value',''))" 2>/dev/null)
   ARGS_LEN=$(echo "$KEYS" | sed -n 1p)
-  BURL=$(echo "$KEYS" | sed -n 2p)
-  TREF=$(echo "$KEYS" | sed -n 3p)
-  IV=$(echo "$KEYS" | sed -n 4p)
+  ENV_LEN=$(echo "$KEYS" | sed -n 2p)
+  VF=$(echo "$KEYS" | sed -n 3p)
+  BURL=$(echo "$KEYS" | sed -n 4p)
+  IV=$(echo "$KEYS" | sed -n 5p)
   assert_eq "default-on：主容器 args 单条（D-1 守卫包裹原命令）" "$ARGS_LEN" "1"
   assert_contains "default-on：args 含 skillsync-launcher.sh 守卫字面" "$PT" "skillsync-launcher.sh"
   assert_contains "default-on：守卫内 task-executor 监听命令保留" "$PT" "/opt/opensandbox/task-executor -listen-addr"
+  assert_eq "default-on：env = 3 固定 + 2 派生" "$ENV_LEN" "5"
+  assert_eq "default-on：env 不含任何 valueFrom（不引用 K8s Secret）" "$VF" "0"
   assert_eq "default-on：SKILLSYNC_BASE_URL 派生 {服务}-svc 集群内地址（AgentPort 8100）" \
     "$BURL" "http://$SVC-svc.$KNS.svc:8100"
-  assert_eq "default-on：SKILLSYNC_TOKEN secretKeyRef 引用服务级 token Secret（落点 ns=opensandbox）" \
-    "$TREF" "{\"key\":\"token\",\"name\":\"$SVC-skillsync-token\"}"
   assert_eq "default-on：SKILLSYNC_INTERVAL 取守护缺省 1m" "$IV" "1m"
 
-  # 用例 2 no-token 灰度对偶：Secret 缺失 = 服务未接入 token → 旧行为建池
-  #（不让 secretKeyRef 悬空引用把 warm pod 卡死 CreateContainerConfigError）
-  kubectl -n opensandbox delete secret "$SVC-skillsync-token" >/dev/null 2>&1
+  # 用例 2 显式关闭：disableSyncd=true → 模板与历史形态一致（无 SKILLSYNC_ 键、无守卫）
   code DELETE /admin/sandboxes/pools/$POOL "" "$TOKEN" >/dev/null
-  CR=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
-  assert_eq "no-token：token Secret 缺失重建池 → 201（灰度对偶）" "$CR" "201"
+  CR=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3},\"disableSyncd\":true}" "" "$TOKEN")
+  assert_eq "disableSyncd：显式关闭重建池 → 201" "$CR" "201"
   PT=$(mock_pool_last "$POOL")
   N=$(echo "$PT" | python3 -c "
 import sys,json
 c=json.load(sys.stdin)['template']['spec']['containers'][0]
 print(sum(1 for e in c['env'] if e['name'].startswith('SKILLSYNC_')))" 2>/dev/null)
-  assert_contains "no-token：args 回落 legacy task-executor 字面" "$PT" "/opt/opensandbox/task-executor -listen-addr"
-  assert_not_contains "no-token：args 不含守卫字面" "$PT" "skillsync-launcher.sh"
-  assert_eq "no-token：env 不含任何 SKILLSYNC_ 前缀键" "$N" "0"
+  assert_contains "disableSyncd：args 回落 legacy task-executor 字面" "$PT" "/opt/opensandbox/task-executor -listen-addr"
+  assert_not_contains "disableSyncd：args 不含守卫字面" "$PT" "skillsync-launcher.sh"
+  assert_eq "disableSyncd：env 不含任何 SKILLSYNC_ 前缀键" "$N" "0"
 else
   skip "skillsync 默认开启链路断言需 kubectl（KUBE_OK=0）"
 fi

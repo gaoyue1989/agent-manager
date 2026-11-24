@@ -1,6 +1,6 @@
 # 沙箱技能同步守护设计（skills-syncd + 镜像 entrypoint）- 261112
 
-> 状态：**设计定稿并已实施（PR-1~PR-4b 合入，2026-11-14；三轮架构评审意见已吸收，决议 A-1~D-11 见 §13；验收清单见 §10，执行状态已按证据回填于 §10.3，部署与回滚见 docs/deployment.md §五之二→4）**
+> 状态：**设计定稿并已实施（PR-1~PR-4b 合入，2026-11-14；三轮架构评审意见已吸收，决议 A-1~D-11 见 §13；验收清单见 §10，执行状态已按证据回填于 §10.3，部署与回滚见 docs/deployment.md §五之二→4）；2026-11-24 起 token 门整体撤销——OpenSandbox 是外部服务，平台只经其 API 交互、不向其命名空间写任何对象（§9.1 补记）**
 > 前置调研：本设计经与维护者多轮收敛（备选方案对比：对象存储挂载 / CSI / ZeroFS-NFS / execd 文件 API 推送 / 守护自拉），最终选定「沙箱内定时同步守护 + 镜像 entrypoint」形态。备选方案淘汰理由见 §12。
 
 ## 1. 背景与问题机制
@@ -56,7 +56,7 @@
 
 ```
 ┌─ agent-framework（业务面，多副本）───────────────────────────┐
-│  SkillBundleController（新增，内部端点，token 鉴权）           │
+│  SkillBundleController（内部端点，无鉴权）                       │
 │    GET /internal/skills/version  → 版本指纹（轻）              │
 │    GET /internal/skills/bundle   → tar.gz（重，仅版本变更时）   │
 │  数据源：/config 包技能（PVC 只读 subPath，跨副本一致）         │
@@ -114,7 +114,6 @@ skills-syncd/
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `SKILLSYNC_BASE_URL` | （必填，无默认即禁用） | 同步源基址，如 `http://oaf-{name}-svc.agent-platform.svc:8100`；一服务一包，基址本身即标识包 |
-| `SKILLSYNC_TOKEN` | 空 | 端点鉴权 token（只读 scope，`Authorization: Bearer`）；为空则请求不带鉴权（源端点可配置为集群内免鉴权） |
 | `SKILLSYNC_STORE_DIR` | `/skills-store` | 技能库根目录 |
 | `SKILLSYNC_INTERVAL` | `1m` | 轮询周期（Go duration 格式，如 `30s`/`1m`/`5m`）；轮询 <200B/次，默认收紧到 1m 把新版生效延迟压到不可感知 |
 | `SKILLSYNC_TIMEOUT` | `120s` | 单次 HTTP 请求超时（bundle 可能数十 MB） |
@@ -129,7 +128,7 @@ skills-syncd/
 ```
 GET {BASE_URL}/internal/skills/version
   → 200 {"version": "<sha256[:16]>", "skillCount": <启用技能数>, "fileCount": <文件数>, "sizeBytes": <总字节>}
-  ← 401 token 无效
+  ← 503 指纹计算失败（ERR-* 不外流，守护退避重试）
 
 GET {BASE_URL}/internal/skills/bundle?version=<v>
   → 200 application/gzip（tar.gz：顶层为各技能目录 <skillName>/...，**仅含未被服务级禁用的技能**，B-2）
@@ -281,15 +280,15 @@ backend preset 参数化提供**；镜像仅提供二进制/launcher（§5.1）�
 
 | 参数 | 形态 | 缺省 |
 |---|---|---|
-| `extraEnv` | `[{name, value}` 或 `{name, secretKeyRef}]` 白名单键集（`SKILLSYNC_*`） | 空 = 模板逐字段与现状一致 |
+| `extraEnv` | `[{name, value}]` 白名单键集（`SKILLSYNC_*`） | 空 = 模板逐字段与现状一致 |
 | `commandWrapper` | 布尔/固定脚本名（`/usr/local/bin/skillsync-launcher.sh`） | off = 现 command 原样 |
 
 **注入来源两态（保留手动实施空间）**：
 
 1. **自动**（常规路径，C-1 决议——一期仅校验）：不新增发布自动建池步骤；发布/框架侧校验管理员
    **预建池**符合 `{k8s名}-pool` 命名且与服务绑定唯一，`SKILLSYNC_*` 参数经建池 API 随池带入
-   （`SKILLSYNC_BASE_URL` 由服务身份生成、`SKILLSYNC_TOKEN` 引用 per-service Secret
-   `{服务名}-skillsync-token`、`commandWrapper` 开）。发布链路自动建池列为后续增强
+   （`SKILLSYNC_BASE_URL` 由服务身份生成、`SKILLSYNC_INTERVAL` 取守护缺省、`commandWrapper` 开）。
+   发布链路自动建池列为后续增强
 2. **手动**（C-2 决议——一期 = admin API）：允许手填 `extraEnv`/`commandWrapper` 与池名——覆盖特殊服务、
    灰度、排障、存量池补配等场景；运维控制台表单列为后续。手填路径校验：池名全局唯一 +
    与服务的绑定关系显式（避免 G1 共享池误配）；未通过校验的建池请求拒绝
@@ -302,9 +301,8 @@ backend preset 参数化提供**；镜像仅提供二进制/launcher（§5.1）�
 ```yaml
 # backend 在 preset 生成时注入
 env:
-  - { name: SKILLSYNC_BASE_URL,   value: "http://oaf-{name}-svc.agent-platform.svc:8100" }
-  - { name: SKILLSYNC_TOKEN,      valueFrom: { secretKeyRef: { name: "{name}-skillsync-token", key: token } } }
-  - { name: SKILLSYNC_INTERVAL,   value: "1m" }
+  - { name: SKILLSYNC_BASE_URL, value: "http://oaf-{name}-svc.agent-platform.svc:8100" }
+  - { name: SKILLSYNC_INTERVAL, value: "1m" }
 command: ["/bin/sh", "-c"]
 args: ["W=/usr/local/bin/skillsync-launcher.sh; [ -x \"$W\" ] || W=\"\"; exec $W /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"]
 ```
@@ -314,8 +312,15 @@ pod 仍是旧镜像（无 launcher 脚本）时，未加引号的空 `$W` 在 PO
 偏斜退化为「无守护的旧行为」（fail-open），而非 warm pod crashloop。镜像回退、模板先行两类偏斜
 方向均被覆盖；镜像升级后守卫恒真，无需回改模板。
 
-token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；agent-framework 侧校验），
-`§9.1` 的「不接受跨服务枚举能力」由 per-service token 兑现。
+**补记（2026-11-24，token 门撤销）**：OpenSandbox 对平台是**外部服务**——平台只经其 API（建池模板的
+env/args）交互，不向其命名空间写任何 K8s 对象、不持有其 RBAC。原设计把 `SKILLSYNC_TOKEN` 镜像为池
+workload ns 的 per-service Secret（池模板 secretKeyRef 引用），迫使 backend 持有该 ns 的 Secret 读写授权
+（manifests 甚至落到集群级 ClusterRole），并衍生出撤销守卫 / 轮换契约（D-8）/ 建池三态，引发 #350、
+#396、#409 与 #476。裁定：端点只读、内容为已发布技能，token 本就明文落沙箱 env，且平台默认预填使各
+服务同值，按服务隔离实际不成立——不值得这套代价。现状：`SKILLSYNC_TOKEN` 自守护、agent-framework 与
+平台 env 模板移除；建池缺省注入两态（`default` / `disabled`），`extraEnv` 只收 `value`；§9.1
+「不接受跨服务枚举能力」不再由 token 兑现，改由 OpenSandbox egress 策略（只放行本服务 svc）承担，属
+部署侧配置（§5.3）。
 
 ### 5.3 网络前提
 
@@ -326,9 +331,8 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
 
 ### 6.1 内部端点（新增 `SkillBundleController`）
 
-- 路径 `/internal/skills/version`、`/internal/skills/bundle`；token 经 env `SKILLSYNC_TOKEN` 配置
-  （空 = 端点关闭，404）。**鉴权关系**：仅 token 校验，不参与 `ROUTER_AUTH_MODE`/业务鉴权链，
-  且不经业务 Ingress 对外暴露（仅集群内访问）
+- 路径 `/internal/skills/version`、`/internal/skills/bundle`。**鉴权关系**：无鉴权（2026-11-24 起，
+  补记四），不参与 `ROUTER_AUTH_MODE`/业务鉴权链，且不经业务 Ingress 对外暴露（仅集群内访问）
   > 补记（2026-11-13）：该断言在 host 模式（`INGRESS_HOST_SUFFIX` 非空）根路径直出下曾被
   > 静默穿透（`/internal/skills/**` 与 `/actuator/**` 均经业务域名可达）。已由平台强制实现：
   > host 模式 per-service Ingress 构造时把 `/internal`、`/actuator` 前缀改道
@@ -354,6 +358,10 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
   > `(/|;|$)`（manifests/platform-router.yaml + charts/oaf-platform + charts/oaf-agent），
   > host 模式 K8s Ingress Prefix 语义无法表达分号，由应用层 Filter 覆盖。守卫：
   > backend/internal/k8s/router_test.go 分号变体断言 + framework Filter 单测。
+  > 补记四（2026-11-24，token 门撤销，§5.2 补记同源）：端点无鉴权，与 `/actuator` 同级；上两条
+  > 补记里「token 门为主控制、入口排除为纵深防御」的口径作废——**业务入口排除（router 内置 +
+  > host Ingress 排除表 + 分号 Filter）是这两个内部路径唯一的对外防线**。对仍带 `Authorization`
+  > 头的旧镜像守护兼容（头被忽略），滚动顺序先框架后 backend（docs/deployment.md「五之二 → 4」）。
 - 数据源 `/config`（PVC 只读 subPath，多副本天然一致）
 - **版本指纹 singleflight + ≤5s TTL 缓存**（D-4，修订 G2 的绝对化表述）：对包技能目录做 stat 指纹
   （relPath|mtime|size 排序遍历，2000 文件 ≈10-50ms）+ 服务级禁用集（B-2）。新鲜度语义由守护侧
@@ -463,7 +471,6 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 | 开关 | 默认 | 语义 |
 |---|---|---|
 | `SANDBOX_SKILLS_SHARED_STORE` | `/skills-store`（空或 `off` = 显式关闸） | 沙箱内共享库路径；空或 `off` = 包技能不投放（总闸，无 tar 回落；`off` 为平台可送达的关闸形态——平台 env 写路径空串=删除，置空送不出 CM） |
-| `SKILLSYNC_TOKEN` | 空 | agent-framework 端点鉴权；空 = 端点关闭 |
 
 回退 = **会话级二值**（B-1 决议）：判定失败（store 目录缺失 / `CURRENT` 解析失败 / 版本硬校验不一致
 （§7.2）/ 端点不可达）→ 本会话无包技能投放。无逐技能混排；
@@ -569,13 +576,11 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 ### 9.1 凭据
 
-- token 只授两个 GET 端点、只读、仅本服务包内容；经 K8s Secret 注入
-- 暴露面评估：token 进入沙箱（不可信代码可读 env）。缓解：scope 收窄到「读本服务已发布技能」，
-  泄露代价 = 技能内容本身（本就是发布内容）。**不接受**该 token 具有任何写能力或跨服务枚举能力
-- **轮换契约（D-8，关闭原开放问题 1）**：轮换 = 更新 Secret + 池模板 rollout 重启（K8s env 变更的
-  自然语义；重启后守护携新 token 自动拉平版本）；撤销 = env 置空同步删池 ns Secret，绑定池
-  仍在运行/管理面不可达时被拒（issue #396 守卫；唯一可行顺序先删池 → 撤销 → 按需重建池）。
-  不引入服务端双 token 重叠窗口——为罕见运维事件在鉴权路径维护双值状态，复杂度不成比例
+端点**无鉴权**（2026-11-24 起，§5.2 补记）：只读、两个 GET、仅本服务已发布技能，与 `/actuator` 同级，
+仅集群内可达（业务入口排除为唯一对外防线，§6.1 补记四）。如实披露的残余面：集群内任意工作负载（含跑着
+不可信代码的沙箱 Pod——框架建箱与池模板均未设 networkPolicy）可按 svc 名读任意服务的技能包；需要按服务
+收窄时由 OpenSandbox egress 策略只放行本服务 svc（§5.3），属部署侧配置。原「per-service token + K8s
+Secret 注入 + 轮换契约（D-8）」随 token 门撤销一并作废（曾引发 #350、#396、#409、#476）。
 
 ### 9.2 UID 现实与写穿语义（B-3 决议）
 
@@ -602,7 +607,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 ### 10.1 单测（skills-syncd，Go）
 
-- 版本协商：version 一致零下载 / 变更触发拉取 / 404 与 401 处理 / 退避重试
+- 版本协商：version 一致零下载 / 变更触发拉取 / 非 2xx 处理 / 退避重试
 - 拉取退避（D-7）：版本变更后拉取延迟分布 ∈ [0, INTERVAL)；重拉容忍集（当前 + 上一版）窗口判定
 - 原子性：staging 中断（模拟 kill）不留半成品可读态；CURRENT 切换后旧版本仍可读
 - 单版本切换：swap 后旧版必删、CURRENT 指向者不删、启动清扫非当前 `v-*`/`.staging-*` 残留幂等
@@ -610,7 +615,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 ### 10.2 agent-framework 单测
 
-- 端点：版本指纹稳定性（源只读）、bundle sha256 头正确、token 校验
+- 端点：版本指纹稳定性（源只读）、bundle sha256 头正确、无鉴权直出（携 Authorization 头照常）
 - 软链农场：会话级二值判定（store 就绪 + 硬校验）与判定记忆（会话键）/ 判定失败全会话降级不混排 /
   manifest 禁用项不建链且既有链删除 / 全局禁用集变更触发版本指纹变化 / 悬空链重建 / 用户技能与软链共存 /
   稳态短路（D-10）：同沙箱代同指纹跳过收敛 exec（0 exec）/ 宿主内容变化（包源变更、用户禁用经
@@ -654,7 +659,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 | 现象 | 查法 |
 |---|---|
-| 技能是旧版 | 沙箱内 `readlink /skills-store/CURRENT` + `cat /var/log/skills-syncd.log`（拉取失败/退避原因）；agent-framework 侧 `curl -H "Authorization: Bearer $TOKEN" $BASE_URL/internal/skills/version` 对账 |
+| 技能是旧版 | 沙箱内 `readlink /skills-store/CURRENT` + `cat /var/log/skills-syncd.log`（拉取失败/退避原因）；agent-framework 侧 `curl $BASE_URL/internal/skills/version` 对账 |
 | 技能缺失/降级 | agent-framework 日志查 §7.2 ERROR（版本硬校验失败）与降级 WARN；确认 store 目录与 `CURRENT` 是否存在 |
 | 农场软链丢失（会话中途容器重启后技能不可用） | 已接受盲点（§6.2-4/D-10）：同 sandboxId 容器重启可写层清空而记账未失效 → 不重收敛；宿主内容下次变化或新会话（新 sandboxId）自愈；紧急恢复 = 重开会话 |
 | 跨服务技能污染 | 查 §5.2 池名是否被两服务共用；`CURRENT` 版本指纹 vs 本服务端点指纹必然不一致（§7.2 已拦截并降级） |
@@ -713,7 +718,7 @@ P0-1/P1-3 机制对用户技能维度继续生效。**PR-4b 之后的回滚语�
 | D-5 判定打点 SLO | Micrometer Counter `skills.farm.decision{result}`（actuator 已带 micrometer-core，零新增依赖）；降级同步 WARN | §7.2 |
 | D-6 守护自愈 | launcher watchdog 30s 重启（sleep 兼任崩溃循环节流），修订原「无 supervise」口径 | §5.1/§4.5 |
 | D-7 拉取退避 | bundle 拉取前 random(0,INTERVAL)，集群级铺满周期；新鲜度口径放宽为 ≤2×INTERVAL | §4.4/§7.1 |
-| D-8 token 轮换契约 | 轮换 = Secret 更新 + 池 rollout 重启（K8s env 变更自然语义）；否决双 token 重叠窗口——关闭原开放问题 1 | §9.1 |
+| D-8 token 轮换契约 | 轮换 = Secret 更新 + 池 rollout 重启（K8s env 变更自然语义）；否决双 token 重叠窗口——关闭原开放问题 1；**2026-11-24 随 token 门撤销作废（§9.1）** | §9.1 |
 | D-9 多通道协议预留 | version 响应二期新增可选 `channels` 对象（通道独立 version/bundle），免 v2 路径迁移 | §4.3 |
 | D-10 农场稳态短路 | 农场收敛不按每次触发执行（否决原 H2 口径——每次触发全量收敛 exec ≈1 次 exec RTT，农场稳态反而劣于 tar 稳态 ≈35ms，与 §8 内在冲突）：采用与 tar 路径 P0-1 同源的稳态短路（宿主指纹 = 包内源 stat + L4 revision；sandboxId 代际记账复用 scoped 指纹表），收敛触发面 = 新沙箱代 / 指纹变化 / exec 失败重试；**否决 per-call 容器侧标记兜底**（任何容器态观测即 1 次 exec RTT，与稳态目标互斥）；会话中途容器重启（同 sandboxId resume）盲点显式接受，与投影指纹缓存 §3.3 系统性盲点同姿态 | §6.2-4/§8/§10.2 |
 | D-11 投放记账模式分量 | D-10 记账无模式分量的翻转漏判修补：sandboxId|scope 记账值（Pod 级 + Redis 共享层同构）改为 {@code mode|指纹}（tar/farm），稳态只认同模式记录——同沙箱代降级(tar)↔farm 互转（gate 丢失后重判定：框架重启/漂副本/LRU 逐出）永不满足对方稳态，翻转必走一次重收敛/重物化（tar 残留真实文件收敛为软链兑现 D-2；farm 软链会话降级重物化兑现 B-1）；无模式存量值（升级窗口）不匹配任何模式 = 未知走慢路径，自然失效无需迁移 | §6.2-4/§10.2/§10.3-11 |
