@@ -219,13 +219,17 @@ public class SkillBundleService {
         try (var top = Files.list(dir)) {
             for (var skillDir : top.filter(Files::isDirectory).toList()) {
                 var name = skillDir.getFileName().toString();
-                if (name.startsWith(".") || disabled.contains(name)) {
+                if (name.startsWith(".")) {
                     continue;
                 }
                 // 打包规范名 = SKILL.md frontmatter name（issue #398）：SDK 渲染路径与
                 // farm 建链/解包顶层三方对齐；无 frontmatter/不安全名回落目录名。
-                // version.skills 清单由 rel 顶层段派生，自动同口径
+                // version.skills 清单由 rel 顶层段派生，自动同口径。
+                // 禁用集同为规范名口径（issue #480，getDisabledSet 已归一化）
                 var canonical = SkillZipSupport.canonicalSkillName(skillDir);
+                if (disabled.contains(canonical)) {
+                    continue;
+                }
                 try (var walk = Files.walk(skillDir)) {
                     for (var f : walk.filter(Files::isRegularFile).toList()) {
                         var rel = dir.relativize(f).toString().replace('\\', '/');

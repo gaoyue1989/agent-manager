@@ -62,6 +62,33 @@ class SkillBundleServiceTest {
             "显式配置（SKILLSYNC_BUNDLE_CACHE_DIR）优先");
     }
 
+    @Test
+    void canonicalNameDisableShouldExcludeFromManifestAndBundle() throws Exception {
+        var service = service(Duration.ZERO);
+        skill("my-dir-name", "---\nname: my-frontmatter-name\n---\n# body\n", "scripts/run.py", "print(1)\n");
+        skill("demo-a", "# demo a\n");
+        manageService().toggleSkill("my-frontmatter-name");
+
+        var version = service.currentVersion().version();
+
+        assertEquals(List.of("demo-a"), service.currentVersion().skills());
+        assertEquals(List.of("demo-a/SKILL.md"), bundleEntryNames(service, version));
+    }
+
+    @Test
+    void legacyDirNameDisableShouldExcludeFromManifestAndBundle() throws Exception {
+        var service = service(Duration.ZERO);
+        skill("my-dir-name", "---\nname: my-frontmatter-name\n---\n# body\n", "scripts/run.py", "print(1)\n");
+        skill("demo-a", "# demo a\n");
+        manageService().toggleSkill("my-dir-name");
+
+        var version = service.currentVersion().version();
+
+        assertEquals(List.of("demo-a"), service.currentVersion().skills(),
+            "历史目录名禁用经归一化后必须同样剔除规范名技能");
+        assertEquals(List.of("demo-a/SKILL.md"), bundleEntryNames(service, version));
+    }
+
     private SandboxConfig sandboxConfigWithCacheDir(String cacheDir) {
         return new SandboxConfig(
             true, "img", 30, 30, 512, 1, List.of("sh"),

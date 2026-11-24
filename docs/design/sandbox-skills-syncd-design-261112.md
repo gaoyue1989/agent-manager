@@ -144,8 +144,12 @@ GET {BASE_URL}/internal/skills/bundle?version=<v>
 `name`（打包规范名，`SkillZipSupport.canonicalSkillName`），非文件系统目录名——SDK 提示词渲染
 （MarketplaceStager Cached → ShellPathPolicy）按 frontmatter name 推导容器路径
 `/workspace/.skills-cache/<scope>/<ns>/<name>`，farm 建链与 bundle 解包顶层同口径才不 404。
-frontmatter 缺失/无 name/不 shell-safe（`..`、引号、空白、`/`）回落目录名；服务级禁用集键
-保持目录名（toggleSkill 按目录 resolve 校验）。
+frontmatter 缺失/无 name/不 shell-safe（`..`、引号、空白、`/`）回落目录名；服务级禁用集键与
+管理面寻址同为规范名口径（issue #480）：`SkillManageService` 统一经 `resolveSkillDir` 解析
+（规范名与历史目录名均可寻址），`.skill-states.json` 读写按规范名键、读取时对历史目录名
+条目按现存目录归一化，`getDisabledSet()` 输出与 SDK `skill.getName()` 同键——目录合并视图
+（SkillCatalogService）、SDK SkillFilter、沙箱投放禁用判定（SkillsFarm/ManagedSkillDisabledChecker）
+三方一致。
 
 一服务一包：每个 agent-framework 服务实例只承载一个 OAF 包（服务即包身份的单一真相源），
 端点无需 package 参数——`BASE_URL` 已标识请求的是哪个服务/包。

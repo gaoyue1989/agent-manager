@@ -110,6 +110,24 @@ class SkillCatalogServiceTest {
     }
 
     @Test
+    void mismatchedDirNameDisabledShouldFlagEnabledAndFilterList() throws IOException {
+        var dir = skillsDir.resolve("my-dir-name");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("SKILL.md"),
+            "---\nname: my-frontmatter-name\ndescription: mismatched\n---\n# body\n");
+        var manage = manageService();
+        manage.toggleSkill("my-frontmatter-name");
+
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manage, userSkillService());
+
+        var all = service.listAll();
+        assertEquals(1, all.size());
+        assertEquals("my-frontmatter-name", all.get(0).get("name"));
+        assertEquals(false, all.get(0).get("enabled"));
+        assertTrue(service.list().isEmpty());
+    }
+
+    @Test
     void declaredOnlySkillShouldBeMarkedMissing() {
         var service = new SkillCatalogService(
             oafConfig(List.of(declared("ghost-skill", "Only declared", true))), props(), manageService(), userSkillService());
