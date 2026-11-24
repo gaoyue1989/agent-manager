@@ -9,6 +9,8 @@
 
 > **键布局演进（2026-11-22，issue #393）**——②的共享层键从 per-scope 独立 key `sbx:scopedfp:{sandboxId}|{scope}` 改为**沙箱代单槽** `sbx:scopedfp:{sandboxId}`，值=`{scope}|{mode}|{指纹}`，put 原子覆盖（`ScopedFingerprintStore`）：容器内 prune「同代只存一个有效 scope」（SkillsFarm 收敛 exec 尾段清其它 scope 目录）的物理事实在 per-scope key 布局下不反映到记账——Pod 切 scope 后其他副本仍能凭被 prune scope 的陈旧共享记录命中稳态并回填 Pod 级表伪造短路，技能执行面全废；单槽覆盖使旧 scope 记账随新 scope 投放自然失效。**Pod 级命中路径同步闭合（同日评审 g1）**：Pod 级两表（`scopedSkillCacheFingerprints`/`hydratedScopedScopes`）同为无跨副本失效机制的本 Pod 信念，同代 A→B→A 序列回落原 Pod 仍可凭陈旧本地记录伪造稳态——`scopedSkillCacheFingerprint` 的 Pod 命中分支现读单槽 scope 段交叉核验（`ScopedFingerprintStore.slotScope`，+1 次 Redis GET/稳态 call，D-10 的 0-exec 稳态保持：GET 亚毫秒级 vs 被替代的 ≈1s 收敛 exec），槽 scope≠请求 scope 即权威否定（清除本 Pod 该 scope 两表记录并返回 null 重收敛）；槽缺失/Redis 不可达=未知，fail-open 维持本 Pod 信念不清本地（滚动窗口内旧布局副本不写槽=维持存量行为）。键收口到 `facade.key` 统一前缀（旧布局本就漏 `AGENT_REDIS_PREFIX`，违反门面契约）；存量旧布局 key 永不被新布局读取（新键无 `|` 且带前缀），≤7 天 TTL 自然消亡，无迁移。
 
+> **prune 广播演进（2026-11-24，issue #481）**——上段「Pod 切 scope 时槽被新 scope 原子覆盖」只覆盖健康收敛路径（record 先行写槽）；ERR- 收敛（指纹未知，record no-op）时 `pruneScopedSkillCacheFingerprintsExcept` 的逐 scope `remove`（DEL）有两个死角：① 执行 prune 的副本可能从未收敛过被删 scope，本地 stale 表为空，其他副本写入的单槽完全不被触碰；② 即便 DEL 落地，缺失态被读取侧 fail-open 与「Redis 不可达」混同（仅 `slotScope≠scope` 才否定本地），其他副本陈旧 Pod 级记录永失效路径——端点恢复后被 prune scope 凭三条件全 true 的稳态短路锁死，技能执行面永久 404。修正 = `ScopedFingerprintStore.remove` 退役、新增 `markPruned(sandboxId, keepScope)`：单槽原子覆写为**非空墓碑** `keepScope|__pruned__|`（不依赖本 Pod 本地记账遍历）——现役 scope 段权威否定所有副本陈旧记录（fail-open 只留给 Redis 真不可达），keepScope 自身墓碑值模式段不匹配 farm、端点恢复后同样重收敛；槽已指向 keepScope 的正常记账（收敛周期内 record 先行写入，容器实态一致）保留不覆写，稳态短路不被击穿。TTL/键布局/读取协议不变。
+
 ## 1. 问题清单（66MB/2000f 真实环境基准，2026-11-09）
 
 每 call（turn）技能同步链路实测分布（改造前）：
@@ -58,6 +60,7 @@ manifest 键从 `{relPath}` 改为 `{技能名}/{relPath}`（`WorkspaceSyncServi
 - **大小一致的原位内容漂移不感知**：与快照差分同一已接受边界（上轮设计 §7）。
 - **效果**：L4 只存用户真实覆盖；`agent_fs` 从 O(66MB×用户数) 收敛为 O(覆盖差异)；新代物化、memory 命名空间扫描等连带成本同步消失。存量 L4 行不自动清理（无害：revision 门控命中后零成本；收敛需显式删除覆盖）。
 - 开关 `SANDBOX_SYNC_SKIP_PACKAGE_BASELINE`（默认 true）。
+- **语义修正（issue #482，2026-11-24）**：基线跳过把容器清单回填进 gate 快照（首见零差分优化），但快照既定不变量是「只记已落库状态」——回填的基线条目 L4 并无对应记录，必须以 `SkillSyncGate.baselineOnlySkills` 区分；否则用户仅改资源文件（SKILL.md 未动）时差分漏读主文件、按「快照已含 SKILL.md」增量落库，留下管理面不可见不可删的孤儿资源行。修正后：检出偏差文件即清该技能快照条目并全量重读，按 SKILL.md 先写完整晋升落库；未修改保持零读写；修改后无 SKILL.md（主文件被删）不算技能，L4 保持无记录。
 
 ### 2.6 P2-6：memory 缺席探测 + 注入收敛到每沙箱代
 

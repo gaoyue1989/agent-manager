@@ -284,8 +284,11 @@ public class WorkspaceSyncService {
                 // 不回写 L4。只在「无栅栏」分支到达（上方三标记已排除），管理面覆盖技能照常走回写路径。
                 if (isPurePackageBaseline(name, containerManifest)) {
                     if (gate != null) {
-                        // 基线副本同样记入快照（键含技能名前缀，P0-2）：下轮差分命中即零内容读
+                        // 基线副本同样记入快照（键含技能名前缀，P0-2）：下轮差分命中即零内容读。
+                        // 快照语义是「已落库状态」，此处记录的是未落库的基线清单，必须以 baselineOnly
+                        // 标记区分，否则用户仅改资源文件时差分漏读 SKILL.md、按增量落库留下孤儿资源行
                         containerManifest.forEach((rel, size) -> gate.manifest().put(manifestKey(name, rel), size));
+                        gate.baselineOnlySkills().add(name);
                     }
                     log.debug("skills/ sync: {} 与包内基线一致，跳过回写（L4 不存纯基线副本）", name);
                     return false;
@@ -295,6 +298,23 @@ public class WorkspaceSyncService {
         // 相对路径 → 文件内容（差分模式下只读与快照不一致的文件；读取失败/超限的不进入结果集）
         Map<String, String> files = new LinkedHashMap<>();
         collectSkillFiles(osbSandbox, skillDir, "", name, files, 0, gate);
+        if (gate != null && gate.baselineOnlySkills().contains(name)) {
+            if (files.isEmpty()) {
+                log.debug("skills/ sync: {} 基线副本未被修改，保持跳过回写", name);
+                return false;
+            }
+            // 用户修改了基线副本（差分检出偏差文件）：清掉基线回填的快照条目（L4 并无对应记录，
+            // 增量落库会留下无 SKILL.md 的孤儿行），全量重读后按 SKILL.md 先写的完整晋升落库。
+            // 失败时快照已清，下轮重新基线比对（容器≠基线）→ 全量读重试，收敛正确。
+            gate.baselineOnlySkills().remove(name);
+            gate.manifest().keySet().removeIf(key -> key.startsWith(name + "/"));
+            files.clear();
+            collectSkillFiles(osbSandbox, skillDir, "", name, files, 0, gate);
+            if (!files.containsKey(WorkspaceReader.SKILL_FILE)) {
+                log.debug("skills/ sync: {} 基线副本被修改但缺少 {}，跳过", name, WorkspaceReader.SKILL_FILE);
+                return false;
+            }
+        }
         if (files.isEmpty() || !files.containsKey(WorkspaceReader.SKILL_FILE)) {
             // 无 SKILL.md 不算技能（同 SDK / WorkspaceReader.listUserSkills 判定）。
             // 差分模式下 SKILL.md 未变时不进 files：此时快照必然已含它（快照只能来自

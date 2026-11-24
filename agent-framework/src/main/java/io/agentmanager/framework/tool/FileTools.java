@@ -257,11 +257,12 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         if (!u.startsWith("http://") && !u.startsWith("https://")) {
             return err("url must be http(s): " + u);
         }
-        // 前缀白名单（SSRF 收敛）：仅允许已配置前缀下的 URL
-        var allowed = prefixes.stream().anyMatch(p -> u.equals(p) || u.startsWith(p + "/"));
-        if (!allowed) {
+        // 前缀白名单（SSRF 收敛，issue #483）：解析+规范化后逐段裁决，拒绝穿越/编码穿越变体
+        var normalized = io.agentmanager.framework.util.ExternalUrlGuard.allowlisted(u, prefixes);
+        if (normalized == null) {
             return err("url not in configured external prefixes: " + u);
         }
+        var registered = normalized.toString();
         var name = sanitizeDisplayName(fileName);
         if (name == null) {
             return err("invalid file_name: " + fileName);
@@ -275,16 +276,16 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
                 id, userKey, null, null, name, name, mime, sz,
-                "external", u, "generated", "injected", java.time.LocalDateTime.now()));
+                "external", registered, "generated", "injected", java.time.LocalDateTime.now()));
         } catch (Exception e) {
-            var existing = fileAssetStore.findByStorage("external", u);
+            var existing = fileAssetStore.findByStorage("external", registered);
             if (existing.isPresent()) {
                 id = existing.get().id();
             } else {
                 return err("metadata write failed: " + e.getMessage());
             }
         }
-        log.info("present_url: registered {} -> {}", name, u);
+        log.info("present_url: registered {} -> {}", name, registered);
         return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + escape(name)
             + "\",\"mime_type\":\"" + escape(mime) + "\",\"size\":" + sz + "}";
     }
@@ -334,39 +335,34 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
     /**
      * 非沙箱模式：从 KV 工作区读文件。
      *
-     * <p><b>归属规则（issue #408）</b>：只允许当前主体可证明归属的命名空间键——
-     * RuntimeContext 原值（userId/sessionId，覆盖直接链路 / 网关 peer 两形态）+
-     * session_user 反查的真实用户（Channel 链路 D3：write_file→KV 同步用请求体 userId，
-     * 工具侧 userId 被网关改写为 peer，经 SessionKeyResolver 同源反查弥合）。
+     * <p><b>命名空间键裁决（issue #408 / #473）</b>：单一可信键——
+     * SessionKeyResolver.realUserId(ctx)（session_user 反查的真实用户；chat/A2A 入口的
+     * ownedBy 前置校验 + 认领语义保证反查结果恒为请求者本人）。仅当解析器缺失（直调/测试
+     * 桩形态）或反查返回 null（DB fail-soft）时回退 ctx.getUserId()（入口已裁决的
+     * 「头 > body > debug-user」身份）。<b>RuntimeContext 原值禁止作为候选</b>：
+     * Channel 链路 ctx.userId 是网关 peer = 客户端可控的前端 sessionId（设为他人 userId
+     * 即命中其命名空间），ctx.sessionId 在 A2A 链路是请求体原值——两者逐个尝试即跨用户
+     * 读取通道（#473 攻击面），候选集语义本身已删除。
      *
      * <p>历史上此处的 kv_sync_key（rel_path 全局唯一、无用户维度）与 file_asset 按文件名
      * 反查会把<b>其他用户</b>的 userKey 带进候选，使任一已认证用户猜中常见路径即可读取
-     * 他人文件——两条全局反查已随本规则删除（登记与查询通道一并移除，见 V18）。
+     * 他人文件——两条全局反查已随 #408 删除（登记与查询通道一并移除，见 V18）。
      */
     private byte[] readFromWorkspace(RuntimeContext ctx, String relPath) {
         if (ctx == null) {
             return null;
         }
-        var candidates = new java.util.LinkedHashSet<String>();
-        if (ctx.getUserId() != null && !ctx.getUserId().isBlank()) {
-            candidates.add(ctx.getUserId());
-        }
-        if (ctx.getSessionId() != null && !ctx.getSessionId().isBlank()) {
-            candidates.add(ctx.getSessionId());
-        }
+        String key = null;
         if (sessionKeyResolver != null) {
-            var real = sessionKeyResolver.realUserId(ctx);
-            if (real != null && !real.isBlank()) {
-                candidates.add(real);
-            }
+            key = sessionKeyResolver.realUserId(ctx);
         }
-        for (var key : candidates) {
-            var bytes = workspaceReader.readWorkspaceFile(key, relPath);
-            if (bytes != null) {
-                return bytes;
-            }
+        if (key == null || key.isBlank()) {
+            key = ctx.getUserId();
         }
-        return null;
+        if (key == null || key.isBlank()) {
+            return null;
+        }
+        return workspaceReader.readWorkspaceFile(key, relPath);
     }
 
     /** 扩展名 → MIME 推断（兜底 application/octet-stream） */
