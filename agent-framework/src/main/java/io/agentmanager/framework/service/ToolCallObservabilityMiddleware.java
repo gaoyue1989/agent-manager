@@ -8,11 +8,11 @@ import java.util.function.Supplier;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
-import io.agentscope.core.event.AllToolsDeniedEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.ToolCallState;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentmanager.framework.controller.AgentEventSseSerializer;
@@ -27,14 +27,15 @@ import reactor.core.publisher.Flux;
  * 在各自 SSE 事件出口分别写入，A2A JSON-RPC 链路无事件出口而漏记；本中间件统一写入
  * （每调用 2 行——TOOL_CALL_START + TOOL_RESULT_END，后者携带 result_state），
  * controller 侧写入已移除。计数口径 = TOOL_CALL_START 行。
- * <b>行来源分工</b>（实测约束）：ToolCallStartEvent 在本中间件更外层才汇入事件流
- * （内层不可见，依赖它会导致 START 行漏记），故 START 行在 onActing 入口直接由
- * ActingInput.toolCalls() 落（payload 不落——审计仅元信息，工具名/id 已有列）；
- * ToolResultEndEvent 由工具执行内核发出、全链路可见，RESULT 行仍取事件侧（携带
- * 终态 result_state）。无终态的中断调用只剩 START 行（明细按「未落终态」展示）。
- * HITL 场景同一调用经两次 onActing（挂起询问轮 + 确认恢复轮）：恢复轮调用携带
- * ALLOWED/ASKING 状态，START 行跳过防双写；用户拒绝时 SDK 在本中间件之外合成
- * DENIED 结果、链内只发 AllToolsDeniedEvent——据此补写 RESULT 行与 error 计数。
+ * <b>行来源分工</b>：START 行在 onActing 入口由 ActingInput.toolCalls() 落
+ * （payload 不落——审计仅元信息，工具名/id 已有列；恢复轮 ALLOWED/ASKING 状态
+ * 调用已在挂起询问轮落过，跳过防双写）；RESULT 行在 onAgent 层由流上的
+ * ToolResultEndEvent 驱动。onAgent 是整条 agent 事件流的汇出口（onActing 链内
+ * 事件与 SDK 直发事件都流经它），终态写点放这里才能同时覆盖两类来源：工具执行
+ * 内核的链内终态，以及 HITL 拒绝时 SDK 对被拒调用合成的 DENIED 终态——后者
+ * 经 publishEvent 直发事件汇、绕过 onActing 链（部分拒绝时 SDK 不发
+ * AllToolsDeniedEvent，全部拒绝时它也只是同一信息的链内冗余副本，不作为写点
+ * 信号，否则与直发终态双写；issue #486）。
  *
  * <p><b>指标</b>：Micrometer 计数 {@code oaf.tool.calls}，标签 service（OAF slug）、
  * tool、result（success / error——非 SUCCESS 终态一律按 error 桶，与 Monitor
@@ -47,7 +48,7 @@ import reactor.core.publisher.Flux;
  * 会话标识经 {@link SessionKeyResolver} 解析业务规范键（与 FrameworkTracingMiddleware
  * 同一实例、同一 memo 语义；Channel 链路 ctx.sessionId 是网关 gw-hash）。
  *
- * <p>解析在 hook 入口做一次（不进 doOnNext 热路径）；写入全程 fail-soft，不影响工具执行。
+ * <p>写入全程 fail-soft，不影响工具执行。
  */
 public class ToolCallObservabilityMiddleware implements MiddlewareBase {
 
@@ -75,13 +76,26 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
     }
 
     @Override
+    public Flux<AgentEvent> onAgent(Agent agent, RuntimeContext ctx, AgentInput input,
+                                    Function<AgentInput, Flux<AgentEvent>> next) {
+        String sessionId = canonicalSessionId(ctx);
+        return next.apply(input)
+            .doOnNext(evt -> {
+                if (evt instanceof ToolResultEndEvent end) {
+                    boolean success = end.getState() == ToolResultState.SUCCESS;
+                    count(end.getToolCallName(), success);
+                    auditResult(end, sessionId, end.getToolCallName(), end.getToolCallId(),
+                        success ? "success" : "error");
+                }
+            });
+    }
+
+    @Override
     public Flux<AgentEvent> onActing(Agent agent, RuntimeContext ctx, ActingInput input,
                                      Function<ActingInput, Flux<AgentEvent>> next) {
-        String sessionId = sessionKeyResolver != null && ctx != null
-            ? sessionKeyResolver.canonicalSessionId(ctx)
-            : ctx == null ? null : ctx.getSessionId();
-        // START 行：入口直接落（ToolCallStartEvent 在本层外才汇入事件流，内层不可见）；
-        // HITL 恢复轮（ALLOWED=确认放行 / ASKING=确认拒绝）已在挂起询问轮落过，跳过防双写
+        // START 行：入口直接落（ToolCallStartEvent 无法区分 HITL 恢复轮，恢复轮
+        // ALLOWED/ASKING 状态调用已在挂起询问轮落过，按状态跳过防双写）
+        String sessionId = canonicalSessionId(ctx);
         List<ToolUseBlock> calls = input.toolCalls();
         if (calls != null) {
             for (ToolUseBlock call : calls) {
@@ -90,25 +104,13 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
                 }
             }
         }
-        return next.apply(input)
-            .doOnNext(evt -> {
-                if (evt instanceof ToolResultEndEvent end) {
-                    boolean success = end.getState() == ToolResultState.SUCCESS;
-                    count(end.getToolCallName(), success);
-                    auditResult(end, sessionId, end.getToolCallName(), end.getToolCallId(),
-                        success ? "success" : "error");
-                } else if (evt instanceof AllToolsDeniedEvent denied) {
-                    // HITL 拒绝：SDK 在本中间件之外合成 DENIED 结果，链内只发本事件——
-                    // 据此补写 RESULT 行与计数（非 SUCCESS 终态按 error 桶，口径同上）
-                    for (ToolUseBlock call : denied.getDeniedToolCalls()) {
-                        if (call == null || call.getName() == null) {
-                            continue;
-                        }
-                        count(call.getName(), false);
-                        auditResult(evt, sessionId, call.getName(), call.getId(), "error");
-                    }
-                }
-            });
+        return next.apply(input);
+    }
+
+    private String canonicalSessionId(RuntimeContext ctx) {
+        return sessionKeyResolver != null && ctx != null
+            ? sessionKeyResolver.canonicalSessionId(ctx)
+            : ctx == null ? null : ctx.getSessionId();
     }
 
     /** HITL 恢复轮的调用（挂起询问轮已落过 START 行）：SDK 确认放行置 ALLOWED、拒绝保持 ASKING */

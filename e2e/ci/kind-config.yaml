@@ -2,6 +2,10 @@
 # 与仓库 e2e 脚本默认的 http://localhost:30080 对齐。
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+      endpoint = ["https://mirror.gcr.io", "https://registry-1.docker.io"]
 nodes:
   - role: control-plane
     kubeadmConfigPatches:

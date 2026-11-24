@@ -150,9 +150,12 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 		// LLM_MODEL+LLM_BASE_URL，在本服务 delivery 行 join connections 范围内匹配
 		// model_id+base_url，按 connection_id ASC 只置首个命中行 true（同 modelId+baseUrl
 		// 多行只标首行，避免编辑回显双 default 触发 marked>1 400）、命中时本服务其余行置
-		// false；env 不匹配（无 LLM_* 或无命中行）则本服务全部行不动。幂等：候选 WHERE 含
-		// is_default IS NULL（三值逻辑下 = false 不命中 NULL 行，先例步骤 3/4），true/false
-		// 行均不命中候选，二轮启动零写入。仅写平台自有表（原则一）。
+		// false；env 不匹配（无 LLM_* 或无命中行）则本服务全部行不动。已有显式
+		// is_default=true 行的服务整服务跳过（issue #487：显式默认是用户选择，同
+		// modelId+baseUrl 多连接时不得被翻回最小 connection_id，否则删除守卫错位），
+		// 仅归一尚无默认标记的存量服务。幂等：候选 WHERE 含 is_default IS NULL（三值
+		// 逻辑下 = false 不命中 NULL 行，先例步骤 3/4），true/false 行均不命中候选，
+		// 二轮启动零写入。仅写平台自有表（原则一）。
 		// 先清孤儿行：旧版服务 Delete 事务只清 ServiceEvent+svc、从不清理
 		// model_deliveries，存量库必有孤儿行——下方逐服务 First 回查 services 会对
 		// 孤儿 service_id 报 ErrRecordNotFound 使整个事务回滚（Backfill 错误 → main.go
@@ -169,6 +172,15 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 			var svc ServiceEntity
 			if err := tx.Select("id, env_json").First(&svc, sid).Error; err != nil {
 				return err
+			}
+			var explicitDefaults int64
+			if err := tx.Model(&ModelDelivery{}).
+				Where("service_id = ? AND is_default = ?", sid, true).
+				Count(&explicitDefaults).Error; err != nil {
+				return err
+			}
+			if explicitDefaults > 0 {
+				continue
 			}
 			var env map[string]string
 			_ = json.Unmarshal([]byte(svc.EnvJSON), &env)

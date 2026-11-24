@@ -164,6 +164,55 @@ func TestDeliverConnectionNormalizesDefaultFlags(t *testing.T) {
 	}
 }
 
+// TestDeliverConnectionRespectsExplicitDefault issue #487：服务已存在显式 is_default=true
+// 行时，手动下发（failed → pending 置换路径触发 env 归一）不得按 connection_id ASC
+// 推断把默认翻回最小 id——同 modelId+baseUrl 双连接（key-a 小 id / key-b 大 id）用户
+// 显式选 key-b 后重发 key-a，标记必须保持，删除守卫仍守护真实默认连接 key-b。
+func TestDeliverConnectionRespectsExplicitDefault(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-1000ggg7", "显式默认守卫空间")
+	var postCnt, patchCnt int32
+	agent := fakeAgentModels(t, &postCnt, &patchCnt, nil)
+	defer agent.Close()
+	svc := &store.ServiceEntity{K8sName: "oaf-explicit", DisplayName: "explicit", WorkspaceID: ws.ID,
+		Status: store.StatusRunning, ClusterURL: agent.URL,
+		EnvJSON: `{"LLM_MODEL":"m1","LLM_BASE_URL":"http://b1/v1"}`}
+	if err := c.DB.Create(svc).Error; err != nil {
+		t.Fatal(err)
+	}
+	keyA := seedVerifiedConn(t, c, ws.ID, "key-a", "m1", "http://b1/v1")
+	keyB := seedVerifiedConn(t, c, ws.ID, "key-b", "m1", "http://b1/v1")
+	if err := c.DB.Create(&store.ModelDelivery{ConnectionID: keyA.ID, ServiceID: svc.ID, Status: "synced"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DB.Create(&store.ModelDelivery{ConnectionID: keyB.ID, ServiceID: svc.ID, Status: "synced", IsDefault: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DB.Model(&store.ModelDelivery{}).
+		Where("connection_id = ? AND service_id = ?", keyA.ID, svc.ID).
+		Update("status", "failed").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeliverConnectionToService(ws.ID, keyA.ID, svc.ID); err != nil {
+		t.Fatalf("re-deliver key-a: %v", err)
+	}
+	flagOf := func(connID uint) bool {
+		var d store.ModelDelivery
+		if err := c.DB.Where("connection_id = ? AND service_id = ?", connID, svc.ID).First(&d).Error; err != nil {
+			t.Fatal(err)
+		}
+		return d.IsDefault
+	}
+	if flagOf(keyA.ID) || !flagOf(keyB.ID) {
+		t.Fatalf("explicit default must survive re-deliver: keyA=%v keyB=%v", flagOf(keyA.ID), flagOf(keyB.ID))
+	}
+	if err := c.DeleteModelConnection(ws.ID, keyB.ID); err == nil ||
+		!strings.Contains(err.Error(), "default_connection_in_use by agent oaf-explicit") {
+		t.Fatalf("explicit default conn must stay guarded: %v", err)
+	}
+}
+
 // TestAgentEditDefaultFlagLifecycle 创建→编辑链路的默认标记（issue #387）：创建写入
 // is_default；EditForm 回显按行标记；编辑切换默认连接翻转标记；无关编辑保存不静默切换默认。
 func TestAgentEditDefaultFlagLifecycle(t *testing.T) {
