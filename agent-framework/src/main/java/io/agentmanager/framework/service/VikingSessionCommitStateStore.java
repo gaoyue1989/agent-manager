@@ -47,6 +47,10 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
     static final int QUEUE_CAPACITY = 500;
     /** seen 去重集容量护栏：超限整体清空重放 append（宁可重复不可丢消息） */
     private static final int SEEN_CAPACITY = 2000;
+    /** seenBySlot 外层 slot 数上限（LRU 淘汰最久未活跃会话，超限重放 append 语义同上） */
+    static final int SLOT_CAPACITY = 1000;
+    /** close 排空队列的上限：超时放弃残留（Pod 关停不得被慢 OpenViking 无限期拖住） */
+    static final int DRAIN_TIMEOUT_SECONDS = 3;
 
     private final AgentStateStore delegate;
     private final VikingMemoryClient client;
@@ -54,8 +58,8 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
     private final SessionUserStore sessionUserStore;
     /** Pod 本地去重集（slotKey → msg ids）；容量护栏超限整体清空（宁可重复不可丢消息）。
      *  实例字段：装饰器每 Pod 单实例，static 会把去重态泄漏到不同装配世代（reload/测试）。 */
-    private final Map<String, Set<String>> seenBySlot = new ConcurrentHashMap<>();
-    private final ThreadPoolExecutor commitWorker = new ThreadPoolExecutor(
+    final Map<String, Set<String>> seenBySlot = BoundedLruMap.of(SLOT_CAPACITY);
+    final ThreadPoolExecutor commitWorker = new ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS,
         new ArrayBlockingQueue<>(QUEUE_CAPACITY),
         r -> {
@@ -128,11 +132,15 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
 
     @Override
     public void delete(String userId, String sessionId) {
+        seenBySlot.remove(SessionMessageArchiveStateStore.slotKey(userId, sessionId));
         delegate.delete(userId, sessionId);
     }
 
     @Override
     public void delete(String userId, String sessionId, String stateKey) {
+        if (SessionMessageArchiveStateStore.AGENT_STATE_KEY.equals(stateKey)) {
+            seenBySlot.remove(SessionMessageArchiveStateStore.slotKey(userId, sessionId));
+        }
         delegate.delete(userId, sessionId, stateKey);
     }
 
@@ -144,6 +152,15 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
     @Override
     public void close() {
         commitWorker.shutdown();
+        try {
+            if (!commitWorker.awaitTermination(DRAIN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                commitWorker.shutdownNow();
+                commitWorker.awaitTermination(1, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            commitWorker.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         delegate.close();
     }
 

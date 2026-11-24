@@ -507,6 +507,21 @@ class AgentScopeConfigTest {
     }
 
     /**
+     * issue #496：Spring 关停必须触发 agent_state 装饰链 close（DistributedStore 无 close
+     * 方法，inferred destroyMethod 无生效目标——由显式 DisposableBean 回调兜住排空语义）。
+     */
+    @Test
+    void shutdownHookMustCloseDistributedStoreAgentStateStore() throws Exception {
+        var store = mock(DistributedStore.class);
+        var agentStore = mock(io.agentscope.core.state.AgentStateStore.class);
+        when(store.agentStateStore()).thenReturn(agentStore);
+
+        config.agentStateStoreShutdownHook(store).destroy();
+
+        org.mockito.Mockito.verify(agentStore).close();
+    }
+
+    /**
      * WorkspaceReader 本地记忆门控（issue #419 B-07b）：provider=openviking（VikingMemoryClient
      * bean 在位）时必须关闭本地文件记忆注入/回写，消除双记忆源；provider=local 保持现状；
      * AGENT_MEMORY_ENABLED=false 时无论 provider 均关闭（既有语义不变）。

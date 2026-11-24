@@ -247,4 +247,93 @@ class VikingSessionCommitStateStoreTest {
             .appendSessionMessage(anyString(), anyString(), anyString(), contains("内容" + (total - 1)));
         s.close();
     }
+
+    /** issue #496：seenBySlot 外层 Map 有界（LRU 淘汰，超限重放 append 语义与内层护栏一致） */
+    @Test
+    void seenSlotsMustStayBounded() {
+        var s = store();
+        for (int i = 0; i < 1200; i++) {
+            s.save("u-1", "s-" + i, SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+                stateWith(List.of(msg("m" + i, MsgRole.USER, "内容" + i))));
+        }
+        assertTrue(s.seenBySlot.size() <= VikingSessionCommitStateStore.SLOT_CAPACITY,
+            "seenBySlot 外层 Map 无界增长：实际 " + s.seenBySlot.size());
+        s.close();
+    }
+
+    /** issue #496：会话删除必须同步清理 slot 去重集（删后重建的会话不得被旧 seen 压制 append） */
+    @Test
+    void deleteMustEvictSeenSlot() {
+        var s = store();
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m1", MsgRole.USER, "问"))));
+        assertTrue(s.seenBySlot.containsKey("u-1:s-1"));
+        s.delete("u-1", "s-1");
+        assertFalse(s.seenBySlot.containsKey("u-1:s-1"), "会话删除必须清理 slot 去重集");
+        s.close();
+    }
+
+    /** issue #496：单键 delete（stateKey=agent_state）同样清理 slot 去重集 */
+    @Test
+    void deleteByStateKeyMustEvictSeenSlot() {
+        var s = store();
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m1", MsgRole.USER, "问"))));
+        s.delete("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY);
+        assertFalse(s.seenBySlot.containsKey("u-1:s-1"));
+        s.close();
+    }
+
+    /** issue #496：close 必须排空队列残留消息并等待 worker 终止后再关闭 delegate */
+    @Test
+    void closeMustDrainPendingCommitsBeforeTerminate() throws Exception {
+        var gate = new CountDownLatch(1);
+        var appended = new AtomicInteger();
+        Mockito.doAnswer(inv -> {
+            if (appended.incrementAndGet() == 1) {
+                gate.await(5, TimeUnit.SECONDS);
+            }
+            return null;
+        }).when(client).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        var s = store();
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m1", MsgRole.USER, "执行中批次"))));
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m2", MsgRole.USER, "队列残留批次"))));
+        Thread.ofPlatform().start(() -> {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+            }
+            gate.countDown();
+        });
+        long start = System.nanoTime();
+        s.close();
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        assertTrue(elapsedMs >= 400,
+            "close 必须等待队列残留消息提交完成后再返回，took " + elapsedMs + "ms");
+        assertTrue(s.commitWorker.isTerminated(), "close 返回时 commitWorker 必须已终止");
+        verify(client, times(2)).appendSessionMessage(eq("u-1"), eq("u-1:s-1"), eq("user"), anyString());
+        verify(delegate).close();
+    }
+
+    /** issue #496：worker 卡死时 close 必须有界返回（排空上限 3s），不得无限期阻塞关停 */
+    @Test
+    void closeMustTerminateWithinBoundWhenWorkerStuck() throws Exception {
+        var gate = new CountDownLatch(1);
+        Mockito.doAnswer(inv -> {
+            gate.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(client).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        var s = store();
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m1", MsgRole.USER, "卡住"))));
+        long start = System.nanoTime();
+        s.close();
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        gate.countDown();
+        assertTrue(elapsedMs < 5000,
+            "worker 卡死时 close 必须有界返回（3s 排空上限），took " + elapsedMs + "ms");
+        assertTrue(s.commitWorker.isTerminated(), "close 返回时 commitWorker 必须已终止");
+    }
 }

@@ -47,11 +47,13 @@ public class VikingMemoryClient {
 
     private final VikingConfig cfg;
     private final HttpClient http;
-    private final Map<String, String> ovSessionIds = new ConcurrentHashMap<>();
+    final Map<String, String> ovSessionIds = BoundedLruMap.of(SESSION_CACHE_CAPACITY);
     /** createSession 失败负缓存（platformSessionId → 失败时刻 epoch ms），冷却期内 append 快速丢弃 */
-    private final Map<String, Long> failedSessionAt = new ConcurrentHashMap<>();
+    final Map<String, Long> failedSessionAt = BoundedLruMap.of(SESSION_CACHE_CAPACITY);
 
     static final long SESSION_RETRY_COOLDOWN_MS = 30_000;
+    /** OV session 映射与负缓存共享容量护栏（LRU 淘汰，映射丢失仅导致重建 session） */
+    static final int SESSION_CACHE_CAPACITY = 1000;
 
     public VikingMemoryClient(VikingConfig cfg) {
         this.cfg = cfg;
@@ -90,17 +92,18 @@ public class VikingMemoryClient {
 
     /**
      * lazy 开户：以服务身份 ADMIN key 注册 (account, user)（seed 派生，幂等——已存在
-     * 视为成功）。仅在数据请求 401 后调用（正常路径零外呼）。
+     * 视为成功）。仅在数据请求 401 后调用（正常路径零外呼）。请求超时下限 2s：开户卡死
+     * 只降级为本次无记忆，不得挂死首推理线程与单线程 commitWorker（issue #496）。
      */
     private boolean ensureUser(String userId) {
         if (cfg.adminKey().isBlank()) {
             return false;
         }
         try {
-            var req = jsonReqBuilder("POST", cfg.url() + "/api/v1/admin/accounts/" + cfg.account() + "/users",
+            var resp = exchange("POST", cfg.url() + "/api/v1/admin/accounts/" + cfg.account() + "/users",
                 cfg.adminKey(),
-                MAPPER.writeValueAsString(Map.of("user_id", userId, "role", "user", "seed", cfg.userSeed()))).build();
-            var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+                MAPPER.writeValueAsString(Map.of("user_id", userId, "role", "user", "seed", cfg.userSeed())),
+                Math.max(cfg.searchTimeoutMs(), 2000));
             // 200/201=新建；409/CONFLICT=已存在（幂等成功）；其余失败告警
             if (resp.statusCode() < 300 || isConflict(resp)) {
                 return true;
