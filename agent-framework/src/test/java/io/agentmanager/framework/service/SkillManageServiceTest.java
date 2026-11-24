@@ -311,6 +311,108 @@ class SkillManageServiceTest {
         assertTrue(service.exportSkillZip("ghost").isEmpty());
     }
 
+    // ========== 规范名寻址（issue #480：目录名 ≠ frontmatter name） ==========
+
+    @Test
+    void canonicalNameShouldToggleWhenDirNameDiffers() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("my-dir-name", "my-frontmatter-name");
+
+        assertFalse(service.toggleSkill("my-frontmatter-name"));
+        assertTrue(service.getDisabledSet().contains("my-frontmatter-name"));
+        assertFalse(service.getDisabledSet().contains("my-dir-name"));
+        assertTrue(service.isDisabled("my-frontmatter-name"));
+
+        assertTrue(service.toggleSkill("my-frontmatter-name"));
+        assertTrue(service.getDisabledSet().isEmpty());
+    }
+
+    @Test
+    void legacyDirNameToggleShouldNormalizeToCanonicalName() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("my-dir-name", "my-frontmatter-name");
+
+        assertFalse(service.toggleSkill("my-dir-name"));
+        assertTrue(service.getDisabledSet().contains("my-frontmatter-name"));
+        assertFalse(service.getDisabledSet().contains("my-dir-name"));
+        assertTrue(service.toggleSkill("my-dir-name"));
+        assertTrue(service.getDisabledSet().isEmpty());
+    }
+
+    @Test
+    void legacyDirNameStateFileEntriesShouldNormalizeOnRead() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("my-dir-name", "my-frontmatter-name");
+        Files.writeString(skillsDir.resolve(".skill-states.json"), "[\"my-dir-name\"]");
+
+        assertEquals(java.util.Set.of("my-frontmatter-name"), service.getDisabledSet());
+        assertTrue(service.isDisabled("my-frontmatter-name"));
+        assertTrue(service.isDisabled("my-dir-name"));
+    }
+
+    @Test
+    void readSkillContentShouldResolveByCanonicalName() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("my-dir-name", "my-frontmatter-name");
+
+        var content = service.readSkillContent("my-frontmatter-name");
+        assertTrue(content.contains("my-frontmatter-name"));
+    }
+
+    @Test
+    void writeSkillContentShouldResolveByCanonicalName() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("my-dir-name", "my-frontmatter-name");
+
+        service.writeSkillContent("my-frontmatter-name",
+            "---\nname: my-frontmatter-name\ndescription: Rewritten\n---\n# Rewritten\n");
+
+        var onDisk = Files.readString(skillsDir.resolve("my-dir-name").resolve("SKILL.md"));
+        assertTrue(onDisk.contains("Rewritten"));
+    }
+
+    @Test
+    void exportSkillZipShouldResolveByCanonicalName() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("my-dir-name", "my-frontmatter-name");
+
+        assertTrue(service.exportSkillZip("my-frontmatter-name").isPresent());
+        assertTrue(service.exportSkillZip("my-dir-name").isPresent());
+    }
+
+    @Test
+    void deleteSkillShouldResolveByCanonicalNameAndClearState() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("my-dir-name", "my-frontmatter-name");
+        service.toggleSkill("my-dir-name");
+
+        assertTrue(service.deleteSkill("my-frontmatter-name"));
+        assertFalse(Files.exists(skillsDir.resolve("my-dir-name")));
+        assertTrue(service.getDisabledSet().isEmpty());
+    }
+
+    @Test
+    void resolveShouldRejectPathTraversal() throws IOException {
+        var service = createService();
+        Files.createDirectories(tempDir.resolve("outside"));
+        Files.writeString(tempDir.resolve("outside").resolve("SKILL.md"), "x");
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class, () -> service.deleteSkill("../outside"));
+        assertTrue(Files.exists(tempDir.resolve("outside")));
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class, () -> service.toggleSkill("../outside"));
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class, () -> service.readSkillContent("../outside"));
+    }
+
+    private void writeMismatchedSkill(String dirName, String frontmatterName) throws IOException {
+        var dir = skillsDir.resolve(dirName);
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("SKILL.md"),
+            "---\nname: " + frontmatterName + "\ndescription: mismatched\n---\n# " + frontmatterName + "\n");
+    }
+
     // ========== 工具方法 ==========
 
     private static Map<String, byte[]> readZipEntries(byte[] zipBytes) throws IOException {

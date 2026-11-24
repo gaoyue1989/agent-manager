@@ -343,8 +343,8 @@ public final class SkillZipSupport {
      * <p>回落目录名：SKILL.md 缺失 / 无 frontmatter / 无 name / 解析抛异常（二进制 SKILL.md，
      * {@link #extractSkillName} 契约）；以及规范名不 shell-safe（含 {@code ..}、引号、空白、
      * {@code /}、以 {@code /} 开头——与 SkillsFarm 链名防线同规则，规范名进 tar rel 与容器
-     * 命令拼接，不得改写名字，改写会再次与 SDK 渲染口径错位）。禁用集键保持目录名口径
-     * （toggleSkill 按目录 resolve 校验），不受本规范名影响。
+     * 命令拼接，不得改写名字，改写会再次与 SDK 渲染口径错位）。管理面禁用集与寻址键同为
+     * 规范名口径（SkillManageService 读取时归一化，issue #480）。
      */
     public static String canonicalSkillName(Path skillDir) {
         var dirName = skillDir.getFileName().toString();

@@ -7,6 +7,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -25,11 +26,15 @@ import io.agentmanager.framework.config.AgentManagerProperties;
  * Skill 包管理服务：zip 上传/解压、删除、启停状态管理。
  *
  * <p>启停状态持久化于 {configDir}/skills/.skill-states.json（Set&lt;String&gt; 格式，
- * 存放被禁用的 skill 名称）。该文件不在 SDK 扫描范围内（以 . 开头）。
+ * 存放被禁用 skill 的规范名（{@link SkillZipSupport#canonicalSkillName}，frontmatter
+ * name 优先、回落目录名；issue #480）。该文件不在 SDK 扫描范围内（以 . 开头）。
+ * 读取时对历史目录名条目按现存目录归一化为规范名，SDK SkillFilter / 沙箱投放
+ * / 目录合并视图三方与 SDK 的 skill.getName() 同键比对。
  *
  * <p>所有文件操作直接作用于 /config/skills 目录——这是 HarnessSkillMiddleware
  * L2 仓库（FileSystemSkillRepository）扫描的事实来源。文件变化后，下轮推理
- * 自动重扫，无需重启 Agent。
+ * 自动重扫，无需重启 Agent。管理面入参按 {@link #resolveSkillDir} 解析：
+ * 规范名与历史目录名均可寻址（catalog 展示的是规范名）。
  */
 @Service
 public class SkillManageService {
@@ -154,20 +159,18 @@ public class SkillManageService {
     /**
      * 导出指定 Skill 的整目录为 zip（供下载）。
      *
-     * <p>以 {@code /config/skills/{name}} 目录为事实来源：递归打包全部文件，保留技能内相对路径
+     * <p>以技能目录为事实来源：递归打包全部文件，保留技能内相对路径
      * 与<b>原始字节</b>（二进制资源不被破坏，区别于 L4 用户技能的纯文本导出）。
      * 技能目录不存在（如 frontmatter 仅声明未落地）返回 empty，由调用方映射 404。
      *
+     * @param name 规范名（历史目录名亦可寻址）
      * @return zip 字节；技能目录不存在返回 {@link Optional#empty()}
      * @throws IllegalArgumentException 名称越出 skills 目录（路径遍历防护）
      * @throws IOException              读取或打包失败
      */
     public Optional<byte[]> exportSkillZip(String name) throws IOException {
-        var dir = skillsDir.resolve(name).normalize();
-        if (!dir.startsWith(skillsDir.normalize())) {
-            throw new IllegalArgumentException("路径遍历攻击防护");
-        }
-        if (!Files.isDirectory(dir)) {
+        var dir = resolveSkillDir(name);
+        if (dir == null) {
             return Optional.empty();
         }
         var baos = new java.io.ByteArrayOutputStream();
@@ -191,25 +194,24 @@ public class SkillManageService {
     /**
      * 删除指定名称的 Skill。
      *
+     * @param name 规范名（历史目录名亦可寻址）
      * @return true 如果成功删除，false 如果 skill 不存在
      */
     public boolean deleteSkill(String name) throws IOException {
-        var dir = skillsDir.resolve(name);
-        if (!Files.isDirectory(dir)) {
+        var dir = resolveSkillDir(name);
+        if (dir == null) {
             return false;
         }
-        // 安全检查：确保在 skills 目录下
-        if (!dir.normalize().startsWith(skillsDir.normalize())) {
-            throw new IllegalArgumentException("路径遍历攻击防护");
-        }
+        var canonical = SkillZipSupport.canonicalSkillName(dir);
+        var disabled = loadDisabledSet();
+        disabled.remove(canonical);
         if (!SkillZipSupport.deleteRecursive(dir)) {
             // 目录未删净（如 /config 为 PVC 只读挂载、权限不足）：必须显式失败——
             // 此前吞掉 IOException 后无条件返回 true，接口谎报 200 而已删，文件其实还在。
             // 文案不重复「删除失败」前缀：上层（控制器/前端）已自行加前缀。
             throw new IOException("目录仍存在（" + dir + "），可能是挂载点只读或无删除权限");
         }
-        // 同时清除禁用状态
-        removeDisabledState(name);
+        saveDisabledSet(disabled);
         log.info("Skill '{}' deleted", name);
         return true;
     }
@@ -217,24 +219,27 @@ public class SkillManageService {
     // ========== 启停 ==========
 
     /**
-     * 切换 skill 启停状态。
+     * 切换 skill 启停状态。禁用集键为规范名（issue #480），写入前对历史目录名
+     * 条目整体归一化迁移。
      *
+     * @param name 规范名（历史目录名亦可寻址）
      * @return 切换后的状态：true=启用, false=禁用
      */
     public boolean toggleSkill(String name) throws IOException {
-        var disabled = loadDisabledSet();
-        var dir = skillsDir.resolve(name);
-        if (!Files.isDirectory(dir)) {
+        var dir = resolveSkillDir(name);
+        if (dir == null) {
             throw new IllegalArgumentException("Skill '" + name + "' 不存在");
         }
+        var canonical = SkillZipSupport.canonicalSkillName(dir);
+        var disabled = loadDisabledSet();
 
         boolean nowEnabled;
-        if (disabled.contains(name)) {
-            disabled.remove(name);
+        if (disabled.contains(canonical)) {
+            disabled.remove(canonical);
             nowEnabled = true;
             log.info("Skill '{}' enabled", name);
         } else {
-            disabled.add(name);
+            disabled.add(canonical);
             nowEnabled = false;
             log.info("Skill '{}' disabled", name);
         }
@@ -242,21 +247,29 @@ public class SkillManageService {
         return nowEnabled;
     }
 
-    /** 获取被禁用的 skill 名称集合 */
+    /** 获取被禁用的 skill 规范名集合（历史目录名条目按现存目录归一化） */
     public Set<String> getDisabledSet() {
         return loadDisabledSet();
     }
 
     /** 判断指定 skill 是否被禁用 */
     public boolean isDisabled(String name) {
-        return loadDisabledSet().contains(name);
+        var dir = resolveSkillDir(name);
+        if (dir == null) {
+            return false;
+        }
+        return loadDisabledSet().contains(SkillZipSupport.canonicalSkillName(dir));
     }
 
     // ========== 读取/修改 SKILL.md 内容 ==========
 
-    /** 读取指定 skill 的 SKILL.md 内容 */
+    /** 读取指定 skill 的 SKILL.md 内容（规范名或历史目录名寻址） */
     public String readSkillContent(String name) throws IOException {
-        var skillMd = skillsDir.resolve(name).resolve("SKILL.md");
+        var dir = resolveSkillDir(name);
+        if (dir == null) {
+            throw new IllegalArgumentException("Skill '" + name + "' 不存在");
+        }
+        var skillMd = dir.resolve("SKILL.md");
         if (!Files.isRegularFile(skillMd)) {
             throw new IllegalArgumentException("Skill '" + name + "' 的 SKILL.md 不存在");
         }
@@ -268,15 +281,15 @@ public class SkillManageService {
         return text;
     }
 
-    /** 修改指定 skill 的 SKILL.md 内容 */
+    /** 修改指定 skill 的 SKILL.md 内容（规范名或历史目录名寻址） */
     public void writeSkillContent(String name, String content) throws IOException {
-        var skillMd = skillsDir.resolve(name).resolve("SKILL.md");
+        var dir = resolveSkillDir(name);
+        if (dir == null) {
+            throw new IllegalArgumentException("Skill '" + name + "' 不存在");
+        }
+        var skillMd = dir.resolve("SKILL.md");
         if (!Files.isRegularFile(skillMd)) {
             throw new IllegalArgumentException("Skill '" + name + "' 的 SKILL.md 不存在");
-        }
-        // 安全检查：确保路径在 skills 目录下
-        if (!skillMd.normalize().startsWith(skillsDir.normalize())) {
-            throw new IllegalArgumentException("路径遍历攻击防护");
         }
         Files.writeString(skillMd, content, StandardCharsets.UTF_8);
         log.info("Skill '{}' content updated", name);
@@ -302,6 +315,37 @@ public class SkillManageService {
         return names;
     }
 
+    // ========== 规范名解析（issue #480） ==========
+
+    /**
+     * 管理面统一寻址入口：{@code name} 优先按目录名直取（兼容历史目录名调用与
+     * 规范名==目录名的常见形态），未命中再按 {@link SkillZipSupport#canonicalSkillName}
+     * 索引解析（catalog/SDK 暴露的是 frontmatter 规范名）。路径越出 skills 目录
+     * 抛 {@link IllegalArgumentException}；无匹配返回 null，由调用方按各自契约处理。
+     */
+    private Path resolveSkillDir(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        var direct = skillsDir.resolve(name).normalize();
+        if (!direct.startsWith(skillsDir.normalize())) {
+            throw new IllegalArgumentException("路径遍历攻击防护");
+        }
+        if (Files.isDirectory(direct)) {
+            return direct;
+        }
+        try (var stream = Files.list(skillsDir)) {
+            for (var dir : stream.filter(Files::isDirectory).toList()) {
+                if (SkillZipSupport.canonicalSkillName(dir).equals(name)) {
+                    return dir;
+                }
+            }
+        } catch (IOException e) {
+            log.warn("Failed to resolve skill dir '{}': {}", name, e.getMessage());
+        }
+        return null;
+    }
+
     // ========== 启停状态持久化 ==========
 
     private Set<String> loadDisabledSet() {
@@ -314,11 +358,41 @@ public class SkillManageService {
             var type = MAPPER.getTypeFactory()
                 .constructCollectionType(List.class, String.class);
             List<String> list = MAPPER.readValue(json, type);
-            return new HashSet<>(list);
+            return normalizeToCanonicalNames(new HashSet<>(list));
         } catch (Exception e) {
             log.warn("Failed to load skill states: {}", e.getMessage());
             return new HashSet<>();
         }
+    }
+
+    /** 历史目录名条目经现存目录索引归一为规范名；目录已消失的条目原样保留（删除时清） */
+    private Set<String> normalizeToCanonicalNames(Set<String> stored) {
+        var index = canonicalNameIndex();
+        var out = new HashSet<String>();
+        for (var entry : stored) {
+            out.add(index.getOrDefault(entry, entry));
+        }
+        return out;
+    }
+
+    /** 现存技能目录的 dirName → canonicalSkillName 索引（隐藏目录跳过） */
+    private Map<String, String> canonicalNameIndex() {
+        var index = new HashMap<String, String>();
+        if (!Files.isDirectory(skillsDir)) {
+            return index;
+        }
+        try (var stream = Files.list(skillsDir)) {
+            for (var dir : stream.filter(Files::isDirectory).toList()) {
+                var dirName = dir.getFileName().toString();
+                if (dirName.startsWith(".")) {
+                    continue;
+                }
+                index.put(dirName, SkillZipSupport.canonicalSkillName(dir));
+            }
+        } catch (IOException e) {
+            log.warn("Failed to index skills dir for canonical names: {}", e.getMessage());
+        }
+        return index;
     }
 
     private void saveDisabledSet(Set<String> disabled) throws IOException {
@@ -327,12 +401,5 @@ public class SkillManageService {
         var json = MAPPER.writerWithDefaultPrettyPrinter()
             .writeValueAsString(new ArrayList<>(disabled));
         Files.writeString(stateFile, json, StandardCharsets.UTF_8);
-    }
-
-    private void removeDisabledState(String name) throws IOException {
-        var disabled = loadDisabledSet();
-        if (disabled.remove(name)) {
-            saveDisabledSet(disabled);
-        }
     }
 }
