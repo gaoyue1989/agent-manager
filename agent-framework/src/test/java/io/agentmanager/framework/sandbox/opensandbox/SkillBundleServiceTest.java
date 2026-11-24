@@ -94,7 +94,7 @@ class SkillBundleServiceTest {
             true, "img", 30, 30, 512, 1, List.of("sh"),
             Duration.ofMillis(100),
             true, true, 900, true, true, true, true, 500, 30,
-            "tok", cacheDir, "/skills-store",
+            cacheDir, "/skills-store",
             new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
     }
 

@@ -15,7 +15,6 @@ var buildSHA = "unknown"
 
 const (
 	envBaseURL        = "SKILLSYNC_BASE_URL"
-	envToken          = "SKILLSYNC_TOKEN"
 	envStoreDir       = "SKILLSYNC_STORE_DIR"
 	envInterval       = "SKILLSYNC_INTERVAL"
 	envTimeout        = "SKILLSYNC_TIMEOUT"
@@ -33,7 +32,6 @@ var errDisabled = errors.New("skills sync disabled")
 
 type config struct {
 	baseURL        string
-	token          string
 	storeDir       string
 	interval       time.Duration
 	timeout        time.Duration
@@ -54,7 +52,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return cfg, errDisabled
 	}
 	cfg.baseURL = strings.TrimSuffix(base, "/")
-	cfg.token = getenv(envToken)
 	if v := getenv(envStoreDir); v != "" {
 		cfg.storeDir = v
 	}
