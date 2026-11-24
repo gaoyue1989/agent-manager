@@ -12,10 +12,10 @@
  * RENEW_INTERVAL=3s + grace-floor=6s）；沙箱 mock 同进程池不建（本组不依赖 poolRef）。
  */
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
 import { sessionIdFor } from '../lib/env.js';
 import { REPLICA_A, REPLICA_B } from '../lib/env.js';
 import { chat } from '../lib/client.js';
+import { withSql } from '../lib/sandbox-lifecycle.js';
 import { waitTerminal, pollUntil } from '../lib/matchers.js';
 
 const BASE_A = REPLICA_A;
@@ -35,34 +35,6 @@ async function bindings(base: string): Promise<BindingRow[]> {
   const r = await fetch(`${base}/debug/sandbox-bindings`);
   const j = (await r.json()) as { bindings?: BindingRow[] };
   return j.bindings ?? [];
-}
-
-/** mysql 连接（L13 式测试钩子的多副本版：直接对账 binding 表不变量） */
-async function withSql<T>(fn: (q: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; affected: number }>) => Promise<T>): Promise<T> {
-  const mysql = (await import('mysql2/promise')).default;
-  // CI 经 job env 注入 MYSQL_URL；本地两段式运行（env-up 与 playwright 分离）回退 env.json
-  // （lib/env.ts replicaUrl 同款回退纪律）
-  const runtimeMysql = (() => {
-    try {
-      const dir = process.env.E2E_RUNTIME_DIR ?? '.runtime';
-      return String(JSON.parse(readFileSync(`${dir}/env.json`, 'utf8')).mysqlUrl ?? '');
-    } catch { return ''; }
-  })();
-  const jdbcUrl = process.env.MYSQL_URL || runtimeMysql || 'jdbc:mysql://127.0.0.1:3306/agent_framework_e2e';
-  const m = /jdbc:mysql:\/\/([^:/]+):(\d+)\/([^?]+)/.exec(jdbcUrl);
-  const conn = await mysql.createConnection({
-    host: m?.[1] ?? '127.0.0.1', port: Number(m?.[2] ?? 3306), database: m?.[3] ?? 'agent_framework_e2e',
-    user: process.env.MYSQL_USER ?? 'e2e', password: process.env.MYSQL_PASS ?? 'e2e-pass',
-  });
-  try {
-    return await fn(async (sql, params) => {
-      const [result] = await conn.query(sql, params ?? []);
-      // @ts-expect-error mysql2 ResultSetHeader/RowDataPacket 联合形态
-      return { rows: Array.isArray(result) ? result as unknown[] : [result], affected: (result as { affectedRows?: number }).affectedRows ?? 0 };
-    });
-  } finally {
-    await conn.end();
-  }
 }
 
 test('M1 双副本并发 acquire 同 user：② CAS 串行化 + 计数==行数', async () => {

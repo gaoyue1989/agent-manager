@@ -28,6 +28,7 @@ export default defineConfig({
     { name: 'api-multi', testMatch: /tests\/api-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-sandbox', testMatch: /tests\/api-sandbox\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-sandbox-lifecycle', testMatch: /tests\/api-sandbox-lifecycle\.spec\.ts/, use: { ...devicesDesktop() } },
+    { name: 'api-sandbox-lifecycle-reuse', testMatch: /tests\/api-sandbox-lifecycle-reuse\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-sandbox-lifecycle-multi', testMatch: /tests\/api-sandbox-lifecycle-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-protocol', testMatch: /tests\/api-protocol\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'ui', testMatch: /tests\/ui\.spec\.ts/, use: { ...devicesDesktop() } },

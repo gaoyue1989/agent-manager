@@ -155,7 +155,7 @@ CI 配置真相源在 [.github/workflows/](.github/workflows/)（backend-ci / fr
 - **concurrency 组含 workflow 维度**，勿回退共享组名（曾致 master push 镜像推送被静默取消）
 - **分支保护**：strict（合并前基于最新 master）+ enforce_admins（对 master 直接 push 被拒）+ 禁 force push/删分支，一切变更走 PR
 - **九项必需检查**：三个单测（mvn test / go vet+go test / lint+build）+ agent-framework 四 E2E（核心/多副本/沙箱/协议多副本 P 组）+ `E2E 平台（kind + 控制台全功能）` + `Chart 校验 (helm lint + template)`
-- 新增 job 默认非必需，转必需由管理员在分支保护加勾（job name 须与保护规则字符串完全一致）；`E2E 沙箱生命周期（L 组）` 转必需前须满足观察期（sandbox-pool-opensandbox-design §9.5）
+- 新增 job 默认非必需，转必需由管理员在分支保护加勾（job name 须与保护规则字符串完全一致）；`E2E 沙箱生命周期（L 组 · 借出/续期）` 与 `E2E 沙箱生命周期（L 组 · 复用/HITL）` 转必需前须满足观察期（sandbox-pool-opensandbox-design §9.5）
 
 日常提交流程（worktree 工作流）：
 
