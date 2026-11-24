@@ -230,31 +230,32 @@ export default function AdminSandboxesPage() {
               <label className="text-xs text-gray-600 md:col-span-2">镜像（缺省 = 平台默认 SANDBOX_IMAGE{defaultImage ? `：${defaultImage}` : "（未配置）"}）
                 <input data-testid="create-image" value={createForm.image} onChange={(e) => setCreateForm({ ...createForm, image: e.target.value })}
                   placeholder={defaultImage || "opensandbox/code-interpreter:v1.1.0"} className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
-              <label className="text-xs text-gray-600">init 镜像 · task-executor（留空 = 内置缺省）
-                <input data-testid="create-task-executor-image" value={createForm.taskExecutorImage}
-                  onChange={(e) => setCreateForm({ ...createForm, taskExecutorImage: e.target.value })}
-                  placeholder="docker.io/opensandbox/task-executor:release-1.1.0" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
-              <label className="text-xs text-gray-600">init 镜像 · execd（留空 = 内置缺省）
-                <input data-testid="create-execd-image" value={createForm.execdImage}
-                  onChange={(e) => setCreateForm({ ...createForm, execdImage: e.target.value })}
-                  placeholder="docker.io/opensandbox/execd:release-1.1.0" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
-              <label className="text-xs text-gray-600">SKILLSYNC_BASE_URL（留空 = 按池名派生）
-                <input data-testid="create-skillsync-base-url" value={createForm.skillsyncBaseUrl}
-                  onChange={(e) => setCreateForm({ ...createForm, skillsyncBaseUrl: e.target.value })}
-                  placeholder="{服务}-svc 集群内地址（:8100）" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
-              <label className="text-xs text-gray-600">SKILLSYNC_INTERVAL（留空 = 1m）
-                <input data-testid="create-skillsync-interval" value={createForm.skillsyncInterval}
-                  onChange={(e) => setCreateForm({ ...createForm, skillsyncInterval: e.target.value })}
-                  placeholder="1m" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
-              <label className="text-xs text-gray-600">SKILLSYNC_STORE_DIR（留空 = 守护缺省）
-                <input data-testid="create-skillsync-store-dir" value={createForm.skillsyncStoreDir}
-                  onChange={(e) => setCreateForm({ ...createForm, skillsyncStoreDir: e.target.value })}
-                  placeholder="/skills-store" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
               {(["poolMin", "bufferMin", "bufferMax", "poolMax"] as const).map((k) => (
                 <label key={k} className="text-xs text-gray-600">{k}
                   <input data-testid={`create-${k}`} value={createForm[k]} onChange={(e) => setCreateForm({ ...createForm, [k]: e.target.value })}
                     className="mt-1 w-full rounded border p-1.5 text-[13px]" /></label>
               ))}
+              <p className="text-[11px] text-gray-400 md:col-span-3">高级（留空 = 后端缺省）</p>
+              <label className="text-xs text-gray-600">init 镜像 · task-executor
+                <input data-testid="create-task-executor-image" value={createForm.taskExecutorImage}
+                  onChange={(e) => setCreateForm({ ...createForm, taskExecutorImage: e.target.value })}
+                  placeholder="docker.io/opensandbox/task-executor:release-1.1.0" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">init 镜像 · execd
+                <input data-testid="create-execd-image" value={createForm.execdImage}
+                  onChange={(e) => setCreateForm({ ...createForm, execdImage: e.target.value })}
+                  placeholder="docker.io/opensandbox/execd:release-1.1.0" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">SKILLSYNC_BASE_URL
+                <input data-testid="create-skillsync-base-url" value={createForm.skillsyncBaseUrl}
+                  onChange={(e) => setCreateForm({ ...createForm, skillsyncBaseUrl: e.target.value })}
+                  placeholder="{服务}-svc 集群内地址（:8100）" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">SKILLSYNC_INTERVAL
+                <input data-testid="create-skillsync-interval" value={createForm.skillsyncInterval}
+                  onChange={(e) => setCreateForm({ ...createForm, skillsyncInterval: e.target.value })}
+                  placeholder="1m" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
+              <label className="text-xs text-gray-600">SKILLSYNC_STORE_DIR
+                <input data-testid="create-skillsync-store-dir" value={createForm.skillsyncStoreDir}
+                  onChange={(e) => setCreateForm({ ...createForm, skillsyncStoreDir: e.target.value })}
+                  placeholder="/skills-store" className="mt-1 w-full rounded border p-1.5 font-mono text-[12px]" /></label>
             </div>
             {createErr && <p className="mt-2 text-xs text-red-600" data-testid="create-error">{createErr}</p>}
             <p className="mt-1 text-[11px] text-gray-400">Pod 模板由平台预设（官方 sample 形状）；容量链 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax；SKILLSYNC_STORE_DIR 改动须与平台配置 SANDBOX_SKILLS_SHARED_STORE 同值</p>
