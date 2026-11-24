@@ -380,13 +380,24 @@ func markDeliveryDefault(db *gorm.DB, serviceID, connectionID uint) error {
 // normalizeDeliveryDefaults 手动下发归一（issue #387，规则唯一语义源锚点）：解析服务 env
 // LLM_MODEL+LLM_BASE_URL，在本服务 delivery 行 join connections 范围内匹配 model_id+base_url，
 // 按 connection_id ASC 最小命中行置 true、命中时本服务其余行置 false；env 不匹配则不动
-// （未下发的连接不因 env 撞车被牵连为默认）。store 层 Backfill 第 9 步按同一规则实现
-// （store 不能 import service，规则唯一、实现两处，注释互指）；注册/编辑链路的显式
-// def 口径见 markDeliveryDefault。
+// （未下发的连接不因 env 撞车被牵连为默认）。服务已有显式 is_default=true 行时整体跳过
+// （issue #487：显式默认是用户选择，同 modelId+baseUrl 多连接时不得被翻回最小
+// connection_id，否则删除守卫错位），仅归一尚无默认标记的服务。store 层 Backfill 第 9 步
+// 按同一规则实现（store 不能 import service，规则唯一、实现两处，注释互指）；注册/编辑
+// 链路的显式 def 口径见 markDeliveryDefault。
 func (c *Core) normalizeDeliveryDefaults(serviceID uint) error {
 	var svc store.ServiceEntity
 	if err := c.DB.First(&svc, serviceID).Error; err != nil {
 		return err
+	}
+	var explicitDefaults int64
+	if err := c.DB.Model(&store.ModelDelivery{}).
+		Where("service_id = ? AND is_default = ?", serviceID, true).
+		Count(&explicitDefaults).Error; err != nil {
+		return err
+	}
+	if explicitDefaults > 0 {
+		return nil
 	}
 	var env map[string]string
 	_ = json.Unmarshal([]byte(svc.EnvJSON), &env)
