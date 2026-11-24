@@ -45,7 +45,7 @@ issue #454 原提案是新增 `ToolDirectReturnMiddleware`：onActing 捕获结�
 
 ### 2.3 配置不另设缓存
 
-issue 提案与初版设计都打算新增 `directReturnTools` 缓存。实际落地以 `ToolInfo.directReturn` 为唯一事实源：`registerOne` 每次重读 config.yaml 并重建 `registeredTools`，`clearServer` 随之清理，OAF reload 语义自然成立，不需要第二份派生副本。
+issue 提案与初版设计都打算新增 `directReturnTools` 缓存。实际落地以 `ToolInfo.directReturn` 为唯一事实源：`registerOne` 每次重读 config.yaml 并重建 `registeredTools`，`clearServer` 随之清理，OAF reload 语义自然成立，不需要第二份派生副本。该语义覆盖 SSE 标记面；per-session agent 隔离时的会话级执行面由 `OafReloadService` 在 A/B 路径 reload 成功后对 `SessionAgentCache` 世代失效（issue #491），惰性重建经 `registerOne` 重读 config.yaml 收敛。
 
 ### 2.4 SSE 只增标记，不增帧
 
