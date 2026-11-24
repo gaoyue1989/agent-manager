@@ -66,6 +66,7 @@
 ## 6. 安全边界与已知限制
 
 - 9222（CDP）不对外：仅沙箱内回环；Agent 依赖沙箱内 CLI；server 代理连不到该端口（实测 502）。
+- 沙箱内 Xtigervnc 以 `-SecurityTypes None` 启动：6080/5901 只在 server 代理之后可达，画面鉴权由业务面的 WS 代理（会话归属校验 + API key 注入）承担，VNC 层不再叠加密码。
 - noVNC 画面必须经归属校验的代理；上游 API key 只在业务进程侧注入。
 - `viewOnly` 是前端约束：接管期间 Agent 不动浏览器由服务端闸门保证；反向（人工不在 Agent 控制时误触）不做服务端强制，后续可在 WS 代理层做 RFB 输入帧过滤。
 - 后续：宿主机 nginx(:8911) `/agent/` 需补 WebSocket 升级头（属系统配置，未在本次改动内）；多实例 noVNC 输入审计；WebRTC 高帧率方案。
