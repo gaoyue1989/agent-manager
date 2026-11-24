@@ -173,7 +173,7 @@ import sys,json
 d=json.load(sys.stdin); d=d.get('data',d)
 row=[p for p in d['items'] if p['name']=='$A6REF'][0]
 print(json.dumps(row['capacitySpec'], sort_keys=True))" 2>/dev/null)
-  assert_eq "E2'2 自动池容量四值取创建表单" "$CAP6" '{"bufferMin": 2, "bufferMax": 3, "poolMax": 4, "poolMin": 2}'
+  assert_eq "E2'2 自动池容量四值取创建表单" "$CAP6" '{"bufferMax": 3, "bufferMin": 2, "poolMax": 4, "poolMin": 2}'
   code DELETE /console/workspaces/$WS/agents/$A6 "" "$TOKEN" >/dev/null
   A6=""
   PL6=$(req GET /admin/sandboxes/pools "" "$TOKEN")
