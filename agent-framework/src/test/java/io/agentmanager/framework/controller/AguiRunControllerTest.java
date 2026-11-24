@@ -269,4 +269,34 @@ class AguiRunControllerTest {
         verify(lifecycle).onTurnStart(threadId);
         verify(lifecycle).onTurnEnd(threadId);
     }
+
+    @Test
+    void sandboxAcquireFailureShouldStillArchiveUserQuestion() {
+        var threadId = "agui-archive-fail";
+        var store = mock(io.agentmanager.framework.service.SessionMessageStore.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "sessionMessageStore", store);
+        when(turnLeaseStore.tryAcquire(threadId)).thenReturn("tok-af-1");
+        when(runtimeService.getAgent(threadId)).thenReturn(agent);
+        when(runtimeService.channelSlotKey(threadId)).thenReturn(threadId + ":gw-x");
+        lenient().when(agent.channel(any(ChatUiChannel.class))).thenReturn(chatChannel);
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.error(new IllegalStateException("Lifecycle acquire failed: timeout")));
+
+        controller.runs(
+                new AguiRunController.AguiRunRequest(threadId, null,
+                    List.of(new AguiRunController.AguiMessageDTO("m1", "user",
+                        "沙箱创建失败也要留住这句提问")), null),
+                null, new HttpHeaders())
+            .collectList().block(Duration.ofSeconds(10));
+
+        @SuppressWarnings("unchecked")
+        var captor = ArgumentCaptor.forClass(List.class);
+        verify(store).archiveBatch(eq(threadId + ":gw-x"), captor.capture());
+        var records = (List<io.agentmanager.framework.service.SessionMessageStore.MessageRecord>)
+            captor.getValue();
+        assertEquals(1, records.size());
+        assertEquals("USER", records.get(0).role());
+        assertTrue(records.get(0).msgJson().contains("沙箱创建失败也要留住这句提问"),
+            "AG-UI 轮沙箱失败也必须在 history 归档轨留下用户提问");
+    }
 }

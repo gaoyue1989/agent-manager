@@ -105,6 +105,17 @@ public class AguiRunController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycle;
 
+    /**
+     * 会话消息轨存储：入口侧用户提问前置归档用（字段注入，同 sandboxLifecycle：
+     * 避免改动构造调用点）。null = 归档关闭，跳过。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
+
+    /** 历史归档配置：与 turn 末 write-through 同一开关；null = 按默认开启 */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.config.HistoryConfig historyConfig;
+
     /** toolCallId → 真实工具名（turn 内有效；ToolCallStartEvent 是唯一带真实名的事件） */
     private final java.util.concurrent.ConcurrentHashMap<String, String> toolCallNames =
         new java.util.concurrent.ConcurrentHashMap<>();
@@ -303,6 +314,15 @@ public class AguiRunController {
                 var msg = Msg.builder().role(MsgRole.USER).name(userId)
                     .metadata(msgMeta)
                     .textContent(processedMessage).build();
+
+                // 用户提问前置归档（与 /threads/chat 同源）：沙箱 acquire 失败时中间件链
+                // 不执行，此处先落库保证 history 看得到提问；同 Msg id 幂等不重复
+                if (sessionMessageStore != null
+                        && (historyConfig == null || historyConfig.archiveEnabled())) {
+                    io.agentmanager.framework.service.SessionMessageArchiveStateStore
+                        .archiveUserInput(sessionMessageStore,
+                            runtimeService.channelSlotKey(threadId), List.of(msg));
+                }
 
                 // ===== 5. 先订阅 EventBus（响应流 = 存储流的渲染，实时/回放零漂移） =====
                 var sub = eventBus.subscribeEnveloped(threadId, 0, runId);

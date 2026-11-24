@@ -1971,4 +1971,44 @@ class ChatStreamControllerTest {
         assertEquals(List.of("refund"), metadata.get("skills"));
         assertEquals(List.of("query"), metadata.get("tools"), "skills 与 tools 正交共存");
     }
+
+    @Test
+    void sandboxAcquireFailureShouldStillArchiveUserQuestion() {
+        var sessionId = "test-sandbox-archive-fail";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-saf-1");
+        var store = mock(io.agentmanager.framework.service.SessionMessageStore.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "sessionMessageStore", store);
+        when(runtimeService.channelSlotKey(sessionId)).thenReturn(sessionId + ":gw-x");
+        // 沙箱建失败：SDK 在 middleware 链之前 acquire，失败即整流报错
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.error(new IllegalStateException("Lifecycle acquire failed: timeout")));
+
+        collect(sessionId, "沙箱创建失败也要留住这句提问", "alice");
+
+        @SuppressWarnings("unchecked")
+        var captor = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(store).archiveBatch(eq(sessionId + ":gw-x"), captor.capture());
+        var records = (List<io.agentmanager.framework.service.SessionMessageStore.MessageRecord>)
+            captor.getValue();
+        assertEquals(1, records.size());
+        assertEquals("USER", records.get(0).role());
+        assertTrue(records.get(0).msgJson().contains("沙箱创建失败也要留住这句提问"),
+            "沙箱失败也必须在 history 归档轨留下用户提问");
+    }
+
+    @Test
+    void archiveDisabledShouldNotArchiveUserQuestionAtEntry() {
+        var sessionId = "test-sandbox-archive-off";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-saf-2");
+        var store = mock(io.agentmanager.framework.service.SessionMessageStore.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "sessionMessageStore", store);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "historyConfig",
+            new io.agentmanager.framework.config.HistoryConfig(8000, false));
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-saf-2")));
+
+        collect(sessionId, "归档关闭不应写", "alice");
+
+        verify(store, never()).archiveBatch(anyString(), anyList());
+    }
 }
