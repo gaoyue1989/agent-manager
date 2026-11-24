@@ -20,7 +20,7 @@
 | `m10-sandbox.sh` | 沙箱配置：enabled true/false/未声明、资源注入与空/负值归一、`SANDBOX_ENABLED` 不落 env、总览三层来源（env > package > default）、edit-form 回显、keyword/member/404 |
 | `m11-workspace-config.sh` | 工作空间配置：runtime-defaults 读写（27 模板键 + 8 导出键，三态语义）、templates 分组/registry/mcp-connectors 骨架端点、成员/owner 权限矩阵 |
 | `m12-sandbox-admin.sh` | 沙箱管理面（sandbox-pool-opensandbox-design §9.4）：settings 沙箱组 3 新键 + `SANDBOX_TIMEOUT_MINUTES` placeholder 30、admin 代理八端点（含同名创建池 409 透传/非法名与容量链 400）、mock 载荷断言（预设 Pod 模板）、console 只读过滤（含 mysql 造数正向断言）、故障注入 501→503/401→502、未配置 503 引导；上游用集群内 mock-sandbox（仅 CI overlay，缺 svc 时 exit 2 SKIP），API 级断言（页面级由黑盒走查承载） |
-| `run-all.sh` | 顺序执行；子脚本 `exit 2` 记为 SKIP，FAIL 汇总后非零退出 |
+| `run-all.sh` | 顺序执行；子脚本 `exit 2` 记为 SKIP，FAIL 汇总后非零退出；CI 分片表在此（`--shard <名>` 跑单分片，`--check-shards` 校验模块与分片表双向一致） |
 
 > `console-split-e2e.sh` 已删除：其 22 条断言是 M0/M1/M2/M8 的子集。
 > 旧的 `ui-e2e.js`（匿名 legacy 管理面）已由 `console-ui-e2e.js` 取代。
@@ -77,15 +77,20 @@ cd e2e && npm ci && BASE=http://localhost:30080/api/v1 FRONTEND=http://localhost
 
 ## CI（`.github/workflows/platform-e2e-ci.yml`）
 
-- 触发：指向 master 的 PR + master push；路径过滤 `backend/**`、`frontend/**`、`manifests/**`、`e2e/**`
+- 触发：指向 master 的 PR + master push；路径过滤 `backend/**`、`frontend/**`、`manifests/**`、`e2e/**`、`.github/actions/**` 与本工作流
 - 运行环境：`ubuntu-latest` + `kind` 单节点（NodePort 30080/30880/30881 映射到 localhost）+
-  `manifests/ci` overlay（本地构建镜像、mock LLM、`oaf-platform-backend` 别名 Service）
+  `manifests/ci` overlay（本地构建镜像、mock LLM、`oaf-platform-backend` 别名 Service）；
+  环境拉起统一走 `.github/actions/platform-e2e-up`（镜像后台并行构建；基础镜像经 `mirror.gcr.io`
+  缓存站拉取——Docker Hub 免费版限额 200 次拉取/6h，分片不得各自直连消耗额度）
 - 业务镜像解析顺序：`E2E_AGENT_IMAGE` → Docker Hub `gaoyue1989/agent-framework` 最新
   `agentscope-*` tag（拉取/导入各 300s 超时）→ 失败回落 `mock-agent:ci`（`E2E_AGENT_RUNTIME=mock`，
   跳过会话类断言）
-- 执行：`platform-e2e.sh` → `console-split/run-all.sh m0..m12` → `console-ui-e2e.js`；
-  失败上传集群状态与 UI 截图
-- **必需检查**（2026-10-22 起）：按目录过滤，不相关变更 Skipped 视为通过
+- 执行：五个分片各起独立集群并行——`publish-chain`（网关三态矩阵 + `platform-e2e.sh`，集群独占）/
+  `agent-create`（m3）/ `agent-detail`（m4）/ `sandbox-config`（m10）/ `console-rest`（其余模块 → `console-ui-e2e.js`）；
+  分片内顺序执行；失败上传集群状态与 UI 截图
+- **必需检查**（2026-10-22 起）：检查名是汇总门禁 job `platform-e2e`，任一分片或变更检测失败即失败；
+  按目录过滤，不相关变更门禁直接通过
+- 新增模块必须登记到 `run-all.sh` 的 `SHARDS`，否则 `--check-shards` 守卫在变更检测 job 即失败
 
 ## 断言原则
 
