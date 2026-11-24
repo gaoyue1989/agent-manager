@@ -485,9 +485,9 @@ func (c *Core) AdminMemorySupply(keyword string) ([]MemorySupplyItem, error) {
 // 身份：userId = u-{uid}（与数据面 X-User-Id 同源），key 本地推导；uri 双向归一到
 // viking://~/ 本人空间单一口径（issue #374）：入参接受 ~/ 契约口径与自有 user/{uid}
 // 展开形态（外部服务原生形态），出参 list 条目统一改写为 ~/ 形态（read 纯文本透传）。
-// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；穿越段（../、%2e%2e）在闸门
-// 之前拒绝、绝不代理上游（issue #420）；他人 user/{uid} 形态一律 ErrInvalidForm
-// 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
+// 归一在白名单之前，最终闸门仍是 viking://~/ 前缀；穿越段与逃逸字符（../、./、%、
+// \、?、#、控制字符）在闸门之前拒绝、绝不代理上游（issue #420/#484）；他人
+// user/{uid} 形态一律 ErrInvalidForm 拒绝、绝不代理给上游。外部服务不可用/失败原样返回错误
 // （fail-soft 由前端呈现空态）。
 func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri string) (json.RawMessage, error) {
 	if _, err := c.ConsoleAgentDetail(workspaceID, serviceID); err != nil {
@@ -555,14 +555,24 @@ func vikingNormalizeBrowseInput(uri, ownUserPrefix string) (string, error) {
 		ErrInvalidForm, uri, strings.TrimSuffix(ownUserPrefix, "/"))
 }
 
-// vikingRejectTraversalSegments 拒绝路径穿越段（issue #420）：任一路径段为 `..` 或
-// 其百分号编码形态（%2e%2e，大小写不敏感）即 ErrInvalidForm。~/ 前缀闸门只验首段
-// 形态，`viking://~/../u-9999/…`（含自有 user/{uid}/../ 改写产物）会带着穿越段通过
-// 并被代理上游——仅本人空间闸门可被越权；段级精确匹配不误伤文件名中的点（a..b）。
+// vikingRejectTraversalSegments 本人空间路径闸门（issue #420/#484）：~/ 之后的路径只
+// 允许纯字面段——逃逸字符（%、\、?、#、控制字符）与 `.`/`..` 段一律 ErrInvalidForm。
+// 全链路单一编码语义：入参 uri 已是 HTTP query 解码后的形态，代理转发再经 QueryEscape/
+// 上游解码复原为同一字符串，凡 `%` 或分隔变体（%2e/%2f/%5c）都可能被上游二次解释
+// （percent 解码、反斜杠归一、?/# 切分 path），校验形态必须等于上游解释形态，歧义输入
+// 一律 fail-fast、绝不代理上游，也不做路径重写；`..` 的编码变体（..、.%2e、%2e.、
+// %252e%252e、..%2f）全部因 `%` 全拒与段级精确匹配被覆盖。段级精确匹配不误伤文件名中
+// 的点（a..b.md、.hidden）与 UTF-8/空格纯字面。
 func vikingRejectTraversalSegments(uri string) error {
 	rest, _ := strings.CutPrefix(uri, "viking://~/")
+	for i := 0; i < len(rest); i++ {
+		if b := rest[i]; b < 0x20 || b == 0x7f || b == '%' || b == '\\' || b == '?' || b == '#' {
+			return fmt.Errorf("%w: uri %q contains forbidden character %q",
+				ErrInvalidForm, uri, rest[i:i+1])
+		}
+	}
 	for _, seg := range strings.Split(rest, "/") {
-		if seg == ".." || strings.EqualFold(seg, "%2e%2e") {
+		if seg == "." || seg == ".." {
 			return fmt.Errorf("%w: uri %q contains path traversal segment %q", ErrInvalidForm, uri, seg)
 		}
 	}

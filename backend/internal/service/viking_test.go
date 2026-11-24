@@ -904,9 +904,9 @@ func TestMemoryBrowseURINormalization(t *testing.T) {
 	}
 }
 
-// 路径穿越段拒绝（issue #420）：`..`/`%2e%2e` 段在白名单闸门之前拦截，绝不代理给
-// 上游——viking://~/../ 与自有 user/{uid}/../ 前缀改写后仍含穿越段，前缀闸门拦不住；
-// 文件名中的点（a..b/.hidden）与合法单段不受影响。
+// 路径穿越与逃逸字符拒绝（issue #420/#484）：`..` 段及全部编码/分隔符变体在白名单
+// 闸门之前拦截，绝不代理给上游——自有 user/{uid}/../ 前缀改写后仍含穿越段，前缀闸门
+// 拦不住；文件名中的点（a..b/.hidden）与 UTF-8/空格纯字面不受影响。
 func TestMemoryBrowseRejectsPathTraversal(t *testing.T) {
 	fake := &fakeOpenViking{}
 	core, _ := newVikingTestCore(t, fake.handler())
@@ -919,11 +919,23 @@ func TestMemoryBrowseRejectsPathTraversal(t *testing.T) {
 	waitForVikingTerminal(t, core, svc.ID)
 
 	for _, uri := range []string{
-		"viking://~/../u-9999/memories",                // 前缀改写后的越权形态（他人空间）
-		"viking://~/../../resources/acme/secret.md",    // 越出本人空间根
-		"viking://user/u-1001/../u-9999/memories",      // 自有展开形态夹带穿越段
-		"viking://~/memories/%2e%2e/u-9999/secrets.md", // 百分号编码穿越段
-		"viking://~/memories/%2E%2E/plan.md",           // 大小写变体
+		"viking://~/../u-9999/memories",                       // 前缀改写后的越权形态（他人空间）
+		"viking://~/../../resources/acme/secret.md",           // 越出本人空间根
+		"viking://user/u-1001/../u-9999/memories",             // 自有展开形态夹带穿越段
+		"viking://~/memories/%2e%2e/u-9999/secrets.md",        // 百分号编码穿越段
+		"viking://~/memories/%2E%2E/plan.md",                  // 大小写变体
+		"viking://~/.%2e/u-9999/memories",                     // 混合点编码
+		"viking://~/%2e./u-9999/memories/secret.md",           // 混合点编码（反序）
+		"viking://user/u-1001/.%2e/u-9999/memories",           // 自有前缀改写产物夹带混合编码
+		"viking://~/memories%2f..%2f..%2fu-9999/memories/secret.md", // 编码斜杠拼接穿越段
+		"viking://~/memories%2F..%2F..%2Fu-9999/memories",     // 编码斜杠大写变体
+		"viking://~/..%2fu-9999/memories",                     // 编码斜杠尾随穿越段
+		"viking://~/..\\u-9999\\memories\\secret.md",          // 反斜杠分隔符
+		"viking://~/..?foo=bar",                               // query 切分出穿越 path
+		"viking://~/..#frag",                                  // fragment 切分出穿越 path
+		"viking://~/%252e%252e/u-9999/memories/secret.md",     // 双重编码
+		"viking://~/memories/\x00/u-9999/secrets.md",          // 控制字符（空字节）
+		"viking://~/./u-9999/memories",                        // . 段（歧义规范化形态）
 	} {
 		fake.resetBrowse()
 		if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", uri); err == nil {
@@ -937,13 +949,19 @@ func TestMemoryBrowseRejectsPathTraversal(t *testing.T) {
 		}
 	}
 
-	// 文件名中的点不是穿越段：合法 URI 照常代理
-	fake.resetBrowse()
-	if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "read", "viking://~/memories/a..b.md"); err != nil {
-		t.Fatalf("dots inside filename must not be rejected: %v", err)
-	}
-	if got := fake.browseURIs(); len(got) != 1 || got[0] != "viking://~/memories/a..b.md" {
-		t.Fatalf("legit uri must reach upstream verbatim, got %v", got)
+	// 文件名中的点、隐藏文件、UTF-8/空格纯字面不是穿越形态：合法 URI 照常原样代理
+	for _, uri := range []string{
+		"viking://~/memories/a..b.md",
+		"viking://~/memories/.hidden",
+		"viking://~/memories/会议 记录.md",
+	} {
+		fake.resetBrowse()
+		if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "read", uri); err != nil {
+			t.Fatalf("legit uri %s must not be rejected: %v", uri, err)
+		}
+		if got := fake.browseURIs(); len(got) != 1 || got[0] != uri {
+			t.Fatalf("legit uri %s must reach upstream verbatim, got %v", uri, got)
+		}
 	}
 }
 
