@@ -239,7 +239,8 @@ public class AgentScopeConfig {
     public io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry sandboxRenewalRegistry(
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore> storeProvider,
         io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
-        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxHoldSignal> holdSignalProvider
     ) {
         var store = storeProvider.getIfAvailable();
         var lifecycle = lifecycleConfig(lifecycleConfigProvider);
@@ -249,7 +250,8 @@ public class AgentScopeConfig {
         // 事件汇初值 null，Manager bean 建好后桥接（emit→Manager 环形缓冲统一落事件）；
         // daemon 守护线程在此启动（JVM 退出自然终止；sweep 异常自捕获不影响主流程）
         var registry = new io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry(
-            store, lifecycle.renewIntervalSeconds(), lifecycle.confirmHoldMinutes(), null);
+            store, lifecycle.renewIntervalSeconds(), lifecycle.confirmHoldMinutes(), null,
+            java.time.Clock.systemUTC(), () -> holdSignalProvider.orderedStream().toList());
         registry.start();
         return registry;
     }

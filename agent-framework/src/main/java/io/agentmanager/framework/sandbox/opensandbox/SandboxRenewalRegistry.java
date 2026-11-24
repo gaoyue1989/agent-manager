@@ -98,6 +98,7 @@ public class SandboxRenewalRegistry implements AutoCloseable {
     private final long renewIntervalSeconds;
     private final long confirmHoldMinutes;
     private final Clock clock;
+    private final java.util.function.Supplier<java.util.List<SandboxHoldSignal>> holdSignals;
     /** 事件汇（volatile：装配期 Manager 建好后桥接，运行期只读） */
     private volatile EventSink eventSink;
 
@@ -128,11 +129,22 @@ public class SandboxRenewalRegistry implements AutoCloseable {
                                   long confirmHoldMinutes,
                                   EventSink eventSink,
                                   Clock clock) {
+        this(bindingStore, renewIntervalSeconds, confirmHoldMinutes, eventSink, clock,
+            java.util.List::of);
+    }
+
+    public SandboxRenewalRegistry(SandboxBindingStore bindingStore,
+                                  long renewIntervalSeconds,
+                                  long confirmHoldMinutes,
+                                  EventSink eventSink,
+                                  Clock clock,
+                                  java.util.function.Supplier<java.util.List<SandboxHoldSignal>> holdSignals) {
         this.bindingStore = bindingStore;
         this.renewIntervalSeconds = renewIntervalSeconds;
         this.confirmHoldMinutes = confirmHoldMinutes;
         this.eventSink = eventSink;
         this.clock = clock;
+        this.holdSignals = holdSignals;
     }
 
     private void emit(String type, String sandboxId, String detail) {
@@ -283,7 +295,7 @@ public class SandboxRenewalRegistry implements AutoCloseable {
                     e.sessionId, e.sandboxId, Duration.between(e.bornAt, now).toSeconds());
                 continue;
             }
-            boolean holding = holding(e, now);
+            boolean holding = holding(e, now) || externallyHeld(e.sessionId);
             if (e.callRefs.get() > 0 || activeTurns.containsKey(e.sessionId) || holding) {
                 renewEntry(e, holding ? "sweep_hold" : "sweep");
             }
@@ -293,6 +305,29 @@ public class SandboxRenewalRegistry implements AutoCloseable {
     /** hold 语义：holdUntil 未到期即挂起保留中（每次 ask 重新计窗） */
     private boolean holding(Entry e, Instant now) {
         return e.holdUntil != null && now.isBefore(e.holdUntil);
+    }
+
+    /** 外部保留信号（人工接管等）：任一信号持有即续期；信号故障按不持有处理（fail-open） */
+    private boolean externallyHeld(String sessionId) {
+        java.util.List<SandboxHoldSignal> signals;
+        try {
+            signals = holdSignals.get();
+        } catch (Exception ignored) {
+            return false;
+        }
+        if (signals == null || signals.isEmpty()) {
+            return false;
+        }
+        for (var signal : signals) {
+            try {
+                if (signal.isHeld(sessionId)) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // 保留信号是可观测增强，不反噬续期
+            }
+        }
+        return false;
     }
 
     /** 续期一拍 + 服务端绝对 expiresAt 回填 binding（失败分类，§4.4） */

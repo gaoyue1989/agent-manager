@@ -302,4 +302,19 @@ class SandboxLocatorTest {
             sdk.close();
         }
     }
+
+    @Test
+    void sandboxIdProbeShouldBeReadOnly() throws Exception {
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-probe")));
+        assertEquals("sbx-probe", locator.sandboxId(USER, SESSION, IsolationScope.USER));
+
+        when(stateStore.load(any())).thenReturn(Optional.empty());
+        org.junit.jupiter.api.Assertions.assertNull(locator.sandboxId(USER, SESSION, IsolationScope.USER));
+    }
+
+    @Test
+    void sandboxIdProbeShouldHandleStateReadFailure() throws Exception {
+        when(stateStore.load(any())).thenThrow(new IOException("kv down"));
+        org.junit.jupiter.api.Assertions.assertNull(locator.sandboxId(USER, SESSION, IsolationScope.USER));
+    }
 }

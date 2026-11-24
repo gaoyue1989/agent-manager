@@ -122,6 +122,10 @@ public class HarnessAgentFactory {
     @Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistryProvider;
 
+    /** 浏览器控制权服务（agent.browser.enabled=true 时装配；关闭时 null → 不装闸门） */
+    @Autowired(required = false)
+    private io.agentmanager.framework.browser.BrowserControlService browserControlService;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -334,6 +338,12 @@ public class HarnessAgentFactory {
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
+
+            // 人工接管闸门（agent.browser.enabled 时装配）：控制权在人工侧时拒绝沙箱命令执行
+            if (browserControlService != null) {
+                builder.middleware(new io.agentmanager.framework.browser.BrowserControlMiddleware(
+                    browserControlService, sessionKeyResolver));
+            }
 
             // 回合起始用户输入归档（2026-10-12）：SDK 整轮结束才落库 agent_state/session_message，
             // turn 执行中 /history 为空——刷新/进历史会话详情前置归档用户提问，助手回复待
