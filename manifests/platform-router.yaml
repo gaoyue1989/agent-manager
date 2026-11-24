@@ -40,6 +40,8 @@ data:
     }
     map $http_x_forwarded_proto $fwd_proto_fwd { default $http_x_forwarded_proto; "" $scheme; }
     map $http_x_forwarded_host  $fwd_host      { default $http_x_forwarded_host;  "" $http_host; }
+    # WebSocket 升级透传：有 Upgrade 头 → upgrade；否则空串（保持既有 SSE keep-alive 语义）
+    map $http_upgrade $pgr_connection_upgrade { default upgrade; "" ""; }
 
     log_format auth '$remote_addr "$request" status=$status auth=$auth_code uid=$auth_result_uid';
     access_log /dev/stdout auth;
@@ -105,7 +107,8 @@ data:
         proxy_set_header X-Forwarded-Prefix /agent/$short;   # agent-framework 前缀感知的输入契约
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_http_version 1.1;
-        proxy_set_header Connection "";         # SSE 长连接
+        proxy_set_header Upgrade $http_upgrade;              # WebSocket 升级透传（业务实时画面）
+        proxy_set_header Connection $pgr_connection_upgrade;  # 无升级头 → 空串（SSE 长连接语义不变）
         proxy_buffering off;                    # SSE 不缓冲
         proxy_request_buffering off;            # 上传直透
         proxy_read_timeout 3600s;               # 等价原 ingress path 模式注解三件套

@@ -12,21 +12,11 @@ import org.slf4j.LoggerFactory;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
-import io.agentscope.core.event.ToolCallEndEvent;
-import io.agentscope.core.event.ToolCallStartEvent;
-import io.agentscope.core.event.ToolResultEndEvent;
-import io.agentscope.core.event.ToolResultStartEvent;
-import io.agentscope.core.event.ToolResultTextDeltaEvent;
-import io.agentscope.core.message.TextBlock;
-import io.agentscope.core.message.ToolResultBlock;
-import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
-import io.agentscope.core.tool.ToolResultMessageBuilder;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.middleware.ReasoningInput;
 import io.agentscope.core.model.ToolSchema;
-import io.agentscope.core.state.AgentState;
 import reactor.core.publisher.Flux;
 
 /**
@@ -142,7 +132,6 @@ public class ToolFilterMiddleware implements MiddlewareBase {
         var keepNames = whitelist.resolution().keepNames();
         var mcp = scopeService.mcpToolNames();
         var custom = scopeService.customToolNames();
-        var allowed = new ArrayList<ToolUseBlock>(allCalls.size());
         var denied = new ArrayList<ToolUseBlock>();
         for (var tub : allCalls) {
             var name = tub.getName();
@@ -152,8 +141,6 @@ public class ToolFilterMiddleware implements MiddlewareBase {
             if (name != null && (mcp.contains(name) || custom.contains(name))
                     && !keepNames.contains(name)) {
                 denied.add(tub);
-            } else {
-                allowed.add(tub);
             }
         }
         if (denied.isEmpty()) {
@@ -163,42 +150,10 @@ public class ToolFilterMiddleware implements MiddlewareBase {
             denied.stream().map(ToolUseBlock::getName).toList(),
             ctx.getSessionId());
 
-        var syntheticEvents = new ArrayList<AgentEvent>();
-        // per-call slot state（CompactionMiddleware 同源）：deprecated getAgentState() 是默认槽，
-        // 注入其中模型不可见、write-through 不落库（曾致 DENIED 结果对模型/归档双不可见）
-        AgentState state = RuntimeContext.resolveAgentState(ctx, agent);
-        if (state == null) {
-            return next.apply(input);
-        }
-        for (var tub : denied) {
-            String toolId = tub.getId();
-            // replyId 约定与 ProtocolDenyRulesMiddleware 一致：合成事件用随机 id（原调用未执行）
-            String replyId = java.util.UUID.randomUUID().toString().replace("-", "");
-            String reason = "Error: tool '" + tub.getName()
-                + "' is not in this turn's allowed tools list; the call was not executed.";
-            // 合成前端事件（保持 SSE 流连续）
-            syntheticEvents.add(new ToolCallStartEvent(replyId, toolId, tub.getName()));
-            syntheticEvents.add(new ToolCallEndEvent(replyId, toolId, tub.getName()));
-            syntheticEvents.add(new ToolResultStartEvent(replyId, toolId, tub.getName()));
-            syntheticEvents.add(new ToolResultTextDeltaEvent(replyId, toolId, tub.getName(), reason));
-            syntheticEvents.add(new ToolResultEndEvent(replyId, toolId, tub.getName(),
-                ToolResultState.DENIED));
-            // 注入 DENIED ToolResultBlock 到 agent 上下文（模型可感知并调整后续动作）
-            ToolResultBlock deniedResult = ToolResultBlock.builder()
-                .id(toolId)
-                .name(tub.getName())
-                .output(List.of(TextBlock.builder().text(reason).build()))
-                .state(ToolResultState.DENIED)
-                .build();
-            state.contextMutable().add(
-                ToolResultMessageBuilder.buildToolResultMsg(deniedResult, tub, agent.getName()));
-        }
-
-        if (allowed.isEmpty()) {
-            return Flux.fromIterable(syntheticEvents);
-        }
-        return Flux.concat(Flux.fromIterable(syntheticEvents),
-            next.apply(new ActingInput(allowed)));
+        return ActingDenials.deny(agent, ctx, input, ActingDenials.identitySet(denied),
+            tub -> "Error: tool '" + tub.getName()
+                + "' is not in this turn's allowed tools list; the call was not executed.",
+            next);
     }
 
     /**

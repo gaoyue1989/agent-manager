@@ -85,6 +85,28 @@ public class SandboxLocator {
     }
 
     /**
+     * 只读定位：返回本会话已登记的沙箱 id（不连接、不占位、无副作用）；无登记返回 null。
+     */
+    public String sandboxId(String userId, String sessionId, IsolationScope scope) {
+        for (SandboxIsolationKey key : candidates(userId, sessionId, scope)) {
+            try {
+                var stateJson = stateStore.load(key).orElse(null);
+                if (stateJson == null) {
+                    continue;
+                }
+                var sandboxId = extractSandboxId(stateJson);
+                if (sandboxId != null && !sandboxId.isBlank()) {
+                    return sandboxId;
+                }
+            } catch (Exception e) {
+                log.debug("[sandbox-locator] state probe failed (key={}): {}", key, e.getMessage());
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 定位并连接沙箱；全部候选失败 → 404 {@code sandbox_not_found}（不做 pending/兜底）。
      * 调用方负责 {@link LocatedSandbox#close()}（仅释放 HTTP 客户端，不 kill 沙箱）。
      */
