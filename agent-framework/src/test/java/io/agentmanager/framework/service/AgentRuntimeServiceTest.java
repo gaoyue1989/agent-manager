@@ -255,6 +255,24 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
+    void invokeStreamShouldForwardToolResultDataDeltaFromImageBlock() {
+        // issue #492：MCP ImageContent 转换产物是 ImageBlock，invokeStream 旧协议面同样要携带图片数据
+        var source = io.agentscope.core.message.Base64Source.builder()
+            .data("aGVsbG8=").mediaType("image/png").build();
+        var imageBlock = io.agentscope.core.message.ImageBlock.builder().source(source).build();
+        var delta = new io.agentscope.core.event.ToolResultDataDeltaEvent("reply-1", "tc-2", "render_chart_png", imageBlock);
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(delta));
+
+        var events = service.invokeStream("hello", "t1", "alice").collectList().block();
+
+        assertNotNull(events);
+        assertTrue(events.stream().anyMatch(e -> "tool_result_data_delta".equals(e.get("type")) &&
+            "image/png".equals(e.get("media_type")) &&
+            "aGVsbG8=".equals(e.get("data"))));
+    }
+
+    @Test
     void twoArgInvokeShouldDelegateWithVendorKey() {
         mockCallReturns("ok");
         service.invoke("hello", "t1");

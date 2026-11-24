@@ -345,6 +345,11 @@ public class ConfirmController {
             // 本轮模型用量累积器（chat-trace-observability-design §2.3/§2.5）：恢复段与对话段
             // 同口径，恢复段 AGENT_END 帧携带本段汇总。turn 闭包局部对象，随 turn 丢弃。
             var usage = new io.agentmanager.framework.service.TurnUsageTracker();
+            // 直返完成信号兜底（issue #492，与 ChatStreamController 同契约）：HITL 批准后
+            // 恢复段的直返短路同样要发 TEXT_BLOCK_DELTA 信号
+            var directReturnSignal = new io.agentmanager.framework.service.DirectReturnSignalTracker(
+                mcpToolRegistrar::resolveToolCallMeta,
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
             // 为何本 turn 只收尾一次（同 ChatStreamController，迟到的回调不得重复 closeSession/release）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -401,7 +406,7 @@ public class ConfirmController {
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
                         turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary, turnSkills,
-                        usage),
+                        usage, directReturnSignal),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -450,11 +455,15 @@ public class ConfirmController {
                                     java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
                                     TurnToolSummaryTracker toolSummary,
                                     java.util.List<String> turnSkills,
-                                    io.agentmanager.framework.service.TurnUsageTracker usage) {
+                                    io.agentmanager.framework.service.TurnUsageTracker usage,
+                                    io.agentmanager.framework.service.DirectReturnSignalTracker directReturnSignal) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
         }
+
+        // 直返完成信号跟踪（issue #492，同 ChatStreamController）
+        directReturnSignal.onEvent(event);
 
         // 沙箱换代提示帧（§4.4 T4 恢复路径，同 ChatStreamController）：归属失效降级重建后
         // 在首个事件前一次性提示，前端据此展示「未保存的工作区文件可能丢失」

@@ -46,6 +46,16 @@ def text_result(text, is_error=False):
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
+# 1x1 PNG（纯图片直返 DR9：结果不含任何 text 块，SDK 不发直返文本信号）
+PNG_1X1_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+def render_chart_png(params):
+    return {"content": [{"type": "image", "data": PNG_1X1_BASE64, "mimeType": "image/png"}], "isError": False}
+
+
 def render_confirm_card(params):
     return text_result(json.dumps(card_payload(order_id_of(params)), ensure_ascii=False, indent=2))
 
@@ -103,6 +113,11 @@ TOOLS = [
         "description": "通知仓库核对订单库存。参数 order_id。",
         "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
     },
+    {
+        "name": "render_chart_png",
+        "description": "渲染订单金额占比图并直接展示给用户。调用后图片会原样显示在用户界面上，本轮对话到此结束。参数 order_id。",
+        "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
+    },
 ]
 
 HANDLERS = {
@@ -112,6 +127,7 @@ HANDLERS = {
     "empty_render": empty_render,
     "lookup_order": lookup_order,
     "notify_warehouse": notify_warehouse,
+    "render_chart_png": render_chart_png,
 }
 
 

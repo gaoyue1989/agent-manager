@@ -260,7 +260,7 @@ e2e/scripts/run.sh <group> # env-up → npx playwright test --project=<group> �
 | `[E2E:execute:fail]` | 失败命令（退出码非 0） | X7（命令失败传播） |
 | `[E2E:tool:write:sb](<file>,<content>)` / `[E2E:tool:read:sb](<path>)` | 沙箱档 write_file / read_file（独立录制件，供沙箱物化链路） | X3/X10/X11/X15 |
 | `[E2E:plugin:echo]` | 调插件工具 `echo_query`（registry 登记 `variants=["denied"]`） | e2e-plugin 三态权限（§5.9） |
-| `[E2E:direct:render]` / `[E2E:direct:fail]` / `[E2E:direct:empty]` / `[E2E:direct:plain]` / `[E2E:direct:submit]` / `[E2E:direct:mixed]` | 分别返回 order MCP 的 `render_confirm_card`（直返，单次调用即收尾）/ `broken_render`（直返但 isError）/ `empty_render`（直返但空内容）/ `lookup_order`（非直返对照）/ `submit_order`（ask + 直返，挂起于 permission_ask）/ 同批 `notify_warehouse` + `render_confirm_card` | DR1–DR8（§5.5b） |
+| `[E2E:direct:render]` / `[E2E:direct:fail]` / `[E2E:direct:empty]` / `[E2E:direct:plain]` / `[E2E:direct:submit]` / `[E2E:direct:mixed]` / `[E2E:direct:image]` | 分别返回 order MCP 的 `render_confirm_card`（直返，单次调用即收尾）/ `broken_render`（直返但 isError）/ `empty_render`（直返但空内容）/ `lookup_order`（非直返对照）/ `submit_order`（ask + 直返，挂起于 permission_ask）/ 同批 `notify_warehouse` + `render_confirm_card` / `render_chart_png`（纯图片直返，无 text 块） | DR1–DR9（§5.5b） |
 | `[E2E:proto:lead-spawn]` | lead 调 `agent_spawn` | P1（§5.12） |
 | `[E2E:proto:member-echo]` | member 调 `bench_echo` 回显 | P1/P3（§5.12） |
 | `[E2E:recall]` | 输出对上一轮 `[E2E:remember](<x>)` 的引用文本（多轮记忆回归） | S3 |
@@ -428,7 +428,8 @@ order MCP mock（`mock/direct-return-mcp.py`，`GET /expected?tool=&order_id=` �
 | DR5 | 成功但空内容 | `direct:empty` | 结果归一化为 ERROR（文案含 `empty content`）；无直返文本 |
 | DR6 | HITL + 直返 | `direct:submit` → confirm-stream 批准 | 挂起前无直返、工具未执行；批准后 SUCCESS、直返回执 = `/expected`，恢复流不再调用模型 |
 | DR7 | 同批混合 | `direct:mixed` | 两个工具同一 `replyId`（同一步）均 SUCCESS；无直返文本；整批回喂模型（2 次调用） |
-| DR8 | `/tools` 标记 | GET `/tools` | order server 四个直返工具 `directReturn=true`，两个普通工具无该键 |
+| DR8 | `/tools` 标记 | GET `/tools` | order server 五个直返工具 `directReturn=true`，两个普通工具无该键 |
+| DR9 | 纯图片直返（issue #492） | `direct:image`（`render_chart_png` 返回 1x1 PNG，无 text 块） | `TOOL_RESULT_DATA_DELTA` 图片帧（`media_type`/`data`）；SDK 无文本信号时框架在 `AGENT_END` 前补一帧 `delta=""` + `generateReason=TOOL_RETURN_DIRECT`；`MODEL_CALL_START` 恰 1 个；history 直返收尾消息不丢、`blocks[]` 含 `image` 块（data 与 SSE 帧一致）；续传回放还原信号帧 |
 
 ### 5.6 X 组 — 沙箱（e2e-sandbox job，mock OpenSandbox）
 

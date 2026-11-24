@@ -321,6 +321,76 @@ class StateDataParserTest {
         assertEquals("__compaction_summary__", list.get(0).get("name"));
     }
 
+    // ========== 纯图片直返消息保留（issue #492：content 无 text 块不得整条丢弃） ==========
+
+    @Test
+    void imageOnlyDirectReturnMessageShouldSurviveHistoryReplay() {
+        // 直返轮完整四条消息形态（SDK buildReturnDirectResultMsg 产物）：
+        // tool_result 被替换为占位句，真实 ImageBlock 在合成收尾 assistant 消息里，
+        // content 无 text 块 → 现状被"空消息"剪掉，刷新后直返图片彻底消失
+        var stateData = """
+            {"context":[
+               {"id":"m1","role":"USER","content":[{"type":"text","text":"draw chart"}]},
+               {"id":"m2","role":"ASSISTANT","content":[
+                  {"type":"tool_use","id":"call_img","name":"mcp__chart__render_png","input":{"id":"1"}}]},
+               {"id":"m3","role":"TOOL","content":[
+                  {"type":"tool_result","id":"call_img","state":"success",
+                   "output":"Tool call completed. The result has been presented to the user as the final output of this turn."}]},
+               {"id":"m4","role":"ASSISTANT","name":"chart-agent",
+                "content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}],
+                "metadata":{"_tool_return_direct":true,"agentscope_generate_reason":"TOOL_RETURN_DIRECT"}}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        // m3 为 TOOL 角色消息，本就被剪；保留 m1/m2/m4 三条
+        assertEquals(3, list.size(), "直返收尾消息不得被剪掉");
+        var direct = list.get(2);
+        assertEquals("assistant", direct.get("role"));
+        assertEquals("TOOL_RETURN_DIRECT", direct.get("generate_reason"));
+        assertEquals(List.of(Map.of("type", "image", "media_type", "image/png", "data", "aGVsbG8=")),
+            direct.get("blocks"));
+    }
+
+    @Test
+    void urlImageDirectReturnMessageShouldCarryUrlBlock() {
+        var stateData = """
+            {"context":[
+               {"id":"m4","role":"ASSISTANT",
+                "content":[{"type":"image","source":{"type":"url","url":"https://e.com/a.png","mime_type":"image/png"}}],
+                "metadata":{"agentscope_generate_reason":"TOOL_RETURN_DIRECT"}}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, list.size());
+        assertEquals(List.of(Map.of("type", "image", "media_type", "image/png",
+            "url", "https://e.com/a.png")), list.get(0).get("blocks"));
+    }
+
+    @Test
+    void textAndImageDirectReturnBlocksShouldKeepContentOrder() {
+        var stateData = """
+            {"context":[
+               {"id":"m4","role":"ASSISTANT",
+                "content":[{"type":"text","text":"二维码如下"},
+                           {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aQ=="}}],
+                "metadata":{"agentscope_generate_reason":"TOOL_RETURN_DIRECT"}}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, list.size());
+        assertEquals("二维码如下", list.get(0).get("content"));
+        assertEquals(List.of(
+            Map.of("type", "text", "text", "二维码如下"),
+            Map.of("type", "image", "media_type", "image/png", "data", "aQ==")),
+            list.get(0).get("blocks"));
+    }
+
     // ========== blocks 有序块序列（Debug Console 按真实发生顺序渲染的依据） ==========
 
     @Test

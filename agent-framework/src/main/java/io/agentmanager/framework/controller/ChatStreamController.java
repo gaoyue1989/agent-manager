@@ -618,6 +618,12 @@ public class ChatStreamController {
             // 累加，AGENT_END 帧携带 turn 级汇总。turn 闭包局部对象，随 turn 丢弃。
             var usage = new io.agentmanager.framework.service.TurnUsageTracker();
 
+            // 直返完成信号兜底（issue #492）：纯图片直返轮 SDK 不发 TEXT_BLOCK_DELTA 信号，
+            // 由本组件在 AGENT_END 前合成。turn 闭包局部对象，随 turn 丢弃。
+            var directReturnSignal = new io.agentmanager.framework.service.DirectReturnSignalTracker(
+                mcpToolRegistrar::resolveToolCallMeta,
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
+
             // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
             // 见 TurnFinalizer#abortSetup 的教训注释。
             // 该路径 replyId 尚未产出任何事件、无本 turn 桶可清，turnBucketKeys 必为空
@@ -734,7 +740,8 @@ public class ChatStreamController {
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
                             finalUserId, sink, turnEnded, turnStartedAt, sandboxRebuildNotified,
-                            turnBucketKeys, toolSummary, forwardedPrefix, body.skills(), usage),
+                            turnBucketKeys, toolSummary, forwardedPrefix, body.skills(), usage,
+                            directReturnSignal),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             cancelHeartbeat(heartbeat);
@@ -857,7 +864,8 @@ public class ChatStreamController {
                                     TurnToolSummaryTracker toolSummary,
                                     String forwardedPrefix,
                                     java.util.List<String> turnSkills,
-                                    io.agentmanager.framework.service.TurnUsageTracker usage) {
+                                    io.agentmanager.framework.service.TurnUsageTracker usage,
+                                    io.agentmanager.framework.service.DirectReturnSignalTracker directReturnSignal) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             if (turnStopWatcher != null) {
@@ -865,6 +873,10 @@ public class ChatStreamController {
             }
             return;
         }
+
+        // 直返完成信号跟踪（issue #492）：纯图片直返轮 SDK 零文本帧，AGENT_END 前由
+        // tracker 合成 generateReason=TOOL_RETURN_DIRECT 信号帧（落库可回放）
+        directReturnSignal.onEvent(event);
 
         // 沙箱换代提示帧（§4.4 T4 恢复路径）：LRU 改绑/懒剔除后本会话重入被归属校验拦截
         // 降级重建时，在首个事件前一次性提示「沙箱已重建，未保存的工作区文件可能丢失」
