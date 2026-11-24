@@ -28,7 +28,14 @@ export function LiveView({ url, viewOnly, ready, owner }: Props) {
     const connect = async () => {
       if (disposed || !containerRef.current) return;
       setStatus('connecting');
-      const { default: RFB } = await import('@novnc/novnc/core/rfb.js');
+      let RFB: typeof import('@novnc/novnc').default;
+      try {
+        ({ default: RFB } = await import('@novnc/novnc'));
+      } catch {
+        setStatus('error');
+        if (!disposed) retryTimer = window.setTimeout(() => void connect(), 2000);
+        return;
+      }
       if (disposed || !containerRef.current) return;
       containerRef.current.innerHTML = '';
       const rfb = new RFB(containerRef.current, url, { wsProtocols: ['binary'] });

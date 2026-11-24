@@ -5,6 +5,12 @@ const target = process.env.AGENT_ENTRY ?? 'http://127.0.0.1:30080';
 
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    exclude: ['@novnc/novnc'],
+  },
+  build: {
+    target: 'es2022',
+  },
   server: {
     host: '127.0.0.1',
     port: 5188,

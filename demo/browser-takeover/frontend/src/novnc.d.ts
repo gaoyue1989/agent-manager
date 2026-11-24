@@ -1,4 +1,4 @@
-declare module '@novnc/novnc/core/rfb.js' {
+declare module '@novnc/novnc' {
   const RFB: new (target: HTMLElement, url: string, options?: Record<string, unknown>) => {
     viewOnly: boolean;
     scaleViewport: boolean;

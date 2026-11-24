@@ -180,7 +180,10 @@ export default function App() {
     try {
       await api.chat(sessionId, text, userId, applyFrame);
     } catch (error) {
-      pushSystem(`请求失败：${(error as Error).message}`);
+      const message = (error as Error).message;
+      pushSystem(message.includes('user_quota_exhausted')
+        ? '沙箱配额已满：先结束或复用已有会话的沙箱（配额见服务 env SANDBOX_USER_QUOTA）'
+        : `请求失败：${message}`);
     } finally {
       setBusy(false);
       void refreshBrowser();
