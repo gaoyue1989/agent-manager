@@ -178,6 +178,11 @@ type PublishRequest struct {
 	K8sNameBase string `json:"k8sNameBase,omitempty"`
 	// PublicEndpoint 是否发布对外访问入口；nil=true（存量默认）
 	PublicEndpoint *bool `json:"publicEndpoint"`
+	// ProvisionSandboxPool 控制台创建 agent 显式开启沙箱 → 自动确保 {k8sName}-pool 并
+	// 注入 SANDBOX_POOL_REF（false = 不介入；直接 REST 发布/存量调用零影响）
+	ProvisionSandboxPool bool `json:"provisionSandboxPool,omitempty"`
+	// SandboxPoolCapacity 自动建池容量（nil = 缺省 {1,1,2,3}）
+	SandboxPoolCapacity *SandboxCapacitySpec `json:"sandboxPoolCapacity,omitempty"`
 }
 
 // spec 档 → Deployment resources 直译映射（决议 4）。
@@ -261,6 +266,13 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// 会话隔离派生（issue #142）：k8sName 定型后按服务派生独立 checkpoint 库名与
 	// Redis key 前缀——仅 env 未显式配置时生效，用户显式值优先
 	c.applyIsolationEnv(k8sName, plain, secret)
+	// 自动沙箱池（创建 agent 显式开启沙箱）：显式自定义池名（空/等于约定 {k8sName}-pool
+	// 之外的值）零影响；需要注入 poolRef 时预留 1 个 env 键位。
+	poolRef := strings.TrimSpace(plain["SANDBOX_POOL_REF"])
+	managedPool := req.ProvisionSandboxPool && (poolRef == "" || poolRef == k8sName+sandboxPoolServiceSuffix)
+	if managedPool && poolRef == "" && len(plain)+len(secret) >= MaxEnvKeys {
+		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret)+1, MaxEnvKeys)
+	}
 	params := applySpec(c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath), req.Spec)
 	params.EnvSecret = secret
 	// 展示 endpoint 派生 + Ingress overlay 纯函数前置（host 模式）：非法 overlay 直接
@@ -325,11 +337,31 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		c.rollbackPublishPlaceholder(svc)
 		return nil, err
 	}
+	// 自动建池（显式开启沙箱）：确保 {k8sName}-pool 存在并注入 SANDBOX_POOL_REF。
+	// 平台未配置 OpenSandbox 时 ensure 返回 poolName="" 跳过（框架降级直建）。
+	var poolCreated bool
+	poolName := ""
+	if managedPool {
+		capacity := autoSandboxPoolCapacity
+		if req.SandboxPoolCapacity != nil {
+			capacity = *req.SandboxPoolCapacity
+		}
+		poolCreated, poolName, err = c.ensureServiceSandboxPool(k8sName, plain["SANDBOX_IMAGE"], capacity, req.CreatedBy)
+		if err != nil {
+			c.rollbackProvision(VikingAccountID(k8sName), created, err)
+			c.rollbackPublishPlaceholder(svc)
+			return nil, err
+		}
+		if poolName != "" {
+			plain["SANDBOX_POOL_REF"] = poolName
+		}
+	}
 	svc.EnvJSON, svc.EnvSecretJSON = mustJSON(plain), mustJSON(secret)
 	if err := c.DB.Model(svc).Updates(map[string]interface{}{
 		"env_json": svc.EnvJSON, "env_secret_json": svc.EnvSecretJSON,
 	}).Error; err != nil {
 		c.rollbackProvision(VikingAccountID(k8sName), created, err)
+		c.rollbackServiceSandboxPool(poolName, poolCreated)
 		c.rollbackPublishPlaceholder(svc)
 		return nil, err
 	}
@@ -556,13 +588,17 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 
 // RepublishOptions 可选变更字段；nil/0 表示沿用现状。
 type RepublishOptions struct {
-	PackageID  *uint
-	Image      *string
-	Replicas   *int32
-	Env        map[string]string // 非 nil 时全量替换（非敏感部分；敏感键路由语义同 UpdateEnv）
-	SecretKeys []string          // Env 非 nil 时生效：强制按敏感处理的任意键
-	Spec       *string           // 规格档（决议 4；空串=清除回平台默认）
-	PublicEndpoint *bool         // 对外入口开关
+	PackageID      *uint
+	Image          *string
+	Replicas       *int32
+	Env            map[string]string // 非 nil 时全量替换（非敏感部分；敏感键路由语义同 UpdateEnv）
+	SecretKeys     []string          // Env 非 nil 时生效：强制按敏感处理的任意键
+	Spec           *string           // 规格档（决议 4；空串=清除回平台默认）
+	PublicEndpoint *bool             // 对外入口开关
+	// ProvisionSandboxPool 编辑表单显式开启沙箱 → 自动 ensure {k8sName}-pool 并注入
+	// SANDBOX_POOL_REF（编辑链路只确保存在，容量沿用池现状/缺省）
+	ProvisionSandboxPool bool
+	Actor                uint // 审计用操作者（0 = 系统）
 }
 
 // applySpec 将规格档直译进 ObjectParams resources（limits 同值，决议 4）。
@@ -607,8 +643,16 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	// 平台默认再全量合并）——Pod 滚动重启后即回连共享库，会话跨服务串列。与 Publish
 	// 同语义：缺失或等于平台默认才派生，派生键原样/用户显式值零影响。
 	c.applyIsolationEnv(svc.K8sName, plain, secret)
-	if len(plain)+len(secret) > MaxEnvKeys {
-		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
+	// 自动沙箱池（编辑表单显式开启沙箱）：显式自定义池名零影响；需要注入 poolRef 时
+	// 预留 1 个 env 键位。
+	poolRef := strings.TrimSpace(plain["SANDBOX_POOL_REF"])
+	managedPool := opt.ProvisionSandboxPool && (poolRef == "" || poolRef == svc.K8sName+sandboxPoolServiceSuffix)
+	extraPoolKeys := 0
+	if managedPool && poolRef == "" {
+		extraPoolKeys = 1
+	}
+	if len(plain)+len(secret)+extraPoolKeys > MaxEnvKeys {
+		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret)+extraPoolKeys, MaxEnvKeys)
 	}
 
 	newPkgID := svc.PackageID
@@ -660,8 +704,22 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)
 		return nil, err
 	}
+	// 自动建池（编辑保存显式开启沙箱）：池缺失即按缺省容量重建；平台未配置时跳过。
+	var poolCreated bool
+	poolName := ""
+	if managedPool {
+		poolCreated, poolName, err = c.ensureServiceSandboxPool(svc.K8sName, plain["SANDBOX_IMAGE"], autoSandboxPoolCapacity, opt.Actor)
+		if err != nil {
+			c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)
+			return nil, err
+		}
+		if poolName != "" {
+			plain["SANDBOX_POOL_REF"] = poolName
+		}
+	}
 	rollback := func(cause error) {
 		c.rollbackProvision(VikingAccountID(svc.K8sName), created, cause)
+		c.rollbackServiceSandboxPool(poolName, poolCreated)
 	}
 	params := applySpec(c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID)), spec)
 	params.EnvSecret = secret
@@ -763,9 +821,9 @@ func (c *Core) Delete(id uint) error {
 		return err
 	}
 	defer unlock()
-	// 删除守卫（issue #359）：绑定池 {k8sName}-pool 仍在上游运行时拒绝——池与服务一一对应，
-	// 先删服务会留下空耗 warm Pod 的孤儿池，同名新服务还会静默接管旧池。
-	if err := c.guardBoundSandboxPool(svc.K8sName); err != nil {
+	// 删除前回收绑定池（issue #359 + 自动建池配套）：自动创建/平台管理的池与服务一一对应，
+	// 删除服务即删 {k8sName}-pool，防留下空耗 warm Pod 的孤儿池；上游不可达时 fail-closed。
+	if err := c.releaseBoundSandboxPool(svc.K8sName); err != nil {
 		return err
 	}
 	ns := c.Cfg.Namespace

@@ -230,17 +230,17 @@ func (ModelDelivery) TableName() string { return "model_deliveries" }
 
 // McpConnector 工作空间级 MCP 连接器配置（创建/更新 Agent 时勾选注入生成包）。
 type McpConnector struct {
-	ID             uint       `gorm:"primaryKey" json:"id"`
-	WorkspaceID    uint       `gorm:"uniqueIndex:uk_conn_ws_name;index" json:"workspaceId"`
-	Name           string     `gorm:"size:64;uniqueIndex:uk_conn_ws_name" json:"name"`
-	Transport      string     `gorm:"size:24" json:"transport"` // streamable_http | sse
-	Endpoint       string     `gorm:"size:512" json:"endpoint"`
-	AuthType       string     `gorm:"size:16" json:"authType"` // none | bearer
-	AuthToken      string     `gorm:"size:512" json:"-"`       // 注入走服务 Secret，不落包
-	TimeoutSec     int        `json:"timeoutSec"`
-	ToolScope      string     `gorm:"type:json" json:"toolScope"`   // {"mode":"all"} | {"mode":"subset","tools":[…]}
-	Permissions    string     `gorm:"type:json" json:"permissions"` // {"tools":{"t":"allow|ask|deny"}}
-	DirectReturn   string     `gorm:"type:json" json:"directReturn"`
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	WorkspaceID     uint       `gorm:"uniqueIndex:uk_conn_ws_name;index" json:"workspaceId"`
+	Name            string     `gorm:"size:64;uniqueIndex:uk_conn_ws_name" json:"name"`
+	Transport       string     `gorm:"size:24" json:"transport"` // streamable_http | sse
+	Endpoint        string     `gorm:"size:512" json:"endpoint"`
+	AuthType        string     `gorm:"size:16" json:"authType"` // none | bearer
+	AuthToken       string     `gorm:"size:512" json:"-"`       // 注入走服务 Secret，不落包
+	TimeoutSec      int        `json:"timeoutSec"`
+	ToolScope       string     `gorm:"type:json" json:"toolScope"`   // {"mode":"all"} | {"mode":"subset","tools":[…]}
+	Permissions     string     `gorm:"type:json" json:"permissions"` // {"tools":{"t":"allow|ask|deny"}}
+	DirectReturn    string     `gorm:"type:json" json:"directReturn"`
 	Status          string     `gorm:"size:16" json:"status"`
 	LastVerifyError string     `gorm:"size:512" json:"lastVerifyError"`
 	LastVerifiedAt  *time.Time `json:"lastVerifiedAt"`
@@ -409,10 +409,10 @@ type ExportPackageMarkEntity struct {
 	PackageVersion string `gorm:"size:32" json:"packageVersion"`
 	// FilesJSON 完整文件快照：[{path,encoding(utf8|base64),content}]——自包含（构建不回读源包，
 	// 源包可能已被换版）；文本/二进制以 store.IsTextContent 判定（fs.go:287），二进制 base64
-	FilesJSON string    `gorm:"type:mediumtext" json:"-"`
-	FileCount int       `json:"fileCount"`
-	Checksum  string    `gorm:"size:64" json:"checksum"` // 快照内容 sha256（canonical JSON）
-	Status    string    `gorm:"size:16" json:"status"`   // draft | frozen
+	FilesJSON string `gorm:"type:mediumtext" json:"-"`
+	FileCount int    `json:"fileCount"`
+	Checksum  string `gorm:"size:64" json:"checksum"` // 快照内容 sha256（canonical JSON）
+	Status    string `gorm:"size:16" json:"status"`   // draft | frozen
 	// DraftVersion 草稿行乐观锁版本号（issue #268）：draft FilesJSON 是读-改-写整份快照，
 	// 并发写者（单文件保存 / 冻结打标记）无版本约束时后写者整段覆盖前写者——写者 bump +1、
 	// CAS compare (id, status=draft, draft_version)（export_orders.manifest_version 同模式，
@@ -439,3 +439,26 @@ type WorkspaceRuntimeDefaultEntity struct {
 }
 
 func (WorkspaceRuntimeDefaultEntity) TableName() string { return "workspace_runtime_defaults" }
+
+// SandboxPoolConfigEntity 平台侧池模板参数（sandbox-pool-opensandbox-design §5 的无状态
+// 代理例外：池运行状态与容量水位仍以 OpenSandbox 为唯一真相；本表只存创建参数，供运维侧
+// 编辑回显与「模板变更=删除重建」，不参与任何启动/后台 reconcile）。
+type SandboxPoolConfigEntity struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	Name              string    `gorm:"size:63;uniqueIndex" json:"name"` // {k8sName}-pool
+	Image             string    `gorm:"size:512" json:"image"`
+	TaskExecutorImage string    `gorm:"size:512" json:"taskExecutorImage"`
+	ExecdImage        string    `gorm:"size:512" json:"execdImage"`
+	SkillsyncJSON     string    `gorm:"type:json" json:"skillsyncJson"`
+	ExtraEnvJSON      string    `gorm:"type:json" json:"extraEnvJson"`
+	DisableSyncd      bool      `json:"disableSyncd"`
+	PoolMin           int32     `json:"poolMin"`
+	BufferMin         int32     `json:"bufferMin"`
+	BufferMax         int32     `json:"bufferMax"`
+	PoolMax           int32     `json:"poolMax"`
+	CreatedBy         uint      `json:"createdBy"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+func (SandboxPoolConfigEntity) TableName() string { return "sandbox_pool_configs" }

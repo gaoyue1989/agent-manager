@@ -79,6 +79,38 @@ type SandboxForm struct {
 	TimeoutMin int    `json:"timeoutMinutes,omitempty"` // 0 = 不注入（运行时默认 60）
 	MemoryMB   int    `json:"memoryMb,omitempty"`       // 0 = 不注入（运行时默认 1024）
 	CPUCount   int    `json:"cpuCount,omitempty"`       // 0 = 不注入（运行时默认 1）
+	// Pool 自动建池容量四值（显式开启沙箱时生效；未提交 = 缺省 {1,1,2,3}）。
+	// 仅创建/导入模式使用；编辑模式不改池容量（运维侧沙箱管理页调整）。
+	Pool *SandboxPoolForm `json:"pool,omitempty"`
+}
+
+// SandboxPoolForm 自动建池容量四值（指针区分未提交与显式 0）。
+type SandboxPoolForm struct {
+	PoolMin   *int32 `json:"poolMin"`
+	BufferMin *int32 `json:"bufferMin"`
+	BufferMax *int32 `json:"bufferMax"`
+	PoolMax   *int32 `json:"poolMax"`
+}
+
+// sandboxOn 显式开启沙箱（三态判定：nil=未提交 / true=开 / false=显式关）。
+func (f *SandboxForm) sandboxOn() bool {
+	return f != nil && f.Enabled != nil && *f.Enabled
+}
+
+// poolCapacity 解析自动建池容量：未提交 = 缺省；提交须四值齐备且满足容量链。
+func (f *SandboxForm) poolCapacity() (SandboxCapacitySpec, error) {
+	if f == nil || f.Pool == nil {
+		return autoSandboxPoolCapacity, nil
+	}
+	p := f.Pool
+	if p.PoolMin == nil || p.BufferMin == nil || p.BufferMax == nil || p.PoolMax == nil {
+		return SandboxCapacitySpec{}, fmt.Errorf("%w: sandbox.pool 须同时提供 poolMin/bufferMin/bufferMax/poolMax", ErrInvalidForm)
+	}
+	spec := SandboxCapacitySpec{PoolMin: *p.PoolMin, BufferMin: *p.BufferMin, BufferMax: *p.BufferMax, PoolMax: *p.PoolMax}
+	if err := spec.validate(); err != nil {
+		return SandboxCapacitySpec{}, err
+	}
+	return spec, nil
 }
 
 // MemoryForm 记忆供给配置（openviking-memory-integration-design §11.1，创建/编辑表单
@@ -692,7 +724,7 @@ func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, for
 // env 尚不存在的键）。
 func (c *Core) platformDefaultEnv(form *AgentForm) map[string]string {
 	env := map[string]string{}
-	sandboxOn := form.Sandbox != nil && form.Sandbox.Enabled != nil && *form.Sandbox.Enabled
+	sandboxOn := form.Sandbox.sandboxOn()
 	sandboxGroup := platformconfig.GroupKeys("sandbox")
 	if defaults, err := c.GetPlatformDefaults(); err == nil {
 		for k, v := range defaults {
@@ -829,6 +861,16 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 	if form.Replicas < 1 {
 		form.Replicas = 1
 	}
+	// 自动建池容量前置校验（显式开启沙箱时）：非法容量 400，不产生包/服务
+	poolOn := form.Sandbox.sandboxOn()
+	var poolCap *SandboxCapacitySpec
+	if poolOn {
+		cap, err := form.Sandbox.poolCapacity()
+		if err != nil {
+			return nil, nil, err
+		}
+		poolCap = &cap
+	}
 	def, conns, err := c.validateModelConnections(workspaceID, form.ModelConnections)
 	if err != nil {
 		return nil, nil, err
@@ -878,7 +920,8 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 		Replicas: int32(form.Replicas), Spec: form.Spec,
 		PublicEndpoint: form.PublicEndpoint,
 		WorkspaceID:    workspaceID, CreatedBy: userID,
-		K8sNameBase: agentKey, // 决议 5：k8s 名与 agentKey 同源（中文名 sanitize 后为兜底名）
+		K8sNameBase:          agentKey, // 决议 5：k8s 名与 agentKey 同源（中文名 sanitize 后为兜底名）
+		ProvisionSandboxPool: poolOn, SandboxPoolCapacity: poolCap,
 	})
 	if err != nil {
 		cleanupPkg()
@@ -903,6 +946,16 @@ func (c *Core) CreateAgentImport(workspaceID, userID uint, form *AgentForm, pack
 	}
 	if base.WorkspaceID != workspaceID && base.WorkspaceID != 0 {
 		return nil, nil, ErrNotFound // 非公共包且非本空间 → 不可见
+	}
+	// 自动建池容量前置校验（显式开启沙箱时；与 harness 模式同语义）
+	poolOn := form.Sandbox.sandboxOn()
+	var poolCap *SandboxCapacitySpec
+	if poolOn {
+		cap, err := form.Sandbox.poolCapacity()
+		if err != nil {
+			return nil, nil, err
+		}
+		poolCap = &cap
 	}
 	var def *store.ModelConnection
 	var conns []*store.ModelConnection
@@ -942,6 +995,7 @@ func (c *Core) CreateAgentImport(workspaceID, userID uint, form *AgentForm, pack
 		Env: env, SecretKeys: secretKeys,
 		Replicas: int32(form.Replicas), Spec: form.Spec, PublicEndpoint: form.PublicEndpoint,
 		WorkspaceID: workspaceID, CreatedBy: userID,
+		ProvisionSandboxPool: poolOn, SandboxPoolCapacity: poolCap,
 	})
 	if err != nil {
 		// 派生副本发布失败回删（不留孤儿数据，同 CreateAgent 失败语义）；
@@ -1232,6 +1286,7 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 		PackageID: &newPkgID,
 		Replicas:  intPtr(form.Replicas), Env: oldPlain, SecretKeys: secretKeys,
 		Spec: &form.Spec, PublicEndpoint: &public,
+		ProvisionSandboxPool: form.Sandbox.sandboxOn(), Actor: userID,
 	}
 	if form.Image != "" {
 		opt.Image = &form.Image // 空 = 沿用现镜像（UpdateEnv/Republish 语义）

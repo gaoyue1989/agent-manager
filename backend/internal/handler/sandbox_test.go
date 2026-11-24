@@ -29,7 +29,7 @@ func newSandboxAdminCore(t *testing.T, upstreamURL string) *service.Core {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{}, &store.SandboxPoolConfigEntity{}); err != nil {
 		t.Fatal(err)
 	}
 	if sqlDB, e := db.DB(); e == nil {
