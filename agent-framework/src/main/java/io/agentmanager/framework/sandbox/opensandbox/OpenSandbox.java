@@ -746,7 +746,7 @@ public class OpenSandbox extends AbstractBaseSandbox
      */
     private void onRealExecBeforeRun(String command) {
         invalidateProbeCache();
-        if (runtimeReadThroughEnabled && looksLikeMemoryAccess(command)
+        if (runtimeReadThroughEnabled && (looksLikeMemoryAccess(command) || looksLikeRootGlobOverMemory(command))
                 && lazyRuntimeInjected.compareAndSet(false, true)) {
             injectRuntimeFilesLazily();
         }
@@ -765,6 +765,24 @@ public class OpenSandbox extends AbstractBaseSandbox
         return command.contains(WorkspaceReader.MEMORY_FILE)
             || command.contains(WorkspaceReader.MEMORY_DIR)
             || command.startsWith("python3 -c");
+    }
+
+    /**
+     * D1 触发判定扩展（issue #500）：glob 回落真 exec 的命令文本不含记忆字样（根级
+     * {@code *.md} 模式检索长期记忆的典型形态），触发判据按语义补齐——P_FIND 完整模板命中
+     * 且 root 为工作区根（与 translateGlob 根级判定同口径）、pattern 可命中 MEMORY.md 时
+     * 视作记忆访问，懒注入后 find -L 地面真相包含已注入文件（用户软链触发回落的残余场景
+     * 读穿不漏 KV）。
+     */
+    private boolean looksLikeRootGlobOverMemory(String command) {
+        var m = P_FIND.matcher(command);
+        if (!m.matches()) {
+            return false;
+        }
+        String root = m.group(1);
+        var rootRel = normalizeRel(root);
+        boolean rootIsWorkspace = root.equals(getWorkspaceRoot()) || rootRel.isEmpty() || rootRel.equals(".");
+        return rootIsWorkspace && globMatch(m.group(2), WorkspaceReader.MEMORY_FILE);
     }
 
     /** D1 补注入：读 KV 运行时文件写入容器（与预热注入同一数据面；失败可重试、不阻塞命令） */
@@ -1131,6 +1149,13 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 补齐（fillGlobFromProbeCache），跳过免重复 execd 往返。跳过目录的隐含约束：其内容与
      * 缓存逐字一致（SKILL.md 模式 + 物化后窗口内），由失效不变量保证。
      *
+     * <p>受控缓存子树（issue #500）：{@code .skills-cache} 是 SDK MarketplaceStager 的技能
+     * 缓存投影（软链农场，skills-syncd §6.2，软链目标 = 平台守护目录 /skills-store），不属于
+     * 用户工作区数据语义——遍历根不在其内时整目录跳过（与 supportsFileTransfer 的排除口径
+     * 同源）：农场软链不再触发整树回落（根 glob 翻译快路径 + 读穿根级 KV 合并恢复），农场
+     * 内部文件也不再经 find -L 解引用混入用户 glob 视野。root 位于 .skills-cache 内的显式
+     * 枚举照旧走软链回落（#394 技能枚举语义）；用户内容软链防护不变。
+     *
      * @return false = 子树含 type=symlink 条目，需整体回落真 exec find -L（软链不递归不解引用——
      *         execd 对软链根拒绝穿透、EntryInfo 无 link target，files API 无法枚举，issue #394）；
      *         true = 完成遍历或截断（截断语义不变：经 {@code truncated} 出参上报，
@@ -1147,6 +1172,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             truncated.set(true);
             return true;
         }
+        boolean insideSkillCache = insideSkillCacheDir(relDir);
         List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
         try {
             entries = osbSandbox.files().listDirectory(relDir);
@@ -1172,6 +1198,9 @@ public class OpenSandbox extends AbstractBaseSandbox
                 if (skipDirs.contains(rel)) {
                     continue; // 缓存已覆盖：容器遍历跳过（缓存条目另行补齐）
                 }
+                if (!insideSkillCache && SkillCacheScope.CACHE_DIR.equals(rel)) {
+                    continue; // 受控技能缓存投影：不进用户 glob 视野（issue #500）
+                }
                 if (!walkFilesSkippingDirs(rel, pattern, out, depth + 1, truncated, skipDirs)) {
                     return false;
                 }
@@ -1182,6 +1211,12 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         return true;
+    }
+
+    /** 遍历根是否位于受控技能缓存子树内（normalizeRel 归一后等于 .skills-cache 或其子路径） */
+    private boolean insideSkillCacheDir(String relDir) {
+        var rel = normalizeRel(relDir);
+        return rel.equals(SkillCacheScope.CACHE_DIR) || rel.startsWith(SkillCacheScope.CACHE_DIR + "/");
     }
 
     /** glob 命中条目（rel/size/mtime 三元组，排序按 rel） */

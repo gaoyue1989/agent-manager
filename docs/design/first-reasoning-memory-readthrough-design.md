@@ -111,6 +111,18 @@ JDBC（L4 大时即 `OpenSandbox.java:822` 注释记载的 ≈1.5s/call 噪声�
 > （按容器已见 rel 去重），404/null 回落路径与 KV 查询异常语义不变。容器整树缺失时
 > glob/ls 纯 KV 应答的回落行为不回退（对照组测试钉死）。
 
+> 根级 glob 的懒注入触发判据与农场软链回落（2026-11-25 回填，issue #500）：第 2 条触发
+> 判定（`looksLikeMemoryAccess`，纯文本匹配）对 glob 回落命令失灵——根级 `*.md` 模式
+> （模型检索长期记忆的典型形态）命令文本不含 `MEMORY.md`/`memory` 字样，#394 软链回落
+> 后真 find -L 既看不到容器内未注入的 MEMORY.md、也不会触发补注入，首探测窗口读穿漏 KV
+> （#356 根级并入 `fillGlobFromMemoryRootFile` 随 `translateGlob` 提前 return 一并跳过）。
+> 双修复：① `walkFilesSkippingDirs` 对受控技能缓存子树（`.skills-cache`，软链农场投影）
+> 整目录跳过——农场软链不再触发整树回落，根 glob 翻译快路径与根级 KV 合并恢复（信任模型
+> 与边界见 sandbox-skills-syncd §6.3 补记）；② 触发判据按语义补齐 `looksLikeRootGlobOverMemory`
+> （P_FIND 完整模板命中 + root 为工作区根 + pattern 可命中 MEMORY.md），用户软链触发回落
+> 的残余场景在真 exec 前懒注入，find -L 地面真相包含已注入文件——不采用「KV-真 exec
+> 结果合并」（§6.3 已拒绝的复杂度）。读穿关闭时判定短路（行为不变）。
+
 ### 3.2 D2 运行时文件单次枚举（P0）
 
 `readRuntimeFiles` 从「1 read + 1 ls + N read」改为**一次 `baseStore.search` 大页分页
