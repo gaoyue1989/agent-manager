@@ -306,9 +306,9 @@ class McpToolRegistrarSharedClientTest {
     // A 路径 reload 豁免的单一真相源，evictSharedWrappers 不清它（B 路径 build 失败
     // 回滚窗口内旧 agent 的合成句柄仍可自愈）。
 
-    /** 合成 server 声明（HarnessAgentFactory.registerVikingSharedContextMcp 同款形态） */
+    /** 合成 server 声明（生产唯一构造点 HarnessAgentFactory.syntheticOpenvikingServerConfig） */
     private static OafConfig.McpServerConfig syntheticConfig() {
-        return new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+        return HarnessAgentFactory.syntheticOpenvikingServerConfig();
     }
 
     /** 合成 base 工厂桩：从队列取桩连接并按真实工厂形态包 UserScoped（评审 P1 形态对称） */

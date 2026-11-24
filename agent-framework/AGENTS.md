@@ -272,7 +272,7 @@ OAF `deniedTools` 字段控制排除列表。
 | 来源 | 作用域 | 声明位置 |
 |---|---|---|
 | MCP 工具 | 各 server 的 MCP 工具 | `mcp-configs/{server}/config.yaml` 的 `permissions.tools`（allow/ask/deny） |
-| 合成 MCP server（openviking，OVK_MCP_SHARED_CONTEXT） | 同 MCP 工具（`mcp__openviking__*`） | 包内 `mcp-configs/openviking/config.yaml` 的 `permissions.tools`（permissions-only，无 connection 节；issue #415 修复前被静默丢弃） |
+| 合成 MCP server（openviking，OVK_MCP_SHARED_CONTEXT） | 同 MCP 工具（`mcp__openviking__*`） | 包内 `mcp-configs/openviking/config.yaml` 的 `permissions.tools`（permissions-only，无 connection 节；#415 修复前被静默丢弃，#479 修复装载路径错指 `{包根}/openviking`） |
 | 自定义/内置工具 | @Tool 注解工具 + Harness 内置工具 | AGENTS.md frontmatter `config.permission.tools`（2026-09-20 新增；不承载 MCP 工具——声明 MCP 注册名忽略并告警） |
 
 - 自定义/内置工具**未声明默认 ALLOW**（不参与确认，零侵入）；声明 `ask` 即接入 HITL 确认卡链路（`permission_ask` → `confirm_context` → `/threads/{sid}/confirm-stream`，与 MCP 工具共用）

@@ -196,7 +196,7 @@ class McpConnectionWatchdogTest {
     // ---------- 合成 server（issue #415）：探测名单含注册表、补偿按 agent 有无分流 ----------
 
     private static final OafConfig.McpServerConfig SYNTHETIC =
-        new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+        HarnessAgentFactory.syntheticOpenvikingServerConfig();
 
     /** 合成注册表桩：registrar.syntheticServers() 返回含 openviking 的真实条目 */
     @SuppressWarnings("unchecked")
