@@ -18,7 +18,7 @@ SHARDS=(
   "console-rest:m0 m1 m2 m5 m6 m7 m8 m9 m11 m12"
 )
 
-shard_modules() { # shard_modules <分片名> -> 模块列表；未知分片返回 1
+shard_modules() {
   local entry
   for entry in "${SHARDS[@]}"; do
     if [ "${entry%%:*}" = "$1" ]; then echo "${entry#*:}"; return 0; fi
@@ -26,7 +26,7 @@ shard_modules() { # shard_modules <分片名> -> 模块列表；未知分片返�
   return 1
 }
 
-check_shards() { # 分片表与模块文件双向一致，保证「跑全部分片」等价于「跑全部模块」
+check_shards() {
   local entry shard m f FILES problem=0
   declare -A OWNER=()
   for entry in "${SHARDS[@]}"; do

@@ -52,7 +52,7 @@ runs:
         set -euo pipefail
         BUILD_DIR=$(mktemp -d)
         echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
-        build() { # build <名称> <docker build 参数...>：日志与退出码落 BUILD_DIR，供后续步骤等待
+        build() {
           local name=$1; shift
           echo "$name" >> "$BUILD_DIR/names"
           ( "$@" > "$BUILD_DIR/$name.log" 2>&1; echo $? > "$BUILD_DIR/$name.rc" ) >/dev/null 2>&1 </dev/null &
