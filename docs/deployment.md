@@ -238,10 +238,15 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    其余 `SKILLSYNC_*` 键的覆盖通道（只收非空 value）；`disableSyncd: true` 显式关闭（与
    extraEnv/skillsync 互斥）。`skillsync.storeDir` 须与平台配置 `SANDBOX_SKILLS_SHARED_STORE` 同值
    （见下文总闸默认值）。镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不 crashloop（D-1）。
+   **控制台创建/编辑自动建池**（2026-11-24）：创建 agent 表单显式开启沙箱时，发布链路自动确保
+   `{k8s名}-pool`（容量取创建页四值，缺省 `{1,1,2,3}`）并注入 `SANDBOX_POOL_REF`；平台未配置
+   OpenSandbox 时跳过（框架降级直建），已配置但建池失败则发布失败（fail-fast）。编辑保存同样幂等
+   确保（池被手工删除后自动补回）。池镜像取服务/平台 `SANDBOX_IMAGE`，**必须为含 skills-syncd 的
+   overlay 镜像**（§四·1），否则技能同步不生效。池模板参数（镜像/init 镜像/skillsync/容量）落平台表
+   `sandbox_pool_configs` 供运维侧编辑回显；模板变更走「删除重建」（上游 PUT 只支持容量），仅容量
+   变更原地 PUT。删除服务自动删除绑定池并清理配置行；上游不可达时拒绝删除（fail-closed 防孤儿池）。
    **OpenSandbox 是外部服务**：平台只经其 API（建池模板的 env/args）传递同步配置，不向其命名空间写
-   任何 K8s 对象、不持有其 RBAC（`/internal/skills/*` 端点无鉴权，见「内部端点安全模型」）。
-   删除守卫（issue #359）：绑定池在运行时删除服务被拒（409 提示先删池）——池与服务一一对应；
-   管理面不可达时同样拒绝（池状态未知即不动）。
+   任何 K8s 对象、不持有其 RBAC（模板参数存平台自有库，`/internal/skills/*` 端点无鉴权，见「内部端点安全模型」）。
 4. **存量集群一次性收尾**（2026-11-24 去 token，按序）：先滚动业务 Pod 到新版 agent-framework
    （端点不再校验，对仍带 token 的旧池兼容）→ 升级 backend → 删池重建（上游改模板必须重建）→
    删除遗留授权与 Secret：
