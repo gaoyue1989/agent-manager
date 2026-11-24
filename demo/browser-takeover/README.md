@@ -34,7 +34,7 @@ SECRETS_FILE=/path/to/.env.secrets ./deploy.sh
 
 # 2. 启动独立前端（默认代理到 127.0.0.1:30080）
 cd frontend && npm install && npm run dev
-# 打开 http://127.0.0.1:5188
+# 打开 http://<主机IP>:5188（dev server 监听 0.0.0.0）
 
 # 3. e2e（API 级，无需前端）
 node e2e/browser-takeover-e2e.mjs

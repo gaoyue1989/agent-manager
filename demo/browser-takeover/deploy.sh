@@ -224,7 +224,7 @@ Agent API：  http://127.0.0.1:30080/agent/$SERVICE/
 前端：
   cd $HERE/frontend
   npm install
-  npm run dev          # http://127.0.0.1:5188
+  npm run dev          # http://<主机IP>:5188（监听 0.0.0.0）
 e2e：
   node $HERE/e2e/browser-takeover-e2e.mjs
 演示站点（沙箱内）：http://127.0.0.1:8088/  账号 demo / 密码见 DEMO_GUIDE.md

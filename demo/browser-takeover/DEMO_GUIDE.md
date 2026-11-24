@@ -5,7 +5,7 @@
 ```bash
 cd demo/browser-takeover
 SECRETS_FILE=/root/agent-manager/.env.secrets ./deploy.sh        # 首次会构建并导入沙箱镜像
-cd frontend && npm install && npm run dev                        # http://127.0.0.1:5188
+cd frontend && npm install && npm run dev                        # http://<主机IP>:5188
 ```
 
 `deploy.sh` 做的事：构建/导入沙箱镜像 → （可选）构建 agent-framework 镜像 → 应用 platform-router
