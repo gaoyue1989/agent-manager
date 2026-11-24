@@ -3,7 +3,10 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -323,9 +326,100 @@ func TestIntrospectApiKeyScopeBypass(t *testing.T) {
 			t.Fatalf("#407 sales key: X-Original-URI=%q => %d (want 403)", uri, w.Code)
 		}
 	}
-	// 空间级 key 不受裁决约束
-	if w := probe(wsPlain, map[string]string{"X-Original-URI": "/agent/anything/threads"}); w.Code != http.StatusOK {
-		t.Fatalf("#407 workspace key: %d (want 200)", w.Code)
+	// 空间级 key 限本空间（issue #488）：本空间 short 放行，未知 short fail-closed
+	if w := probe(wsPlain, map[string]string{"X-Original-URI": "/agent/demo/threads"}); w.Code != http.StatusOK {
+		t.Fatalf("#488 workspace key own short: %d (want 200)", w.Code)
+	}
+	if w := probe(wsPlain, map[string]string{"X-Original-URI": "/agent/anything/threads"}); w.Code != http.StatusForbidden {
+		t.Fatalf("#488 workspace key unknown short: %d (want 403)", w.Code)
+	}
+}
+
+// TestApiKeyWorkspaceGuard issue #488：API Key 工作空间守卫。签发端 agentId 必须指向
+// 本空间真实 Agent（不存在/跨空间一律 ErrNotFound，不泄露存在性）；Introspect 端单
+// Agent key 与空间级 key 双分支统一按服务归属裁决（svc.WorkspaceID == key.WorkspaceID），
+// 修复前签出的存量越权 key 数据面 fail-closed；空间级 key（nil=空间内全部 Agent）不再
+// 跳过路由裁决。
+func TestApiKeyWorkspaceGuard(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	wsA := seedWs(t, c, "ws-488a", "守卫空间A")
+	wsB := seedWs(t, c, "ws-488b", "守卫空间B")
+	victim := &store.ServiceEntity{K8sName: "oaf-guard-victim", DisplayName: "Victim",
+		WorkspaceID: wsB.ID, ShortName: "guard-victim"}
+	own := &store.ServiceEntity{K8sName: "oaf-guard-own", DisplayName: "Own",
+		WorkspaceID: wsA.ID, ShortName: "guard-own"}
+	if err := c.DB.Create(victim).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DB.Create(own).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 签发端：他空间 / 不存在的 agentId 一律 ErrNotFound；同空间正常签出
+	if _, _, err := c.IssueApiKey(IssueApiKeyInput{Name: "k-cross", AgentID: &victim.ID, WorkspaceID: wsA.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("#488 cross workspace agentId: %v (want ErrNotFound)", err)
+	}
+	missing := uint(999999)
+	if _, _, err := c.IssueApiKey(IssueApiKeyInput{Name: "k-missing", AgentID: &missing, WorkspaceID: wsA.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("#488 missing agentId: %v (want ErrNotFound)", err)
+	}
+	_, ownPlain, err := c.IssueApiKey(IssueApiKeyInput{Name: "k-own", AgentID: &own.ID, WorkspaceID: wsA.ID})
+	if err != nil {
+		t.Fatalf("#488 own agentId issue: %v", err)
+	}
+	_, wsPlain, err := c.IssueApiKey(IssueApiKeyInput{Name: "k-ws", WorkspaceID: wsA.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 存量越权 key（修复前签出的 workspace_id=A、agent_id=B 空间服务）直插 DB 模拟
+	crossPlain := "ak-488aaaaa-488488488488488488488488"
+	sum := sha256.Sum256([]byte(crossPlain))
+	c.DB.Create(&store.ApiKey{WorkspaceID: wsA.ID, AgentID: &victim.ID, UserID: 1,
+		Name: "legacy-cross", KeyPrefix: "ak-488a", KeyHash: hex.EncodeToString(sum[:]), Status: "active"})
+
+	probe := func(bearer string, headers map[string]string) *httptest.ResponseRecorder {
+		req, _ := http.NewRequest(http.MethodGet, "http://router/api/v1/auth/introspect", nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		c.Introspect(w, req)
+		return w
+	}
+
+	// Introspect 端：存量越权单 Agent key 访问绑定目标/任意目标一律 403
+	for _, uri := range []string{"/agent/guard-victim/threads", "/agent/guard-own/threads"} {
+		if w := probe(crossPlain, map[string]string{"X-Original-URI": uri}); w.Code != http.StatusForbidden {
+			t.Fatalf("#488 legacy cross key %s: %d (want 403)", uri, w.Code)
+		}
+	}
+	// 空间级 key：他空间 403 / 未知 short 403 / 非 /agent 路径 403 / 路由捕获分叉 403 / 本空间 200
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    int
+	}{
+		{"cross-workspace", map[string]string{"X-Original-URI": "/agent/guard-victim/threads"}, http.StatusForbidden},
+		{"unknown-short", map[string]string{"X-Original-URI": "/agent/nosuch/threads"}, http.StatusForbidden},
+		{"empty-target", map[string]string{"X-Original-URI": "/other/path"}, http.StatusForbidden},
+		{"short-divergence", map[string]string{"X-Original-URI": "/agent/guard-own/threads", "X-Agent-Short": "guard-victim"}, http.StatusForbidden},
+		{"own-workspace", map[string]string{"X-Original-URI": "/agent/guard-own/threads"}, http.StatusOK},
+		{"own-short-agree", map[string]string{"X-Original-URI": "/agent/guard-own/threads", "X-Agent-Short": "guard-own"}, http.StatusOK},
+	}
+	for _, tc := range cases {
+		if w := probe(wsPlain, tc.headers); w.Code != tc.want {
+			t.Fatalf("#488 ws key %s: %d (want %d)", tc.name, w.Code, tc.want)
+		}
+	}
+	// 同空间单 Agent key 不回归：命中绑定 Agent 放行、他 Agent 拒绝
+	if w := probe(ownPlain, map[string]string{"X-Original-URI": "/agent/guard-own/threads"}); w.Code != http.StatusOK {
+		t.Fatalf("#488 own scoped key: %d (want 200)", w.Code)
+	}
+	if w := probe(ownPlain, map[string]string{"X-Original-URI": "/agent/guard-victim/threads"}); w.Code != http.StatusForbidden {
+		t.Fatalf("#488 own scoped key cross target: %d (want 403)", w.Code)
 	}
 }
 
