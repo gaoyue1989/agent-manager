@@ -158,7 +158,7 @@ if [ "$KUBE_OK" = "1" ]; then
   BD=$(kubectl -n $KNS get deploy oaf-platform-backend -o name 2>/dev/null \
     || kubectl -n $KNS get deploy platform-backend -o name)
   BSA=$(kubectl -n $KNS get $BD -o jsonpath='{.spec.template.spec.serviceAccountName}')
-  CAN=$(kubectl auth can-i get secrets -n opensandbox --as="system:serviceaccount:$KNS:${BSA:-default}" 2>/dev/null)
+  CAN=$(kubectl auth can-i get secrets -n opensandbox --as="system:serviceaccount:$KNS:${BSA:-default}" 2>/dev/null | awk '{print $1}')
   assert_eq "backend SA 对 opensandbox ns 无 secrets 读权限（OpenSandbox 是外部服务，零 RBAC 耦合）" "$CAN" "no"
 
   # 用例 1 default-on：绑定服务的新建池缺省即开启（上方首次建池即此形态）

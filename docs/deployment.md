@@ -242,8 +242,8 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 4. **存量集群一次性收尾**（2026-11-24 去 token，按序）：先滚动业务 Pod 到新版 agent-framework
    （端点不再校验，对仍带 token 的旧池兼容）→ 升级 backend → 删池重建（上游改模板必须重建）→
    删除遗留授权与 Secret：
-   `kubectl delete clusterrole,clusterrolebinding platform-backend-skillsync`、
-   `kubectl -n opensandbox delete role,rolebinding platform-backend-skillsync-token`、
+   `kubectl delete clusterrole,clusterrolebinding platform-backend-skillsync --ignore-not-found`、
+   `kubectl -n opensandbox delete role,rolebinding platform-backend-skillsync-token --ignore-not-found`、
    `kubectl -n opensandbox delete secret -l app.kubernetes.io/managed-by=oaf-platform`。
    平台配置与服务 env 里残留的 `SKILLSYNC_TOKEN` 值不再被读取，可留可清。
 
