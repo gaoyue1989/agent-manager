@@ -130,3 +130,107 @@ func TestPublishDerivesIsolationEnv(t *testing.T) {
 		t.Fatalf("redis prefix not derived: %q", env["AGENT_REDIS_PREFIX"])
 	}
 }
+
+// TestRepublishReDerivesIsolationEnv（issue #385）Republish 是 env 重建出口之一，
+// 派生键可能在上游写路径被平台默认预填覆盖回共享值（UpdateAgent 的 buildPublishEnv
+// 会把平台默认 CHECKPOINT_JDBC_URL 预填进 env 再全量合并）——而 Pod 滚动重启后即回连
+// 共享库，会话列表/调试面板串入其它服务会话。与 Publish 同语义：出口重跑派生。
+//   1) 派生键被覆盖回平台默认 → 重新派生 per-service 库（编辑保存场景，本 issue 主案例）
+//   2) 派生键原样保留（纯 republish / 升级版本，无 Env 覆盖）→ 保持不动
+//   3) 用户显式自定义（≠平台默认）→ 保持不动
+func TestRepublishReDerivesIsolationEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		withEnv func(derived string) map[string]string // Republish 携带的 Env（nil = 不带）
+		wantCK  string                                  // 期望落库的 checkpoint URL 前缀段
+	}{
+		{"覆盖回平台默认 → 重新派生", func(derived string) map[string]string {
+			return map[string]string{"CHECKPOINT_JDBC_URL": "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint", "LLM_MODEL": "m"}
+		}, "/oaf_checkpoint_oaf_"},
+		{"派生键保留 → 原样", func(derived string) map[string]string { return nil }, "/oaf_checkpoint_oaf_"},
+		{"用户显式自定义 → 不动", func(derived string) map[string]string {
+			return map[string]string{"CHECKPOINT_JDBC_URL": "jdbc:mysql://my-mysql:3306/mydb"}
+		}, "/mydb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, fk, done := newTestCore(t)
+			defer done()
+			_ = seedWs(t, c, "ws-77770011", "隔离重发布")
+			if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: "CHECKPOINT_JDBC_URL",
+				Value: "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint"}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: "AGENT_REDIS_URL",
+				Value: "redis://oaf-redis:6379"}).Error; err != nil {
+				t.Fatal(err)
+			}
+			pkg := uploadTestPkg(t, c, "")
+			svc := publishToRegisterFailed(t, c, fk, pkg.ID, "")
+			if !strings.Contains(envJSONField(t, svc.EnvJSON, "CHECKPOINT_JDBC_URL"), "/oaf_checkpoint_"+strings.ReplaceAll(svc.K8sName, "-", "_")+"?") {
+				t.Fatalf("publish 未派生: %s", svc.EnvJSON)
+			}
+			opt := RepublishOptions{}
+			if tc.withEnv != nil {
+				opt.Env = tc.withEnv(envJSONField(t, svc.EnvJSON, "CHECKPOINT_JDBC_URL"))
+			}
+			updated, err := c.Republish(svc.ID, opt)
+			if err != nil {
+				t.Fatalf("republish: %v", err)
+			}
+			got := envJSONField(t, updated.EnvJSON, "CHECKPOINT_JDBC_URL")
+			switch tc.name {
+			case "覆盖回平台默认 → 重新派生", "派生键保留 → 原样":
+				if !strings.Contains(got, "/oaf_checkpoint_"+strings.ReplaceAll(svc.K8sName, "-", "_")+"?") {
+					t.Fatalf("republish 后 checkpoint 应为 per-service 派生库, got %q", got)
+				}
+			case "用户显式自定义 → 不动":
+				if got != "jdbc:mysql://my-mysql:3306/mydb" {
+					t.Fatalf("用户显式值被改动: %q", got)
+				}
+			}
+			if p := envJSONField(t, updated.EnvJSON, "AGENT_REDIS_PREFIX"); p != svc.K8sName+":" {
+				t.Fatalf("redis prefix: %q", p)
+			}
+		})
+	}
+}
+
+// TestUpdateEnvReDerivesIsolationEnv（issue #385）UpdateEnv 全量覆盖语义下未回传
+// 派生键时（运维侧编辑遗漏），出口派生兜底：Pod 不得因 env 编辑回退共享库。
+func TestUpdateEnvReDerivesIsolationEnv(t *testing.T) {
+	c, fk, done := newTestCore(t)
+	defer done()
+	_ = seedWs(t, c, "ws-77770012", "隔离UpdateEnv")
+	if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: "CHECKPOINT_JDBC_URL",
+		Value: "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: "AGENT_REDIS_URL",
+		Value: "redis://oaf-redis:6379"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	pkg := uploadTestPkg(t, c, "")
+	svc := publishToRegisterFailed(t, c, fk, pkg.ID, "")
+	// 全量覆盖且不回传派生键
+	updated, err := c.UpdateEnv(svc.ID, map[string]string{"LLM_MODEL": "m2"}, nil)
+	if err != nil {
+		t.Fatalf("updateEnv: %v", err)
+	}
+	got := envJSONField(t, updated.EnvJSON, "CHECKPOINT_JDBC_URL")
+	if !strings.Contains(got, "/oaf_checkpoint_"+strings.ReplaceAll(svc.K8sName, "-", "_")+"?") {
+		t.Fatalf("updateEnv 后 checkpoint 应回退共享库: %q", got)
+	}
+	if envJSONField(t, updated.EnvJSON, "LLM_MODEL") != "m2" {
+		t.Fatalf("普通键覆盖语义被破坏: %s", updated.EnvJSON)
+	}
+}
+
+// envJSONField 从服务 env_json 提取单键（测试辅助）。
+func envJSONField(t *testing.T, raw, key string) string {
+	t.Helper()
+	env := map[string]string{}
+	if err := jsonUnmarshalStrict(raw, &env); err != nil {
+		t.Fatalf("env json: %v", err)
+	}
+	return env[key]
+}

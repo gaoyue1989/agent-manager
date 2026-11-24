@@ -126,7 +126,7 @@ export default function ChatPane({
         .filter(Boolean) as ThreadItem[];
       setThreads(items.slice(0, 20));
     } catch { /* 列表加载失败静默（面板显示空态） */ }
-  }, []);
+  }, [agentBase]); // agentBase 进依赖（issue #385）：SPA 切换 Agent 复用实例时旧闭包会把列表打到上一个服务
 
   /** 可选模型列表（GET /models；老后端无此端点时 404，picker 不渲染，行为与升级前一致） */
   const loadModels = useCallback(async () => {
@@ -205,7 +205,7 @@ export default function ChatPane({
       }
     } catch { /* 回放失败按空会话处理（上下文仍在后端，不影响继续对话） */ }
     return msgs;
-  }, []);
+  }, [agentBase]);
 
   // 文本增量必须落到「最后一条 assistant 气泡」——工具状态行固定插在其前（步骤在上、答案在下）
   const updateLastAssistant = useCallback((fn: (m: ChatMsg) => ChatMsg) => {
@@ -394,7 +394,7 @@ export default function ChatPane({
     } finally {
       processor.finish();
     }
-  }, [createStreamProcessor, readSseResponse]);
+  }, [agentBase, createStreamProcessor, readSseResponse]);
 
   /**
    * 刷新/切换会话恢复：turn 仍在执行时订阅 GET /subscribe 续传（durable SSE）。
@@ -456,7 +456,7 @@ export default function ChatPane({
       setBusy(false);
       loadThreads();
     }
-  }, [createStreamProcessor, readSseResponse, updateLastAssistant, loadThreads]);
+  }, [agentBase, createStreamProcessor, readSseResponse, updateLastAssistant, loadThreads]);
 
   /** 切换到历史会话：更新本地会话 id → 回放历史消息（上下文由后端 checkpoint 自动恢复） */
   const selectSession = useCallback(async (item: ThreadItem) => {
@@ -487,7 +487,7 @@ export default function ChatPane({
       const data = await resp.json();
       setModelId(data?.model && String(data.model).trim() ? String(data.model) : "system");
     } catch { /* 回显失败保持当前选择 */ }
-  }, []);
+  }, [agentBase]);
 
   useEffect(() => {
     const sid = initialSessionId || getSessionId(persistKey);
@@ -499,7 +499,9 @@ export default function ChatPane({
     let cancelled = false;
     setHistoryLoading(true);
     loadHistory(sid).then((msgs) => {
-      if (!cancelled && msgs.length) setMessages(msgs);
+      // 空历史也要清屏（issue #385）：切换 Agent 复用实例时保留旧消息会把上一个
+      // Agent 的对话当成当前会话首屏展示；失败路径 loadHistory 已置 ⚠️ 消息
+      if (!cancelled) setMessages(msgs.length ? msgs : [{ role: "system", content: GREETING }]);
     }).finally(() => {
       if (!cancelled) {
         sessionLoading.current = false;
@@ -545,7 +547,7 @@ export default function ChatPane({
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
-  }, []);
+  }, [agentBase]);
 
   const removeAttachment = (fileId: string) =>
     setAttachments((prev) => prev.filter((a) => a.fileId !== fileId));
@@ -586,7 +588,7 @@ export default function ChatPane({
       confirmInFlight.current = false;
       setBusy(false);
     }
-  }, [sessionLocked, consumeStream, updateLastAssistant]);
+  }, [agentBase, sessionLocked, consumeStream, updateLastAssistant]);
 
   const send = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
@@ -635,7 +637,7 @@ export default function ChatPane({
       setBusy(false);
       loadThreads(); // 新会话首轮对话后进入历史列表
     }
-  }, [sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant, loadThreads, modelId]);
+  }, [agentBase, sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant, loadThreads, modelId]);
 
   /** 配额错误卡「停止该会话」：POST /threads/{sid}/stop（仅限本人会话，复用既有端点）后刷新列表 */
   const stopQuotaSession = useCallback(async (sid: string) => {
