@@ -6,6 +6,9 @@
 cd demo/browser-takeover
 SECRETS_FILE=/root/agent-manager/.env.secrets ./deploy.sh        # 首次会构建并导入沙箱镜像
 cd frontend && npm install && npm run dev                        # http://<主机IP>:5188
+#   若访问链路会重置 WebSocket 升级（表现为「画面连接断开，正在重试」+ DevTools 里
+#   ws:// ERR_CONNECTION_RESET、且服务端无请求记录），改用 HTTPS 入口：
+npm run dev:https                                              # https://<主机IP>/（自签证书需点继续）
 ```
 
 `deploy.sh` 做的事：构建/导入沙箱镜像 → （可选）构建 agent-framework 镜像 → 应用 platform-router
@@ -74,4 +77,5 @@ node e2e/browser-takeover-e2e.mjs
 | 画面卡在「正在连接实时画面」 | 重启前端 dev server（noVNC 用顶层 await，已配 `optimizeDeps.exclude`；依赖缓存过期会 504） |
 | 建箱失败 `KUBERNETES::POD_FAILED`（容器退出码 127） | `SANDBOX_ENTRYPOINT` 未生效：服务 env 需含 `SANDBOX_ENTRYPOINT=/browser-entrypoint.sh`（yml 映射已补） |
 | 节点 CPU 打满导致新 Pod Pending | 沙箱按 `SANDBOX_CPU_COUNT` 申请 CPU；同时活着的沙箱数受 `SANDBOX_USER_QUOTA` 限制，清理遗留沙箱见下 |
+| 画面一直「正在重试」且服务端无请求记录 | 访问链路上的代理/安全软件重置了 WS 升级：改用 `npm run dev:https` 的 HTTPS 入口（wss 走 TLS），或为浏览器代理加 100.66.1.11 例外，或用同网段 `http://<LAN IP>:5188` |
 | 清理遗留沙箱 | `kubectl -n opensandbox get pods` 找到 `<sandboxId>-0`；`DELETE /v1/sandboxes/{id}`（需重建时让对应会话再发一轮消息） |

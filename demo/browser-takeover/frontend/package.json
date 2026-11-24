@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --port 5188",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --port 5188"
+    "preview": "vite preview --port 5188",
+    "dev:https": "DEMO_HTTPS=1 DEMO_PORT=443 vite --strictPort"
   },
   "dependencies": {
     "@novnc/novnc": "^1.5.0",

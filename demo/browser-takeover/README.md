@@ -36,6 +36,10 @@ SECRETS_FILE=/path/to/.env.secrets ./deploy.sh
 cd frontend && npm install && npm run dev
 # 打开 http://<主机IP>:5188（dev server 监听 0.0.0.0）
 
+# 可选：HTTPS 入口（自签证书，浏览器需点「高级 → 继续前往」）
+#   wss + 安全上下文；经只放行 CONNECT:443 的代理访问时也能通
+npm run dev:https     # https://<主机IP>/
+
 # 3. e2e（API 级，无需前端）
 node e2e/browser-takeover-e2e.mjs
 
