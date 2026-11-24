@@ -247,35 +247,67 @@ public class FileController {
             || m.startsWith("image/svg");
     }
 
-    /** 外部交付物代理下载客户端（连接池共享；超时收敛防慢端点拖死容器线程） */
+    /** 外部交付物代理下载客户端（连接池共享；超时收敛防慢端点拖死容器线程；重定向禁自动跟随） */
     private static final java.net.http.HttpClient EXTERNAL_CLIENT = java.net.http.HttpClient.newBuilder()
         .connectTimeout(java.time.Duration.ofSeconds(5))
-        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+        .followRedirects(java.net.http.HttpClient.Redirect.NEVER)
         .build();
+
+    /** 外部代理重定向逐跳上限（issue #483：每跳 Location 均重过白名单，循环收敛） */
+    private static final int EXTERNAL_MAX_REDIRECTS = 5;
 
     /**
      * 外部交付物代理：GET storage_key 指向的 http(s) URL 并流式转发。
      * URL 来源为 present_url 工具登记（LLM 可控），必须经 FILE_EXTERNAL_URL_PREFIXES
-     * 前缀白名单校验后才发起请求（SSRF 收敛）；上游非 2xx 返回 502。
+     * 白名单裁决（解析+规范化逐段比较，ExternalUrlGuard）后才发起请求（SSRF 收敛）；
+     * 重定向不自动跟随——每跳 Location resolve 后重过白名单，跳白名单外即 403、
+     * 循环超上限 502；上游非 2xx 返回 502。
      */
     private ResponseEntity<StreamingResponseBody> proxyExternal(FileAssetStore.FileAsset asset, int inline) {
-        var url = asset.storageKey();
         var prefixes = props.file().externalUrlPrefixList();
-        boolean allowed = prefixes.stream().anyMatch(p -> url.equals(p) || url.startsWith(p + "/"));
-        if (!allowed) {
-            log.warn("download: external url not allowlisted for file {}: {}", asset.id(), url);
+        var current = io.agentmanager.framework.util.ExternalUrlGuard.allowlisted(asset.storageKey(), prefixes);
+        if (current == null) {
+            log.warn("download: external url not allowlisted for file {}: {}", asset.id(), asset.storageKey());
             return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         }
         java.net.http.HttpResponse<InputStream> upstream;
-        try {
-            var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
-                .timeout(java.time.Duration.ofSeconds(60))
-                .GET()
-                .build();
-            upstream = EXTERNAL_CLIENT.send(request, java.net.http.HttpResponse.BodyHandlers.ofInputStream());
-        } catch (Exception e) {
-            log.warn("download: external fetch failed for file {}: {}", asset.id(), e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+        for (int hops = 0; ; hops++) {
+            try {
+                var request = java.net.http.HttpRequest.newBuilder(current)
+                    .timeout(java.time.Duration.ofSeconds(60))
+                    .GET()
+                    .build();
+                upstream = EXTERNAL_CLIENT.send(request, java.net.http.HttpResponse.BodyHandlers.ofInputStream());
+            } catch (Exception e) {
+                log.warn("download: external fetch failed for file {}: {}", asset.id(), e.getMessage());
+                return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+            }
+            if (upstream.statusCode() / 100 != 3) {
+                break;
+            }
+            try (var body = upstream.body()) {
+                if (hops >= EXTERNAL_MAX_REDIRECTS) {
+                    log.warn("download: external redirect loop for file {}", asset.id());
+                    return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+                }
+                var location = upstream.headers().firstValue("Location").orElse(null);
+                if (location == null || location.isBlank()) {
+                    log.warn("download: external redirect without location for file {}", asset.id());
+                    return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+                }
+                var next = io.agentmanager.framework.util.ExternalUrlGuard
+                    .allowlisted(current.resolve(location).toString(), prefixes);
+                if (next == null) {
+                    log.warn("download: external redirect escapes allowlist for file {}: {}",
+                        asset.id(), location);
+                    return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+                }
+                current = next;
+            } catch (IOException | IllegalArgumentException e) {
+                log.warn("download: external redirect handling failed for file {}: {}",
+                    asset.id(), e.getMessage());
+                return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+            }
         }
         if (upstream.statusCode() / 100 != 2) {
             try {

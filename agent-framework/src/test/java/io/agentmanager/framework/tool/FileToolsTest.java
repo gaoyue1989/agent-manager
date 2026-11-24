@@ -112,6 +112,32 @@ class FileToolsTest {
     }
 
     @Test
+    void presentUrlShouldRejectPathTraversalVariants() {
+        var t = toolsWithPrefixes("http://ok.example/base");
+        for (var url : new String[]{
+                "http://ok.example/base/../secret",
+                "http://ok.example/%2e%2e/secret",
+                "http://ok.example/base/%2E%2E/secret",
+                "http://ok.example/base/a%2fb",
+                "http://ok.example/base/..%2fsecret",
+                "http://ok.example/base/sub/../../secret",
+                "http://ok.example/base/\\.\\secret"}) {
+            assertTrue(t.presentUrl(ctx(), "a.zip", url, null, null)
+                .contains("not in configured external prefixes"), "穿越变体应拒绝: " + url);
+        }
+    }
+
+    @Test
+    void presentUrlShouldRegisterNormalizedUrl() throws Exception {
+        var t = toolsWithPrefixes("http://ok.example/base");
+        t.presentUrl(ctx(), "a.zip", "http://ok.example/base/./x.zip", null, null);
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        assertEquals("http://ok.example/base/x.zip", captor.getValue().storageKey(),
+            "登记规范化 URL: " + captor.getValue().storageKey());
+    }
+
+    @Test
     void presentUrlShouldReuseFileIdOnDuplicate() {
         var t = toolsWithPrefixes("http://ok.example");
         org.mockito.Mockito.doThrow(new IllegalStateException("Duplicate entry"))

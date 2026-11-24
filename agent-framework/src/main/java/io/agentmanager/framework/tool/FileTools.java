@@ -257,11 +257,12 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         if (!u.startsWith("http://") && !u.startsWith("https://")) {
             return err("url must be http(s): " + u);
         }
-        // 前缀白名单（SSRF 收敛）：仅允许已配置前缀下的 URL
-        var allowed = prefixes.stream().anyMatch(p -> u.equals(p) || u.startsWith(p + "/"));
-        if (!allowed) {
+        // 前缀白名单（SSRF 收敛，issue #483）：解析+规范化后逐段裁决，拒绝穿越/编码穿越变体
+        var normalized = io.agentmanager.framework.util.ExternalUrlGuard.allowlisted(u, prefixes);
+        if (normalized == null) {
             return err("url not in configured external prefixes: " + u);
         }
+        var registered = normalized.toString();
         var name = sanitizeDisplayName(fileName);
         if (name == null) {
             return err("invalid file_name: " + fileName);
@@ -275,16 +276,16 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
                 id, userKey, null, null, name, name, mime, sz,
-                "external", u, "generated", "injected", java.time.LocalDateTime.now()));
+                "external", registered, "generated", "injected", java.time.LocalDateTime.now()));
         } catch (Exception e) {
-            var existing = fileAssetStore.findByStorage("external", u);
+            var existing = fileAssetStore.findByStorage("external", registered);
             if (existing.isPresent()) {
                 id = existing.get().id();
             } else {
                 return err("metadata write failed: " + e.getMessage());
             }
         }
-        log.info("present_url: registered {} -> {}", name, u);
+        log.info("present_url: registered {} -> {}", name, registered);
         return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + escape(name)
             + "\",\"mime_type\":\"" + escape(mime) + "\",\"size\":" + sz + "}";
     }

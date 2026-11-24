@@ -537,6 +537,132 @@ public class FileControllerTest {
     }
 
     @Test
+    void downloadExternalShouldRejectPathTraversalUrl() throws Exception {
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var hits = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/", exchange -> {
+            hits.incrementAndGet();
+            var body = ("SECRET_BACKEND_DATA:" + exchange.getRequestURI().getRawPath()).getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/zip");
+            exchange.sendResponseHeaders(200, body.length);
+            try (var os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        server.start();
+        try {
+            var port = server.getAddress().getPort();
+            var c = new FileController(fileStorage, fileAssetStore, sessionUserStore,
+                propsWithExternalPrefix("http://127.0.0.1:" + port + "/pkg"));
+            for (var url : new String[]{
+                    "http://127.0.0.1:" + port + "/pkg/../secret",
+                    "http://127.0.0.1:" + port + "/pkg/%2e%2e/secret",
+                    "http://127.0.0.1:" + port + "/pkg/1/..%2fsecret",
+                    "http://127.0.0.1:" + port + "/pkg/x/a%2f../../secret"}) {
+                var id = "550e8400-e29b-41d4-a716-446655440021";
+                when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id, url, "a.zip")));
+                assertEquals(HttpStatus.FORBIDDEN, c.download(id, 0).getStatusCode(), "穿越应拒绝: " + url);
+            }
+            assertEquals(0, hits.get(), "白名单外目标不得发起任何上游请求");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void downloadExternalShouldRejectRedirectEscape() throws Exception {
+        var escaped = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var escapedHits = new java.util.concurrent.atomic.AtomicInteger();
+        escaped.createContext("/secret", exchange -> {
+            escapedHits.incrementAndGet();
+            var body = "SECRET_OUTSIDE_ALLOWLIST".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (var os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        escaped.start();
+        var allowlisted = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var escapePort = escaped.getAddress().getPort();
+        allowlisted.createContext("/pkg/redirect", exchange -> {
+            exchange.getResponseHeaders().add("Location", "http://127.0.0.1:" + escapePort + "/secret");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        allowlisted.start();
+        try {
+            var port = allowlisted.getAddress().getPort();
+            var id = "550e8400-e29b-41d4-a716-446655440022";
+            var c = new FileController(fileStorage, fileAssetStore, sessionUserStore,
+                propsWithExternalPrefix("http://127.0.0.1:" + port));
+            when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id,
+                "http://127.0.0.1:" + port + "/pkg/redirect", "a.zip")));
+            assertEquals(HttpStatus.FORBIDDEN, c.download(id, 0).getStatusCode(), "3xx 跳白名单外应拒绝");
+            assertEquals(0, escapedHits.get(), "白名单外主机不得被访问");
+        } finally {
+            allowlisted.stop(0);
+            escaped.stop(0);
+        }
+    }
+
+    @Test
+    void downloadExternalShouldFollowAllowlistedRedirect() throws Exception {
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/pkg/redirect", exchange -> {
+            exchange.getResponseHeaders().add("Location", "/pkg/secret");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        var bytes = "ALLOWLISTED-REDIRECT-OK".getBytes(StandardCharsets.UTF_8);
+        server.createContext("/pkg/secret", exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "application/zip");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (var os = exchange.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+        server.start();
+        try {
+            var port = server.getAddress().getPort();
+            var id = "550e8400-e29b-41d4-a716-446655440023";
+            var c = new FileController(fileStorage, fileAssetStore, sessionUserStore,
+                propsWithExternalPrefix("http://127.0.0.1:" + port));
+            when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id,
+                "http://127.0.0.1:" + port + "/pkg/redirect", "a.zip")));
+            var resp = c.download(id, 0);
+            assertEquals(HttpStatus.OK, resp.getStatusCode(), "白名单内相对跳转应放行");
+            var out = new java.io.ByteArrayOutputStream();
+            resp.getBody().writeTo(out);
+            assertTrue(out.toString(StandardCharsets.UTF_8).contains("ALLOWLISTED-REDIRECT-OK"),
+                "代理转发跳转目标字节");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void downloadExternalShouldReturn502OnRedirectLoop() throws Exception {
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/pkg/loop", exchange -> {
+            exchange.getResponseHeaders().add("Location", "/pkg/loop");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var port = server.getAddress().getPort();
+            var id = "550e8400-e29b-41d4-a716-446655440024";
+            var c = new FileController(fileStorage, fileAssetStore, sessionUserStore,
+                propsWithExternalPrefix("http://127.0.0.1:" + port));
+            when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id,
+                "http://127.0.0.1:" + port + "/pkg/loop", "a.zip")));
+            assertEquals(HttpStatus.BAD_GATEWAY, c.download(id, 0).getStatusCode(), "跳转循环应收敛 502");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void downloadExternalShouldReturn502OnUpstreamError() throws Exception {
         var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/pkg/2/download", exchange -> {
