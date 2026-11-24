@@ -11,10 +11,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 
@@ -26,53 +24,18 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
-import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.sandbox.opensandbox.SkillBundleService;
 
 class SkillBundleControllerTest {
 
-    private static final String TOKEN = "sync-token";
     private static final byte[] GZ = "gz-payload".getBytes(StandardCharsets.UTF_8);
 
     private final SkillBundleService bundleService = mock(SkillBundleService.class);
     private MockMvc mvc;
-    private MockMvc closedMvc;
 
     @BeforeEach
     void setUp() {
-        mvc = MockMvcBuilders.standaloneSetup(
-                new SkillBundleController(config(TOKEN), bundleService)).build();
-        closedMvc = MockMvcBuilders.standaloneSetup(
-                new SkillBundleController(config(""), bundleService)).build();
-    }
-
-    @Test
-    void versionShouldReturn404WhenTokenNotConfigured() throws Exception {
-        closedMvc.perform(get("/internal/skills/version"))
-            .andExpect(status().isNotFound());
-    }
-
-    @Test
-    void bundleShouldReturn404WhenTokenNotConfigured() throws Exception {
-        closedMvc.perform(get("/internal/skills/bundle").param("version", "abc"))
-            .andExpect(status().isNotFound());
-    }
-
-    @Test
-    void versionShouldReturn401WhenAuthorizationMissing() throws Exception {
-        mvc.perform(get("/internal/skills/version"))
-            .andExpect(status().isUnauthorized());
-    }
-
-    @Test
-    void versionShouldReturn401WhenBearerTokenWrong() throws Exception {
-        mvc.perform(get("/internal/skills/version")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer wrong-token"))
-            .andExpect(status().isUnauthorized());
-
-        mvc.perform(get("/internal/skills/version")
-                .header(HttpHeaders.AUTHORIZATION, TOKEN))
-            .andExpect(status().isUnauthorized());
+        mvc = MockMvcBuilders.standaloneSetup(new SkillBundleController(bundleService)).build();
     }
 
     @Test
@@ -80,8 +43,7 @@ class SkillBundleControllerTest {
         when(bundleService.currentVersion())
             .thenReturn(new SkillBundleService.SkillVersion("abc123", 2, 3, 27L, List.of()));
 
-        mvc.perform(get("/internal/skills/version")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+        mvc.perform(get("/internal/skills/version"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.version").value("abc123"))
             .andExpect(jsonPath("$.skillCount").value(2))
@@ -91,14 +53,33 @@ class SkillBundleControllerTest {
     }
 
     @Test
+    void endpointsShouldServeRequestsCarryingAuthorizationHeader() throws Exception {
+        when(bundleService.currentVersion())
+            .thenReturn(new SkillBundleService.SkillVersion("abc123", 2, 3, 27L, List.of()));
+        when(bundleService.bundle("abc123")).thenReturn(Optional.of(payload()));
+
+        mvc.perform(get("/internal/skills/version")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer stale-token"))
+            .andExpect(status().isOk());
+        MvcResult result = mvc.perform(get("/internal/skills/bundle")
+                .param("version", "abc123")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer stale-token"))
+            .andExpect(request().asyncStarted())
+            .andReturn();
+
+        mvc.perform(asyncDispatch(result))
+            .andExpect(status().isOk())
+            .andExpect(content().bytes(GZ));
+    }
+
+    @Test
     void versionShouldReturn503WhenFingerprintUnavailable() throws Exception {
         // 指纹计算失败（computeVersion 全 catch → ERR-*）= 端点当前不可用：返回 503 让守护
         // 退避重试，不输出 ERR-* 版本（守护会把它当合法版本装进 store 污染版本空间）
         when(bundleService.currentVersion())
             .thenReturn(new SkillBundleService.SkillVersion("ERR-123456", 0, 0, 0L, List.of()));
 
-        mvc.perform(get("/internal/skills/version")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+        mvc.perform(get("/internal/skills/version"))
             .andExpect(status().isServiceUnavailable());
     }
 
@@ -106,9 +87,7 @@ class SkillBundleControllerTest {
     void bundleShouldStreamGzipWithSha256Header() throws Exception {
         when(bundleService.bundle("abc123")).thenReturn(Optional.of(payload()));
 
-        MvcResult result = mvc.perform(get("/internal/skills/bundle")
-                .param("version", "abc123")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+        MvcResult result = mvc.perform(get("/internal/skills/bundle").param("version", "abc123"))
             .andExpect(request().asyncStarted())
             .andReturn();
 
@@ -123,32 +102,13 @@ class SkillBundleControllerTest {
     void bundleShouldReturn404WhenVersionMismatch() throws Exception {
         when(bundleService.bundle("ghost")).thenReturn(Optional.empty());
 
-        mvc.perform(get("/internal/skills/bundle")
-                .param("version", "ghost")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+        mvc.perform(get("/internal/skills/bundle").param("version", "ghost"))
             .andExpect(status().isNotFound());
-    }
-
-    @Test
-    void bundleShouldReturn401WhenBearerTokenWrong() throws Exception {
-        mvc.perform(get("/internal/skills/bundle")
-                .param("version", "abc123")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer wrong-token"))
-            .andExpect(status().isUnauthorized());
     }
 
     private static SkillBundleService.BundlePayload payload() {
         return new SkillBundleService.BundlePayload(GZ.length, sha256Hex(GZ),
             () -> new ByteArrayInputStream(GZ));
-    }
-
-    private static SandboxConfig config(String token) {
-        return new SandboxConfig(
-            false, "img", 30, 30, 1024, 1,
-            List.of("/e"), Duration.ofMillis(100),
-            true, true, 900, true, true, true, true, 500, 30,
-            token, "/tmp/skills-bundle-cache-test", "",
-            new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", ""));
     }
 
     private static String sha256Hex(byte[] data) {

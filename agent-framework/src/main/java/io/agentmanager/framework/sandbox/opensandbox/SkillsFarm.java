@@ -130,8 +130,8 @@ final class SkillsFarm {
         var store = probeStore(options.getSkillsSharedStore().trim());
         if (store.version() == null) {
             // store 无 CURRENT 二分：store 目录由守护启动时创建——目录存在 = 守护活着但同步
-            // 失败，第一根因即守护→端点链路不可达（token 漂移 401 / 端点关闭 404 / egress
-            // 断网），归 degraded_endpoint_down（runbook 信号直指端点链路）；目录缺失 = 守护
+            // 失败，第一根因即守护→端点链路不可达（egress 断网），归 degraded_endpoint_down
+            // （runbook 信号直指端点链路）；目录缺失 = 守护
             // 未装/未跑（或 store 卷未挂），归 degraded_store_missing。exec 探测异常按目录
             // 缺失保守处理（fail-open 同桶）。
             if (store.dirPresent()) {

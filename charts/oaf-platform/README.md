@@ -8,10 +8,9 @@ OAF 服务发布平台控制面的一键部署 chart（**自包含**，无子 ch
 
 **不部署 / 不创建**：MySQL、Redis、OpenSandbox、**任何 PVC**、业务 agent 服务
 （业务服务由平台发布 API 动态创建，**Helm 永不管理**）、OpenSandbox 池 workload ns
-（`rbac.sandboxWorkloadNamespace`，默认 `opensandbox`）——该 ns 由
-`scripts/deploy-opensandbox.sh` 创建（issue #352：chart 建 ns 会与脚本双写撞 Helm 所有权
-冲突——先装沙箱后装 chart 必 install 失败；且 Helm uninstall 会级联删池 ns）。chart 仅在该
-ns 内渲染 skillsync token Secret 的 RBAC（Role/RoleBinding），ns 缺失时先跑脚本再装 chart。
+（`opensandbox`）——该 ns 由 `scripts/deploy-opensandbox.sh` 创建（issue #352：chart 建 ns
+会与脚本双写撞 Helm 所有权冲突——先装沙箱后装 chart 必 install 失败；且 Helm uninstall 会级联
+删池 ns）。chart 不在该 ns 内渲染任何对象：OpenSandbox 是外部服务，平台只经其 API 交互。
 
 ## 快速开始
 

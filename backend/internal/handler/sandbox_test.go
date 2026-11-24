@@ -17,14 +17,12 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"agent-manager/backend/internal/k8s/k8sfake"
 	"agent-manager/backend/internal/service"
 	"agent-manager/backend/internal/store"
 )
 
 // newSandboxAdminCore sqlite 内存库 + 指向 httptest 上游的 platform_config（空串 = 不写入）。
-// K8s 注入 k8sfake（PR-4a）：建池缺省注入技能同步 env 须经 SecretExists 查池 workload ns
-// token Secret 前提，Core.K8s 不再可缺省（fake 无 Secret → no-token 旧行为分支，201 契约不变）。
+// 不注入 K8s 句柄：沙箱管理面只经 OpenSandbox API 交互，不依赖任何 K8s 对象。
 func newSandboxAdminCore(t *testing.T, upstreamURL string) *service.Core {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -45,7 +43,7 @@ func newSandboxAdminCore(t *testing.T, upstreamURL string) *service.Core {
 			t.Fatal(err)
 		}
 	}
-	return &service.Core{DB: db, K8s: k8sfake.New()}
+	return &service.Core{DB: db}
 }
 
 // newSandboxAdminEngine 最小 admin 引擎：uid 注入中间件替身 + 沙箱路由组（鉴权由 RequireAdmin

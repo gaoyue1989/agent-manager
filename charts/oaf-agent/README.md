@@ -28,7 +28,7 @@ envFrom 两源与平台发布链路同序：**服务 Secret `{fullname}-env-secr
 - **router**：子路径 `ingress.pathPrefix`（如 `/agent/travel-agent`）+ ingress-nginx `rewrite-target`/`use-regex`/`x-forwarded-prefix` 注解剥前缀——生产集群无平台共享路由器，该语义由环境自担。
 
 **内部路径排除（issue #351，语义对齐平台 `objects.go` hostModeBlockPathList）**：`/internal`
-（skills-syncd 端点，SKILLSYNC_TOKEN 门）与 `/actuator`（健康 + Micrometer 指标，无鉴权）
+（skills-syncd 端点，无鉴权）与 `/actuator`（健康 + Micrometer 指标，无鉴权）
 不经业务 Ingress 对外暴露（仅集群内访问）。两模式的排除表都改道 `{fullname}-blocked`
 无 endpoints 占位 Service，恒 **503 fail-closed**（平台形态 router 在位时为 404、缺失时
 503；本 chart 自包含无平台路由器，统一 503）。host 模式为无尾斜杠 Prefix（同盖裸
