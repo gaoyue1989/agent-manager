@@ -206,6 +206,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 工作区（Workspace） | ✅ | WorkspaceInitializer 生成 .agentscope/workspace/ |
 | 子 Agent | ✅ | subagents/*.md |
 | 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆/用户技能回写 KV） |
+| 浏览器人工接管 | ✅ | `AGENT_BROWSER_ENABLED`（默认 false 零装配）：Redis 控制权锁 + acting 闸门（接管期间整体拒绝 `execute`）+ 接管/交还端点 + noVNC WebSocket 代理（经 OpenSandbox server 代理注入 API key）+ 控制权锁作为沙箱保留信号；设计见 [../docs/design/browser-takeover-design-261124.md](../docs/design/browser-takeover-design-261124.md) |
 | Agent 状态存储 | ✅ | MysqlDistributedStore (agent_state + agent_fs) |
 | 模型集成 | ✅ | OpenAI 兼容 API；多托管模型（`/models`）+ 会话级切换 + 全局默认模型（`PUT /models/{id}/default`）+ 可配置备用模型（`PUT /models/{id}/fallback`，DB 优先于 `LLM_FALLBACK_MODEL_ID`；见 [docs/model-fallback-design.md](docs/model-fallback-design.md)） |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
@@ -236,6 +237,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | `echo(text)` | 回显输入 |
 | `present_file(file_path, file_content_base64?)` | 工作区产物注册到平台供用户下载（结果由 SSE 层合成 file_ready 帧）。非沙箱 KV 读取命名空间键单一可信裁决：`SessionKeyResolver.realUserId` 反查（缺失/未命中回退入口裁决 userId），RuntimeContext 原值（peer/sessionId，客户端可控）禁止作为候选——issue #473 |
 | `present_url(file_name, url, mime_type?, size?)` | 外部系统产物（http(s) URL）登记为下载卡片；`/files/{id}` 服务端代理回源。白名单裁决单一真相源 `util/ExternalUrlGuard`：URI 解析 + normalize 后段边界前缀裁决（拒绝 `%2e`/`%2f`/`%5c`/`\` 编码穿越），登记与请求一律用规范化 URL——字符串前缀比较可被 `<prefix>/../` 越出白名单（issue #483 SSRF），已弃用 |
+| `request_browser_takeover(reason)` | 请求人工接管浏览器（`AGENT_BROWSER_ENABLED=true` 才注册）：翻控制权锁为 HUMAN；结果文本要求模型结束本轮、等【控制权交还】消息后再继续 |
 
 > OAF 打包工具（`check_oaf_package` / `create_oaf_zip`）2026-09 迁至平台 backend 的 platform-publisher MCP
 > （直建包返回 packageId/download_url，零 base64 经 LLM），发布助手经 `present_url` 交付；
@@ -425,6 +427,10 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS` | `300` | | loopback message/send blocking 发送超时秒；租期 = 2×该值+60s（认领残留的接管窗口） |
 | `AGENT_A2A_JOB_RETENTION_HOURS` | `24` | | 完成态幂等映射保留小时（Redis TTL）；窗口外同键重试 = 新任务（标准幂等窗口语义） |
 | `AGENT_A2A_JOB_MAX_CONCURRENT` | `32` | | 并发准入（Semaphore tryAcquire(0)）：loopback 自环每 Job 占 2 Tomcat 线程，防自环死锁（Issue §2.5）；饱和返回 503 + Retry-After |
+| `AGENT_BROWSER_ENABLED` | `false` | | 浏览器人工接管总开关：true 时装配控制权锁/闸门/接管端点/VNC WS 代理与 `request_browser_takeover` 工具；false 时零装配、端点 404 |
+| `AGENT_BROWSER_TAKEOVER_TTL_MINUTES` | `60` | | 人工接管控制权锁 TTL（Redis key `brw:ctrl:{sid}`，经 `AGENT_REDIS_PREFIX` 前缀），过期即回落 AGENT；接管期间该锁同时作为沙箱续期保留信号 |
+| `AGENT_BROWSER_VIEW_PORT` | `6080` | | 沙箱内实时画面端口（websockify） |
+| `AGENT_BROWSER_VIEW_PATH` | `/websockify` | | 沙箱内实时画面 WS 路径（VNC 代理上游 `ws://{沙箱端点}{view-path}`） |
 | `AGENT_AGUI_*` | 见左 | | AG-UI 协议面（`/agui/runs` + 续传端点，`@ConditionalOnProperty` 装配）：`AGENT_AGUI_ENABLED`=`false` 总开关 / `AGENT_AGUI_EMIT_TOKEN_USAGE`=`true` / `AGENT_AGUI_EMIT_TOOL_CALL_ARGS`=`true` / `AGENT_AGUI_ENABLE_REASONING`=`true` / `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE`=`false`（application.yml `agent.agui` 段） |
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活共享缓存句柄，失联对句柄原地换芯（build+握手成功才 swap，存量会话免重注册自愈，issue #348）；缓存无句柄 compensate 补建；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
@@ -530,6 +536,10 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/models/{id}/test` | 模型连接测试（真实发一次最小 completion，返回 ok/latency_ms/reply） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |
 | POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约；恢复轮继承挂起轮 skills 白名单，issue #264） |
+| GET | `/threads/{sid}/browser` | 浏览器人工接管状态：控制权锁 + 沙箱就绪（只读探测，不连接不占位）+ `vnc_path`；`AGENT_BROWSER_ENABLED=false` 时 404 |
+| POST | `/threads/{sid}/browser/takeover` | 人工接管（body `{reason?}`）：先翻锁为 HUMAN，再复用协作式停止结束当前轮；返回 `{control, stop_outcome}` |
+| POST | `/threads/{sid}/browser/release` | 交还控制权（SSE）：翻锁为 AGENT 后经 `ChatStreamController.chat` 送固定续跑消息（要求先 `list_pages`/`take_snapshot` 重采样）；非 HUMAN 持有 → `not_taken_over` 错误帧 |
+| GET | `/threads/{sid}/browser/vnc` | WebSocket 实时画面代理：握手校验会话归属（`X-User-Id` 头 > `?userId=` > 匿名），上游=沙箱固定端口经 OpenSandbox server 代理（注入 `OPEN-SANDBOX-API-KEY`），双向透传 binary/text（4MB 上限、分片聚合、发送串行化） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（?inline=1 内联） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |

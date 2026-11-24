@@ -8,13 +8,14 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import io.agentmanager.framework.config.AgentA2aJobProperties;
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.AgentRedisProperties;
+import io.agentmanager.framework.config.BrowserProperties;
 import io.agentmanager.framework.config.HistoryConfig;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.config.SandboxLifecycleConfig;
 import io.agentmanager.framework.config.VikingConfig;
 
 @SpringBootApplication
-@EnableConfigurationProperties({AgentManagerProperties.class, SandboxConfig.class, SandboxLifecycleConfig.class, AgentRedisProperties.class, HistoryConfig.class, AgentA2aJobProperties.class, VikingConfig.class})
+@EnableConfigurationProperties({AgentManagerProperties.class, SandboxConfig.class, SandboxLifecycleConfig.class, AgentRedisProperties.class, HistoryConfig.class, AgentA2aJobProperties.class, VikingConfig.class, BrowserProperties.class})
 @EnableScheduling
 public class AgentFrameworkApplication {
 

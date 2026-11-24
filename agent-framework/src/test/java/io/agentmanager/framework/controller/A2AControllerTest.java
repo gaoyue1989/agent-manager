@@ -680,7 +680,7 @@ class A2AControllerTest {
         when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
         mockWrapper();
 
-        mockMvc.perform(post("/")
+        var initial = mockMvc.perform(post("/")
                 .header("X-User-Id", "mallory")
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
@@ -689,9 +689,19 @@ class A2AControllerTest {
                      "params":{"sessionId":"alice-sess","userId":"mallory",
                        "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
                     """))
-            .andExpect(status().isOk())
-            .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
-            .andExpect(content().string(org.hamcrest.Matchers.containsString("-32001")));
+            .andReturn();
+        var result = initial.getRequest().isAsyncStarted()
+            ? mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .asyncDispatch(initial)).andReturn()
+            : initial;
+        org.junit.jupiter.api.Assertions.assertEquals(200, result.getResponse().getStatus());
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getResponse().getContentType() != null
+                && result.getResponse().getContentType().startsWith(MediaType.TEXT_EVENT_STREAM_VALUE),
+            "SSE 拒绝帧必须声明 text/event-stream（实际: " + result.getResponse().getContentType() + "）");
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getResponse().getContentAsString().contains("-32001"),
+            "SSE 拒绝帧必须携带 -32001（实际: " + result.getResponse().getContentAsString() + "）");
 
         verify(sessionUserStore, never()).upsert(anyString(), anyString());
         verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());

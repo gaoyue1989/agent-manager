@@ -1,0 +1,7 @@
+{
+  "headless": false,
+  "browserUrl": "http://127.0.0.1:9222",
+  "usageStatistics": false,
+  "performanceCrux": false,
+  "logFile": "/tmp/chrome-devtools.log"
+}

@@ -1,0 +1,25 @@
+{
+  "name": "browser-takeover-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5188",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 5188",
+    "dev:https": "DEMO_HTTPS=1 DEMO_PORT=443 vite --strictPort"
+  },
+  "dependencies": {
+    "@novnc/novnc": "^1.5.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "@types/node": "^22.15.0"
+  }
+}

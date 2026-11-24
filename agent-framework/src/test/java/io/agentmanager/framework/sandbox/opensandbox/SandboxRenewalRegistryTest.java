@@ -344,4 +344,43 @@ class SandboxRenewalRegistryTest {
         reg.registerTurn("sid-1");
         assertTrue(((String) reg.debugEntries().get(0).get("hold_until")).isEmpty());
     }
+
+    @Test
+    void externalHoldSignalShouldKeepRenewingUntilReleased() {
+        var renewer = new FakeRenewer();
+        var held = new java.util.concurrent.atomic.AtomicBoolean(true);
+        SandboxHoldSignal signal = sid -> "sid-1".equals(sid) && held.get();
+        var reg = new SandboxRenewalRegistry(store, RENEW_INTERVAL, HOLD_MINUTES,
+            (type, sid, detail) -> events.add(type), clock(), () -> List.of(signal));
+        reg.acquireRef("sb-1", "sid-1", TTL_SECONDS, renewer);
+        reg.releaseRef("sb-1");
+
+        int before = renewer.calls.get();
+        advance(Duration.ofMinutes(5));
+        reg.sweep();
+        assertTrue(renewer.calls.get() > before, "外部保留信号（人工接管）期间继续续期");
+
+        held.set(false);
+        int afterRelease = renewer.calls.get();
+        advance(Duration.ofMinutes(5));
+        reg.sweep();
+        assertEquals(afterRelease, renewer.calls.get(), "信号释放后停续");
+    }
+
+    @Test
+    void externalHoldSignalFailureShouldNotBlockSweep() {
+        var renewer = new FakeRenewer();
+        SandboxHoldSignal broken = sid -> {
+            throw new IllegalStateException("control store down");
+        };
+        var reg = new SandboxRenewalRegistry(store, RENEW_INTERVAL, HOLD_MINUTES,
+            (type, sid, detail) -> events.add(type), clock(), () -> List.of(broken));
+        reg.acquireRef("sb-1", "sid-1", TTL_SECONDS, renewer);
+        reg.registerTurn("sid-1");
+
+        int before = renewer.calls.get();
+        advance(Duration.ofMinutes(5));
+        reg.sweep();
+        assertTrue(renewer.calls.get() > before, "信号异常按不持有处理，turn 信号照常续期");
+    }
 }
