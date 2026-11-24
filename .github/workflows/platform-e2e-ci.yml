@@ -24,6 +24,15 @@ jobs:
     outputs:
       e2e: ${{ steps.filter.outputs.e2e }}
     steps:
+      - name: 临时诊断：Docker Hub 额度读数（前）
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOCKERHUB_USER:-}" ]; then echo "无 Docker Hub 凭据，跳过读数"; exit 0; fi
+          TOKEN=$(curl -fsS --user "$DOCKERHUB_USER:$DOCKERHUB_TOKEN" "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
+          curl -sI -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep -i -E 'ratelimit' || echo "无 ratelimit 头"
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
@@ -147,6 +156,15 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: 临时诊断：Docker Hub 额度读数（后）
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOCKERHUB_USER:-}" ]; then echo "无 Docker Hub 凭据，跳过读数"; exit 0; fi
+          TOKEN=$(curl -fsS --user "$DOCKERHUB_USER:$DOCKERHUB_TOKEN" "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
+          curl -sI -H "Authorization: Bearer $TOKEN" https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest | grep -i -E 'ratelimit' || echo "无 ratelimit 头"
       - name: 汇总分片结果
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
