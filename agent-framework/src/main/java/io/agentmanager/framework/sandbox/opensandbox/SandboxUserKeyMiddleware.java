@@ -102,7 +102,13 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
                         if (rolledBack > 0) {
                             sandbox.invalidatePendingUploadMemo();
                         }
-                        spec.markInjectedOnSandbox(pendingSessionId, sandboxId);
+                        // 记账=「重置已成功执行」的事实记录（issue #497）：DB 瞬时失败（-1）时
+                        // 重置未真正执行，写入 7 天 ResetMark 会让后续所有 turn/副本永久跳过
+                        // reset（历史上传件在重建容器内永久缺失）——仅 DB 更新确证成功（>=0）
+                        // 才记账，失败 turn 本代保持未记账，下 turn isInjectedOnSandbox miss 重试
+                        if (rolledBack >= 0) {
+                            spec.markInjectedOnSandbox(pendingSessionId, sandboxId);
+                        }
                     }
                 }
                 sandbox.injectPendingUploads();

@@ -217,8 +217,9 @@ public class FileAssetStore {
      * 本会话的行；session 未知时调用方必须跳过（user 维度回滚会波及他 session 行）。
      *
      * <p>返回实际回滚行数（issue #413）：n&gt;0 = 确有 injected 行回到 pending，调用方据此
-     * 失效沙箱实例的注入备忘（否则备忘短路吞掉重注入批次）；异常路径返回 0（与
-     * catch-告警语义一致）。
+     * 失效沙箱实例的注入备忘（否则备忘短路吞掉重注入批次）；异常路径返回 -1（issue #497）：
+     * DB 更新未确证成功，与「成功且 0 行」区分——调用方不得凭 -1 写换代记账（ResetMark），
+     * 留待下一 turn 重试。
      */
     public int resetInjectedToPending(String sessionId) {
         try (var conn = dataSource.getConnection();
@@ -234,7 +235,7 @@ public class FileAssetStore {
             return n;
         } catch (Exception e) {
             log.warn("FileAssetStore: resetInjectedToPending {} failed: {}", sessionId, e.getMessage());
-            return 0;
+            return -1;
         }
     }
 
