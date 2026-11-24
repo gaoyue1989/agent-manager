@@ -17,10 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/k8s/k8sfake"
 	"agent-manager/backend/internal/store"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // recReq 上游收到的单次请求记录。
@@ -121,6 +119,59 @@ func auditKinds(t *testing.T, c *Core) []string {
 		}
 	}
 	return kinds
+}
+
+const (
+	presetLegacyArgs  = "/opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
+	presetWrapperArgs = "W=/usr/local/bin/skillsync-launcher.sh; [ -x \"$W\" ] || W=\"\"; exec $W /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
+)
+
+type presetEnv struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type presetMainContainer struct {
+	Name  string      `json:"name"`
+	Image string      `json:"image"`
+	Args  []string    `json:"args"`
+	Env   []presetEnv `json:"env"`
+}
+
+type presetInitContainer struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
+}
+
+type presetTemplate struct {
+	Main           presetMainContainer
+	InitContainers []presetInitContainer
+	Volumes        []map[string]interface{}
+	Tolerations    []map[string]interface{}
+}
+
+// parsePresetTemplate 解析 POST /v1/pools 请求 body 的 template.spec。
+func parsePresetTemplate(t *testing.T, body string) presetTemplate {
+	t.Helper()
+	var payload struct {
+		Template struct {
+			Spec struct {
+				Containers     []presetMainContainer    `json:"containers"`
+				InitContainers []presetInitContainer    `json:"initContainers"`
+				Volumes        []map[string]interface{} `json:"volumes"`
+				Tolerations    []map[string]interface{} `json:"tolerations"`
+			} `json:"spec"`
+		} `json:"template"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("payload not json: %v", err)
+	}
+	spec := payload.Template.Spec
+	if len(spec.Containers) != 1 || spec.Containers[0].Name != sandboxPresetMainContainer {
+		t.Fatalf("main container = %+v", spec.Containers)
+	}
+	return presetTemplate{Main: spec.Containers[0], InitContainers: spec.InitContainers,
+		Volumes: spec.Volumes, Tolerations: spec.Tolerations}
 }
 
 const poolsJSON = `{"items":[{"name":"pool-a","capacitySpec":{"bufferMin":1,"bufferMax":2,"poolMin":1,"poolMax":3},"status":{"total":2,"allocated":1,"available":1,"revision":"r1"}}]}`
@@ -276,7 +327,8 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 			t.Fatalf("recycleStrategy Bogus 应 400 ErrInvalidForm, got %v", err)
 		}
 	}
-	// image 缺省 → 取平台默认 SANDBOX_IMAGE
+	// image 缺省 → 取平台默认 SANDBOX_IMAGE；DisableSyncd=true 时模板与官方 sample 逐字段一致
+	// （单 arg 直启 + 三固定 env），image 参数只换主容器镜像
 	core, _, h, done := newProxyCore(t, map[string]string{"SANDBOX_IMAGE": "reg.example.com/ci:v9"})
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
@@ -284,62 +336,37 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
 	})
-	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
-		Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
-	}, 0); err != nil {
-		t.Fatal(err)
+	capSpec := SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3}
+	for _, in := range []CreateSandboxPoolInput{
+		{Name: "oaf-demo-pool", DisableSyncd: true, CapacitySpec: capSpec},
+		{Name: "oaf-demo-pool", Image: "custom:2", DisableSyncd: true, CapacitySpec: capSpec},
+	} {
+		if _, err := core.AdminCreateSandboxPool(in, 0); err != nil {
+			t.Fatal(err)
+		}
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.Reqs) != 2 {
+		t.Fatalf("requests = %d", len(h.Reqs))
+	}
+	// 官方 sample 三要素：task-executor 监听命令 / SANDBOX_MAIN_CONTAINER+EXECD_ENVS+EXECD env / installer×2
 	assertPreset := func(t *testing.T, body string, wantImage string) {
 		t.Helper()
-		var payload struct {
-			Template struct {
-				Spec struct {
-					Containers []struct {
-						Name    string   `json:"name"`
-						Image   string   `json:"image"`
-						Command []string `json:"command"`
-						Args    []string `json:"args"`
-						Env     []struct {
-							Name  string `json:"name"`
-							Value string `json:"value"`
-						} `json:"env"`
-					} `json:"containers"`
-					InitContainers []struct {
-						Name  string `json:"name"`
-						Image string `json:"image"`
-					} `json:"initContainers"`
-					Volumes     []map[string]interface{} `json:"volumes"`
-					Tolerations []map[string]interface{} `json:"tolerations"`
-				} `json:"spec"`
-			} `json:"template"`
-		}
-		if err := json.Unmarshal([]byte(body), &payload); err != nil {
-			t.Fatalf("payload not json: %v", err)
-		}
-		tpl := payload.Template.Spec
-		if len(tpl.Containers) != 1 || tpl.Containers[0].Name != "sandbox" {
-			t.Fatalf("main container = %+v", tpl.Containers)
-		}
-		main := tpl.Containers[0]
+		tpl := parsePresetTemplate(t, body)
+		main := tpl.Main
 		if main.Image != wantImage {
 			t.Fatalf("main image = %q, want %q", main.Image, wantImage)
 		}
-		// 官方 sample 三要素：task-executor 监听命令 / SANDBOX_MAIN_CONTAINER+EXECD_ENVS+EXECD env / installer×2
-		joined := strings.Join(main.Args, " ")
-		if !strings.Contains(joined, "task-executor -listen-addr=0.0.0.0:5758") {
-			t.Fatalf("main command missing task-executor listener: %s", joined)
-		}
-		// 服务未配 token Secret（no-token 灰度分支，PR-4a 默认开启的前置门不满足）：
-		// 模板与历史形态逐字段一致（单 arg 直启 + 三固定 env）
-		if len(main.Args) != 1 || main.Args[0] != "/opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp" {
-			t.Fatalf("no-token args must stay exact, got %v", main.Args)
-		}
-		if len(main.Env) != 3 {
-			t.Fatalf("default env must stay 3 fixed entries, got %d", len(main.Env))
+		if len(main.Args) != 1 || main.Args[0] != presetLegacyArgs {
+			t.Fatalf("main args must stay exact official sample literal, got %v", main.Args)
 		}
 		envs := map[string]string{}
 		for _, e := range main.Env {
 			envs[e.Name] = e.Value
+		}
+		if len(main.Env) != 3 {
+			t.Fatalf("main container env = %d, want 3 fixed entries: %+v", len(main.Env), main.Env)
 		}
 		for _, k := range []string{"SANDBOX_MAIN_CONTAINER", "EXECD_ENVS", "EXECD"} {
 			if envs[k] == "" {
@@ -356,40 +383,18 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 			t.Fatal("tolerations missing (official sample)")
 		}
 	}
-	h.mu.Lock()
-	if len(h.Reqs) != 1 {
-		t.Fatalf("requests = %d", len(h.Reqs))
-	}
 	assertPreset(t, h.Reqs[0].Body, "reg.example.com/ci:v9")
-	h.mu.Unlock()
-
-	// 显式 image 优先
-	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
-		Name: "oaf-demo-pool", Image: "custom:2", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
-	}, 0); err != nil {
-		t.Fatal(err)
-	}
-	h.mu.Lock()
-	if len(h.Reqs) != 2 {
-		t.Fatalf("requests = %d", len(h.Reqs))
-	}
 	assertPreset(t, h.Reqs[1].Body, "custom:2")
-	h.mu.Unlock()
 }
 
-// TestSandboxProxyPoolSyncdDefaultOn 技能同步默认开启三态（PR-4a，skills-syncd §11）：
-// per-service token Secret 在位 → 新建池缺省注入三键 + commandWrapper（新缺省注入断言）；
+// TestSandboxProxyPoolSyncdDefaultOn 技能同步默认开启两态（skills-syncd §11）：绑定服务的新建池
+// 缺省注入 BASE_URL/INTERVAL 两键 + commandWrapper（只经上游 API，不依赖任何 K8s 对象）；
 // DisableSyncd=true → 模板逐字段与历史形态一致（显式关闭 = 完全旧行为，可回滚）；
-// Secret 缺失（服务未接入 token）→ 旧行为建池不让 secretKeyRef 卡死 warm pod
-// （未接入服务不受默认开启影响），审计 syncd 三态留痕。
+// 审计 syncd 两态留痕。
 func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
 	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
-	if err := core.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(k8s.ObjectParams{
-		K8sName: "oaf-demo", EnvSecret: map[string]string{k8s.SkillsyncTokenEnvKey: "tok"}})); err != nil {
-		t.Fatal(err)
-	}
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
@@ -398,99 +403,37 @@ func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
 	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: capSpec}, 0); err != nil {
 		t.Fatal(err)
 	}
-
-	parseMain := func(t *testing.T, body string) struct {
-		Name string   `json:"name"`
-		Args []string `json:"args"`
-		Env  []struct {
-			Name      string `json:"name"`
-			Value     string `json:"value"`
-			ValueFrom *struct {
-				SecretKeyRef *struct {
-					Name string `json:"name"`
-					Key  string `json:"key"`
-				} `json:"secretKeyRef"`
-			} `json:"valueFrom"`
-		} `json:"env"`
-	} {
-		t.Helper()
-		var payload struct {
-			Template struct {
-				Spec struct {
-					Containers []struct {
-						Name string   `json:"name"`
-						Args []string `json:"args"`
-						Env  []struct {
-							Name      string `json:"name"`
-							Value     string `json:"value"`
-							ValueFrom *struct {
-								SecretKeyRef *struct {
-									Name string `json:"name"`
-									Key  string `json:"key"`
-								} `json:"secretKeyRef"`
-							} `json:"valueFrom"`
-						} `json:"env"`
-					} `json:"containers"`
-				} `json:"spec"`
-			} `json:"template"`
-		}
-		if err := json.Unmarshal([]byte(body), &payload); err != nil {
-			t.Fatalf("payload not json: %v", err)
-		}
-		if len(payload.Template.Spec.Containers) != 1 {
-			t.Fatalf("containers = %+v", payload.Template.Spec.Containers)
-		}
-		return payload.Template.Spec.Containers[0]
-	}
-	legacyArgs := "/opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
-	wrapperArgs := "W=/usr/local/bin/skillsync-launcher.sh; [ -x \"$W\" ] || W=\"\"; exec $W /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
-
-	// 1) 新缺省：三键派生 + wrapper
-	main := parseMain(t, h.Reqs[0].Body)
-	if len(main.Args) != 1 || main.Args[0] != wrapperArgs {
-		t.Fatalf("default-on args wrong:\n got %q\nwant %q", main.Args, wrapperArgs)
-	}
-	if len(main.Env) != 6 {
-		t.Fatalf("default-on env = %d, want 3 fixed + 3 derived: %+v", len(main.Env), main.Env)
-	}
-	if e := main.Env[3]; e.Name != "SKILLSYNC_BASE_URL" || e.Value != "http://oaf-demo-svc.test.svc:8100" || e.ValueFrom != nil {
-		t.Fatalf("SKILLSYNC_BASE_URL wrong: %+v", e)
-	}
-	if tok := main.Env[4]; tok.Name != k8s.SkillsyncTokenEnvKey || tok.ValueFrom == nil ||
-		tok.ValueFrom.SecretKeyRef == nil || tok.ValueFrom.SecretKeyRef.Name != k8s.SkillsyncTokenName("oaf-demo") ||
-		tok.ValueFrom.SecretKeyRef.Key != k8s.SkillsyncTokenDataKey {
-		t.Fatalf("SKILLSYNC_TOKEN secretKeyRef wrong: %+v", tok)
-	}
-	if e := main.Env[5]; e.Name != "SKILLSYNC_INTERVAL" || e.Value != "1m" || e.ValueFrom != nil {
-		t.Fatalf("SKILLSYNC_INTERVAL wrong: %+v", e)
-	}
-
-	// 2) 显式关闭：模板逐字段与历史形态一致（旧代码 dormant，可回滚）
 	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: capSpec, DisableSyncd: true}, 0); err != nil {
 		t.Fatal(err)
 	}
-	main = parseMain(t, h.Reqs[1].Body)
-	if len(main.Args) != 1 || main.Args[0] != legacyArgs {
+
+	// 1) 新缺省：两键派生 + wrapper
+	main := parsePresetTemplate(t, h.Reqs[0].Body).Main
+	if len(main.Args) != 1 || main.Args[0] != presetWrapperArgs {
+		t.Fatalf("default-on args wrong:\n got %q\nwant %q", main.Args, presetWrapperArgs)
+	}
+	if len(main.Env) != 5 {
+		t.Fatalf("default-on env = %d, want 3 fixed + 2 derived: %+v", len(main.Env), main.Env)
+	}
+	for i, want := range []presetEnv{
+		{"SKILLSYNC_BASE_URL", "http://oaf-demo-svc.test.svc:8100"},
+		{"SKILLSYNC_INTERVAL", "1m"},
+	} {
+		if e := main.Env[3+i]; e != want {
+			t.Fatalf("derived env[%d] = %+v, want %+v", 3+i, e, want)
+		}
+	}
+
+	// 2) 显式关闭：模板逐字段与历史形态一致
+	main = parsePresetTemplate(t, h.Reqs[1].Body).Main
+	if len(main.Args) != 1 || main.Args[0] != presetLegacyArgs {
 		t.Fatalf("disabled args must stay exact legacy literal, got %q", main.Args)
 	}
 	if len(main.Env) != 3 {
 		t.Fatalf("disabled env = %d, want 3 fixed only: %+v", len(main.Env), main.Env)
 	}
 
-	// 3) 服务未配 token Secret：默认开启不波及（旧行为 + 审计 no-token）
-	seedWsService(t, core, 1, "oaf-bare")
-	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{Name: "oaf-bare-pool", CapacitySpec: capSpec}, 0); err != nil {
-		t.Fatal(err)
-	}
-	main = parseMain(t, h.Reqs[2].Body)
-	if len(main.Args) != 1 || main.Args[0] != legacyArgs {
-		t.Fatalf("no-token args must stay exact legacy literal, got %q", main.Args)
-	}
-	if len(main.Env) != 3 {
-		t.Fatalf("no-token env = %d, want 3 fixed only: %+v", len(main.Env), main.Env)
-	}
-
-	// 审计 syncd 三态：default / disabled / no-token（灰度观测按 result 维度区分，D-5 口径）
+	// 审计 syncd 两态：default / disabled
 	var rows []store.ServiceEvent
 	if err := core.DB.Where("service_id = 0").Order("id ASC").Find(&rows).Error; err != nil {
 		t.Fatal(err)
@@ -506,22 +449,17 @@ func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
 			syncd = append(syncd, m)
 		}
 	}
-	if len(syncd) != 3 || syncd[0] != "default" || syncd[1] != "disabled" || syncd[2] != "no-token" {
-		t.Fatalf("audit syncd modes = %v, want [default disabled no-token]", syncd)
+	if len(syncd) != 2 || syncd[0] != "default" || syncd[1] != "disabled" {
+		t.Fatalf("audit syncd modes = %v, want [default disabled]", syncd)
 	}
 }
 
-// TestSandboxProxyPresetExtraEnvOverride C-2 手动通道（skills-syncd §5.2）：token Secret
-// 在位（默认开启生效）时手动 extraEnv 键级覆盖缺省派生值（同名后者胜）、其余键追加；
-// value / secretKeyRef→valueFrom 两种形态照常。
+// TestSandboxProxyPresetExtraEnvOverride C-2 手动通道（skills-syncd §5.2）：手动 extraEnv
+// 键级覆盖缺省派生值（同名后者胜）、其余键按入参顺序追加。
 func TestSandboxProxyPresetExtraEnvOverride(t *testing.T) {
 	core, _, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
-	if err := core.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(k8s.ObjectParams{
-		K8sName: "oaf-demo", EnvSecret: map[string]string{k8s.SkillsyncTokenEnvKey: "tok"}})); err != nil {
-		t.Fatal(err)
-	}
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
@@ -540,60 +478,26 @@ func TestSandboxProxyPresetExtraEnvOverride(t *testing.T) {
 	h.mu.Lock()
 	body := h.Reqs[0].Body
 	h.mu.Unlock()
-	var payload struct {
-		Template struct {
-			Spec struct {
-				Containers []struct {
-					Name string   `json:"name"`
-					Args []string `json:"args"`
-					Env  []struct {
-						Name      string `json:"name"`
-						Value     string `json:"value"`
-						ValueFrom *struct {
-							SecretKeyRef *struct {
-								Name string `json:"name"`
-								Key  string `json:"key"`
-							} `json:"secretKeyRef"`
-						} `json:"valueFrom"`
-					} `json:"env"`
-				} `json:"containers"`
-			} `json:"spec"`
-		} `json:"template"`
+	main := parsePresetTemplate(t, body).Main
+	if len(main.Args) != 1 || main.Args[0] != presetWrapperArgs {
+		t.Fatalf("wrapper args literal wrong:\n got %q\nwant %q", main.Args, presetWrapperArgs)
 	}
-	if err := json.Unmarshal([]byte(body), &payload); err != nil {
-		t.Fatalf("payload not json: %v", err)
-	}
-	main := payload.Template.Spec.Containers[0]
-	if main.Name != "sandbox" || len(main.Args) != 1 {
-		t.Fatalf("main container wrong: %+v", payload.Template.Spec.Containers)
-	}
-	// 默认开启：commandWrapper 缺省生效（D-1 内联守卫字面）
-	wantArgs := "W=/usr/local/bin/skillsync-launcher.sh; [ -x \"$W\" ] || W=\"\"; exec $W /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
-	if main.Args[0] != wantArgs {
-		t.Fatalf("wrapper args literal wrong:\n got %q\nwant %q", main.Args[0], wantArgs)
-	}
-	if len(main.Env) != 7 {
-		t.Fatalf("env = %d entries, want 3 fixed + 3 default + 1 appended: %+v", len(main.Env), main.Env)
+	if len(main.Env) != 6 {
+		t.Fatalf("env = %d entries, want 3 fixed + 2 default + 1 appended: %+v", len(main.Env), main.Env)
 	}
 	for i, k := range []string{"SANDBOX_MAIN_CONTAINER", "EXECD_ENVS", "EXECD"} {
-		if main.Env[i].Name != k || main.Env[i].Value == "" || main.Env[i].ValueFrom != nil {
+		if main.Env[i].Name != k || main.Env[i].Value == "" {
 			t.Fatalf("fixed env[%d] altered: %+v", i, main.Env[i])
 		}
 	}
-	if e := main.Env[3]; e.Name != "SKILLSYNC_BASE_URL" || e.Value != "http://oaf-demo-svc.test.svc:8100" || e.ValueFrom != nil {
-		t.Fatalf("default base url wrong: %+v", e)
-	}
-	tok := main.Env[4]
-	if tok.Name != "SKILLSYNC_TOKEN" || tok.Value != "" || tok.ValueFrom == nil ||
-		tok.ValueFrom.SecretKeyRef == nil || tok.ValueFrom.SecretKeyRef.Name != "oaf-demo-skillsync-token" ||
-		tok.ValueFrom.SecretKeyRef.Key != "token" {
-		t.Fatalf("default token secretKeyRef wrong: %+v", tok)
-	}
-	if e := main.Env[5]; e.Name != "SKILLSYNC_INTERVAL" || e.Value != "5m" || e.ValueFrom != nil {
-		t.Fatalf("manual override must replace default interval in place: %+v", e)
-	}
-	if e := main.Env[6]; e.Name != "SKILLSYNC_TIMEOUT" || e.Value != "30s" || e.ValueFrom != nil {
-		t.Fatalf("appended manual env wrong: %+v", e)
+	for i, want := range []presetEnv{
+		{"SKILLSYNC_BASE_URL", "http://oaf-demo-svc.test.svc:8100"},
+		{"SKILLSYNC_INTERVAL", "5m"},
+		{"SKILLSYNC_TIMEOUT", "30s"},
+	} {
+		if e := main.Env[3+i]; e != want {
+			t.Fatalf("env[%d] = %+v, want %+v", 3+i, e, want)
+		}
 	}
 }
 
@@ -625,12 +529,8 @@ func TestSandboxProxyValidation(t *testing.T) {
 			ExtraEnv: []SandboxPoolExtraEnv{{Name: "skillsync_foo", Value: "x"}}}},
 		{"extraEnv empty key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
 			ExtraEnv: []SandboxPoolExtraEnv{{Name: "", Value: "x"}}}},
-		{"extraEnv both value and secretKeyRef", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
-			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_TOKEN", Value: "v", SecretKeyRef: &SandboxPoolEnvSecretKeyRef{Name: "s", Key: "token"}}}}},
-		{"extraEnv neither value nor secretKeyRef", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
-			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_TOKEN"}}}},
-		{"extraEnv secretKeyRef missing key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
-			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_TOKEN", SecretKeyRef: &SandboxPoolEnvSecretKeyRef{Name: "s"}}}}},
+		{"extraEnv empty value", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_INTERVAL"}}}},
 		{"extraEnv duplicate key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
 			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_INTERVAL", Value: "1m"}, {Name: "SKILLSYNC_INTERVAL", Value: "2m"}}}},
 		{"extraEnv over limit", overLimit},
@@ -904,8 +804,8 @@ func publishForDeleteGuard(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgID 
 }
 
 // TestDeleteServiceRefusedWhileBoundPoolExists（issue #359）：绑定池 {k8sName}-pool 仍在上游
-// 运行时删除服务被拒（ErrConflict → handler 409），K8s 对象原样未动——池模板 secretKeyRef
-// 引用 {k8sName}-skillsync-token，连带删除会使池新 Pod 卡 CreateContainerConfigError。
+// 运行时删除服务被拒（ErrConflict → handler 409），K8s 对象原样未动——池与服务一一对应，
+// 先删服务会留下空耗 warm Pod 的孤儿池，同名新服务还会静默接管旧池。
 func TestDeleteServiceRefusedWhileBoundPoolExists(t *testing.T) {
 	core, fk, h, done := newProxyCore(t, nil)
 	defer done()
@@ -940,7 +840,7 @@ func TestDeleteServiceRefusedWhileBoundPoolExists(t *testing.T) {
 }
 
 // TestDeleteServiceProceedsWhenPoolAbsent（issue #359）：上游 404（无绑定池）→ 正常删除，
-// K8s 对象清理；#350 语义不受影响。
+// K8s 对象清理。
 func TestDeleteServiceProceedsWhenPoolAbsent(t *testing.T) {
 	core, fk, h, done := newProxyCore(t, nil)
 	defer done()
@@ -996,136 +896,5 @@ func TestDeleteServiceProceedsWhenSandboxNotConfigured(t *testing.T) {
 	}
 	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err == nil {
 		t.Fatal("deployment must be deleted after successful Delete")
-	}
-}
-
-// publishTokenService 发布携带 SKILLSYNC_TOKEN（敏感）+ LOG_LEVEL（非敏感）的服务
-// （token Secret 已 Ensure 到池 ns，发布期走 Ensure 分支不触上游探测），供撤销守卫用例
-// 复用；LOG_LEVEL 使拒绝用例可断言服务 ns CM/Secret 均未被写穿。
-func publishTokenService(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgID uint) *store.ServiceEntity {
-	t.Helper()
-	return publishWithEnv(t, core, fk, pkgID,
-		map[string]string{"SKILLSYNC_TOKEN": "tok-1", "LOG_LEVEL": "info"}, nil)
-}
-
-// boundPoolHandler 上游按路径返回绑定池 200 的 handler。
-func boundPoolHandler(h *upstreamHarness, poolPath string) {
-	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
-		statusWithBody(map[string]func() (int, string){
-			poolPath: func() (int, string) { return 200, `{"name":"pool","replicas":{"current":1}}` },
-		})(w, r)
-	})
-}
-
-// TestUpdateEnvRevokeRefusedWhileBoundPoolExists（issue #396）：绑定池仍在运行时 UpdateEnv
-// 置空 SKILLSYNC_TOKEN（撤销）被拒（ErrConflict → 409）。守卫先于服务两级对象写入、
-// UpdateEnv apply 先于 DB 写，拒绝全链路零副作用——池 ns token Secret、服务 ns CM/Secret、
-// DB env_secret_json 均保持原状，撤销探测打到上游。
-func TestUpdateEnvRevokeRefusedWhileBoundPoolExists(t *testing.T) {
-	core, fk, h, done := newProxyCore(t, nil)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishTokenService(t, core, fk, pkg.ID)
-
-	poolPath := "/v1/pools/" + svc.K8sName + "-pool"
-	boundPoolHandler(h, poolPath)
-	_, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": ""}, nil)
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("revoke must be refused with ErrConflict, got %v", err)
-	}
-	if !strings.Contains(err.Error(), svc.K8sName+"-pool") {
-		t.Fatalf("refusal must name the bound pool, got %s", err.Error())
-	}
-	exists, err := core.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(svc.K8sName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !exists {
-		t.Fatal("refused revoke must keep pool ns token secret intact")
-	}
-	// 守卫先于服务两级对象写入：拒绝零副作用——服务 ns Secret 仍含 token、CM 未被写
-	// （EnsureSecret 整体替换 Data，写后拒会造成 K8s 与 DB 静默漂移）
-	sobj, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.EnvSecretName(svc.K8sName), metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(sobj.Data["SKILLSYNC_TOKEN"]) != "tok-1" {
-		t.Fatalf("refused revoke must leave service ns env secret intact, got data %v", sobj.Data)
-	}
-	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), svc.K8sName+"-env", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cm.Data["LOG_LEVEL"] != "info" {
-		t.Fatalf("refused revoke must leave service ns CM intact, got data %v", cm.Data)
-	}
-	var fresh store.ServiceEntity
-	if err := core.DB.First(&fresh, svc.ID).Error; err != nil {
-		t.Fatal(err)
-	}
-	var secret map[string]string
-	if err := json.Unmarshal([]byte(fresh.EnvSecretJSON), &secret); err != nil || secret["SKILLSYNC_TOKEN"] != "tok-1" {
-		t.Fatalf("refused revoke must leave env_secret_json unchanged: %s (%v)", fresh.EnvSecretJSON, err)
-	}
-	found := false
-	for _, req := range h.Reqs {
-		if req.Method == http.MethodGet && req.Path == poolPath {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("revoke must probe GET /v1/pools/{k8sName}-pool before deleting")
-	}
-}
-
-// TestUpdateEnvRevokeProceedsWhenPoolAbsent（issue #396）：无绑定池（上游 404）→ 撤销照常、
-// 池 ns token Secret 删除——#350 撤销语义在已配 OpenSandbox 部署下不回归。
-func TestUpdateEnvRevokeProceedsWhenPoolAbsent(t *testing.T) {
-	core, fk, h, done := newProxyCore(t, nil)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishTokenService(t, core, fk, pkg.ID)
-
-	h.srv.Config.Handler = statusWithBody(map[string]func() (int, string){
-		"/v1/pools/" + svc.K8sName + "-pool": func() (int, string) { return 404, `{"message":"no pool"}` },
-	})
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": ""}, nil); err != nil {
-		t.Fatalf("revoke with no bound pool must proceed: %v", err)
-	}
-	exists, err := core.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(svc.K8sName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if exists {
-		t.Fatal("token secret must be revoked when no bound pool exists")
-	}
-}
-
-// TestRepublishRevokeRefusedWhileBoundPoolExists（issue #396）：Republish 全量 env 置空
-// SKILLSYNC_TOKEN 同样被绑定池守卫拒绝、Secret 保留；服务转 error 属既有「republish
-// apply 失败」语义（DB-first：env 已落库、Secret 在，删池后 StartAgain/Republish 收敛）。
-func TestRepublishRevokeRefusedWhileBoundPoolExists(t *testing.T) {
-	core, fk, h, done := newProxyCore(t, nil)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishTokenService(t, core, fk, pkg.ID)
-
-	boundPoolHandler(h, "/v1/pools/"+svc.K8sName+"-pool")
-	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{"SKILLSYNC_TOKEN": ""}}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("republish revoke must be refused with ErrConflict, got %v", err)
-	}
-	exists, err := core.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(svc.K8sName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !exists {
-		t.Fatal("refused republish revoke must keep pool ns token secret intact")
-	}
-	got, err := core.Get(svc.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != store.StatusError {
-		t.Fatalf("republish apply failure must transition service to error, got %s", got.Status)
 	}
 }

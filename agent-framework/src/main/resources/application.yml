@@ -116,8 +116,6 @@ agent:
     session-agent-isolation: ${SANDBOX_SESSION_AGENT_ISOLATION:true}
     session-agent-cache-max: ${SANDBOX_SESSION_AGENT_CACHE_MAX:500}
     session-agent-cache-ttl-minutes: ${SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES:30}
-    # skills-syncd 内部端点（sandbox-skills-syncd-design §6.1）：token 空 = 端点关闭（404）
-    skills-sync-token: ${SKILLSYNC_TOKEN:}
     # bundle 磁盘缓存目录（issue #358）：空 = 运行时解析 workspace 卷内 {workspaceBase}/tmp/
     # skills-bundle-cache（业务 Pod /tmp 不可写实测，resolvedSpoolDir 同源）；解析在 SkillBundleService
     skills-bundle-cache-dir: ${SKILLSYNC_BUNDLE_CACHE_DIR:}

@@ -105,7 +105,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 | `POST /admin/workspaces/:id/members` | 邀请成员；`GET :id/members` 列表；`PATCH :id/members/:uid` 改角色；`DELETE :id/members/:uid` 移除 |
 | `GET /admin/workspaces/:id/agents` | 空间内 Agent（服务）清单 |
 | `GET /admin/audit-logs` | 审计日志 |
-| `/admin/sandboxes/*` | 沙箱管理面（sandbox-pool PR-C）：summary 聚合 / pools 增删改查（POST 创建池校验在 capacitySpec 四值 0≤poolMin≤bufferMin≤bufferMax≤poolMax、recycleStrategy 仅收 Delete/Restart/Noop（校验不转发）之外，另含：池名必须为 {服务 k8s 名}-pool 且该 k8s 名服务已存在（400 pool 名必须为 {服务 k8s 名}-pool / pool "…" 未绑定已存在的服务）；disableSyncd=true 与 extraEnv 互斥（400）；extraEnv 仅收 SKILLSYNC_ 前缀键（≤8 个、键不重复、value 与 secretKeyRef 二选一互斥，违规一律 400）。池名合法且未传 disableSyncd 时，若该服务的技能同步 token Secret 已存在则缺省注入 skills-syncd 三键与 commandWrapper（已接入技能同步的服务新池默认开启），Secret 缺失按旧行为建池不注入；disableSyncd:true 显式关闭）/ 沙箱列表（state 过滤+分页）/ 销毁；上游未配置 503、上游 401→502、429/5xx 透传 |
+| `/admin/sandboxes/*` | 沙箱管理面（sandbox-pool PR-C）：summary 聚合 / pools 增删改查（POST 创建池校验在 capacitySpec 四值 0≤poolMin≤bufferMin≤bufferMax≤poolMax、recycleStrategy 仅收 Delete/Restart/Noop（校验不转发）之外，另含：池名必须为 {服务 k8s 名}-pool 且该 k8s 名服务已存在（400 pool 名必须为 {服务 k8s 名}-pool / pool "…" 未绑定已存在的服务）；disableSyncd=true 与 extraEnv 互斥（400）；extraEnv 仅收 SKILLSYNC_ 前缀键（≤8 个、键不重复、value 非空，违规一律 400）。池名合法且未传 disableSyncd 时缺省注入 skills-syncd 两键与 commandWrapper（只经 OpenSandbox API，不依赖任何 K8s 对象）；disableSyncd:true 显式关闭）/ 沙箱列表（state 过滤+分页）/ 销毁；上游未配置 503、上游 401→502、429/5xx 透传 |
 
 ### 4.3 console（用户侧；JWT，路径携带空间 id）
 

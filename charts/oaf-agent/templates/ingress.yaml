@@ -1,6 +1,6 @@
 {{- $fullname := include "oaf-agent.fullname" . -}}
 {{/* 内部路径排除表（issue #351，语义对齐平台 objects.go hostModeBlockPathList）：/internal
-     （skills-syncd 端点，SKILLSYNC_TOKEN 门）与 /actuator（健康 + Micrometer 指标，无鉴权）
+     （skills-syncd 端点，无鉴权）与 /actuator（健康 + Micrometer 指标，无鉴权）
      不经业务 Ingress 对外暴露（仅集群内访问）——backend 指向 fullname-blocked 无 endpoints
      占位 Service（blocked-backend.yaml），恒 503 fail-closed。无尾斜杠 Prefix 同时盖住裸
      /actuator（Spring 端点发现页）；业务端点无 internal、actuator 起头的路径，前缀级过度

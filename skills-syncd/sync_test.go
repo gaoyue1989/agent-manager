@@ -80,8 +80,7 @@ func buildBundle(files []fixtureFile) ([]byte, string) {
 }
 
 type fakeSource struct {
-	srv   *httptest.Server
-	token string
+	srv *httptest.Server
 
 	mu              sync.Mutex
 	version         string
@@ -96,8 +95,6 @@ type fakeSource struct {
 	versionHits     int
 	bundleHits      int
 	bundleTimes     []time.Time
-	authVersion     string
-	authBundle      string
 	lastBundleVer   string
 }
 
@@ -115,14 +112,8 @@ func newFakeSource(t *testing.T) *fakeSource {
 func (fs *fakeSource) serveVersion(w http.ResponseWriter, r *http.Request) {
 	fs.mu.Lock()
 	fs.versionHits++
-	auth := r.Header.Get("Authorization")
-	fs.authVersion = auth
-	status, ver, proto, raw, token := fs.versionStatus, fs.version, fs.protocol, fs.versionJSON, fs.token
+	status, ver, proto, raw := fs.versionStatus, fs.version, fs.protocol, fs.versionJSON
 	fs.mu.Unlock()
-	if token != "" && auth != "Bearer "+token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	if status != 0 && status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -144,15 +135,9 @@ func (fs *fakeSource) serveBundle(w http.ResponseWriter, r *http.Request) {
 	fs.mu.Lock()
 	fs.bundleHits++
 	fs.bundleTimes = append(fs.bundleTimes, time.Now())
-	auth := r.Header.Get("Authorization")
-	fs.authBundle = auth
 	fs.lastBundleVer = r.URL.Query().Get("version")
-	body, headerSHA, status, abortAfter, chunked, token := fs.bundleBody, fs.bundleHeaderSHA, fs.bundleStatus, fs.abortAfter, fs.forceChunked, fs.token
+	body, headerSHA, status, abortAfter, chunked := fs.bundleBody, fs.bundleHeaderSHA, fs.bundleStatus, fs.abortAfter, fs.forceChunked
 	fs.mu.Unlock()
-	if token != "" && auth != "Bearer "+token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	if status != 0 && status != http.StatusOK {
 		w.WriteHeader(status)
 		return
@@ -187,7 +172,6 @@ func (fs *fakeSource) setVersionStatus(code int) {
 func (fs *fakeSource) setBundleStatus(code int) { fs.mu.Lock(); fs.bundleStatus = code; fs.mu.Unlock() }
 func (fs *fakeSource) setBundleAbort(after int) { fs.mu.Lock(); fs.abortAfter = after; fs.mu.Unlock() }
 func (fs *fakeSource) setBundleChunked()        { fs.mu.Lock(); fs.forceChunked = true; fs.mu.Unlock() }
-func (fs *fakeSource) setToken(tok string)      { fs.mu.Lock(); fs.token = tok; fs.mu.Unlock() }
 func (fs *fakeSource) setBundleRaw(body []byte, sha string) {
 	fs.mu.Lock()
 	fs.bundleBody = body
@@ -205,8 +189,6 @@ type sourceStats struct {
 	versionHits   int
 	bundleHits    int
 	bundleTimes   []time.Time
-	authVersion   string
-	authBundle    string
 	lastBundleVer string
 }
 
@@ -217,8 +199,6 @@ func (fs *fakeSource) stats() sourceStats {
 		versionHits:   fs.versionHits,
 		bundleHits:    fs.bundleHits,
 		bundleTimes:   append([]time.Time(nil), fs.bundleTimes...),
-		authVersion:   fs.authVersion,
-		authBundle:    fs.authBundle,
 		lastBundleVer: fs.lastBundleVer,
 	}
 }
@@ -307,7 +287,6 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 	env := map[string]string{
 		envBaseURL:        "http://oaf-demo-svc.agent-platform.svc:8100/",
-		envToken:          "tok",
 		envStoreDir:       "/tmp/store",
 		envInterval:       "30s",
 		envTimeout:        "10s",
@@ -321,7 +300,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.baseURL != "http://oaf-demo-svc.agent-platform.svc:8100" {
 		t.Fatalf("baseURL = %q, trailing slash not trimmed", cfg.baseURL)
 	}
-	if cfg.token != "tok" || cfg.storeDir != "/tmp/store" || cfg.interval != 30*time.Second || cfg.timeout != 10*time.Second || cfg.maxBundleBytes != 1024 || cfg.logPath != "/var/log/skills-syncd.log" {
+	if cfg.storeDir != "/tmp/store" || cfg.interval != 30*time.Second || cfg.timeout != 10*time.Second || cfg.maxBundleBytes != 1024 || cfg.logPath != "/var/log/skills-syncd.log" {
 		t.Fatalf("overrides not applied: %+v", cfg)
 	}
 }
@@ -496,7 +475,6 @@ func TestVersionEndpointHTTPErrorHandling(t *testing.T) {
 		name string
 		code int
 	}{
-		{"unauthorized", http.StatusUnauthorized},
 		{"not found", http.StatusNotFound},
 		{"server error", http.StatusInternalServerError},
 	} {
@@ -530,7 +508,6 @@ func TestBundleEndpointHTTPErrorHandling(t *testing.T) {
 		name string
 		code int
 	}{
-		{"unauthorized", http.StatusUnauthorized},
 		{"not found", http.StatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1153,38 +1130,6 @@ func TestVersionResponseUnknownFieldsIgnored(t *testing.T) {
 	if !strings.Contains(logs.String(), "serverProtocol") || !strings.Contains(logs.String(), "proto-9") {
 		t.Fatalf("serverProtocol not logged: %s", logs.String())
 	}
-}
-
-func TestBearerTokenHeaderSemantics(t *testing.T) {
-	t.Run("token attached", func(t *testing.T) {
-		src := newFakeSource(t)
-		src.setVersion(ver1)
-		src.setBundleFiles(defaultFixture("v1"))
-		src.setToken("tok123")
-		d := newTestDaemon(t, src, func(c *config) { c.token = "tok123" }, nil)
-
-		if err := d.cycle(context.Background()); err != nil {
-			t.Fatalf("cycle with token: %v", err)
-		}
-		stats := src.stats()
-		if stats.authVersion != "Bearer tok123" || stats.authBundle != "Bearer tok123" {
-			t.Fatalf("auth headers = %q / %q, want Bearer tok123 on both endpoints", stats.authVersion, stats.authBundle)
-		}
-	})
-	t.Run("empty token sends no authorization header", func(t *testing.T) {
-		src := newFakeSource(t)
-		src.setVersion(ver1)
-		src.setBundleFiles(defaultFixture("v1"))
-		d := newTestDaemon(t, src, nil, nil)
-
-		if err := d.cycle(context.Background()); err != nil {
-			t.Fatalf("cycle without token: %v", err)
-		}
-		stats := src.stats()
-		if stats.authVersion != "" || stats.authBundle != "" {
-			t.Fatalf("auth headers = %q / %q, want empty on both endpoints", stats.authVersion, stats.authBundle)
-		}
-	})
 }
 
 func TestExtractRejectsUnsafeTarEntries(t *testing.T) {

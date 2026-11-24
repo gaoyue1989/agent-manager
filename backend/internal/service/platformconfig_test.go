@@ -294,180 +294,55 @@ func TestDeleteRemovesServiceSecret(t *testing.T) {
 	}
 }
 
-// TestSkillsyncTokenSecretLifecycle per-service 技能同步 token Secret（skills-syncd D-8）。
-// 发布方按普通 env 填 SKILLSYNC_TOKEN（不带 secretKeys——模板敏感键自动路由，评审修复的
-// 陷阱场景：漏路由则 token 明文落 CM 且 per-service Secret 不产出，池 Pod secretKeyRef
-// 解析失败卡 CreateContainerConfigError）→ Ensure {k8sName}-skillsync-token 落池 workload
-// ns（消费方；跨 ns secretKeyRef 不解析，服务 ns 无副本）；UpdateEnv 轮换 → 同 ns Secret
-// 同步更新（池 Pod 重建为 D-8 轮换语义）；服务删除连带清理。
-func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
+// TestServiceWritePathsNeverTouchSandboxWorkloadNamespace OpenSandbox 是外部服务，平台只经其
+// API 交互：服务写路径（Publish/UpdateEnv/Republish/StartAgain/Delete）不得触碰其命名空间内
+// 任何 K8s 对象——两个命名空间全动词 Forbidden 时全部照常成功。
+func TestServiceWritePathsNeverTouchSandboxWorkloadNamespace(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
 	pkg := uploadTestPkg(t, core, "")
-	svc := publishWithEnv(t, core, fk, pkg.ID,
-		map[string]string{"SKILLSYNC_TOKEN": "tok-1", "LOG_LEVEL": "info"}, nil)
-
-	if svc.EnvJSON != `{"LOG_LEVEL":"info"}` {
-		t.Fatalf("template-sensitive key must leave env_json, got %s", svc.EnvJSON)
-	}
-	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := cm.Data["SKILLSYNC_TOKEN"]; ok {
-		t.Fatal("CM must not contain SKILLSYNC_TOKEN (plaintext token)")
-	}
-	secName := k8s.SkillsyncTokenName(svc.K8sName)
-	sec, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("skillsync token secret must be ensured in pool workload ns: %v", err)
-	}
-	if string(sec.Data["token"]) != "tok-1" {
-		t.Fatalf("token value wrong: %q", sec.Data["token"])
-	}
-	if sec.Labels[k8s.LabelKey] != svc.K8sName {
-		t.Fatalf("owner label wrong: %+v", sec.Labels)
-	}
-	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
-		t.Fatal("service ns must have no skillsync token copy (cross-ns secretKeyRef is unresolvable)")
-	}
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	sec, err = fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
-	if err != nil || string(sec.Data["token"]) != "tok-2" {
-		t.Fatalf("token rotation not mirrored to secret: err=%v data=%v", err, sec.Data)
-	}
-	if err := core.Delete(svc.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
-		t.Fatal("skillsync token secret must be deleted with service")
-	}
-}
-
-// TestNoSkillsyncTokenSecretWithoutToken env 无 SKILLSYNC_TOKEN 的服务不产出该 Secret。
-func TestNoSkillsyncTokenSecretWithoutToken(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
-	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), k8s.SkillsyncTokenName(svc.K8sName), metav1.GetOptions{}); err == nil {
-		t.Fatal("skillsync token secret must not exist without SKILLSYNC_TOKEN env")
-	}
-}
-
-// TestSkillsyncTokenSecretRevocation 撤销闭环（issue #350）：UpdateEnv 清空 SKILLSYNC_TOKEN
-// （三态语义「空串=删除」）→ 池 ns token Secret 同步删除（撤销落地到消费方落点）；
-// 填回 → 幂等重建。
-func TestSkillsyncTokenSecretRevocation(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishWithEnv(t, core, fk, pkg.ID,
-		map[string]string{"SKILLSYNC_TOKEN": "tok-1"}, nil)
-
-	secName := k8s.SkillsyncTokenName(svc.K8sName)
-	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("precondition: token secret ensured on publish: %v", err)
-	}
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": ""}, nil); err != nil {
-		t.Fatalf("revoke via UpdateEnv: %v", err)
-	}
-	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
-		t.Fatal("token secret must be revoked when env drops SKILLSYNC_TOKEN")
-	}
-	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, nil); err != nil {
-		t.Fatalf("re-grant via UpdateEnv: %v", err)
-	}
-	sec, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("re-grant must recreate token secret: %v", err)
-	}
-	if string(sec.Data["token"]) != "tok-2" {
-		t.Fatalf("re-grant token value wrong: %q", sec.Data["token"])
-	}
-}
-
-// forbidPoolSecretRead 注入池 workload ns Secret 读 Forbidden（issue #409：模拟
-// 未部署 OpenSandbox / 未授权该 ns 的环境），仅拦 opensandbox ns，服务 ns 不受影响。
-func forbidPoolSecretRead(fk *k8sfake.FakeK8s) {
-	fk.CS().Fake.PrependReactor("get", "secrets", func(action clienttesting.Action) (bool, runtime.Object, error) {
-		if action.GetNamespace() != k8s.SandboxWorkloadNamespace {
+	touched := false
+	fk.CS().Fake.PrependReactor("*", "*", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if ns := action.GetNamespace(); ns != "opensandbox" && ns != "opensandbox-system" {
 			return false, nil, nil
 		}
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("no pool ns RBAC"))
+		touched = true
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: action.GetResource().Resource}, "",
+			errors.New("sandbox namespaces are external to the platform"))
 	})
-}
-
-// TestPublishNoTokenForbiddenFree（issue #409，PR #364 回归）：未配置 SKILLSYNC_TOKEN
-// 的服务发布零跨 ns 访问——池 ns Secret 读被 Forbidden 时 Publish 照常成功。
-func TestPublishNoTokenForbiddenFree(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	forbidPoolSecretRead(fk)
-	if _, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
-		Env: map[string]string{"LOG_LEVEL": "info"}}); err != nil {
-		t.Fatalf("publish without token must not touch pool ns: %v", err)
-	}
-}
-
-// TestUpdateEnvNoTokenForbiddenFree（issue #409）：存量无 token 服务 UpdateEnv 不触碰池 ns。
-func TestUpdateEnvNoTokenForbiddenFree(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
 	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
-	forbidPoolSecretRead(fk)
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn"}, nil); err != nil {
-		t.Fatalf("update env without token must not touch pool ns: %v", err)
+	settle := func() {
+		core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("cluster_url", "http://127.0.0.1:1")
+		_ = fk.SetReady("test", svc.K8sName, 1)
+		waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
 	}
-}
-
-// TestRepublishNoTokenForbiddenFree（issue #409）：存量无 token 服务 Republish 不触碰池 ns。
-func TestRepublishNoTokenForbiddenFree(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
-	forbidPoolSecretRead(fk)
-	if _, err := core.Republish(svc.ID, RepublishOptions{}); err != nil {
-		t.Fatalf("republish without token must not touch pool ns: %v", err)
+	for _, write := range []struct {
+		name string
+		call func() error
+	}{
+		{"UpdateEnv", func() error {
+			_, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn"}, nil)
+			return err
+		}},
+		{"Republish", func() error {
+			_, err := core.Republish(svc.ID, RepublishOptions{})
+			return err
+		}},
+		{"StartAgain", func() error {
+			_, err := core.StartAgain(svc.ID)
+			return err
+		}},
+		{"Delete", func() error { return core.Delete(svc.ID) }},
+	} {
+		if err := write.call(); err != nil {
+			t.Fatalf("%s must not depend on the sandbox namespaces: %v", write.name, err)
+		}
+		if write.name != "Delete" {
+			settle()
+		}
 	}
-}
-
-// TestStartAgainNoTokenForbiddenFree（issue #409）：存量无 token 服务 StartAgain 不触碰池 ns。
-func TestStartAgainNoTokenForbiddenFree(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
-	forbidPoolSecretRead(fk)
-	if _, err := core.StartAgain(svc.ID); err != nil {
-		t.Fatalf("start again without token must not touch pool ns: %v", err)
-	}
-}
-
-// TestRepublishTokenRevocation 撤销闭环对照（issue #409，RBAC 正常）：曾带 token 服务经
-// Republish 以「空串=删除」清 token → 池 ns token Secret 仍被撤销（prevSecret 传参在
-// 四条写路径不遗漏；UpdateEnv 侧由 TestSkillsyncTokenSecretRevocation 锁定）。
-func TestRepublishTokenRevocation(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	svc := publishWithEnv(t, core, fk, pkg.ID,
-		map[string]string{"SKILLSYNC_TOKEN": "tok-1"}, nil)
-	secName := k8s.SkillsyncTokenName(svc.K8sName)
-	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("precondition: token secret ensured on publish: %v", err)
-	}
-	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{"SKILLSYNC_TOKEN": ""}}); err != nil {
-		t.Fatalf("republish clear token: %v", err)
-	}
-	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
-		t.Fatal("token secret must be revoked when republish drops SKILLSYNC_TOKEN")
+	if touched {
+		t.Fatal("service write paths must never touch the OpenSandbox namespaces")
 	}
 }
 
