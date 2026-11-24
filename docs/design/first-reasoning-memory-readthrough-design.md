@@ -100,6 +100,17 @@ JDBC（L4 大时即 `OpenSandbox.java:822` 注释记载的 ≈1.5s/call 噪声�
 > `__EMPTY__` 一致）；symlink 回落真 exec（#394）与异常向上抛语义不变，读穿关闭/未绑定
 > 时回落短路 false（行为与不读穿一致）。
 
+> glob/ls 对 memory/ 的视图统一（2026-11-25 回填，issue #498）：本节第 1 条的回落语义在
+> 枚举算子上曾被割裂为两套互斥视图——`translateGlob` 对 memory/ 子树**只查 KV**（跳过
+> 容器遍历，容器本轮新写文件不可见）；`translateLs` **仅容器 404 时**才回落 KV（容器
+> 目录一经本轮写入即存在，KV 历史文件全部隐藏），而 `test -e`/`read` 又能同时看到两者
+> （#423 修订口径），四算子对同一目录给出互相矛盾的清单。修订后统一为「**容器 ∪ KV
+> 合并视图，同 rel 容器条目优先**」：`translateGlob` 先容器遍历（404 视作空目录、软链
+> 仍整树回落 find -L）再并入 `fillGlobFromMemoryKv`（TreeSet 按 rel 先入为主实现容器
+> 优先）；`translateLs` 对容器列举成功的 memory/ 目录追加 `fillLsFromMemoryKv` 条目
+> （按容器已见 rel 去重），404/null 回落路径与 KV 查询异常语义不变。容器整树缺失时
+> glob/ls 纯 KV 应答的回落行为不回退（对照组测试钉死）。
+
 ### 3.2 D2 运行时文件单次枚举（P0）
 
 `readRuntimeFiles` 从「1 read + 1 ls + N read」改为**一次 `baseStore.search` 大页分页
