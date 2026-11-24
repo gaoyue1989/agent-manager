@@ -635,8 +635,8 @@ platform e2e 已是必需检查，场景在其内部追加（无需改分支保�
 
 | 项 | 变更 | 说明 |
 |---|---|---|
-| agent-framework-ci.yml | 重建 job **`e2e-sandbox-lifecycle`**（E2E_GROUP=**lifecycle**，run.sh 据此映射 `--project=api-sandbox-lifecycle`；结构同被回滚的 e2e-sandbox-pool：`needs: [changes]` 目录过滤、mysql+redis services、mvn package、run.sh、artifact 上传） | PR-D 引入；`e2e-multi` 组内追加双副本并发用例（该 job 已是必需检查，无结构变更） |
-| **分支保护（master）** | **PR-D 合并后，管理员将 `E2E 沙箱生命周期（L 组）` 加入必需状态检查**（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`，strict/enforce_admins 维持）——必需检查由九项变**十项**；根目录 AGENTS.md「分支保护」章节与 `agent-framework/docs/e2e-ci-plan.md` 同步更新 | 与原 e2e-sandbox-pool「初期非必需」先例不同：本设计配额/TTL **默认开启**影响所有服务，L 组必须挡合并；转必需前先以非必需跑 ≥3 个 PR 观察稳定性 |
+| agent-framework-ci.yml | 重建 job **`e2e-sandbox-lifecycle`**（E2E_GROUP=**lifecycle**，run.sh 据此映射 `--project=api-sandbox-lifecycle`；结构同被回滚的 e2e-sandbox-pool：`needs: [changes]` 目录过滤、mysql+redis services、mvn package、run.sh、artifact 上传；2026-11-24 起为 matrix 两分支 `lifecycle` / `lifecycle-reuse`，后者映射 `--project=api-sandbox-lifecycle-reuse`） | PR-D 引入；`e2e-multi` 组内追加双副本并发用例（该 job 已是必需检查，无结构变更） |
+| **分支保护（master）** | **PR-D 合并后，管理员将 `E2E 沙箱生命周期（L 组 · 借出/续期）`、`E2E 沙箱生命周期（L 组 · 复用/HITL）` 加入必需状态检查**（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`，strict/enforce_admins 维持）——必需检查由九项变**十一项**；根目录 AGENTS.md「分支保护」章节与 `agent-framework/docs/e2e-ci-plan.md` 同步更新 | 与原 e2e-sandbox-pool「初期非必需」先例不同：本设计配额/TTL **默认开启**影响所有服务，L 组必须挡合并；转必需前先以非必需跑 ≥3 个 PR 观察稳定性 |
 | platform-e2e-ci | m12-sandbox-admin 场景纳入（该工作流已是必需检查） | §9.4 |
 | backend-ci / frontend-ci | 无结构变更 | U5/U6 用例进入既有 `go test` / `lint+test+build` 必需门禁 |
 | 单测门禁 | `mvn test`（U1~U4）/ `go vet + go test`（U5）/ `npm run lint+test+build`（U6）失败即红 | 既有 |

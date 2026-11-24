@@ -591,10 +591,14 @@ order MCP mock（`mock/direct-return-mcp.py`，`GET /expected?tool=&order_id=` �
 
 ### 5.14 L 组 — 沙箱生命周期（e2e-sandbox-lifecycle job，2026-11-08；sandbox-pool-opensandbox-design §9.3 PR-D）
 
-环境参数（env-up `lifecycle` 分支）：`QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / POOL_REF=pool-e2e / CONFIRM_HOLD=1min`；
+环境参数（env-up `lifecycle` / `lifecycle-reuse` 分支）：`QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / POOL_REF=pool-e2e / CONFIRM_HOLD=1min`；
+2026-11-24 起该 job 按 spec 既有分组拆 matrix 两分支并行（原 22 例单进程 8.7 分钟全为真实时间等待）：
+`lifecycle`=A+B 组 12 例（`tests/api-sandbox-lifecycle.spec.ts`）、`lifecycle-reuse`=C/D/E 组 10 例
+（`tests/api-sandbox-lifecycle-reuse.spec.ts`），分支间独占实例与 mock；公共 helper 在 `e2e/lib/sandbox-lifecycle.ts`
+（`withSql` 同时供 lifecycle-multi 引用）。
 JVM 注入 `-Dagent.sandbox.lifecycle.grace-floor-seconds=6`（生产 120s）、`-Dagent.sandbox.lifecycle.registry-overage-minutes=2`
 （生产 2h）、`-Dagent.cleanup.turn-lease-max-lifetime-minutes=1`（L12）；实例 a=lifecycle on（8100 主断言）+
-实例 off=SANDBOX_LIFECYCLE_ENABLED=false（8101，L8 基线对照）。mock OpenSandbox 扩展（§9.2）：
+实例 off=SANDBOX_LIFECYCLE_ENABLED=false（8101，L8 基线对照，仅 `lifecycle` 分支）。mock OpenSandbox 扩展（§9.2）：
 `/v1/pools` 内存 CRUD（status 变动/补位）、`renew-expiration`（计入 /stats.renews）、create 请求体记录
 （poolRef/metadata/timeout 断言源）、`/admin/fault` 扩展 `renew404/poolExhausted/slowCommandMs`
 （slowLLM 由 mock-llm 既有 `[E2E:slow]`/`[E2E:hang]` 时序包装承担，§4.1.3）。
