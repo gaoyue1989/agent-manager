@@ -70,6 +70,13 @@ class McpToolRegistrarTest {
         Files.writeString(dir.resolve("config.yaml"), content);
     }
 
+    /** 真实 OAF 包布局：configDir=mcp-configs/{server}（backend agentgen.go 同款） */
+    private void writePackageConfigYaml(String server, String content) throws Exception {
+        var dir = tempDir.resolve("mcp-configs").resolve(server);
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("config.yaml"), content);
+    }
+
     @Test
     void shouldBuildSseClient() throws Exception {
         writeConfigYaml("weather", """
@@ -443,13 +450,13 @@ class McpToolRegistrarTest {
      */
     @Test
     void shouldCollectPermissionRulesFromSyntheticServerPermissionsOnlyConfig() throws Exception {
-        writeConfigYaml("openviking", """
+        writePackageConfigYaml("openviking", """
             permissions:
               tools:
                 write: ask
                 read: deny
             """);
-        var synthetic = new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+        var synthetic = HarnessAgentFactory.syntheticOpenvikingServerConfig();
         var wrapper = mock(McpClientWrapper.class);
         when(wrapper.initialize()).thenReturn(Mono.empty());
         when(wrapper.listTools()).thenReturn(Mono.just(List.of(
@@ -476,12 +483,12 @@ class McpToolRegistrarTest {
      */
     @Test
     void syntheticRegistryEntriesShouldNotOverrideDeclaredSameNameRules() throws Exception {
-        writeConfigYaml("openviking", """
+        writePackageConfigYaml("openviking", """
             permissions:
               tools:
                 write: ask
             """);
-        var synthetic = new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false);
+        var synthetic = HarnessAgentFactory.syntheticOpenvikingServerConfig();
         var wrapper = mock(McpClientWrapper.class);
         when(wrapper.initialize()).thenReturn(Mono.empty());
         when(wrapper.listTools()).thenReturn(Mono.just(List.of(
@@ -489,7 +496,7 @@ class McpToolRegistrarTest {
         assertEquals("openviking", registrar.registerSyntheticClient(new Toolkit(), synthetic, () -> wrapper));
 
         // gen2：同名声明 + 文件更新（write: deny）——declared 现读必须胜出合成残留缓存值
-        writeConfigYaml("openviking", """
+        writePackageConfigYaml("openviking", """
             permissions:
               tools:
                 write: deny
@@ -498,12 +505,68 @@ class McpToolRegistrarTest {
         when(oaf.runtimeConfig())
             .thenReturn(new OafConfig.RuntimeConfig(0.7, 4096, false, "default"));
         when(oaf.mcpServers()).thenReturn(List.of(
-            new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false)));
+            new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "mcp-configs/openviking", false)));
 
         var result = registrar.collectPermissionRules(oaf);
 
         assertEquals(Map.of("mcp__openviking__write", "deny"), result.tools(),
             "同名声明后规则唯一来自 declared 现读，合成注册表残留不得覆盖");
+    }
+
+    /**
+     * 合成 server 真实包布局（issue #479）：权限装载必须落包内
+     * {@code mcp-configs/openviking/config.yaml}（文档规定位置）。修复前生产构造
+     * configDir="" 使 resolveMcpDir 查 {包根}/openviking/config.yaml，文档位置声明
+     * 被静默忽略（write/delete 按 bypass 放行）。
+     */
+    @Test
+    void syntheticServerShouldLoadPermissionsFromRealPackageLayout() throws Exception {
+        writePackageConfigYaml("openviking", """
+            permissions:
+              tools:
+                write: ask
+                delete: deny
+            """);
+        var synthetic = HarnessAgentFactory.syntheticOpenvikingServerConfig();
+        assertEquals("mcp-configs/openviking", synthetic.configDir());
+        var wrapper = mock(McpClientWrapper.class);
+        when(wrapper.initialize()).thenReturn(Mono.empty());
+        when(wrapper.listTools()).thenReturn(Mono.just(List.of(
+            new McpSchema.Tool("write", "", "desc", null, null, null, null),
+            new McpSchema.Tool("delete", "", "desc", null, null, null, null))));
+        assertEquals("openviking", registrar.registerSyntheticClient(new Toolkit(), synthetic, () -> wrapper));
+
+        var oaf = mock(OafConfig.class);
+        when(oaf.runtimeConfig())
+            .thenReturn(new OafConfig.RuntimeConfig(0.7, 4096, false, "default"));
+        when(oaf.mcpServers()).thenReturn(List.of());
+
+        var result = registrar.collectPermissionRules(oaf);
+
+        assertEquals(Map.of("mcp__openviking__write", "ask", "mcp__openviking__delete", "deny"), result.tools());
+    }
+
+    /**
+     * 缺省行为不变（issue #479）：包内无 mcp-configs/{server}/config.yaml 时合成 server
+     * 权限为空 Map（不限制），不因目录回退分支产生意外装载。
+     */
+    @Test
+    void syntheticServerWithoutPackageConfigShouldKeepEmptyPermissions() throws Exception {
+        var synthetic = HarnessAgentFactory.syntheticOpenvikingServerConfig();
+        var wrapper = mock(McpClientWrapper.class);
+        when(wrapper.initialize()).thenReturn(Mono.empty());
+        when(wrapper.listTools()).thenReturn(Mono.just(List.of(
+            new McpSchema.Tool("write", "", "desc", null, null, null, null))));
+        assertEquals("openviking", registrar.registerSyntheticClient(new Toolkit(), synthetic, () -> wrapper));
+
+        var oaf = mock(OafConfig.class);
+        when(oaf.runtimeConfig())
+            .thenReturn(new OafConfig.RuntimeConfig(0.7, 4096, false, "default"));
+        when(oaf.mcpServers()).thenReturn(List.of());
+
+        var result = registrar.collectPermissionRules(oaf);
+
+        assertTrue(result.tools().isEmpty());
     }
 
     // ===== MCP Apps: ui 静态声明解析 =====

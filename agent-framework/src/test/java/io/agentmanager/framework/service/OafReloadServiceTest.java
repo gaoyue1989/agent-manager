@@ -187,7 +187,7 @@ class OafReloadServiceTest {
         when(registrar.getRegisteredServerNames()).thenReturn(java.util.Set.of("server-a", "openviking"));
         when(registrar.syntheticServers()).thenReturn(java.util.Map.of("openviking",
             new McpToolRegistrar.SyntheticServer(
-                new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false),
+                HarnessAgentFactory.syntheticOpenvikingServerConfig(),
                 () -> null)));
 
         var mcpDir = tempDir.resolve("mcp-configs/server-a");
@@ -275,7 +275,7 @@ class OafReloadServiceTest {
     private void stubSyntheticResidual() {
         when(registrar.syntheticServers()).thenReturn(java.util.Map.of("openviking",
             new McpToolRegistrar.SyntheticServer(
-                new OafConfig.McpServerConfig("openviking", "openviking", "1.0.0", "", false),
+                HarnessAgentFactory.syntheticOpenvikingServerConfig(),
                 () -> null)));
     }
 

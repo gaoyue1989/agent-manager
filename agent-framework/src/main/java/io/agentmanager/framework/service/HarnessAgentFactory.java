@@ -474,6 +474,18 @@ public class HarnessAgentFactory {
     static final String SYNTHETIC_OPENVIKING_SERVER = "openviking";
 
     /**
+     * 合成 openviking server 声明的唯一构造点：configDir 与声明式 server 同布局
+     * （mcp-configs/{server}，backend agentgen.go 同款），权限装载经
+     * McpToolRegistrar.resolveMcpDir 落包内 {@code mcp-configs/openviking/config.yaml}
+     * （issue #479：修复前 configDir="" 回退查 {包根}/openviking，文档位置声明被静默忽略）。
+     */
+    static OafConfig.McpServerConfig syntheticOpenvikingServerConfig() {
+        return new io.agentmanager.framework.model.OafConfig.McpServerConfig(
+            SYNTHETIC_OPENVIKING_SERVER, SYNTHETIC_OPENVIKING_SERVER, "1.0.0",
+            "mcp-configs/" + SYNTHETIC_OPENVIKING_SERVER, false);
+    }
+
+    /**
      * 合成 MCP server openviking 注入（OVK_MCP_SHARED_CONTEXT，openviking-memory-integration-design
      * §11.1）：服务身份 ADMIN key 固定 Bearer 连接 {@code {url}/mcp}（streamable HTTP），
      * 暴露 account 级共享工具（find/search/read/rule_search/add_resource 等，见 OpenViking
@@ -513,8 +525,7 @@ public class HarnessAgentFactory {
             return new io.agentmanager.framework.mcp.UserScopedMcpClientWrapper(
                 base, io.agentmanager.framework.mcp.UserHeaderRule.EMPTY);
         };
-        var synthetic = new io.agentmanager.framework.model.OafConfig.McpServerConfig(
-            SYNTHETIC_OPENVIKING_SERVER, SYNTHETIC_OPENVIKING_SERVER, "1.0.0", "", false);
+        var synthetic = syntheticOpenvikingServerConfig();
         var registered = mcpToolRegistrar.registerSyntheticClient(toolkit, synthetic, baseFactory);
         log.info("[viking] shared-context MCP server registered: {} (tools={})",
             registered, registered != null ? "account-shared find/search/read/..." : "none");
