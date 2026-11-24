@@ -335,13 +335,23 @@ jobs:
   # QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / HOLD=1min / POOL_REF=pool-e2e / grace 6s / 超龄 2min /
   # turn-lease 硬寿命 1min，经 start-agent.sh 的 AGENT_JVM_OPTS 注入）。
   # 结构同 e2e-sandbox（mock OpenSandbox，纯 HTTP 断言不装浏览器）。
+  # 用例按 spec 既有分组拆两条 matrix 分支并行（原 22 例单进程 8.7 分钟），分支间独占实例与 mock：
+  # lifecycle = 借出/配额 + TTL/续期（含 off 基线实例，L8）；lifecycle-reuse = 复用/抢占 + HITL + 可观测/清理。
   # 初期非必需检查（§9.5：合并后先非必需跑 ≥3 个 PR 观察稳定，再由管理员转必需——九项→十项预案）。
   e2e-sandbox-lifecycle:
-    name: E2E 沙箱生命周期（L 组）
+    name: E2E 沙箱生命周期（L 组 · ${{ matrix.title }}）
     needs: [changes]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: lifecycle
+            title: 借出/续期
+          - group: lifecycle-reuse
+            title: 复用/HITL
     services:
       mysql:
         image: mysql:8.0
@@ -361,7 +371,7 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      E2E_GROUP: lifecycle
+      E2E_GROUP: ${{ matrix.group }}
       E2E_BASE_PORT: "8100"
       E2E_LIFECYCLE_OFF_BASE: http://127.0.0.1:8101
       MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
@@ -382,11 +392,11 @@ jobs:
       - working-directory: agent-framework/e2e
         run: node scripts/check-fixtures.mjs
       - working-directory: agent-framework/e2e
-        run: ./scripts/run.sh lifecycle
+        run: ./scripts/run.sh "$E2E_GROUP"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-logs-sandbox-lifecycle
+          name: e2e-logs-sandbox-${{ matrix.group }}
           # .runtime 是隐藏目录（.开头），默认被跳过——失败排障必须拿到应用/沙箱日志
           include-hidden-files: true
           path: |

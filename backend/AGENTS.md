@@ -61,8 +61,8 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）；超限类错误（ErrZipTooLarge/ErrTooManyFiles/ErrExtractTooLarge）统一 400 JSON（issue #165）——入口链路（宿主机 nginx / ingress-nginx `proxy-body-size: 200m` / platform-router `client_max_body_size`）须宽于应用 20MB 上限，超限由 backend 出 JSON
 - skills/ 目录合规检查（issue #163）：`service/skillcheck.go` `checkSkillDirs` 宽松模式——上传登记写包 `warningsJson`、`SpaceSkills` 产条目 `issues`；规则对齐运行时 OafConfigLoader 降级验证（SKILL.md 存在性 / frontmatter name/description / 名称正则与 64 长度 / 描述 1024），只提示不阻断
 - 导入模式 env（issue #161）：`CreateAgentImport` 与 harness 同走 `buildPublishEnv`——平台默认恒合并、模型连接可选（勾选则校验+注入+下发登记）；派生副本发布失败回删，本空间已上传包保留
-- 平台默认的沙箱分组键（`SANDBOX_*`）按表单沙箱开关过滤（issue #402）：`platformDefaultEnv` 仅在 `sandbox.enabled=true` 时预填（表单显式值优先、平台默认补空）；关闭/未声明不注入任何 `SANDBOX_*`（m10 B3 契约），其余分组键不受影响
-- 编辑保存 env 合并（issue #478）：`UpdateAgent` 仅用表单管辖键（`buildFormEnv`：LLM_* / MCP_TOKEN_* / 集成认证头 / 沙箱表单四键 / Memory 注入键）覆盖既有服务 env，平台默认（`platformDefaultEnv`）只对 plain 与 secret 均缺失的键补位——用户经 UpdateEnv 显式自定义的 `CHECKPOINT_JDBC_URL` / `AGENT_REDIS_URL` / `SANDBOX_SKILLS_SHARED_STORE` 等不被覆盖、不触发共享库再派生（服务静默切库根因）；`buildPublishEnv`（平台默认全量预填 + 表单覆盖）仅保留创建态语义
+- 平台默认的 sandbox 分组键（`SANDBOX_*` / `OPENSANDBOX_SERVER_URL` / `OPENSANDBOX_API_KEY`）按表单沙箱开关整组过滤（issue #402/#489）：`platformDefaultEnv` 仅在 `sandbox.enabled=true` 时预填（表单显式值优先、平台默认补空）；关闭/未声明整组不注入（m10 B3 契约，管理面凭据不下发无沙箱 Pod），其余分组键不受影响
+- 编辑保存 env 合并（issue #478）：`UpdateAgent` 仅用表单管辖键（`buildFormEnv`：LLM_* / MCP_TOKEN_* / 集成认证头 / 沙箱表单四键 / Memory 注入键）覆盖既有服务 env；表单显式关闭沙箱时 sandbox 分组键（含敏感份）整组清理（issue #489，空串走 `resolveEnvMerge` 三态显式删除）；平台默认（`platformDefaultEnv`）只对 plain 与 secret 均缺失的键补位——用户经 UpdateEnv 显式自定义的 `CHECKPOINT_JDBC_URL` / `AGENT_REDIS_URL` / `SANDBOX_SKILLS_SHARED_STORE` 等不被覆盖、不触发共享库再派生（服务静默切库根因）；`buildPublishEnv`（平台默认全量预填 + 表单覆盖）仅保留创建态语义
 
 ## 控制台与跨集群导出（auth/console/admin + export/workspaceconfig + imagebuilder）
 
@@ -73,7 +73,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
   - values/manifest 渲染（`exportvalues.go`）：四层合并 L0 chart 默认 < L1 工作空间运行时默认 < L2 用户导出覆盖（仅新增，撞 L1 已配置键/L3 保留键 400）< L3 平台生成；敏感键（platformconfig.SensitiveKeys() ∪ 请求 secretKeys）路由 values `secretEnv` 段（chart 渲染为服务 Secret）
   - OAF 配置镜像直推（`internal/imagebuilder`）：busybox 基底（`EXPORT_BASE_IMAGE`，默认 busybox:1.36）+ 包目录 tar 层挂 /oaf，go-containerregistry `remote.Write` 直推目标仓库（仓库名 `oaf-{short}`）——纯数据镜像、无 docker 依赖、无特权；`EXPORT_REGISTRY_USERNAME/PASSWORD` 为仓库凭据，仅作用于推送目标 registry（基底拉取对非推送 registry 一律匿名，凭证不送达第三方 token 端点，issue #227）；`core.Images` 未装配时创建导出单 400 不降级假成功
   - 交付物：charts/oaf-agent Helm chart + `values.yaml`/`manifest.json`（ValuesYAML 不进 JSON 响应，仅 `/console/exports/:id` 文件端点下载并写审计）；人工推进 `POST /console/exports/:id/status`（归属与 owner/admin 权限由 service 层裁决）
-- **工作空间配置**（`workspaceconfig.go` + `workspaceruntime.go`）：`/console/workspaces/:ws/config/*`——runtime-defaults 读写（GET=成员，PUT=owner/admin）+ templates/:group、registry、mcp-connectors 骨架端点；runtime-defaults 键空间 = 29 模板键（KnownKeys − CHECKPOINT_JDBC_URL；sandbox-pool 3 键并入后 24→27、skills-syncd SKILLSYNC_TOKEN 与 issue #392 SANDBOX_SKILLS_SHARED_STORE 并入后 27→29，测试锁定 37）+ 8 导出键，三态语义对齐 UpdatePlatformConfig（非空=设置、空串=删除、缺失=不变）
+- **工作空间配置**（`workspaceconfig.go` + `workspaceruntime.go`）：`/console/workspaces/:ws/config/*`——runtime-defaults 读写（GET=成员，PUT=owner/admin）+ templates/:group、registry、mcp-connectors 骨架端点；runtime-defaults 键空间 = 28 模板键（KnownKeys − CHECKPOINT_JDBC_URL；sandbox-pool 3 键并入后 24→27、issue #392 SANDBOX_SKILLS_SHARED_STORE 并入后 27→28、2026-11-24 skills-syncd 去 token 移除 SKILLSYNC_TOKEN 后 29→28，测试锁定 36）+ 8 导出键，三态语义对齐 UpdatePlatformConfig（非空=设置、空串=删除、缺失=不变）
 
 ## 平台默认配置与敏感 env Secret 化（platformconfig + envroute）
 

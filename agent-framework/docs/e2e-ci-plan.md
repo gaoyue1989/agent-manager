@@ -107,7 +107,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | `eval-selftest` | — | 评测飞轮离线自检（`bench/eval/flywheel.py selftest`：帧映射/检查器/HITL 视图/错误断言/失败分类，零网络零 LLM） | needs: changes（与单测并行） | <1min |
 | `e2e-core` | 1 | S/F/H/M/A/FW/RD/X/CG/Q86 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.13；SK/MEM/HA 组无 §5 小节，用例定义见 [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) §4，同落 api-core 项目） | needs: changes（与单测并行） | ~12-15min |
 | `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7）+ L 组多副本并发（§5.14 M1-M3：双副本 acquire/改绑竞态/P3 闲置重入互斥；副本 env 增开沙箱+生命周期，sandbox-pool-opensandbox-design §9.3） | needs: changes（与单测并行） | ~12-18min |
-| `e2e-sandbox-lifecycle`（L 组，2026-11-08，sandbox-pool-opensandbox-design PR-D §9.3） | 2（lifecycle on + off 基线对照，8100/8101）+ mock 沙箱（池/renew-expiration/故障注入 §9.2） | L1-L20：配额仲裁/预检 409/PENDING 不变量/假 409 修正/总开关回退/T2-T4 续期/A2A 不被抢/超龄剔除/renew404/LRU 复用/被抢重建/租约硬释放/同 user 残留/挂起保留窗/到期重建/debug 端点/定时清理 | needs: changes（非必需检查；§9.5：≥3 个 PR 观察稳定后由管理员转必需，九项→十项） | ~15-20min |
+| `e2e-sandbox-lifecycle`（L 组，2026-11-08，sandbox-pool-opensandbox-design PR-D §9.3；2026-11-24 起按 spec 既有分组拆 matrix 两分支并行，见 §5.14） | `lifecycle` 分支 2 实例（on + off 基线对照，8100/8101）/ `lifecycle-reuse` 分支 1 实例，各配 mock 沙箱（池/renew-expiration/故障注入 §9.2） | L1-L20：配额仲裁/预检 409/PENDING 不变量/假 409 修正/总开关回退/T2-T4 续期/A2A 不被抢/超龄剔除/renew404/LRU 复用/被抢重建/租约硬释放/同 user 残留/挂起保留窗/到期重建/debug 端点/定时清理 | needs: changes（非必需检查；§9.5：≥3 个 PR 观察稳定后由管理员转必需，九项→十一项） | 每分支 ~5.5-6.5min（并行；拆分前单 job ~10min） |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
 | `e2e-protocol`（T 组先行 + J 组，2026-09-30/10-01） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；J0/J 组 `/a2a/jobs` 幂等 Job HTTP 面（401/400/同键同 taskId/GET 404、卡片 metadata 透出）；spawn/父崩溃/超时已由 protocol-multi P1/P2/P4 承接，确认/拒绝两场景仍待二期 | needs: changes（非必需检查） | ~5min |
 | `e2e-protocol-multi`（P 组，2026-09-30） | lead×2 + member×2 + 双 nginx LB（8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本；`AGENT_PROTOCOL_EVENT_BUS=redis`，共享 MySQL/Redis） | P1-P7 跨副本委派（travel-fulfillment 设计 §18.4/§18.10）：spawn 随机路由→收割汇总、lead kill 接管、member 事件跨副本对账、TTL 恰好一次、无粘性冒烟、存量零影响、A2A Job 同键收敛（用例定义见 §5.12） | needs: changes（**必需检查**） | timeout 30min |
@@ -591,10 +591,14 @@ order MCP mock（`mock/direct-return-mcp.py`，`GET /expected?tool=&order_id=` �
 
 ### 5.14 L 组 — 沙箱生命周期（e2e-sandbox-lifecycle job，2026-11-08；sandbox-pool-opensandbox-design §9.3 PR-D）
 
-环境参数（env-up `lifecycle` 分支）：`QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / POOL_REF=pool-e2e / CONFIRM_HOLD=1min`；
+环境参数（env-up `lifecycle` / `lifecycle-reuse` 分支）：`QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / POOL_REF=pool-e2e / CONFIRM_HOLD=1min`；
+2026-11-24 起该 job 按 spec 既有分组拆 matrix 两分支并行（原 22 例单进程 8.7 分钟全为真实时间等待）：
+`lifecycle`=A+B 组 12 例（`tests/api-sandbox-lifecycle.spec.ts`）、`lifecycle-reuse`=C/D/E 组 10 例
+（`tests/api-sandbox-lifecycle-reuse.spec.ts`），分支间独占实例与 mock；公共 helper 在 `e2e/lib/sandbox-lifecycle.ts`
+（`withSql` 同时供 lifecycle-multi 引用）。
 JVM 注入 `-Dagent.sandbox.lifecycle.grace-floor-seconds=6`（生产 120s）、`-Dagent.sandbox.lifecycle.registry-overage-minutes=2`
 （生产 2h）、`-Dagent.cleanup.turn-lease-max-lifetime-minutes=1`（L12）；实例 a=lifecycle on（8100 主断言）+
-实例 off=SANDBOX_LIFECYCLE_ENABLED=false（8101，L8 基线对照）。mock OpenSandbox 扩展（§9.2）：
+实例 off=SANDBOX_LIFECYCLE_ENABLED=false（8101，L8 基线对照，仅 `lifecycle` 分支）。mock OpenSandbox 扩展（§9.2）：
 `/v1/pools` 内存 CRUD（status 变动/补位）、`renew-expiration`（计入 /stats.renews）、create 请求体记录
 （poolRef/metadata/timeout 断言源）、`/admin/fault` 扩展 `renew404/poolExhausted/slowCommandMs`
 （slowLLM 由 mock-llm 既有 `[E2E:slow]`/`[E2E:hang]` 时序包装承担，§4.1.3）。

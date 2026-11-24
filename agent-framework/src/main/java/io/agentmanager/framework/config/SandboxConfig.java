@@ -68,12 +68,10 @@ public record SandboxConfig(
     /** 会话级 agent 空闲过期分钟（{@code SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES}，默认 30） */
     @DefaultValue("30") int sessionAgentCacheTtlMinutes,
     /**
-     * skills-syncd 内部端点鉴权 token（{@code SKILLSYNC_TOKEN}，空 = 端点关闭 404）；
      * bundle 磁盘缓存目录（{@code SKILLSYNC_BUNDLE_CACHE_DIR}，空 = 运行时解析 workspace 卷内
      * {@code {workspaceBase}/tmp/skills-bundle-cache}，业务 Pod /tmp 不可写实测 issue #358，
      * 解析在 SkillBundleService.resolveBundleCacheDir）
      */
-    @DefaultValue("") String skillsSyncToken,
     @DefaultValue("") String skillsBundleCacheDir,
     /**
      * 软链农场总闸（{@code SANDBOX_SKILLS_SHARED_STORE}，issue #392 起缺省 /skills-store）：
@@ -109,13 +107,12 @@ public record SandboxConfig(
             projectionEnabled, guardEnabled, guardLeaseSeconds,
             skillRevisionGateEnabled, syncSnapshotDiffEnabled,
             true, sessionAgentIsolation, sessionAgentCacheMax, sessionAgentCacheTtlMinutes,
-            "", "", "", opensandbox);
+            "", "", opensandbox);
     }
 
     /**
      * 兼容旧 18 参按位构造（skills-syncd 端点加组件前曾是绑定主构造器，存量测试按此形态传参，
-     * 与 AgentManagerProperties 兼容构造器同源问题）：skills-sync token/缓存目录取默认值
-     * （token 空 = 端点关闭）。
+     * 与 AgentManagerProperties 兼容构造器同源问题）：bundle 缓存目录取默认值。
      */
     public SandboxConfig(boolean enabled, String image, int timeoutMinutes, int requestTimeoutSeconds,
                          int memoryMb, int cpuCount,
@@ -132,7 +129,7 @@ public record SandboxConfig(
             skillRevisionGateEnabled, syncSnapshotDiffEnabled,
             syncSkipPackageBaselineEnabled, sessionAgentIsolation, sessionAgentCacheMax,
             sessionAgentCacheTtlMinutes,
-            "", "", "", opensandbox);
+            "", "", opensandbox);
     }
 
     public record OpenSandboxConfig(

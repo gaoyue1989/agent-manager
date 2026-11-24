@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"agent-manager/backend/internal/oaf"
+	"agent-manager/backend/internal/service/platformconfig"
 	"agent-manager/backend/internal/store"
 )
 
@@ -1001,6 +1002,104 @@ func TestAgentGenSandboxPlatformDefaultsGate(t *testing.T) {
 	}
 	if keys := sandboxKeys(envOf(svcE)); len(keys) != 0 {
 		t.Fatalf("issue #402：沙箱关闭的 Agent 编辑保存不得注入 SANDBOX_*：%v", keys)
+	}
+}
+
+// TestAgentGenSandboxGroupEnvGate（issue #489）：sandbox 分组整组门控——#402（PR #455）
+// 只按 SANDBOX_ 前缀过滤，同组的 OPENSANDBOX_SERVER_URL / OPENSANDBOX_API_KEY（敏感）
+// 在沙箱关闭时仍被平台默认预填下发（Pod 持有管理面凭据）；编辑页把沙箱开→关后旧
+// SANDBOX_* 键也不清理（plain 与敏感份双残留）。关闭 = 分组全零注入 + 编辑关闭 = 分组
+// 全量清理；开启场景平台默认补空语义不变。
+func TestAgentGenSandboxGroupEnvGate(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-sbx-0489", "沙箱组泄漏空间")
+	owner := seedUserIn(t, c, "sbxg", "user", ws.ID, "owner")
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+	if _, err := c.UpdatePlatformConfig(map[string]string{
+		"OPENSANDBOX_SERVER_URL":         "opensandbox.svc:8090",
+		"OPENSANDBOX_API_KEY":            "sk-leak-probe",
+		"SANDBOX_IMAGE":                  "registry.example.com/leak-probe:v1",
+		"SANDBOX_MEMORY_MB":              "2048",
+		"AGENT_REDIS_COMMAND_TIMEOUT_MS": "2000",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mkForm := func(name string) *AgentForm {
+		form := goldenForm()
+		form.Name = name
+		form.ModelConnections[0].ConnectionID = conn.ID
+		form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+		return form
+	}
+	envOf := func(svc *store.ServiceEntity) map[string]string {
+		t.Helper()
+		if err := c.DB.First(svc, svc.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		plain, secret, err := c.partitionServiceEnv(svc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range secret {
+			plain[k] = v
+		}
+		return plain
+	}
+	groupKeysOf := func(svc *store.ServiceEntity) []string {
+		t.Helper()
+		env := envOf(svc)
+		group := platformconfig.GroupKeys("sandbox")
+		var keys []string
+		for k := range env {
+			if group[k] {
+				keys = append(keys, k)
+			}
+		}
+		return keys
+	}
+
+	off, on := false, true
+
+	// A 创建显式关闭：两级 env 均无 sandbox 分组键（含 OPENSANDBOX_*）；非沙箱平台默认照常预填
+	fa := mkForm("sbx-group-off")
+	fa.Sandbox = &SandboxForm{Enabled: &off}
+	svcA, _, err := c.CreateAgent(ws.ID, owner.ID, fa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys := groupKeysOf(svcA); len(keys) != 0 {
+		t.Fatalf("issue #489：沙箱关闭的 Agent 不得注入 sandbox 分组键（含 OPENSANDBOX_*）：%v", keys)
+	}
+	if envOf(svcA)["AGENT_REDIS_COMMAND_TIMEOUT_MS"] != "2000" {
+		t.Fatal("非沙箱平台默认应照常预填")
+	}
+
+	// B 创建开启：分组键照常预填（回归护栏——整组过滤不得误伤开启链路）
+	fb := mkForm("sbx-group-on")
+	fb.Sandbox = &SandboxForm{Enabled: &on}
+	svcB, _, err := c.CreateAgent(ws.ID, owner.ID, fb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envB := envOf(svcB)
+	if envB["OPENSANDBOX_SERVER_URL"] != "opensandbox.svc:8090" || envB["SANDBOX_IMAGE"] != "registry.example.com/leak-probe:v1" {
+		t.Fatalf("开启沙箱时分组平台默认应照常预填：%v", envB)
+	}
+
+	// C 编辑关闭（开→关）：分组键 plain + 敏感份全量清理
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svcB.ID).
+		Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+	fc := mkForm("sbx-group-on")
+	fc.Sandbox = &SandboxForm{Enabled: &off}
+	if _, _, err := c.UpdateAgent(ws.ID, owner.ID, svcB.ID, fc); err != nil {
+		t.Fatal(err)
+	}
+	if keys := groupKeysOf(svcB); len(keys) != 0 {
+		t.Fatalf("issue #489：编辑关闭沙箱后旧 sandbox 分组键必须清理（plain+secret）：%v", keys)
 	}
 }
 

@@ -230,36 +230,22 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 
 2. **egress 放行**：池 Pod → 本服务 svc 出网须在 OpenSandbox egress 策略放行
    `oaf-{name}-svc.agent-platform.svc`（或集群内网段），否则守护拉取持续退避、store 无库（fail-open）。
-3. **token Secret（自动 ensure，消费方落点）**：`SKILLSYNC_TOKEN` 是平台 env 模板敏感键
-   （platformconfig/template.go sandbox 组）——服务 env 携带该键即自动路由进服务 Secret
-   （无需显式 `secretKeys`，明文不落 CM/env_json），发布/改 env 链路幂等 ensure
-   `{name}-skillsync-token`（data 键 `token`）直落池 workload ns **`opensandbox`**——池模板
-   secretKeyRef 在该 ns 内解析，K8s 跨 ns 引用不成立，服务 ns（agent-platform）不产副本。
-   前置：deploy-opensandbox.sh 步骤 4.1 已授予 platform-backend 于该 ns 的 Secret 读写删 RBAC
-   （脚本自动）；发布/env 链路仅在服务配置或撤销 `SKILLSYNC_TOKEN` 时触达该 RBAC——服务
-   env 从未携带该键的发布/改 env/重发布/重新上线零跨 ns 访问，未部署沙箱或缺授权的环境
-   发布照常可用（issue #409：曾对所有发布无条件探查池 ns，缺授权时报
-   `skillsync token secret ... forbidden`）。建池 SecretExists 前提门（`disableSyncd` 未开
-   时默认执行）仍触达该 ns——缺授权时建池报 `skillsync token secret check ... forbidden`；
-   轮换/撤销或建池报 forbidden 时重跑 deploy-opensandbox.sh 步骤 4.1 即恢复，存量集群需重
-   apply manifests/platform.yaml 使 ClusterRole 补上 delete 动词。
-   轮换 = env 表单改 `SKILLSYNC_TOKEN`（单写入口，两处消费自动同值）+ 池 Pod 重建（D-8 契约）；
-   撤销 = env 表单把 `SKILLSYNC_TOKEN` 置空串保存（三态语义「空串=删除」）→ 池 ns token
-   Secret 同步删除、服务侧内部端点关闭（404）；删服务连带清理（issue #350 修复的静默残留缺口）。
-   撤销守卫（issue #396）：绑定池仍在运行或管理面不可达时撤销被拒（409）；唯一可行顺序
-   为**先删池 → 撤销 →（可选）重建池**——撤销后 token Secret 已删，重建池缺 token 自动按
-   无守护旧行为建（`disableSyncd` 重建不行：守卫只看池是否存在，重建后池仍在仍被拒）。
-   存量集群 agent-platform ns 的同名 Secret 为无消费方遗留物，可手工删除。
-4. **建池**（PR-4a 默认开启）：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag——
-   token Secret 在位（服务 env 携带 `SKILLSYNC_TOKEN`）时建池请求缺省即注入三键
-   （`SKILLSYNC_BASE_URL` 按 `{k8s名}-svc.{ns}.svc` 派生 + token secretKeyRef + `SKILLSYNC_INTERVAL=1m`）
-   并开启 commandWrapper，无需手填；`extraEnv` 仅作键级覆盖通道（灰度改 INTERVAL 等）。
-   服务未配 token Secret → 该池按旧行为建（补配后重建池即默认开启）；`disableSyncd: true`
-   显式关闭（与 extraEnv 互斥）。镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不
-   crashloop（D-1）。
-   删除/撤销守卫（issue #359/#396）：绑定池在运行时删除服务或撤销 token Secret 均被拒
-   （409 提示先删池）——池模板 secretKeyRef 引用服务 token Secret，先删会使池新 Pod 卡
-   CreateContainerConfigError；管理面不可达时同样拒绝（池状态未知即不动）。
+3. **建池**（默认开启）：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag——建池请求缺省即
+   注入两键（`SKILLSYNC_BASE_URL` 按 `{k8s名}-svc.{ns}.svc` 派生 + `SKILLSYNC_INTERVAL=1m`）并开启
+   commandWrapper，无需手填；`extraEnv` 仅作键级覆盖通道（灰度改 INTERVAL 等，只收非空 value）；
+   `disableSyncd: true` 显式关闭（与 extraEnv 互斥）。镜像/模板任一先行或回退均被偏斜守卫兜底为
+   无守护旧行为，不 crashloop（D-1）。
+   **OpenSandbox 是外部服务**：平台只经其 API（建池模板的 env/args）传递同步配置，不向其命名空间写
+   任何 K8s 对象、不持有其 RBAC（`/internal/skills/*` 端点无鉴权，见「内部端点安全模型」）。
+   删除守卫（issue #359）：绑定池在运行时删除服务被拒（409 提示先删池）——池与服务一一对应；
+   管理面不可达时同样拒绝（池状态未知即不动）。
+4. **存量集群一次性收尾**（2026-11-24 去 token，按序）：先滚动业务 Pod 到新版 agent-framework
+   （端点不再校验，对仍带 token 的旧池兼容）→ 升级 backend → 删池重建（上游改模板必须重建）→
+   删除遗留授权与 Secret：
+   `kubectl delete clusterrole,clusterrolebinding platform-backend-skillsync --ignore-not-found`、
+   `kubectl -n opensandbox delete role,rolebinding platform-backend-skillsync platform-backend-skillsync-token --ignore-not-found`（脚本 4.1 与更早清单的两个历史名）、
+   `kubectl -n opensandbox delete secret -l app.kubernetes.io/managed-by=oaf-platform`。
+   平台配置与服务 env 里残留的 `SKILLSYNC_TOKEN` 值不再被读取，可留可清。
 
 **升级**：重跑 `./scripts/build-skillsync-image.sh`（同 tag 覆盖）→ 直建新沙箱即用新镜像；池化 Pod
 须重建才换镜像（沙箱管理页销毁 warm 实例，或删池重建——上游改模板必须删池重建）。
@@ -268,7 +254,7 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 
 1. 镜像 tag 回退：池/服务镜像改回上一 tag（如 `opensandbox/code-interpreter:v1.1.0`）后重建池。
 2. 池模板参数摘除（PR-4a）：建池/重建池请求带 `disableSyncd: true`。
-3. 清理：删除 ns `opensandbox` 的 `{name}-skillsync-token` Secret（唯一副本，落点即消费方）+ 回收 egress 放行条目。
+3. 清理：回收 egress 放行条目。
 
 **PR-4b 语义**（agent-framework 侧）：tar 物化路径已退役——`SANDBOX_SKILLS_SHARED_STORE` 为总闸
 （空 = 包技能不投放，**不是**「回退旧投影」）；farm 判定降级（端点不可达/版本不一致/store 缺失）=
@@ -428,7 +414,7 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 
 > ⚠️ **router 模式启动自检**：suffix 空时 backend 启动即检查 `platform-router-svc` 存在，缺失则 CrashLoop（报错指向 §七之三的 manifest）——先 apply platform-router 再升级 backend。**suffix 空 + `INGRESS_TEMPLATE` 非空同样启动即拒**（router 无 per-service Ingress，模板无处生效）。
 
-**内部端点安全模型**（skills-syncd 内部端点 `/internal/skills/**` 与 actuator `/actuator/**`）：前者的访问控制以 **token 门为主**——合法消费经 `SKILLSYNC_BASE_URL` 集群内直连 `oaf-{name}-svc:8100` 携带 `SKILLSYNC_TOKEN`，无 token 401、未配 token 端点关闭（404）；actuator 无鉴权，仅限集群内消费（D-5 判定打点直连 svc）。两者不经业务域名暴露由业务入口排除兜底：`/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404——router nginx 内置排除（§七之三 manifest）与 host 模式 Ingress 排除表同语义，为**纵深防御**（两种模式外部表现一致），不是 token 之外的第二套鉴权。
+**内部端点安全模型**（skills-syncd 内部端点 `/internal/skills/**` 与 actuator `/actuator/**`）：两者均**无鉴权、仅限集群内消费**（合法消费分别为守护经 `SKILLSYNC_BASE_URL` 集群内直连 `oaf-{name}-svc:8100`、D-5 判定打点直连 svc；2026-11-24 去 token 起 `/internal/skills` 与 actuator 同级，只读、内容为已发布技能）。不经业务域名暴露由业务入口排除保证：`/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404——router nginx 内置排除（§七之三 manifest）与 host 模式 Ingress 排除表同语义（两种模式外部表现一致），应用层 `SemicolonPathRejectFilter` 封死分号矩阵参数绕过。**入口排除是这两个内部路径唯一的对外防线**，改动排除规则须按此对待。
 
 host 模式切换（后缀必须以 `.` 开头、各段 ≤63、叠加最长 K8sName 后总长 ≤253）：
 

@@ -1,0 +1,233 @@
+name: 平台 E2E 环境拉起
+description: >-
+  构建 CI 镜像并在 kind 集群拉起平台（backend/frontend/mock/MySQL/Redis/router/ingress），
+  供平台 E2E 各分片使用；镜像构建与 ingress 安装后台执行，与集群初始化重叠。
+inputs:
+  dockerhub-user:
+    description: Docker Hub 用户名（基础镜像缓存站未命中时回落拉取）
+    required: true
+  dockerhub-token:
+    description: Docker Hub 访问令牌
+    required: true
+  agent-image:
+    description: 可选，固定业务镜像（如 gaoyue1989/agent-framework:agentscope-2.1.0-v20261018）；留空则取 Docker Hub 最新 agentscope-* tag
+    required: false
+    default: ''
+outputs:
+  agent-image:
+    description: 实际使用的业务镜像（真实 agent-framework 或 mock-agent:ci）
+    value: ${{ steps.agent-image.outputs.image }}
+  agent-runtime:
+    description: 业务运行时形态：real / mock
+    value: ${{ steps.agent-image.outputs.runtime }}
+runs:
+  using: composite
+  steps:
+    - name: 配置 Docker Hub 缓存站（免费版限额 200 次拉取/小时，命中缓存站不计）
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo mkdir -p /etc/docker
+        CONF=$(mktemp)
+        if [ -f /etc/docker/daemon.json ]; then
+          jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' /etc/docker/daemon.json > "$CONF"
+        else
+          echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' > "$CONF"
+        fi
+        sudo install -m 644 "$CONF" /etc/docker/daemon.json
+        rm -f "$CONF"
+        sudo systemctl restart docker
+        for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+        docker info --format 'Registry Mirrors: {{.RegistryConfig.Mirrors}}'
+
+    - name: 登录 Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ inputs.dockerhub-user }}
+        password: ${{ inputs.dockerhub-token }}
+
+    - name: 后台并行构建 CI 镜像
+      shell: bash
+      run: |
+        set -euo pipefail
+        BUILD_DIR=$(mktemp -d)
+        echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        bg images backend docker build --build-arg GOPROXY=https://proxy.golang.org,direct -t platform-backend:ci backend
+        bg images frontend docker build -t platform-frontend:ci frontend
+        bg images mock-llm docker build -t mock-llm:ci e2e/ci/mock-llm
+        bg images mock-sandbox docker build -t mock-sandbox:ci e2e/ci/mock-sandbox
+
+    - name: 创建 kind 集群
+      uses: helm/kind-action@v1
+      with:
+        version: v0.27.0
+        cluster_name: agent-manager
+        config: e2e/ci/kind-config.yaml
+        wait: 5m
+
+    - name: 先行部署基础设施（MySQL/Redis/router 随集群初始化，与镜像构建重叠）
+      shell: bash
+      run: |
+        kubectl kustomize --load-restrictor=LoadRestrictionsNone manifests/ci-infra | kubectl apply -f -
+
+    - name: 后台安装 ingress-nginx（kind provider）
+      shell: bash
+      run: |
+        set -euo pipefail
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        bg cluster ingress bash "$GITHUB_ACTION_PATH/ingress-nginx.sh"
+
+    - name: 解析业务镜像（优先拉取真实 agent-framework，超时/失败回落 mock）
+      id: agent-image
+      shell: bash
+      env:
+        E2E_AGENT_IMAGE: ${{ inputs.agent-image }}
+      run: |
+        set -uo pipefail
+        IMAGE=""
+        RUNTIME="mock"
+
+        if [ -n "${E2E_AGENT_IMAGE:-}" ] && [ "${E2E_AGENT_IMAGE}" != "mock-agent:ci" ]; then
+          echo "尝试仓库变量 E2E_AGENT_IMAGE=${E2E_AGENT_IMAGE}"
+          if timeout 300 docker pull "${E2E_AGENT_IMAGE}"; then
+            IMAGE="${E2E_AGENT_IMAGE}"
+          fi
+        fi
+
+        if [ -z "$IMAGE" ]; then
+          echo "查询 Docker Hub 上 gaoyue1989/agent-framework 的最新 agentscope-* tag ..."
+          TAGS=$(curl -fsS --max-time 30 \
+            "https://hub.docker.com/v2/repositories/gaoyue1989/agent-framework/tags?page_size=100&ordering=last_updated" \
+            2>/dev/null | jq -r '.results[]?.name' || true)
+          for TAG in $TAGS; do
+            case "$TAG" in
+              agentscope-*) ;;
+              *) continue ;;
+            esac
+            echo "尝试 gaoyue1989/agent-framework:$TAG"
+            if timeout 300 docker pull "gaoyue1989/agent-framework:$TAG"; then
+              IMAGE="gaoyue1989/agent-framework:$TAG"
+              break
+            fi
+          done
+        fi
+
+        if [ -n "$IMAGE" ]; then
+          if timeout 300 kind load docker-image "$IMAGE" --name agent-manager; then
+            RUNTIME="real"
+          else
+            echo "::warning::镜像 $IMAGE 导入 kind 超时/失败，回落 mock-agent"
+            IMAGE=""
+          fi
+        fi
+
+        if [ -z "$IMAGE" ]; then
+          docker build -t mock-agent:ci e2e/ci/mock-agent
+          kind load docker-image mock-agent:ci --name agent-manager
+          IMAGE="mock-agent:ci"
+          echo "::warning::真实 agent-framework 镜像不可用，使用 mock-agent；运行时会话类断言将跳过"
+        else
+          echo "✅ 使用真实 agent-framework 镜像：$IMAGE"
+        fi
+
+        echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+        echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
+        echo "resolved=$IMAGE runtime=$RUNTIME"
+
+    - name: 等待镜像构建
+      shell: bash
+      run: |
+        set -euo pipefail
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        wait_group images
+
+    - name: 导入本地镜像到 kind
+      shell: bash
+      run: |
+        set -euo pipefail
+        for img in platform-backend:ci platform-frontend:ci mock-llm:ci mock-sandbox:ci; do
+          kind load docker-image "$img" --name agent-manager
+        done
+
+    - name: 渲染 CI 清单（注入业务镜像）
+      shell: bash
+      run: |
+        sed -i "s|__AGENT_IMAGE__|${{ steps.agent-image.outputs.image }}|g" manifests/ci/patch-backend-env.yaml
+        grep -n "AVAILABLE_IMAGES\|DEFAULT_IMAGE" -A1 manifests/ci/patch-backend-env.yaml
+
+    - name: 部署平台
+      shell: bash
+      run: |
+        set -euo pipefail
+        kubectl kustomize --load-restrictor=LoadRestrictionsNone manifests/ci | kubectl apply -f -
+        kubectl -n agent-platform wait --for=condition=ready pod -l app=oaf-mysql --timeout=300s
+        kubectl -n agent-platform rollout status deploy/platform-router --timeout=180s
+        kubectl -n agent-platform rollout status deploy/mock-llm --timeout=120s
+        kubectl -n agent-platform rollout status deploy/mock-sandbox --timeout=120s
+        kubectl -n agent-platform rollout status deploy/platform-backend --timeout=300s
+        kubectl -n agent-platform rollout status deploy/platform-frontend --timeout=300s
+        kubectl -n agent-platform get pods -o wide
+
+    - name: 初始化平台默认配置（mock LLM / 集群内 MySQL+Redis）
+      shell: bash
+      run: |
+        set -euo pipefail
+        BASE=http://localhost:30080/api/v1
+        for i in $(seq 1 30); do
+          if curl -fsS "$BASE/../../healthz" >/dev/null 2>&1; then break; fi
+          sleep 2
+        done
+        curl -fsS -X PUT "$BASE/platform-config" -H 'Content-Type: application/json' -d '{
+          "values": {
+            "LLM_BASE_URL": "http://mock-llm.agent-platform.svc.cluster.local:8080/v1",
+            "LLM_MODEL_ID": "e2e-mock",
+            "LLM_API_KEY": "e2e-dummy-key",
+            "CHECKPOINT_JDBC_URL": "jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
+            "CHECKPOINT_USERNAME": "oaf",
+            "CHECKPOINT_PASSWORD": "OafPlatform2026",
+            "AGENT_REDIS_URL": "redis://oaf-redis.agent-platform.svc.cluster.local:6379",
+            "OPENSANDBOX_SERVER_URL": "mock-sandbox.agent-platform.svc.cluster.local:8090",
+            "OPENSANDBOX_API_KEY": "e2e-placeholder"
+          }
+        }' >/dev/null
+        echo "平台默认配置已写入"
+
+    - name: 播种 Skill 市场条目
+      shell: bash
+      run: |
+        set -euo pipefail
+        kubectl -n agent-platform exec -i deploy/platform-backend -- \
+          sh -c 'mkdir -p /data/market/builtin/e2e-market-skill && cat > /data/market/builtin/e2e-market-skill/SKILL.md' <<'EOF'
+        ---
+        name: e2e-market-skill
+        description: E2E market install probe
+        ---
+
+        Market skill body.
+        EOF
+        kubectl -n agent-platform exec deploy/oaf-mysql -- \
+          mysql -h127.0.0.1 -uoaf -pOafPlatform2026 oaf_platform -e "
+            INSERT INTO skill_market_items
+              (source_id, \`key\`, display_name, description, tags_json, downloads, bundle_dir, enabled)
+            SELECT id, 'e2e-market-skill', 'E2E Market Skill', 'market install probe', '[\"e2e\"]', 0,
+                   'market/builtin/e2e-market-skill', 1
+            FROM skill_market_sources WHERE \`key\`='builtin'
+            ON DUPLICATE KEY UPDATE bundle_dir=VALUES(bundle_dir), enabled=1;"
+        kubectl -n agent-platform exec deploy/platform-backend -- ls -l /data/market/builtin/e2e-market-skill
+
+    - name: 准备 e2e 环境变量文件
+      shell: bash
+      run: |
+        cat > .env.secrets <<'EOF'
+        LLM_API_KEY=e2e-dummy-key
+        LLM_MODEL=e2e-mock
+        LLM_ENDPOINT=http://mock-llm.agent-platform.svc.cluster.local:8080/v1
+        EOF
+
+    - name: 等待 ingress-nginx 就绪
+      shell: bash
+      run: |
+        set -euo pipefail
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        wait_group cluster

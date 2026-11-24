@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -42,6 +43,47 @@ type Core struct {
 	// Viking OpenViking Admin 客户端（openviking-memory-integration-design；nil = 平台未
 	// 启用 OpenViking，发布链路零接触）。发布路径经它建 account、注入 env/Secret。
 	Viking *VikingAdmin
+
+	// svcMu 守护 svcLocks（k8sName → 互斥锁，懒建）：同一服务的发布链路操作
+	// （Publish/UpdateEnv/Republish/Delete）进程内串行化（issue #475）。backend 单副本
+	// 设计（AGENTS.md 架构原则一），进程内互斥即完整；扩多副本前须按红线先解决发布
+	// 链路一致性。锁内一律重读服务行（lockForService），防锁等待期间被并发删除。
+	svcMu    sync.Mutex
+	svcLocks map[string]*sync.Mutex
+}
+
+// lockServiceOps 取 k8sName 对应互斥锁并加锁，返回解锁函数（defer 调用）。锁粒度 =
+// k8sName（账户派生源 + K8s 对象名，服务资源的唯一标识）；map 只增不减，条目量与
+// 服务数同级，无回收必要。
+func (c *Core) lockServiceOps(k8sName string) func() {
+	c.svcMu.Lock()
+	if c.svcLocks == nil {
+		c.svcLocks = map[string]*sync.Mutex{}
+	}
+	mu := c.svcLocks[k8sName]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		c.svcLocks[k8sName] = mu
+	}
+	c.svcMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
+// lockForService 按 id 取服务行并加服务锁：锁等待期间服务可能已被并发 Delete/
+// 变更，锁内重读最新行返回（不存在即 ErrNotFound 退出），杜绝「检查-执行」竞态。
+func (c *Core) lockForService(id uint) (*store.ServiceEntity, func(), error) {
+	svc, err := c.Get(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	unlock := c.lockServiceOps(svc.K8sName)
+	fresh, err := c.Get(id)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return fresh, unlock, nil
 }
 
 // ConfigView 发布所需的最小配置集（避免直接依赖 config.Config，便于测试）。
@@ -197,16 +239,14 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	}
 
 	k8sName := k8s.DeriveK8sName(orStr(req.K8sNameBase, req.Name), pkg.Slug)
-	// 子对象名预算前置校验（issue #149 复测残留）：Service "{name}-svc"、Secret
-	// "{name}-skillsync-token"（最长后缀）同为 DNS-1123 ≤63——超预算必须 400 拒绝，
-	// 否则先落库再被 K8s API 拒绝（500 invalid metadata.name），残留 deploying/error 记录
-	if n := len(k8s.SkillsyncTokenName(k8sName)); n > 63 {
-		return nil, fmt.Errorf("%w: name too long (derived k8s name %q exceeds object-name budget)", ErrInvalidForm, k8sName)
-	}
 	k8sName, err = c.uniqName(k8sName)
 	if err != nil {
 		return nil, err
 	}
+	// k8sName 定型即持服务锁（issue #475）：占位 → OpenViking 供给 → env 回写 → apply
+	// 全程独占，并发同名发布败者在占位唯一键失败（零建户），其他写路径在锁外等待
+	unlock := c.lockServiceOps(k8sName)
+	defer unlock()
 	public := req.PublicEndpoint == nil || *req.PublicEndpoint
 
 	// 敏感路由：模板敏感键 + secretKeys 进 EnvSecret（服务 Secret），其余进 Env（CM）
@@ -277,9 +317,11 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		return nil, err
 	}
 	// OpenViking 记忆供给派生（issue #142 模式）：建户 + env/Secret 注入 + 包内知识导入
-	// （显式 local 退出）。供给/回写任一失败即发布失败，回滚新建 account 与占位行，
-	// 不留半配置记录与外部孤儿 account
-	if err := c.applyOpenVikingEnv(k8sName, pkg, plain, secret); err != nil {
+	// （显式 local 退出）。供给/回写任一失败即发布失败，按 created 回滚新建 account
+	// （401 = key 已被他者轮换，绝不清户）与占位行，不留半配置记录与外部孤儿 account
+	created, err := c.applyOpenVikingEnv(k8sName, pkg, plain, secret)
+	if err != nil {
+		c.rollbackProvision(VikingAccountID(k8sName), created, err)
 		c.rollbackPublishPlaceholder(svc)
 		return nil, err
 	}
@@ -287,11 +329,12 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	if err := c.DB.Model(svc).Updates(map[string]interface{}{
 		"env_json": svc.EnvJSON, "env_secret_json": svc.EnvSecretJSON,
 	}).Error; err != nil {
+		c.rollbackProvision(VikingAccountID(k8sName), created, err)
 		c.rollbackPublishPlaceholder(svc)
 		return nil, err
 	}
 
-	if _, err := c.applyAllPublic(params, public, nil); err != nil { // nil：新服务无上一版 env
+	if _, err := c.applyAllPublic(params, public); err != nil {
 		c.transition(svc, store.StatusError, "apply failed: "+err.Error())
 		return nil, err
 	}
@@ -301,16 +344,22 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 
 // rollbackPublishPlaceholder 发布占位行清理（issue #430）：占位事务成功后、apply 之前的
 // 任一失败路径调用——删服务行与事件、复原包引用计数；K8s 对象尚未创建，无需清理。
+// 仅在占位行删除成功（RowsAffected>0）时递减 ref_count（issue #475）：行已被并发
+// Delete 先行删除并递减时，迟到的回滚不得再误减他人对同一包的引用。
 func (c *Core) rollbackPublishPlaceholder(svc *store.ServiceEntity) {
 	err := c.DB.Transaction(func(tx *gorm.DB) error {
+		res := tx.Delete(svc)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
 		if err := tx.Model(&store.OafPackage{}).Where("id = ?", svc.PackageID).
 			UpdateColumn("ref_count", gorm.Expr("CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END")).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("service_id = ?", svc.ID).Delete(&store.ServiceEvent{}).Error; err != nil {
-			return err
-		}
-		return tx.Delete(svc).Error
+		return tx.Where("service_id = ?", svc.ID).Delete(&store.ServiceEvent{}).Error
 	})
 	if err != nil {
 		log.Printf("[publish] rollback placeholder svc=%d (%s) failed: %v", svc.ID, svc.K8sName, err)
@@ -319,16 +368,16 @@ func (c *Core) rollbackPublishPlaceholder(svc *store.ServiceEntity) {
 
 // applyAllPublic 公共入口开关包装：public=false 时 host 模式跳过 Ingress 创建
 // （M3 §2.4：不发布对外访问入口 = 仅集群内可达）；router 模式行为不变（本就无 per-service
-// Ingress，收敛旧对象语义保持）。prevSecret 透传 applyServiceEnvObjects（token 撤销判定）。
-func (c *Core) applyAllPublic(p k8s.ObjectParams, public bool, prevSecret map[string]string) (*networkingv1.Ingress, error) {
+// Ingress，收敛旧对象语义保持）。
+func (c *Core) applyAllPublic(p k8s.ObjectParams, public bool) (*networkingv1.Ingress, error) {
 	if public || c.Cfg.IngressHostSuffix == "" {
-		return c.applyAll(p, prevSecret)
+		return c.applyAll(p)
 	}
 	// host 模式私有发布：跳过 Ingress 构建/写入，并清理历史同名 Ingress（如有）
 	if err := c.K8s.DeleteIngress(p.Namespace, p.K8sName); err != nil {
 		return nil, fmt.Errorf("ingress cleanup: %w", err)
 	}
-	if err := c.applyServiceEnvObjects(p, prevSecret); err != nil {
+	if err := c.applyServiceEnvObjects(p); err != nil {
 		return nil, err
 	}
 	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
@@ -353,7 +402,7 @@ func (c *Core) applyAllPublic(p k8s.ObjectParams, public bool, prevSecret map[st
 // router 模式（IngressHostSuffix 空）：不构造 per-service Ingress（子路径路由由集群内
 // platform-router 承担），并对同名 Ingress「存在即删除」（NotFound 容忍）——存量
 // path 模式对象与共享 /agent Ingress 路径重叠，经显式发布 API 收敛（不做后台批量迁移）。
-func (c *Core) applyAll(p k8s.ObjectParams, prevSecret map[string]string) (*networkingv1.Ingress, error) {
+func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 	dep, err := c.deployBuilder().Build(p)
 	if err != nil {
 		return nil, fmt.Errorf("deployment: %w", err)
@@ -372,7 +421,7 @@ func (c *Core) applyAll(p k8s.ObjectParams, prevSecret map[string]string) (*netw
 			return nil, fmt.Errorf("ingress: %w", err)
 		}
 	}
-	if err := c.applyServiceEnvObjects(p, prevSecret); err != nil {
+	if err := c.applyServiceEnvObjects(p); err != nil {
 		return nil, err
 	}
 	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
@@ -385,51 +434,12 @@ func (c *Core) applyAll(p k8s.ObjectParams, prevSecret map[string]string) (*netw
 }
 
 // applyServiceEnvObjects 幂等写入服务 env 两级对象（CM 非敏感 + Secret 敏感）。
-// env 含敏感键 SKILLSYNC_TOKEN 时幂等 Ensure 技能同步 token Secret（D-8：池模板
-// secretKeyRef 引用，落点=池 workload ns k8s.SandboxWorkloadNamespace 消费方——跨 ns
-// 引用不成立，服务 ns 无消费方；轮换=本入口同值更新 + 池 Pod 重建，单写入口即服务
-// env 表单）；无该键不产出对象，且上一版 env 曾携带该键时同步撤销存量 token Secret
-// （不变量：池 ns token Secret 存在 ⇔ 当前或上一版 env 携带非空 SKILLSYNC_TOKEN，
-// issue #350/#409——本 Secret 唯一写入口是本函数，prevSecret 无该键 ⇒ 池 ns 必无
-// 本服务 token Secret，直接跳过：未配置过 token 的发布零跨 ns 访问，未部署
-// OpenSandbox/未授权池 ns 的环境 Publish/UpdateEnv/Republish/StartAgain 不再报
-// forbidden）。撤销意图分支在写服务两级对象之前复核绑定池（issue #396）：池模板
-// secretKeyRef 引用该 Secret，绑定池在运行/管理面不可达时拒绝撤销（ErrConflict → 409）
-// ——守卫前移保证拒绝零副作用（EnsureSecret 整体替换 Data，若先写后拒，UpdateEnv 的
-// K8s 与 DB env_secret_json 静默漂移）；轮换/常规发布调用序列不变，零新增上游调用。
-func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams, prevSecret map[string]string) error {
-	revoke := false
-	if p.EnvSecret[k8s.SkillsyncTokenEnvKey] == "" && prevSecret[k8s.SkillsyncTokenEnvKey] != "" {
-		exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
-		if err != nil {
-			return fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
-		}
-		if exists {
-			if err := c.guardBoundSandboxPool(p.K8sName, "撤销技能同步 token"); err != nil {
-				return err
-			}
-			revoke = true
-		}
-	}
+func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
 	if err := c.K8s.EnsureConfigMap(k8s.EnvConfigMap(p)); err != nil {
 		return fmt.Errorf("configmap: %w", err)
 	}
 	if err := c.K8s.EnsureSecret(k8s.EnvSecret(p)); err != nil {
 		return fmt.Errorf("secret: %w", err)
-	}
-	if p.EnvSecret[k8s.SkillsyncTokenEnvKey] != "" {
-		if err := c.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(p)); err != nil {
-			return fmt.Errorf("skillsync token secret (ns %s, 部署前提见 docs/deployment.md「技能同步」): %w",
-				k8s.SandboxWorkloadNamespace, err)
-		}
-		return nil
-	}
-	if !revoke {
-		return nil
-	}
-	if err := c.K8s.DeleteSecret(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName)); err != nil {
-		return fmt.Errorf("skillsync token secret revoke (ns %s, RBAC 需 delete，见 docs/deployment.md「技能同步」): %w",
-			k8s.SandboxWorkloadNamespace, err)
 	}
 	return nil
 }
@@ -477,10 +487,11 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if err := validateSecretKeys(secretKeys); err != nil {
 		return nil, err
 	}
-	svc, err := c.Get(id)
+	svc, unlock, err := c.lockForService(id)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	switch svc.Status {
 	case store.StatusStopped:
 		return nil, fmt.Errorf("%w: service is stopped", ErrBadState)
@@ -501,22 +512,31 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
-	// OpenViking 派生幂等重跑（provider 切换经 UpdateEnv 时的补装入口；已供给则零外呼）
+	// OpenViking 派生幂等重跑（provider 切换经 UpdateEnv 时的补装入口；已供给则零外呼）。
+	// 落库前（apply/重启/DB 回写）任一失败按 created 回滚本次新建账户（issue #475，
+	// 锁内无并发持有者；401 = key 已被他者轮换，绝不清户）
 	pkg, err := c.Packages.Get(svc.PackageID)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.applyOpenVikingEnv(svc.K8sName, pkg, plain, secret); err != nil {
+	created, err := c.applyOpenVikingEnv(svc.K8sName, pkg, plain, secret)
+	if err != nil {
+		c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)
 		return nil, err
+	}
+	rollback := func(cause error) {
+		c.rollbackProvision(VikingAccountID(svc.K8sName), created, cause)
 	}
 	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
 	params.EnvSecret = secret
-	if err := c.applyServiceEnvObjects(params, oldSecret); err != nil {
+	if err := c.applyServiceEnvObjects(params); err != nil {
+		rollback(err)
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := c.K8s.RestartDeployment(ctx, c.Cfg.Namespace, svc.K8sName); err != nil {
+		rollback(err)
 		return nil, err
 	}
 	// DB 先于 transition：若顺序颠倒，DB 写失败会留下 deploying 且无 goroutine 推进，
@@ -526,6 +546,7 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if err := c.DB.Model(svc).Updates(map[string]interface{}{
 		"env_json": svc.EnvJSON, "env_secret_json": svc.EnvSecretJSON,
 	}).Error; err != nil {
+		rollback(err)
 		return nil, err
 	}
 	c.transition(svc, store.StatusDeploying, "env updated, rolling restart")
@@ -555,10 +576,11 @@ func applySpec(p k8s.ObjectParams, spec string) k8s.ObjectParams {
 
 // Republish 幂等重建全套资源（可换包/镜像/env），并滚动重启重新注册。
 func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, error) {
-	svc, err := c.Get(id)
+	svc, unlock, err := c.lockForService(id)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	oldPlain, oldSecret, err := c.partitionServiceEnv(svc)
 	if err != nil {
 		return nil, err
@@ -622,7 +644,10 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	// Ingress overlay 纯函数前置（事务前，host 模式）：非法 overlay 直接拒绝，库与 K8s
 	// 均保持原状；同时派生展示 endpoint 随事务回写（模板/配置变更后展示地址跟随合并
 	// 结果）。router 模式纯配置拼装（RouterEndpoint）。
-	// OpenViking 派生幂等重跑（换包时按新包重导 knowledge/skills；已供给则零外呼）
+	// OpenViking 派生幂等重跑（换包时按新包重导 knowledge/skills；已供给则零外呼）。
+	// DB 落库前（deriveEndpoint/事务）失败按 created 回滚本次新建账户（issue #475，
+	// 锁内无并发持有者；401 = key 已被他者轮换，绝不清户）；落库提交后 apply 失败
+	// 服务转 error，账户与 env 已归属服务，不回滚
 	if newPkg == nil {
 		p, err := c.Packages.Get(newPkgID)
 		if err != nil {
@@ -630,13 +655,19 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		}
 		newPkg = p
 	}
-	if err := c.applyOpenVikingEnv(svc.K8sName, newPkg, plain, secret); err != nil {
+	created, err := c.applyOpenVikingEnv(svc.K8sName, newPkg, plain, secret)
+	if err != nil {
+		c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)
 		return nil, err
+	}
+	rollback := func(cause error) {
+		c.rollbackProvision(VikingAccountID(svc.K8sName), created, cause)
 	}
 	params := applySpec(c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID)), spec)
 	params.EnvSecret = secret
 	endpoint, err := c.deriveEndpoint(params)
 	if err != nil {
+		rollback(err)
 		return nil, err
 	}
 	if !public {
@@ -661,6 +692,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		return tx.Model(svc).Updates(updates).Error
 	})
 	if err != nil {
+		rollback(err)
 		return nil, err
 	}
 	svc.PackageID, svc.Image, svc.Replicas = newPkgID, image, int(replicas)
@@ -668,7 +700,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	svc.Endpoint, svc.Spec = endpoint, spec
 	svc.PublicEndpoint = &public
 
-	if _, err := c.applyAllPublic(params, public, oldSecret); err != nil {
+	if _, err := c.applyAllPublic(params, public); err != nil {
 		c.transition(svc, store.StatusError, "republish apply failed: "+err.Error())
 		return nil, err
 	}
@@ -694,7 +726,7 @@ func (c *Core) StartAgain(id uint) (*store.ServiceEntity, error) {
 	}
 	params := applySpec(c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID)), svc.Spec)
 	params.EnvSecret = secret
-	ing, err := c.applyAllPublic(params, svc.EndpointPublic(), secret)
+	ing, err := c.applyAllPublic(params, svc.EndpointPublic())
 	if err != nil {
 		c.transition(svc, store.StatusError, "start again apply failed: "+err.Error())
 		return nil, err
@@ -726,14 +758,14 @@ func (c *Core) Unpublish(id uint) (*store.ServiceEntity, error) {
 
 // Delete 删除服务及全部关联资源（CM、引用计数、PVC 目录、DB 记录）。
 func (c *Core) Delete(id uint) error {
-	svc, err := c.Get(id)
+	svc, unlock, err := c.lockForService(id)
 	if err != nil {
 		return err
 	}
-	// 删除守卫（issue #359）：绑定池 {k8sName}-pool 仍在上游运行时拒绝——本函数下方
-	// 连带删除的池 ns token Secret 被池模板 secretKeyRef 引用，池新 Pod 会卡
-	// CreateContainerConfigError、池容量静默退化；建池门只护建池，Delete 复核同一前提。
-	if err := c.guardBoundSandboxPool(svc.K8sName, "删除服务"); err != nil {
+	defer unlock()
+	// 删除守卫（issue #359）：绑定池 {k8sName}-pool 仍在上游运行时拒绝——池与服务一一对应，
+	// 先删服务会留下空耗 warm Pod 的孤儿池，同名新服务还会静默接管旧池。
+	if err := c.guardBoundSandboxPool(svc.K8sName); err != nil {
 		return err
 	}
 	ns := c.Cfg.Namespace
@@ -742,7 +774,6 @@ func (c *Core) Delete(id uint) error {
 	_ = c.K8s.DeleteDeployment(ns, svc.K8sName)
 	_ = c.K8s.DeleteConfigMap(ns, svc.K8sName+"-env")
 	_ = c.K8s.DeleteSecret(ns, k8s.EnvSecretName(svc.K8sName))
-	_ = c.K8s.DeleteSecret(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(svc.K8sName))
 	// 引用计数原子递减（CASE WHEN 防负数，MySQL 8 / SQLite 兼容）。
 	// 旧实现为"事务内 First 读出 refCount 再应用侧减 1 判断归零"，
 	// 并发发布/删除时存在读-改-写竞态：误判归零触发 RemovePackage，

@@ -174,7 +174,6 @@ func (d *daemon) fetchVersion() (versionInfo, error) {
 	if err != nil {
 		return versionInfo{}, err
 	}
-	d.setAuth(req)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return versionInfo{}, fmt.Errorf("version request: %w", err)
@@ -195,12 +194,6 @@ func (d *daemon) fetchVersion() (versionInfo, error) {
 		return versionInfo{}, fmt.Errorf("version endpoint returned invalid version %q", info.Version)
 	}
 	return info, nil
-}
-
-func (d *daemon) setAuth(req *http.Request) {
-	if d.cfg.token != "" {
-		req.Header.Set("Authorization", "Bearer "+d.cfg.token)
-	}
 }
 
 func validVersion(v string) bool {
@@ -279,7 +272,6 @@ func (d *daemon) downloadBundle(ver, tarPath string) error {
 	if err != nil {
 		return err
 	}
-	d.setAuth(req)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("bundle request: %w", err)

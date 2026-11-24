@@ -46,54 +46,26 @@ func TestDeriveAndShortName(t *testing.T) {
 	}
 }
 
-// 派生名总长必须为最长子对象名（"{name}-skillsync-token"）预留后缀预算（issue #149：
+// 派生名总长必须为最长子对象名（"{name}-env-secret"）预留后缀预算（issue #149：
 // k8s 名贴 63 时 -svc 后缀拼出 67 被 K8s API 拒绝，且发布已落库 → 残留记录）。
 func TestDeriveK8sNameLengthCap(t *testing.T) {
 	long := repeat("z", 100)
 	got := DeriveK8sName(long, "x/y")
-	// oaf-(4) + base(≤43) + "-skillsync-token"(16) ≤ 63... 实际约束：k8s 名 ≤47，子对象 ≤63
-	if len(got) > 63-len(SkillsyncTokenSuffix) {
-		t.Fatalf("derived name length %d exceeds %d: %q", len(got), 63-len(SkillsyncTokenSuffix), got)
+	// oaf-(4) + base(≤48) + "-env-secret"(11) ≤ 63
+	if len(got)+len(EnvSecretSuffix) > 63 {
+		t.Fatalf("derived name %q (%d) leaves no budget for %q", got, len(got), EnvSecretSuffix)
 	}
-	if got != "oaf-"+repeat("z", 43) {
-		t.Fatalf("unexpected truncation: %q (want oaf- + 43 z)", got)
+	if got != "oaf-"+repeat("z", 48) {
+		t.Fatalf("unexpected truncation: %q (want oaf- + 48 z)", got)
 	}
-	if n := len(got + "-svc"); n > 63 {
-		t.Fatalf("svc object name %d exceeds 63", n)
-	}
-	if n := len(got + "-env-secret"); n > 63 {
-		t.Fatalf("secret object name %d exceeds 63", n)
-	}
-	if n := len(got + SkillsyncTokenSuffix); n > 63 {
-		t.Fatalf("skillsync token secret name %d exceeds 63", n)
+	for _, suffix := range []string{"-svc", "-env", "-env-secret", "-pool"} {
+		if n := len(got + suffix); n > 63 {
+			t.Fatalf("object name with suffix %q: %d exceeds 63", suffix, n)
+		}
 	}
 	// 非 ASCII 输入 sanitize 后长度收缩，同样满足上限
-	if got := DeriveK8sName(repeat("智", 100), "x/y"); len(got) > 63-len(SkillsyncTokenSuffix) {
+	if got := DeriveK8sName(repeat("智", 100), "x/y"); len(got)+len(EnvSecretSuffix) > 63 {
 		t.Fatalf("cjk derive: %q (%d)", got, len(got))
-	}
-}
-
-// TestSkillsyncTokenNameAndSecret per-service 技能同步 token Secret（skills-syncd D-8）：
-// 名派生 {k8sName}-skillsync-token、key=token、值取自服务敏感 env SKILLSYNC_TOKEN，
-// 落点固定池 workload ns（消费方，跨 ns secretKeyRef 引用不成立）。
-func TestSkillsyncTokenNameAndSecret(t *testing.T) {
-	if got := SkillsyncTokenName("oaf-demo"); got != "oaf-demo-skillsync-token" {
-		t.Fatalf("name derive: %q", got)
-	}
-	if EnvSecretName("oaf-demo") != "oaf-demo-env-secret" {
-		t.Fatal("env secret name must stay")
-	}
-	p := testParams()
-	p.EnvSecret = map[string]string{"SKILLSYNC_TOKEN": "tok-1"}
-	sec := SkillsyncTokenSecret(p)
-	if sec.Name != SkillsyncTokenName(p.K8sName) || sec.Namespace != SandboxWorkloadNamespace {
-		t.Fatalf("meta wrong: %+v", sec.ObjectMeta)
-	}
-	if sec.Labels[LabelKey] != p.K8sName || sec.Labels[ManagedByLabel] != ManagedByValue {
-		t.Fatalf("labels wrong: %+v", sec.Labels)
-	}
-	if string(sec.Data[SkillsyncTokenDataKey]) != "tok-1" {
-		t.Fatalf("data wrong: %+v", sec.Data)
 	}
 }
 

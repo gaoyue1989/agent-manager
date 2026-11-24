@@ -27,6 +27,15 @@ func (c *Core) GetByK8sName(name string) (*store.ServiceEntity, error) {
 	return &svc, nil
 }
 
+// GetByShortName 按路由 short 名查询（router /agent/{short} 全局唯一语义）。
+func (c *Core) GetByShortName(short string) (*store.ServiceEntity, error) {
+	var svc store.ServiceEntity
+	if err := c.DB.Where("short_name = ?", short).First(&svc).Error; err != nil {
+		return nil, ErrNotFound
+	}
+	return &svc, nil
+}
+
 // EnvSecretKeyView 服务级敏感键掩码视图：值永不回明文，仅键名 + hasValue。
 type EnvSecretKeyView struct {
 	Key      string `json:"key"`
