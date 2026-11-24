@@ -575,6 +575,11 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 - **轮换契约（D-8，关闭原开放问题 1）**：轮换 = 更新 Secret + 池模板 rollout 重启（K8s env 变更的
   自然语义；重启后守护携新 token 自动拉平版本）；撤销 = env 置空同步删池 ns Secret，绑定池
   仍在运行/管理面不可达时被拒（issue #396 守卫；唯一可行顺序先删池 → 撤销 → 按需重建池）。
+  守卫顺序语义（issue #476）：撤销守卫必须前置于 DB 落库（先守卫后落库，UpdateEnv 经
+  `applyServiceEnvObjects`、Republish 事务前预检共用 `guardSkillsyncRevoke` 单一真相源），
+  拒绝零副作用——DB `env_secret_json` 仍含 token、服务不转 error；先落库后守卫的旧序在
+  拒绝后即丢 token，派生 StartAgain 借道抹空服务 Secret、删池恢复路径跳过池 ns 撤销致
+  Secret 永久残留两条缺陷链。
   不引入服务端双 token 重叠窗口——为罕见运维事件在鉴权路径维护双值状态，复杂度不成比例
 
 ### 9.2 UID 现实与写穿语义（B-3 决议）

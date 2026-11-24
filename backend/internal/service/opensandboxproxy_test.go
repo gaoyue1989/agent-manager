@@ -1101,16 +1101,19 @@ func TestUpdateEnvRevokeProceedsWhenPoolAbsent(t *testing.T) {
 	}
 }
 
-// TestRepublishRevokeRefusedWhileBoundPoolExists（issue #396）：Republish 全量 env 置空
-// SKILLSYNC_TOKEN 同样被绑定池守卫拒绝、Secret 保留；服务转 error 属既有「republish
-// apply 失败」语义（DB-first：env 已落库、Secret 在，删池后 StartAgain/Republish 收敛）。
+// TestRepublishRevokeRefusedWhileBoundPoolExists（issue #396/#476）：Republish 全量 env
+// 置空 SKILLSYNC_TOKEN 同样被绑定池守卫拒绝，且守卫预检前置于 DB 事务（先守卫后落库，
+// 与 UpdateEnv 同款零副作用 409）——拒绝后 DB env_secret_json 仍含 token、服务不转
+// error、池 ns Secret 保留；旧序（先落库后 apply）会在拒绝后丢 token，进而派生
+// StartAgain 抹 token 与删池恢复残留 Secret 两条缺陷链。
 func TestRepublishRevokeRefusedWhileBoundPoolExists(t *testing.T) {
 	core, fk, h, done := newProxyCore(t, nil)
 	defer done()
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishTokenService(t, core, fk, pkg.ID)
 
-	boundPoolHandler(h, "/v1/pools/"+svc.K8sName+"-pool")
+	poolPath := "/v1/pools/" + svc.K8sName + "-pool"
+	boundPoolHandler(h, poolPath)
 	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{"SKILLSYNC_TOKEN": ""}}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("republish revoke must be refused with ErrConflict, got %v", err)
 	}
@@ -1125,7 +1128,83 @@ func TestRepublishRevokeRefusedWhileBoundPoolExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != store.StatusError {
-		t.Fatalf("republish apply failure must transition service to error, got %s", got.Status)
+	if got.Status == store.StatusError {
+		t.Fatalf("refused republish revoke must not transition service to error, got %s", got.Status)
+	}
+	var secret map[string]string
+	if err := json.Unmarshal([]byte(got.EnvSecretJSON), &secret); err != nil || secret["SKILLSYNC_TOKEN"] != "tok-1" {
+		t.Fatalf("refused republish revoke must keep env_secret_json intact: %s (%v)", got.EnvSecretJSON, err)
+	}
+	found := false
+	for _, req := range h.Reqs {
+		if req.Method == http.MethodGet && req.Path == poolPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("revoke guard must probe GET /v1/pools/{k8sName}-pool before the DB transaction")
+	}
+}
+
+// TestStartAgainKeepsTokenAfterRefusedRepublish（issue #476 时序 2）：被拒 Republish 后
+// DB token 完好，register_failed 服务 StartAgain 重建对象不得抹空服务 Secret 的
+// SKILLSYNC_TOKEN（DB 一旦丢 token，撤销短路条件失活，StartAgain 曾借道整体替换
+// Secret 抹空 token，业务 Pod 无 token 启动致在跑池 skills-syncd 恒 404）。
+func TestStartAgainKeepsTokenAfterRefusedRepublish(t *testing.T) {
+	core, fk, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishTokenService(t, core, fk, pkg.ID)
+
+	boundPoolHandler(h, "/v1/pools/"+svc.K8sName+"-pool")
+	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{"SKILLSYNC_TOKEN": ""}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("republish revoke must be refused with ErrConflict, got %v", err)
+	}
+	if _, err := core.StartAgain(svc.ID); err != nil {
+		t.Fatalf("start again after refused republish must proceed: %v", err)
+	}
+	sobj, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.EnvSecretName(svc.K8sName), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(sobj.Data["SKILLSYNC_TOKEN"]) != "tok-1" {
+		t.Fatalf("start again must keep service secret token, got data %v", sobj.Data)
+	}
+	exists, err := core.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(svc.K8sName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("start again must keep pool ns token secret while env still carries the token")
+	}
+}
+
+// TestRepublishRecoveryAfterPoolDeletedCleansPoolSecret（issue #476 时序 3）：被拒
+// Republish 后按运维手册删池再收敛，恢复 Republish 的撤销路径必须清理池 ns token
+// Secret——DB prevSecret 一旦丢 token，撤销分支失活跳过 DeleteSecret，Secret 永久
+// 残留会被重建池按旧撤销 token 注入 skills-syncd，与无 token 的业务 Pod 永久 404。
+func TestRepublishRecoveryAfterPoolDeletedCleansPoolSecret(t *testing.T) {
+	core, fk, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishTokenService(t, core, fk, pkg.ID)
+
+	poolPath := "/v1/pools/" + svc.K8sName + "-pool"
+	boundPoolHandler(h, poolPath)
+	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{"SKILLSYNC_TOKEN": ""}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("republish revoke must be refused with ErrConflict, got %v", err)
+	}
+	h.srv.Config.Handler = statusWithBody(map[string]func() (int, string){
+		poolPath: func() (int, string) { return 404, `{"message":"no pool"}` },
+	})
+	if _, err := core.Republish(svc.ID, RepublishOptions{Env: map[string]string{"SKILLSYNC_TOKEN": ""}}); err != nil {
+		t.Fatalf("republish recovery after pool deletion must proceed: %v", err)
+	}
+	exists, err := core.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(svc.K8sName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("recovery republish must delete the pool ns token secret instead of leaking it")
 	}
 }

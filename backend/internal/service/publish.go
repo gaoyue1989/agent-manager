@@ -384,6 +384,28 @@ func (c *Core) applyAll(p k8s.ObjectParams, prevSecret map[string]string) (*netw
 	return ing, nil
 }
 
+// guardSkillsyncRevoke 撤销 SKILLSYNC_TOKEN 的守卫预检（issue #396/#476，单一真相源，
+// UpdateEnv 经 applyServiceEnvObjects 与 Republish 事务前共用）：env 撤销该键且上一版
+// 携带时，先探查池 ns 存量 token Secret，存在则复核绑定池——运行中/不可达 fail-closed
+// 拒绝（ErrConflict → 409）。返回是否应执行撤销（Secret 存在且守卫放行）；不产生任何
+// 写副作用，供「先守卫后落库」的拒绝零副作用语义使用。
+func (c *Core) guardSkillsyncRevoke(p k8s.ObjectParams, prevSecret map[string]string) (bool, error) {
+	if p.EnvSecret[k8s.SkillsyncTokenEnvKey] != "" || prevSecret[k8s.SkillsyncTokenEnvKey] == "" {
+		return false, nil
+	}
+	exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
+	if err != nil {
+		return false, fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
+	}
+	if !exists {
+		return false, nil
+	}
+	if err := c.guardBoundSandboxPool(p.K8sName, "撤销技能同步 token"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // applyServiceEnvObjects 幂等写入服务 env 两级对象（CM 非敏感 + Secret 敏感）。
 // env 含敏感键 SKILLSYNC_TOKEN 时幂等 Ensure 技能同步 token Secret（D-8：池模板
 // secretKeyRef 引用，落点=池 workload ns k8s.SandboxWorkloadNamespace 消费方——跨 ns
@@ -393,23 +415,13 @@ func (c *Core) applyAll(p k8s.ObjectParams, prevSecret map[string]string) (*netw
 // issue #350/#409——本 Secret 唯一写入口是本函数，prevSecret 无该键 ⇒ 池 ns 必无
 // 本服务 token Secret，直接跳过：未配置过 token 的发布零跨 ns 访问，未部署
 // OpenSandbox/未授权池 ns 的环境 Publish/UpdateEnv/Republish/StartAgain 不再报
-// forbidden）。撤销意图分支在写服务两级对象之前复核绑定池（issue #396）：池模板
-// secretKeyRef 引用该 Secret，绑定池在运行/管理面不可达时拒绝撤销（ErrConflict → 409）
-// ——守卫前移保证拒绝零副作用（EnsureSecret 整体替换 Data，若先写后拒，UpdateEnv 的
+// forbidden）。撤销意图先经 guardSkillsyncRevoke 复核绑定池（issue #396），守卫先于
+// 服务两级对象写入，拒绝零副作用（EnsureSecret 整体替换 Data，若先写后拒，UpdateEnv 的
 // K8s 与 DB env_secret_json 静默漂移）；轮换/常规发布调用序列不变，零新增上游调用。
 func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams, prevSecret map[string]string) error {
-	revoke := false
-	if p.EnvSecret[k8s.SkillsyncTokenEnvKey] == "" && prevSecret[k8s.SkillsyncTokenEnvKey] != "" {
-		exists, err := c.K8s.SecretExists(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(p.K8sName))
-		if err != nil {
-			return fmt.Errorf("skillsync token secret check (ns %s): %w", k8s.SandboxWorkloadNamespace, err)
-		}
-		if exists {
-			if err := c.guardBoundSandboxPool(p.K8sName, "撤销技能同步 token"); err != nil {
-				return err
-			}
-			revoke = true
-		}
+	revoke, err := c.guardSkillsyncRevoke(p, prevSecret)
+	if err != nil {
+		return err
 	}
 	if err := c.K8s.EnsureConfigMap(k8s.EnvConfigMap(p)); err != nil {
 		return fmt.Errorf("configmap: %w", err)
@@ -641,6 +653,14 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	}
 	if !public {
 		endpoint = ""
+	}
+
+	// 撤销守卫预检前置（issue #476，先守卫后落库）：DB-first 旧序在绑定池运行时守卫
+	// 409 拒绝后 env_secret_json 已丢 token——StartAgain 借道抹空服务 Secret、删池恢复
+	// 路径跳过池 ns 撤销致 Secret 永久残留；与 UpdateEnv 同款零副作用，拒绝不改 DB、
+	// 不转 error。
+	if _, err := c.guardSkillsyncRevoke(params, oldSecret); err != nil {
+		return nil, err
 	}
 
 	err = c.DB.Transaction(func(tx *gorm.DB) error {

@@ -246,7 +246,9 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    轮换 = env 表单改 `SKILLSYNC_TOKEN`（单写入口，两处消费自动同值）+ 池 Pod 重建（D-8 契约）；
    撤销 = env 表单把 `SKILLSYNC_TOKEN` 置空串保存（三态语义「空串=删除」）→ 池 ns token
    Secret 同步删除、服务侧内部端点关闭（404）；删服务连带清理（issue #350 修复的静默残留缺口）。
-   撤销守卫（issue #396）：绑定池仍在运行或管理面不可达时撤销被拒（409）；唯一可行顺序
+   撤销守卫（issue #396）：绑定池仍在运行或管理面不可达时撤销被拒（409）；守卫前置于
+   DB 落库（issue #476，UpdateEnv/Republish 同款零副作用）——拒绝不改 DB、不转 error，
+   token 保持完好，删池后重新提交撤销即正常收敛（池 ns Secret 随撤销清理）；唯一可行顺序
    为**先删池 → 撤销 →（可选）重建池**——撤销后 token Secret 已删，重建池缺 token 自动按
    无守护旧行为建（`disableSyncd` 重建不行：守卫只看池是否存在，重建后池仍在仍被拒）。
    存量集群 agent-platform ns 的同名 Secret 为无消费方遗留物，可手工删除。
