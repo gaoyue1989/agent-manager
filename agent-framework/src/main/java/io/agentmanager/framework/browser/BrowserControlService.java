@@ -29,7 +29,8 @@ public class BrowserControlService implements SandboxHoldSignal {
     private final SandboxRuntime sandboxRuntime;
     private final SandboxLocator sandboxLocator;
 
-    public BrowserControlService(BrowserControlStore store, TurnStopService turnStopService,
+    public BrowserControlService(BrowserControlStore store,
+                                 @org.springframework.context.annotation.Lazy TurnStopService turnStopService,
                                  SandboxRuntime sandboxRuntime, SandboxLocator sandboxLocator) {
         this.store = store;
         this.turnStopService = turnStopService;

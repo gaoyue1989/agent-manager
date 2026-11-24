@@ -1,5 +1,6 @@
 package io.agentmanager.framework.browser;
 
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -17,11 +18,11 @@ import io.agentmanager.framework.service.SessionUserStore;
 @ConditionalOnProperty(prefix = "agent.browser", name = "enabled", havingValue = "true")
 public class BrowserViewWebSocketConfig implements WebSocketConfigurer {
 
-    private final BrowserViewWebSocketHandler handler;
-    private final BrowserViewHandshakeInterceptor interceptor;
+    private final ObjectProvider<BrowserViewWebSocketHandler> handler;
+    private final ObjectProvider<BrowserViewHandshakeInterceptor> interceptor;
 
-    public BrowserViewWebSocketConfig(BrowserViewWebSocketHandler handler,
-                                      BrowserViewHandshakeInterceptor interceptor) {
+    public BrowserViewWebSocketConfig(ObjectProvider<BrowserViewWebSocketHandler> handler,
+                                      ObjectProvider<BrowserViewHandshakeInterceptor> interceptor) {
         this.handler = handler;
         this.interceptor = interceptor;
     }
@@ -41,8 +42,8 @@ public class BrowserViewWebSocketConfig implements WebSocketConfigurer {
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        registry.addHandler(handler, "/threads/{sessionId}/browser/vnc")
-            .addInterceptors(interceptor)
+        registry.addHandler(handler.getObject(), "/threads/{sessionId}/browser/vnc")
+            .addInterceptors(interceptor.getObject())
             .setAllowedOriginPatterns("*");
     }
 }
