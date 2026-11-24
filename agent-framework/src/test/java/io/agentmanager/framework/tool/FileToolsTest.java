@@ -479,6 +479,80 @@ class FileToolsTest {
         verify(ws).readWorkspaceFile("alice", "outputs/kv.txt");
     }
 
+    // ===== issue #473：sessionId 伪造为他人 userId 不得成为 KV 命名空间候选 =====
+
+    /**
+     * Channel 链路攻击复现：u-2002 以 sessionId=u-1001（受害者 userId 格式串）发起
+     * /threads/chat，入口 ownedBy 因无映射放行并 upsert("u-1001","u-2002")，网关把
+     * ctx 改写为 userId=u-1001（peer=前端 sessionId）/sessionId=gw-hash。旧实现把
+     * ctx.userId 原值加进候选 → 命中受害者 KV 命名空间。
+     */
+    @Test
+    void presentFileMustNotReadVictimNamespaceViaSpoofedPeerUserId() {
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(store.findUserIdBySession("u-1001")).thenReturn("u-2002");
+        var ws = mock(WorkspaceReader.class);
+        when(ws.readWorkspaceFile(eq("u-1001"), eq("outputs/secret.txt")))
+            .thenReturn("alice-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws,
+            new io.agentmanager.framework.service.SessionKeyResolver(store));
+
+        var mallory = RuntimeContext.builder().sessionId("gw-hash").userId("u-1001").build();
+        var result = t.presentFile(mallory, "outputs/secret.txt", null);
+
+        assertTrue(result.contains("not readable"),
+            "伪造 peer=受害者 userId 不得读到其 KV 命名空间: " + result);
+        verify(ws, never()).readWorkspaceFile(eq("u-1001"), anyString());
+    }
+
+    /**
+     * A2A 链路攻击复现（反查未登记/fail-soft 形态）：X-User-Id 强制覆盖后 ctx.userId=
+     * 攻击者本人，但请求体 sessionId 仍客户端可控——旧实现把 ctx.sessionId 加进候选，
+     * 设为受害者 userId 即命中其命名空间。修复后未命中回退 userId 原值，绝不用 sessionId。
+     */
+    @Test
+    void presentFileMustNotReadVictimNamespaceViaSpoofedA2aSessionId() {
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession(anyString())).thenReturn(null);
+        var ws = mock(WorkspaceReader.class);
+        when(ws.readWorkspaceFile(eq("u-1001"), eq("outputs/secret.txt")))
+            .thenReturn("alice-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws,
+            new io.agentmanager.framework.service.SessionKeyResolver(store));
+
+        var mallory = RuntimeContext.builder().userId("u-2002").sessionId("u-1001").build();
+        var result = t.presentFile(mallory, "outputs/secret.txt", null);
+
+        assertTrue(result.contains("not readable"),
+            "A2A sessionId=受害者 userId 不得命中其 KV 命名空间: " + result);
+        verify(ws, never()).readWorkspaceFile(eq("u-1001"), anyString());
+        verify(ws).readWorkspaceFile(eq("u-2002"), eq("outputs/secret.txt"));
+    }
+
+    /** A2A 常态（入口 ownedBy 放行 + upsert 自认领行后）：反查命中 = 攻击者本人，封堵成立 */
+    @Test
+    void presentFileResolvesSelfClaimedRowForSpoofedSessionId() {
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession("u-1001")).thenReturn("u-2002");
+        var ws = mock(WorkspaceReader.class);
+        when(ws.readWorkspaceFile(eq("u-1001"), eq("outputs/secret.txt")))
+            .thenReturn("alice-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws,
+            new io.agentmanager.framework.service.SessionKeyResolver(store));
+
+        var mallory = RuntimeContext.builder().userId("u-2002").sessionId("u-1001").build();
+        var result = t.presentFile(mallory, "outputs/secret.txt", null);
+
+        assertTrue(result.contains("not readable"),
+            "反查命中自认领行后读取键必须是攻击者本人: " + result);
+        verify(ws, never()).readWorkspaceFile(eq("u-1001"), anyString());
+        verify(ws).readWorkspaceFile(eq("u-2002"), eq("outputs/secret.txt"));
+    }
+
     // ===== issue #424：返回 JSON 转义 + /workspace// 双斜杠绝对逃逸 =====
 
     /**

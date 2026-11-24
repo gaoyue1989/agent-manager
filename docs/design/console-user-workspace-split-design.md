@@ -194,6 +194,14 @@ AGENT 协作
 - 分发与落表前对非空 `sessionId` 做归属校验，不符返回 JSON-RPC 错误 `-32001`（语义 = task/session not found，不泄露存在性），拒绝执行与覆写——封堵「伪造请求体 userId 接管他人会话/冒充任意用户」两条攻击链（#411 归属校验在 A2A 面的前置失效点）；
 - 头存在但 body 非 JSON 时 fail-closed 拒绝（身份覆盖无法保证不透传）；无头（host 模式 ingress / `ROUTER_AUTH_MODE=off` 自报 / 直连调试）回落请求体身份，与 §5.4 所列「绕过 frontend 的直连调用仍可行（与今天同等暴露面）」的既有信任边界一致，不为 A2A 单独加严造成行为分叉。
 
+#### 5.4.2 文件命名空间候选裁决（issue #473，2026-11-24 起）
+
+§5.4.1 身份裁决在文件访问面的延伸：非沙箱 `present_file` 从 KV（agent_fs）工作区读文件时，命名空间键**单一可信键裁决**——`SessionKeyResolver.realUserId(ctx)`（session_user 反查的真实用户；入口 ownedBy 前置校验 + 认领语义保证反查结果恒为请求者本人），仅当解析器缺失（直调/测试桩形态）或反查 null（DB fail-soft）时回退入口已裁决的 userId（头 > body > `debug-user`）。
+
+- **RuntimeContext 原值禁止作为命名空间候选**：Channel 链路 `ctx.userId` 是网关 peer = 客户端可控的前端 `sessionId`（设为他人 userId 格式串即被 ownedBy 无映射放行 + upsert 认领，工具侧原值即他人命名空间）；A2A 链路 `ctx.sessionId` 是请求体原值。#473 之前的「原值 + 反查」候选集逐个尝试读取 = 跨用户读取通道，候选集语义已删除（#408 修复 #435 的遗留缺口）；
+- 写入侧天然对齐：`write_file`→KV 同步用入口裁决 userId（Channel peer 不参与），读取键与写入键同为反查后的规范用户，写读命名空间一致；
+- 沙箱档不受此规则影响：沙箱归属校验沿用 `resolveUserKey` 单值链（与 `SandboxUserKeyMiddleware` 同源，issue #52），沙箱绑定键与 KV 命名空间不同源。
+
 ---
 
 ## 6. 数据模型与迁移

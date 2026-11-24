@@ -234,7 +234,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 |------|------|
 | `get_current_time(timezone)` | 返回指定时区当前时间 |
 | `echo(text)` | 回显输入 |
-| `present_file(file_path, file_content_base64?)` | 工作区产物注册到平台供用户下载（结果由 SSE 层合成 file_ready 帧） |
+| `present_file(file_path, file_content_base64?)` | 工作区产物注册到平台供用户下载（结果由 SSE 层合成 file_ready 帧）。非沙箱 KV 读取命名空间键单一可信裁决：`SessionKeyResolver.realUserId` 反查（缺失/未命中回退入口裁决 userId），RuntimeContext 原值（peer/sessionId，客户端可控）禁止作为候选——issue #473 |
 | `present_url(file_name, url, mime_type?, size?)` | 外部系统产物（http(s) URL）登记为下载卡片；`/files/{id}` 服务端代理回源（前缀白名单，SSRF 收敛） |
 
 > OAF 打包工具（`check_oaf_package` / `create_oaf_zip`）2026-09 迁至平台 backend 的 platform-publisher MCP
