@@ -58,13 +58,15 @@ issue 提案与初版设计都打算新增 `directReturnTools` 缓存。实际�
 | `TOOL_CALL_START` | `directReturn: true` | 该工具配置了直返 |
 | `TOOL_RESULT_TEXT_DELTA` | 无变更 | 原样内容，按 `toolCallId` 拼接 |
 | `TEXT_BLOCK_DELTA` | `generateReason: "TOOL_RETURN_DIRECT"` | **本轮以直返结束的权威信号**，只有真的短路才出现 |
-| history assistant 消息 | `generate_reason: "TOOL_RETURN_DIRECT"` | 收尾消息，`content` 即原样内容 |
+| history assistant 消息 | `generate_reason: "TOOL_RETURN_DIRECT"` | 收尾消息，`content` 即原样内容；纯图片直返 `content` 为空、图片经 `blocks[]` 的 `image` 块下发 |
 
 判定规则：
 
 1. `TOOL_CALL_START.directReturn` → 标记该步骤并累积它的 `TOOL_RESULT_TEXT_DELTA`。
 2. 出现 `generateReason: "TOOL_RETURN_DIRECT"` 的文本 → 本轮以直返结束：渲染同一批次直返步骤的内容，跳过这段文本。
 3. 没出现该标记 → 本轮没走直返（同批混合或失败），按普通工具步骤展示。
+
+**纯图片直返的信号补发（issue #492）**：SDK 的收尾文本事件只遍历 `TextBlock`（`publishReturnDirectTextEvents`），纯图片直返轮不会发出上述信号——与空输出不可区分。框架在短路成立（直返工具成功结束且其后无模型回喂）而 SDK 未发信号时，于 `AGENT_END` 前补一帧 `delta` 为空的合成信号帧（`generateReason` 同值，经合成帧落库、订阅回放与续传一致）；判定规则 2 不变，空 `delta` 对既有前端零影响。
 
 **归属关系（实施中更正）**：初版设计称 `TOOL_CALL_START` 与工具结果共用 `replyId`，实测不成立。`TOOL_CALL_START` 产生于推理阶段，带的是推理 `replyId`；`TOOL_RESULT_*` 与收尾文本产生于执行阶段，三者共用执行 `replyId`。前端用 `toolCallId` 关联调用与结果，用执行 `replyId` 关联结果与收尾文本。同批多个直返调用时，各工具的内容在各自的 `TOOL_RESULT_TEXT_DELTA` 里，不会粘连；SDK 的收尾文本只是按序拼接，不带分隔符。
 
@@ -86,7 +88,7 @@ issue 提案与初版设计都打算新增 `directReturnTools` 缓存。实际�
 | 声明直返的工具同时是 `app_only` | app_only 优先并告警（对 LLM 隐藏的工具不会被模型调用） |
 | 声明的工具未注册（子集关闭 / server 未提供） | 告警，无副作用 |
 | `permissions` | 保持正交，直返不隐式放行（直返工具也可能是写操作，如「下单回执」）；演示型工具需自行声明 `allow` |
-| 保真范围 | MCP `content` 文本块逐字；图片走 `TOOL_RESULT_DATA_DELTA`；只返回 `structuredContent` 的工具得到空文本 |
+| 保真范围 | MCP `content` 文本块逐字；图片走 `TOOL_RESULT_DATA_DELTA`，history 侧直返收尾消息保留 `blocks[]` 的 `image` 块（`{type:"image", media_type, data?/url?}`，issue #492）；只返回 `structuredContent` 的工具得到空文本 |
 | 上下文留存 | 原样内容作为 assistant 消息留在模型上下文，后续轮模型知道「已向用户展示过什么」；占位 tool_result 不触发大结果卸载，适合表单 / 演示型载荷，不适合大数据量传输 |
 | 续接 | 本轮已终止；用户在前端完成确认后，由前端把确认结果作为下一条用户消息发起下一轮，零新增状态 |
 

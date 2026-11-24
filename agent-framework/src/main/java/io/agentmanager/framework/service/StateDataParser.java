@@ -443,8 +443,11 @@ public final class StateDataParser {
             // 层把上传卡片挂回本用户消息。纯文件轮（无文本）也借此保留，不被下面的"空消息"剪掉
             var fileIds = "user".equals(role) ? extractFileIds(m) : List.<String>of();
             var tools = extractToolCalls(m, resultsByCallId);
-            // 仅保留有文本内容/工具调用/上传文件的消息（跳过纯 tool_result 等）
-            if (content.isBlank() && tools.isEmpty() && fileIds.isEmpty()) {
+            // 直返收尾消息（issue #492）：纯图片直返的 content 无 text 块、也无 tool_use，
+            // 真实内容（ImageBlock）经 blocks 下发，不得按"空消息"剪掉
+            boolean directReturn = generateReason.equals(
+                io.agentscope.core.message.GenerateReason.TOOL_RETURN_DIRECT.name());
+            if (content.isBlank() && tools.isEmpty() && fileIds.isEmpty() && !directReturn) {
                 continue;
             }
             var msg = new java.util.LinkedHashMap<String, Object>();
@@ -622,10 +625,15 @@ public final class StateDataParser {
      * <p>thinking 块不上屏、tool_result 块位于后续 TOOL 角色消息（结果仍由
      * {@link #collectToolResults} 配对合并到 tool_calls 上），两者均不进 blocks。
      *
+     * <p>image 块（issue #492 直返收尾消息的真实载荷）：Base64Source 序列化为
+     * {@code source.media_type/data}，URLSource 为 {@code source.mime_type/url}——
+     * 输出统一 {@code media_type} 键与 SSE {@code tool_result_data_delta} 词表对齐。
+     *
      * <p>只处理 assistant 消息：文本与工具块交错只发生在 assistant 侧，
      * 其它角色（user 的纯文本、tool 的结果）加了也是噪音。
      *
-     * @return 元素形如 {@code {type:"text", text}} 或 {@code {type:"tool", id?, name}}；
+     * @return 元素形如 {@code {type:"text", text}}、{@code {type:"tool", id?, name}} 或
+     *         {@code {type:"image", media_type, data?/url?}}；
      *         content 非数组（旧格式字符串 / 缺失）时为空列表，调用方据此不写 blocks 键
      */
     private static List<Map<String, Object>> extractOrderedBlocks(JsonNode msg) {
@@ -653,6 +661,26 @@ public final class StateDataParser {
                     b.put("id", id);
                 }
                 b.put("name", block.path("name").asText(""));
+                blocks.add(b);
+            } else if ("image".equals(type)) {
+                var source = block.path("source");
+                var b = new java.util.LinkedHashMap<String, Object>();
+                b.put("type", "image");
+                var mediaType = source.path("media_type").asText("");
+                if (mediaType.isBlank()) {
+                    mediaType = source.path("mime_type").asText("");
+                }
+                if (!mediaType.isBlank()) {
+                    b.put("media_type", mediaType);
+                }
+                var data = source.path("data").asText("");
+                if (!data.isBlank()) {
+                    b.put("data", data);
+                }
+                var url = source.path("url").asText("");
+                if (!url.isBlank()) {
+                    b.put("url", url);
+                }
                 blocks.add(b);
             }
         }
