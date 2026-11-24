@@ -261,7 +261,9 @@ export default function App() {
             onRelease={release}
           />
           <LiveView
-            url={api.vncUrl(sessionId, userId)}
+            sessionId={sessionId}
+            userId={userId}
+            sandboxId={browser?.sandbox.sandbox_id ?? null}
             viewOnly={owner !== 'HUMAN'}
             ready={sandboxReady}
             owner={owner}

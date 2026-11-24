@@ -160,7 +160,44 @@ export async function confirmStream(
   await readSse(response, onFrame, signal);
 }
 
-export function vncUrl(sessionId: string, userId: string): string {
+const VNC_BASE_STORAGE = 'browser-takeover-vnc-base';
+
+export function configuredVncBase(): string {
+  const fromQuery = new URLSearchParams(window.location.search).get('vncBase');
+  if (fromQuery) {
+    try {
+      localStorage.setItem(VNC_BASE_STORAGE, fromQuery);
+    } catch {
+      // 隐私模式不可写时仅本次生效
+    }
+    return fromQuery;
+  }
+  try {
+    return localStorage.getItem(VNC_BASE_STORAGE) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function gatewayBase(raw: string): string {
+  const trimmed = raw.replace(/\/+$/, '');
+  if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {
+    return trimmed;
+  }
+  if (trimmed.startsWith('http://')) {
+    return 'ws://' + trimmed.slice('http://'.length);
+  }
+  if (trimmed.startsWith('https://')) {
+    return 'wss://' + trimmed.slice('https://'.length);
+  }
+  return 'ws://' + trimmed;
+}
+
+export function vncUrl(sessionId: string, userId: string, sandboxId: string | null): string {
+  const base = configuredVncBase();
+  if (base && sandboxId) {
+    return `${gatewayBase(base)}/v1/sandboxes/${sandboxId}/proxy/6080/websockify`;
+  }
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${scheme}://${window.location.host}${threadsUrl(sessionId)}/browser/vnc?userId=${encodeURIComponent(userId)}`;
 }

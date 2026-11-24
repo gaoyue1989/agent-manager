@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import * as api from '../api';
 
 type Props = {
-  url: string;
+  sessionId: string;
+  userId: string;
+  sandboxId: string | null;
   viewOnly: boolean;
   ready: boolean;
   owner: 'AGENT' | 'HUMAN';
@@ -9,21 +12,29 @@ type Props = {
 
 type LiveStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
 
-export function LiveView({ url, viewOnly, ready, owner }: Props) {
+export function LiveView({ sessionId, userId, sandboxId, viewOnly, ready, owner }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const rfbRef = useRef<{
-    viewOnly: boolean;
-    disconnect: () => void;
-  } | null>(null);
+  const rfbRef = useRef<{ viewOnly: boolean; disconnect: () => void } | null>(null);
+  const failuresRef = useRef(0);
   const [status, setStatus] = useState<LiveStatus>('idle');
+
+  useEffect(() => {
+    failuresRef.current = 0;
+  }, [sessionId, userId]);
 
   useEffect(() => {
     if (!ready) {
       setStatus('idle');
-      return;
+      return undefined;
     }
     let disposed = false;
     let retryTimer: number | undefined;
+
+    const fail = () => {
+      failuresRef.current += 1;
+      setStatus('error');
+      retryTimer = window.setTimeout(() => void connect(), 2000);
+    };
 
     const connect = async () => {
       if (disposed || !containerRef.current) return;
@@ -32,22 +43,23 @@ export function LiveView({ url, viewOnly, ready, owner }: Props) {
       try {
         ({ default: RFB } = await import('@novnc/novnc'));
       } catch {
-        setStatus('error');
-        if (!disposed) retryTimer = window.setTimeout(() => void connect(), 2000);
+        if (!disposed) fail();
         return;
       }
       if (disposed || !containerRef.current) return;
       containerRef.current.innerHTML = '';
-      const rfb = new RFB(containerRef.current, url, { wsProtocols: ['binary'] });
+      const rfb = new RFB(containerRef.current, api.vncUrl(sessionId, userId, sandboxId), { wsProtocols: ['binary'] });
       rfb.scaleViewport = true;
       rfb.viewOnly = viewOnly;
-      rfb.addEventListener('connect', () => setStatus('connected'));
+      rfb.addEventListener('connect', () => {
+        failuresRef.current = 0;
+        setStatus('connected');
+      });
       rfb.addEventListener('disconnect', (event) => {
-        setStatus(event.detail?.clean ? 'closed' : 'error');
         rfbRef.current = null;
-        if (!disposed) {
-          retryTimer = window.setTimeout(() => void connect(), 2000);
-        }
+        if (disposed) return;
+        setStatus(event.detail?.clean ? 'closed' : 'error');
+        fail();
       });
       rfbRef.current = rfb;
     };
@@ -59,12 +71,10 @@ export function LiveView({ url, viewOnly, ready, owner }: Props) {
       rfbRef.current?.disconnect();
       rfbRef.current = null;
     };
-  }, [url, ready]);
+  }, [ready, sandboxId, sessionId, userId, viewOnly]);
 
   useEffect(() => {
-    if (rfbRef.current) {
-      rfbRef.current.viewOnly = viewOnly;
-    }
+    if (rfbRef.current) rfbRef.current.viewOnly = viewOnly;
   }, [viewOnly]);
 
   const overlay = !ready
@@ -72,8 +82,10 @@ export function LiveView({ url, viewOnly, ready, owner }: Props) {
     : status === 'connecting'
       ? '正在连接实时画面…'
       : status === 'error'
-        ? '画面连接断开，正在重试…'
-        : null;
+        ? '画面连接断开，正在重试…（连续失败将自动切换 HTTP 截图模式）'
+        : status === 'closed'
+          ? '画面连接已关闭，正在重连…'
+          : null;
 
   return (
     <div className="live-wrap">
