@@ -49,8 +49,16 @@ export function LiveView({ sessionId, userId, sandboxId, viewOnly, ready, owner 
         return;
       }
       if (disposed || !containerRef.current) return;
+      let url: string;
+      try {
+        url = await api.vncUrl(sessionId, userId, sandboxId);
+      } catch {
+        if (!disposed) fail();
+        return;
+      }
+      if (disposed || !containerRef.current) return;
       containerRef.current.innerHTML = '';
-      const rfb = new RFB(containerRef.current, api.vncUrl(sessionId, userId, sandboxId), { wsProtocols: ['binary'] });
+      const rfb = new RFB(containerRef.current, url, { wsProtocols: ['binary'] });
       rfb.scaleViewport = true;
       rfb.viewOnly = viewOnlyRef.current;
       rfb.addEventListener('connect', () => {

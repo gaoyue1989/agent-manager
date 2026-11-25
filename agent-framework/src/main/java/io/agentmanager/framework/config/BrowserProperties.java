@@ -1,5 +1,7 @@
 package io.agentmanager.framework.config;
 
+import java.util.List;
+
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
@@ -8,10 +10,20 @@ public record BrowserProperties(
     @DefaultValue("false") boolean enabled,
     @DefaultValue("60") long takeoverTtlMinutes,
     @DefaultValue("6080") int viewPort,
-    @DefaultValue("/websockify") String viewPath
+    @DefaultValue("/websockify") String viewPath,
+    @DefaultValue("60") long vncTicketTtlSeconds,
+    @DefaultValue List<String> allowedOriginPatterns
 ) {
 
     public long takeoverTtlSeconds() {
         return takeoverTtlMinutes * 60L;
+    }
+
+    public List<String> originPatterns() {
+        return allowedOriginPatterns.stream()
+            .filter(p -> p != null)
+            .map(String::trim)
+            .filter(p -> !p.isEmpty())
+            .toList();
     }
 }

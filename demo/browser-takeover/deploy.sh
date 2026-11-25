@@ -106,7 +106,7 @@ PY
 
 derive_env() {
   local key="$1"
-  NS="$NS" python3 - "$SANDBOX_IMAGE" "$OSB_SERVER_URL" "$key" <<'PY'
+  NS="$NS" python3 - "$SANDBOX_IMAGE" "$OSB_SERVER_URL" "$key" "${DEMO_ORIGIN_PATTERNS:-http://*:5188,https://*}" <<'PY'
 import base64, json, os, subprocess, sys
 ns = os.environ["NS"]
 
@@ -124,6 +124,7 @@ env = {k: merged[k] for k in keep if merged.get(k)}
 env.update({
     "AGENT_BROWSER_ENABLED": "true",
     "AGENT_BROWSER_TAKEOVER_TTL_MINUTES": "60",
+    "AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS": sys.argv[4],
     "SANDBOX_ENABLED": "true",
     "SANDBOX_IMAGE": sys.argv[1],
     "SANDBOX_ENTRYPOINT": "/browser-entrypoint.sh",

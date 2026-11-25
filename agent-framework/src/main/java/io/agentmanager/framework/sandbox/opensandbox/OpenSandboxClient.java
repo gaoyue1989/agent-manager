@@ -211,18 +211,14 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         } else if (sid != null && !sid.isBlank()) {
             builder.metadata(Map.of("session_id", sid));
         }
-        var osbSandbox = builder.build();
+        var execd = OpenSandboxEndpoints.withPortFidelity(builder.build(), options.getServerUrl());
+        var osbSandbox = execd.sandbox();
 
         // 2. 构建状态
         var info = osbSandbox.getInfo();
         OpenSandboxState state = new OpenSandboxState();
         state.setSandboxId(info.getId());
-        try {
-            state.setSandboxEndpoint(osbSandbox.getEndpoint(44772).getEndpoint());
-        } catch (Exception e) {
-            // execd 端点获取失败不阻塞：SDK 命令/文件操作自行解析端点
-            state.setSandboxEndpoint(null);
-        }
+        state.setSandboxEndpoint(execd.execdEndpoint());
         state.setWorkspaceSpec(workspaceSpec);
         state.setImage(options.getImage());
         state.setCreatedAt(System.currentTimeMillis());
@@ -269,17 +265,14 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
     private OpenSandbox wrapReused(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
                                    String sandboxId, WorkspaceSpec workspaceSpec,
                                    String sessionId) throws Exception {
+        var execd = OpenSandboxEndpoints.withPortFidelity(osbSandbox, options.getServerUrl());
         OpenSandboxState state = new OpenSandboxState();
         state.setSandboxId(sandboxId);
-        try {
-            state.setSandboxEndpoint(osbSandbox.getEndpoint(44772).getEndpoint());
-        } catch (Exception e) {
-            state.setSandboxEndpoint(null);
-        }
+        state.setSandboxEndpoint(execd.execdEndpoint());
         state.setWorkspaceSpec(workspaceSpec);
         state.setImage(options.getImage());
         state.setCreatedAt(System.currentTimeMillis());
-        OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader,
+        OpenSandbox sandbox = new OpenSandbox(state, execd.sandbox(), options, workspaceReader,
             workspaceSyncService, filesystemSpec, fileAssetStore, fileStorage,
             options.isSkillRevisionGateEnabled(), options.isSyncSnapshotDiffEnabled());
         bindUserKey(sandbox);
@@ -300,16 +293,18 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
 
     private SandboxLifecycleManager.ProbeResult probeAlive(String sandboxId) {
         try {
-            var osbSandbox = com.alibaba.opensandbox.sandbox.Sandbox.connector()
-                .sandboxId(sandboxId)
-                .connectionConfig(connectionConfig)
-                .skipHealthCheck(true)
-                .connect();
-            osbSandbox.getInfo();   // getInfo 200 = 控制面活（HTTP 404/410 在此抛 SandboxApiException）
-            if (PROBE_EXECD_PING && !execdPingAlive(osbSandbox)) {
+            var connected = OpenSandboxEndpoints.withPortFidelity(
+                com.alibaba.opensandbox.sandbox.Sandbox.connector()
+                    .sandboxId(sandboxId)
+                    .connectionConfig(connectionConfig)
+                    .skipHealthCheck(true)
+                    .connect(),
+                options.getServerUrl()).sandbox();
+            connected.getInfo();   // getInfo 200 = 控制面活（HTTP 404/410 在此抛 SandboxApiException）
+            if (PROBE_EXECD_PING && !execdPingAlive(connected)) {
                 return SandboxLifecycleManager.ProbeResult.dead();
             }
-            return SandboxLifecycleManager.ProbeResult.alive(osbSandbox);
+            return SandboxLifecycleManager.ProbeResult.alive(connected);
         } catch (com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException api) {
             int status = api.getStatusCode() != null ? api.getStatusCode() : 0;
             if (status == 404 || status == 410) {
@@ -362,11 +357,13 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         var lifecycle = filesystemSpec != null ? filesystemSpec.getLifecycleManager() : null;
         final com.alibaba.opensandbox.sandbox.Sandbox osbSandbox;
         try {
-            osbSandbox = com.alibaba.opensandbox.sandbox.Sandbox.connector()
-                .sandboxId(osbState.getSandboxId())
-                .connectionConfig(connectionConfig)
-                .skipHealthCheck(true)
-                .connect();
+            osbSandbox = OpenSandboxEndpoints.withPortFidelity(
+                com.alibaba.opensandbox.sandbox.Sandbox.connector()
+                    .sandboxId(osbState.getSandboxId())
+                    .connectionConfig(connectionConfig)
+                    .skipHealthCheck(true)
+                    .connect(),
+                options.getServerUrl()).sandbox();
         } catch (com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException gone) {
             // 沙箱已被服务端 GC/删除（404/410）：P3 无法恢复，harness 将降级 create 重建。
             // 登记换代（V6⑧ live 实锤缺失路径：绑定行被 renew-404 sweep 懒剔除后，confirm/

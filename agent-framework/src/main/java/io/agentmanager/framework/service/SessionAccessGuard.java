@@ -17,6 +17,8 @@ import org.springframework.stereotype.Component;
  *   <li>session_user 无映射行 → 放行（存量/legacy 会话无归属记录，行为与修复前一致；
  *        正常链路创建的会话必写映射，见 ChatStreamController / A2AController 的 upsert）；</li>
  *   <li>有映射且 owner ≠ 请求者 → 拒绝，端点统一返回 404（不泄露会话存在性）。</li>
+ *   <li>浏览器接管/VNC 等实时控制端点走 {@link #establishedOwner}：无映射行/占位行
+ *       不构成归属证明（fail-closed，issue #559）。</li>
  * </ul>
  *
  * <p>静态工具形态：ThreadController / ConfirmController / ChatStreamController 已注入
@@ -61,5 +63,26 @@ public class SessionAccessGuard {
         // 的 chat 会经 upsert 认领该行；其余有映射要求严格相等
         return owner == null || SessionUserStore.PLACEHOLDER_USER.equals(owner)
             || owner.equals(requester);
+    }
+
+    /**
+     * 已建立归属的会话所有者（fail-closed，issue #559）：浏览器接管/VNC 等实时控制端点
+     * 只面向有明确归属且归属者 = 请求者的会话。
+     *
+     * <p>与 {@link #ownedBy} 的差别：无映射行/占位行不构成归属证明，一律返回 null；
+     * 保留命名空间（用户身份/网关运行时键）同样拒绝。
+     *
+     * @return 会话归属用户；未建立归属返回 null
+     */
+    public static String establishedOwner(SessionUserStore store, String sessionId, String headerUserId) {
+        if (SessionKeyNamespace.isReservedSessionId(sessionId)) {
+            return null;
+        }
+        var requester = (headerUserId == null || headerUserId.isBlank()) ? ANONYMOUS_USER : headerUserId;
+        var owner = store.findUserIdBySession(sessionId);
+        if (owner == null || SessionUserStore.PLACEHOLDER_USER.equals(owner) || !owner.equals(requester)) {
+            return null;
+        }
+        return owner;
     }
 }

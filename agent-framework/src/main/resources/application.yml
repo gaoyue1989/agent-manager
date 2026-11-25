@@ -191,6 +191,8 @@ agent:
     takeover-ttl-minutes: ${AGENT_BROWSER_TAKEOVER_TTL_MINUTES:60}
     view-port: ${AGENT_BROWSER_VIEW_PORT:6080}
     view-path: ${AGENT_BROWSER_VIEW_PATH:/websockify}
+    vnc-ticket-ttl-seconds: ${AGENT_BROWSER_VNC_TICKET_TTL_SECONDS:60}
+    allowed-origin-patterns: ${AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS:}
   # session_event 事件流存储（Redis Streams，见 AgentRedisProperties record）
   # 键名与 AgentRedisProperties 字段一一对应；每个叶子在代码里都有 @DefaultValue，
   # 所以本段缺失也能起来 —— 但**别**依赖那些默认值：它们指向 127.0.0.1:6379。

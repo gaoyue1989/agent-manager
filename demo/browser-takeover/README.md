@@ -35,6 +35,8 @@ SECRETS_FILE=/path/to/.env.secrets ./deploy.sh
 # 2. 启动独立前端（默认代理到 127.0.0.1:30080）
 cd frontend && npm install && npm run dev
 # 打开 http://<主机IP>:5188（dev server 监听 0.0.0.0）
+#   WS 握手 Origin 白名单由 deploy.sh 注入（缺省 http://*:5188,https://*），
+#   换端口/域名用 DEMO_ORIGIN_PATTERNS=... ./deploy.sh 覆盖（禁止 *）
 
 # 可选：HTTPS 入口（自签证书，浏览器需点「高级 → 继续前往」）
 #   wss + 安全上下文；经只放行 CONNECT:443 的代理访问时也能通

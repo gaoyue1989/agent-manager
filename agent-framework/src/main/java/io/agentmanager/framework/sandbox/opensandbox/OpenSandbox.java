@@ -25,6 +25,8 @@ import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
 
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException;
 
 /**
  * OpenSandbox 沙箱运行时：包装 SDK Sandbox 句柄，
@@ -571,45 +573,22 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * execd files API「路径缺失」判据（2026-11 issue #296；评审 g1 修正拓扑表述）：
-     * HTTP 404 且响应体非 sandbox-not-found 形态才映射为缺失哨兵
-     * （__NOT_FOUND__/__NOT_EXISTS__），其余异常向上抛、交 {@link #tryTranslateExec}
-     * 外层 catch 回落真 exec。评选依据：
-     * <ul>
-     *   <li>① files 请求的实际拓扑：客户端 useServerProxy(true)（OpenSandboxClient.java
-     *       :116-117），经 server 代理转发（/v1/sandboxes/{id}/proxy/{n}/...，e2e mock
-     *       server.mjs:322-326 对齐录制件形态），并非 execd 容器直连。因此 404 有两个来源，
-     *       需按响应体区分：(a) 代理转发至 execd 的路径判定（活沙箱路径缺失）→ 判缺失；
-     *       (b) 代理自身死沙箱分支（TTL 过期/故障态）→ <b>不判缺失</b>，向上抛回落真
-     *       exec——否则死沙箱的探测被吞成假缺失，且与同 turn 真 exec 回落路径的
-     *       「沙箱不可达」报错矛盾；回落后由 runCommandGuarded 连续失败熔断收口为一致的
-     *       故障信号；</li>
-     *   <li>② 两类 404 的响应体形态（2026-11-11 本地双运行时真实 server 探针实证，
-     *       非 mock 推断）：execd 路径缺失 body 为
-     *       {@code {"code":"FILE_NOT_FOUND","message":"file not found. open …"}}；
-     *       server 代理死沙箱 body 的 code 字段带 {@code SANDBOX_NOT_FOUND}——k8s runtime
-     *       （batchsandbox + Pool，业务目标架构）为
-     *       {@code {"code":"KUBERNETES::SANDBOX_NOT_FOUND","message":"Sandbox '<id>' not found"}}，
-     *       docker runtime 为
-     *       {@code {"code":"DOCKER::SANDBOX_NOT_FOUND","message":"Sandbox <id> not found."}}。
-     *       因此判据用 code 字段的 {@code sandbox_not_found}（下划线形）匹配两个真实运行时，
-     *       并保留空格形 {@code sandbox not found} 兼容 e2e mock 旧形态
-     *       （server.mjs:325-326）；mock 对路径缺失返回<b>空 body</b> 404
-     *       （server.mjs:356/:363）→ 空 body 不含任何字样 → 判缺失，e2e 语义不变；</li>
-     *   <li>③ 仍不采用 SDK ExceptionConverterKt.isFileNotFound（error.code==FILE_NOT_FOUND，
-     *       依赖响应体解析）——真实 server 路径缺失虽带 FILE_NOT_FOUND code，但 mock 空 body
-     *       下 code 为 UNEXPECTED_RESPONSE、该判据失配会令 X 组路径缺失探测回落真 exec，
-     *       而 read 探测模板 {@code if [ ! -f ...} 不在 mock EXEC_WHITELIST
-     *       （server.mjs:47）→ CommandExecError 126，e2e 回归；反向仅按 FILE_NOT_FOUND
-     *       正向判缺失也无法排除死沙箱（两者都靠 body 区分，正反判据等价，取排除式）;</li>
-     *   <li>④ 与 SandboxEnvFile.notFound 同型（sandbox 生命周期 404/410 惯例）——其中的 410
-     *       是控制面 sandbox 资源态，不纳入。</li>
-     * </ul>
+     * execd files API「路径缺失」白名单判据（issue #296 引入，issue #514 收窄为白名单）：
+     * 仅 HTTP 404 且响应体为空（e2e mock 缺失形态）或为 execd 的 JSON 且 code=FILE_NOT_FOUND
+     * 时映射为缺失哨兵（__NOT_FOUND__/__NOT_EXISTS__）；其余 404 一律向上抛、交
+     * {@link #tryTranslateExec} 外层 catch 回落真 exec。
      *
-     * <p>失配方向的失败模式均安全：若未来真实死沙箱 body 变体不含上述字样，判据退化为
-     * 「404 即缺失」= 评审前行为（影响有界：下轮 probeAlive 404/410 → DEAD 重建，
-     * OpenSandboxClient.java:312-314）；反向误伤（路径缺失 body 恰含该字样）仅导致多回落
-     * 一次真 exec（活沙箱上结果仍正确，只多付一次 exec 时延）。
+     * <p>依据（2026-11-11 双运行时真实 server 探针 + 2026-11-24 评审机 nginx 非标端口复现）：
+     * files 请求经 server proxy（useServerProxy(true)）转发，404 有三个来源——execd 路径缺失
+     * （{@code {"code":"FILE_NOT_FOUND",...}}）、死沙箱（{@code DOCKER::/KUBERNETES::SANDBOX_NOT_FOUND}）、
+     * 前置反代故障（endpoint 丢端口后打到 nginx 默认站点的 HTML 404）。只有第一种是路径缺失；
+     * 后两种若按排除法判缺失，整条代理故障会被吞成「工作区所有文件都不存在」，既不回落也不熔断。
+     * 判据与 SDK {@code ExceptionConverterKt.isFileNotFound} 同向（只认 FILE_NOT_FOUND），
+     * 额外放宽空 body 以兼容 e2e mock（server.mjs 对路径缺失返回空 body 404，且 mock 命令白名单
+     * 不含 read 探测模板，回落真 exec 会 126 回归）。
+     *
+     * <p>失配方向安全：未知形态的 404 一律回落真 exec（活沙箱上结果仍正确，只多付一次 exec
+     * 时延）；上游故障则经真 exec 失败暴露给调用方。
      */
     private static boolean isPathMissing(Throwable e) {
         if (!(e instanceof SandboxApiException api)) {
@@ -619,23 +598,20 @@ public class OpenSandbox extends AbstractBaseSandbox
         if (status == null || status != 404) {
             return false;
         }
-        // server 代理层死沙箱 404（body code 含 SANDBOX_NOT_FOUND，两运行时统一）不是路径缺失：
-        // 交调用方向上抛回落真 exec（runCommandGuarded 熔断给出一致故障信号）
-        return !isSandboxNotFoundBody(api.getResponseBody());
+        String body = api.getResponseBody();
+        if (body == null || body.isBlank()) {
+            return true;
+        }
+        var error = api.getError();
+        return error != null && SandboxError.FILE_NOT_FOUND.equals(error.getCode());
     }
 
-    /**
-     * 404 响应体是否为 server 代理死沙箱形态（大小写不敏感）：code 字段下划线形
-     * {@code SANDBOX_NOT_FOUND}（docker/k8s 两真实运行时统一）+ 空格形
-     * {@code sandbox not found}（e2e mock 兼容）；空 body 视为 execd 路径缺失
-     * （mock files/download 与 directories/list 的缺失形态）→ 返回 false
-     */
-    private static boolean isSandboxNotFoundBody(String responseBody) {
-        if (responseBody == null || responseBody.isBlank()) {
+    private static boolean isDirectoryDownloadError(Throwable e) {
+        if (!(e instanceof SandboxInternalException)) {
             return false;
         }
-        String lower = responseBody.toLowerCase(java.util.Locale.ROOT);
-        return lower.contains("sandbox_not_found") || lower.contains("sandbox not found");
+        String msg = e.getMessage();
+        return msg != null && (msg.contains("Cannot buffer entire body") || msg.contains("9223372036854775807"));
     }
 
     /**
@@ -834,11 +810,10 @@ public class OpenSandbox extends AbstractBaseSandbox
             // 不匹配即零开销，补注入后容器条目与 KV 条目同 rel 去重无害。根判定用绝对路径
             // 精确等值或归一化空/点（normalizeRel 对 '/workspace' 只剥前导斜杠得 'workspace'，
             // 不能作为根判定）
-            var rootRel = normalizeRel(root);
-            if (runtimeReadThroughEnabled && (root.equals(getWorkspaceRoot())
-                    || rootRel.isEmpty() || rootRel.equals("."))
-                    && globMatch(pattern, WorkspaceReader.MEMORY_FILE)) {
-                fillGlobFromMemoryRootFile(files);
+            var rootRel = stripTrailingSlashes(normalizeRel(root));
+            if (runtimeReadThroughEnabled && (stripTrailingSlashes(root).equals(getWorkspaceRoot())
+                    || rootRel.isEmpty() || rootRel.equals("."))) {
+                fillGlobFromMemoryWorkspaceRoot(pattern, files);
             }
         }
         // 截断可观测性（issue #296）：每次 translateGlob 仅一条 WARN，避免深树逐分支刷屏
@@ -858,7 +833,7 @@ public class OpenSandbox extends AbstractBaseSandbox
 
     /** root 归一化后落在 memory/ 子树内则返回其相对形态（如 {@code memory} / {@code memory/sub}），否则 null */
     private String memoryRelUnder(String root) {
-        var rel = normalizeRel(root);
+        var rel = stripTrailingSlashes(normalizeRel(root));
         if (!runtimeReadThroughEnabled) {
             return null;
         }
@@ -887,14 +862,16 @@ public class OpenSandbox extends AbstractBaseSandbox
      * mtime=0）——仅工作区根级 glob 且 pattern 匹配时由 translateGlob 调用（调用方已做模式
      * 预检），memory/ 子树语义由 {@link #fillGlobFromMemoryKv} 负责、不含根级文件。
      */
-    private void fillGlobFromMemoryRootFile(java.util.TreeSet<FileEntry> out) {
+    private void fillGlobFromMemoryWorkspaceRoot(String pattern, java.util.TreeSet<FileEntry> out) {
         if (workspaceReader == null || userKey == null || userKey.isBlank() || out.size() > 5000) {
             return;
         }
         try {
-            var size = workspaceReader.listRuntimeFiles(userKey).get(WorkspaceReader.MEMORY_FILE);
-            if (size != null) {
-                out.add(new FileEntry(WorkspaceReader.MEMORY_FILE, size, 0));
+            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
+                var rel = entry.getKey();
+                if (globMatch(pattern, leaf(rel))) {
+                    out.add(new FileEntry(rel, entry.getValue() == null ? 0 : entry.getValue(), 0));
+                }
             }
         } catch (Exception e) {
             log.debug("[sandbox-open] read-through memory root glob failed: {}", e.getMessage());
@@ -990,7 +967,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 sb.append("FILE:").append(p).append('\t').append(Math.max(e.getSize(), 0)).append('\t').append(mtime);
             }
         }
-        if (WorkspaceReader.MEMORY_DIR.equals(normalizeRel(dir))) {
+        if (WorkspaceReader.MEMORY_DIR.equals(stripTrailingSlashes(normalizeRel(dir)))) {
             fillLsFromMemoryKv(seen, sb);
         }
         return new ExecResult(0, sb.toString(), "", false);
@@ -1029,7 +1006,7 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 拼装与容器同构的 FILE: 行（path\tsize\tmtime=0）；其余情况维持 __NOT_EXISTS__。
      */
     private ExecResult readThroughMemoryLs(String dir) throws Exception {
-        var rel = normalizeRel(dir);
+        var rel = stripTrailingSlashes(normalizeRel(dir));
         if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()
                 || !WorkspaceReader.MEMORY_DIR.equals(rel)) {
             return new ExecResult(0, "__NOT_EXISTS__", "", false);
@@ -1051,41 +1028,42 @@ public class OpenSandbox extends AbstractBaseSandbox
      *         有效链 yes/no），回落原 test -e 真 exec（issue #394）
      */
     private Boolean translateExists(String relPath) throws Exception {
-        var normalized = normalizeRel(relPath);
-        boolean trailingSlash = normalized.length() > 1 && normalized.endsWith("/");
-        if (trailingSlash) {
-            normalized = normalized.substring(0, normalized.length() - 1);
-        }
-        // 父目录列举仅对工作区相对路径/工作区内绝对路径生效：非工作区绝对路径（/etc/hosts 等）
-        // 不得改写成 /workspace 镜像路径判存在，直接回落旧两步实现
+        var rawNormalized = normalizeRel(relPath);
+        boolean trailingSlash = rawNormalized.length() > 1 && rawNormalized.endsWith("/");
+        var normalized = stripTrailingSlashes(rawNormalized);
         var workspaceScoped = !relPath.startsWith("/") || relPath.startsWith(getWorkspaceRoot() + "/");
         int slash = normalized.lastIndexOf('/');
         var parent = slash <= 0 ? "" : normalized.substring(0, slash);
         var leafPath = leaf(normalized);
-        if (workspaceScoped && !parent.isEmpty()) {
+        if (workspaceScoped && !leafPath.isEmpty()) {
+            String parentDir = parent.isEmpty() ? getWorkspaceRoot() : getWorkspaceRoot() + "/" + parent;
             try {
-                var entries = osbSandbox.files().listDirectory(getWorkspaceRoot() + "/" + parent);
-                if (entries != null) {
+                var entries = osbSandbox.files().listDirectory(parentDir);
+                if (entries != null && (!parent.isEmpty() || !entries.isEmpty())) {
                     for (var e : entries) {
                         if (e.getPath() != null && leaf(normalizeRel(e.getPath())).equals(leafPath)) {
                             if ("symlink".equalsIgnoreCase(e.getType())) {
                                 return null;
                             }
-                            return !trailingSlash || "directory".equalsIgnoreCase(e.getType());
+                            return !trailingSlash
+                                || "directory".equalsIgnoreCase(e.getType())
+                                || "dir".equalsIgnoreCase(e.getType());
                         }
                     }
-                    return memoryKvExists(normalized);
+                    return memoryKvExists(normalized, trailingSlash);
                 }
             } catch (Exception ignoreParent) {
-                // 父目录列举失败（适配器差异等）→ 回落旧两步实现
             }
         }
         try {
             osbSandbox.files().readByteArray(normalized);
             return !trailingSlash;
         } catch (SandboxApiException e) {
-            // 404 = 确定不是文件 → 继续目录探测；其余异常向上抛，交外层回落真 exec（issue #296）
             if (!isPathMissing(e)) {
+                throw e;
+            }
+        } catch (SandboxInternalException e) {
+            if (!isDirectoryDownloadError(e)) {
                 throw e;
             }
         }
@@ -1094,11 +1072,10 @@ public class OpenSandbox extends AbstractBaseSandbox
             if (entries != null) {
                 return Boolean.TRUE;
             }
-            return memoryKvExists(normalized);
+            return memoryKvExists(normalized, trailingSlash);
         } catch (SandboxApiException e) {
-            // 两层均 404 = 确定缺失 → 记忆路径回落 KV；其余异常向上抛回落真 exec（test -e / test -d）
             if (isPathMissing(e)) {
-                return memoryKvExists(normalized);
+                return memoryKvExists(normalized, trailingSlash);
             }
             throw e;
         }
@@ -1111,14 +1088,17 @@ public class OpenSandbox extends AbstractBaseSandbox
      * （KV 空内容 → yes，与 read 的 __EMPTY__ 一致，issue #356）；非记忆路径、读穿关闭、
      * 用户未绑定 → false。
      */
-    private boolean memoryKvExists(String relPath) {
+    private boolean memoryKvExists(String relPath, boolean requireDir) {
         if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()) {
             return false;
         }
-        var rel = normalizeRel(relPath);
+        var rel = stripTrailingSlashes(normalizeRel(relPath));
         if (WorkspaceReader.MEMORY_DIR.equals(rel)) {
             return workspaceReader.listRuntimeFiles(userKey).keySet().stream()
                 .anyMatch(k -> k.startsWith(WorkspaceReader.MEMORY_DIR + "/"));
+        }
+        if (requireDir) {
+            return false;
         }
         var isKvRuntimeKey = WorkspaceReader.MEMORY_FILE.equals(rel)
             || (rel.startsWith(WorkspaceReader.MEMORY_DIR + "/") && rel.endsWith(".md")
@@ -1238,6 +1218,14 @@ public class OpenSandbox extends AbstractBaseSandbox
             p = p.substring(1);
         }
         return p;
+    }
+
+    private static String stripTrailingSlashes(String p) {
+        int end = p.length();
+        while (end > 1 && p.charAt(end - 1) == '/') {
+            end--;
+        }
+        return end == p.length() ? p : p.substring(0, end);
     }
 
     /**
@@ -1706,7 +1694,9 @@ public class OpenSandbox extends AbstractBaseSandbox
             // readFileInfo 直接查询目标路径：不遍历父目录，因此可读取位于技能软链目录
             // 下的真实文件元数据。对软链本身保持未知大小，避免把链接目标字符串长度
             // 当作文件大小（Lstat 语义）。
-            var info = osbSandbox.files().readFileInfo(List.of(relPath)).get(relPath);
+            var infoMap = osbSandbox.files().readFileInfo(List.of(relPath));
+            var info = infoMap == null ? null
+                : infoMap.getOrDefault(relPath, infoMap.size() == 1 ? infoMap.values().iterator().next() : null);
             if (info == null) {
                 return -1;
             }

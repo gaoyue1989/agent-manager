@@ -34,6 +34,7 @@ class BrowserControlControllerTest {
     private BrowserControlService control;
     private SessionUserStore sessionUserStore;
     private ChatStreamController chatStreamController;
+    private BrowserViewTicketStore ticketStore;
     private BrowserControlController controller;
 
     @BeforeEach
@@ -41,7 +42,8 @@ class BrowserControlControllerTest {
         control = mock(BrowserControlService.class);
         sessionUserStore = mock(SessionUserStore.class);
         chatStreamController = mock(ChatStreamController.class);
-        controller = new BrowserControlController(control, sessionUserStore, chatStreamController);
+        ticketStore = mock(BrowserViewTicketStore.class);
+        controller = new BrowserControlController(control, sessionUserStore, chatStreamController, ticketStore);
         when(sessionUserStore.findUserIdBySession(SESSION)).thenReturn(USER);
     }
 
@@ -61,6 +63,48 @@ class BrowserControlControllerTest {
             () -> controller.state(SESSION, "someone-else"));
         assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
         verify(control, never()).state(anyString(), anyString());
+    }
+
+    @Test
+    void unclaimedSessionShouldGetNotFound() {
+        when(sessionUserStore.findUserIdBySession("unclaimed")).thenReturn(null);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.state("unclaimed", "someone-else"));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).state(anyString(), anyString());
+    }
+
+    @Test
+    void placeholderSessionShouldGetNotFound() {
+        when(sessionUserStore.findUserIdBySession("placeholder"))
+            .thenReturn(SessionUserStore.PLACEHOLDER_USER);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.state("placeholder", "someone-else"));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).state(anyString(), anyString());
+    }
+
+    @Test
+    void unclaimedSessionShouldNotBeTakeoverAble() {
+        when(sessionUserStore.findUserIdBySession("unclaimed")).thenReturn(null);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.takeover("unclaimed", "someone-else", null));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).takeover(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void unclaimedSessionShouldNotBeReleasable() {
+        when(sessionUserStore.findUserIdBySession("unclaimed")).thenReturn(null);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.release("unclaimed", "someone-else", null, new HttpHeaders()));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).release(anyString());
+        verify(chatStreamController, never()).chat(any(), any(), any(), any());
     }
 
     @Test
@@ -85,6 +129,36 @@ class BrowserControlControllerTest {
         var response = controller.takeover(SESSION, USER, null);
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
         assertEquals("control_store_unavailable", response.getBody().get("error"));
+    }
+
+    @Test
+    void vncTicketShouldBeIssuedOnlyToSessionOwner() {
+        when(ticketStore.issue(SESSION, USER)).thenReturn("ticket-1");
+        when(ticketStore.ttlSeconds()).thenReturn(60L);
+
+        var response = controller.vncTicket(SESSION, USER);
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals("ticket-1", response.getBody().get("ticket"));
+        assertEquals(60L, response.getBody().get("expires_in_seconds"));
+    }
+
+    @Test
+    void vncTicketShouldBeNotFoundForForeignUser() {
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.vncTicket(SESSION, "someone-else"));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(ticketStore, never()).issue(anyString(), anyString());
+    }
+
+    @Test
+    void vncTicketShouldReportStoreUnavailable() {
+        when(ticketStore.issue(SESSION, USER))
+            .thenThrow(new BrowserControlUnavailableException("down", new IllegalStateException("down")));
+
+        var response = controller.vncTicket(SESSION, USER);
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
+        assertEquals("view_ticket_unavailable", response.getBody().get("error"));
     }
 
     @Test
@@ -137,5 +211,24 @@ class BrowserControlControllerTest {
             .collectList().block();
         assertEquals(List.of(), frames);
         verify(chatStreamController).chat(any(), eq(USER), eq("/agent/demo"), any());
+    }
+
+    @Test
+    void releaseErrorFramesMustBeValidJson() throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        when(control.release(SESSION)).thenReturn(false);
+        var notHeld = controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        assertEquals(1, notHeld.size());
+        var tree1 = mapper.readTree(notHeld.get(0).data());
+        assertEquals("error", tree1.get("type").asText());
+        assertTrue(tree1.get("error").asText().contains("not_taken_over"));
+
+        when(control.release(SESSION))
+            .thenThrow(new BrowserControlUnavailableException("redis down", new IllegalStateException("down")));
+        var unavailable = controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        assertEquals(1, unavailable.size());
+        var tree2 = mapper.readTree(unavailable.get(0).data());
+        assertEquals("error", tree2.get("type").asText());
+        assertTrue(tree2.get("error").asText().contains("control_store_unavailable"));
     }
 }

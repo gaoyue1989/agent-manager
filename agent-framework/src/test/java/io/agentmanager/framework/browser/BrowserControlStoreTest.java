@@ -35,7 +35,7 @@ class BrowserControlStoreTest {
         facade = mock(RedisConnectionFacade.class);
         when(facade.key(anyString())).thenAnswer(inv -> inv.getArgument(0));
         when(facade.sync()).thenReturn(sync);
-        store = new BrowserControlStore(facade, new BrowserProperties(true, 60, 6080, "/websockify"));
+        store = new BrowserControlStore(facade, new BrowserProperties(true, 60, 6080, "/websockify", 60, java.util.List.of()));
     }
 
     private static String key() {

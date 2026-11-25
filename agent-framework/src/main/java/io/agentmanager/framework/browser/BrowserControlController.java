@@ -39,12 +39,15 @@ public class BrowserControlController {
     private final BrowserControlService control;
     private final SessionUserStore sessionUserStore;
     private final ChatStreamController chatStreamController;
+    private final BrowserViewTicketStore ticketStore;
 
     public BrowserControlController(BrowserControlService control, SessionUserStore sessionUserStore,
-                                    ChatStreamController chatStreamController) {
+                                    ChatStreamController chatStreamController,
+                                    BrowserViewTicketStore ticketStore) {
         this.control = control;
         this.sessionUserStore = sessionUserStore;
         this.chatStreamController = chatStreamController;
+        this.ticketStore = ticketStore;
     }
 
     public record TakeoverRequest(String reason) {
@@ -55,11 +58,11 @@ public class BrowserControlController {
             @PathVariable String sessionId,
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
         String sid = PathSafe.sanitize(sessionId);
-        assertOwned(sid, headerUserId);
+        String owner = assertOwned(sid, headerUserId);
         try {
-            return ResponseEntity.ok(control.state(requester(headerUserId), sid));
+            return ResponseEntity.ok(control.state(owner, sid));
         } catch (BrowserControlUnavailableException e) {
-            return unavailable(e);
+            return unavailable("control_store_unavailable", e);
         }
     }
 
@@ -69,16 +72,16 @@ public class BrowserControlController {
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestBody(required = false) TakeoverRequest body) {
         String sid = PathSafe.sanitize(sessionId);
-        assertOwned(sid, headerUserId);
+        String owner = assertOwned(sid, headerUserId);
         try {
-            var result = control.takeover(sid, requester(headerUserId),
+            var result = control.takeover(sid, owner,
                 body != null ? body.reason() : null, BrowserControlService.TRIGGER_USER);
             var out = new LinkedHashMap<String, Object>();
             out.put("control", result.control());
             out.put("stop_outcome", result.stopOutcome());
             return ResponseEntity.ok(out);
         } catch (BrowserControlUnavailableException e) {
-            return unavailable(e);
+            return unavailable("control_store_unavailable", e);
         }
     }
 
@@ -90,7 +93,7 @@ public class BrowserControlController {
             @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader,
             @RequestHeader(required = false) HttpHeaders requestHeaders) {
         String sid = PathSafe.sanitize(sessionId);
-        assertOwned(sid, headerUserId);
+        String owner = assertOwned(sid, headerUserId);
         try {
             if (!control.release(sid)) {
                 return Flux.just(errorFrame("not_taken_over: browser control is not held by the human"));
@@ -98,35 +101,49 @@ public class BrowserControlController {
         } catch (BrowserControlUnavailableException e) {
             return Flux.just(errorFrame("control_store_unavailable: " + e.getMessage()));
         }
-        var request = new ChatStreamController.ChatRequest(RESUME_MESSAGE, requester(headerUserId),
+        var request = new ChatStreamController.ChatRequest(RESUME_MESSAGE, owner,
             sid, null, null, null, null);
         log.info("[browser-control] release accepted, resuming agent turn (sid={})", sid);
-        return chatStreamController.chat(request, headerUserId, forwardedPrefixHeader, requestHeaders);
+        return chatStreamController.chat(request, owner, forwardedPrefixHeader, requestHeaders);
     }
 
-    private void assertOwned(String sessionId, String headerUserId) {
-        if (!SessionAccessGuard.ownedBy(sessionUserStore, sessionId, headerUserId)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
-                "Session '" + sessionId + "' not found");
+    @PostMapping("/threads/{sessionId}/browser/vnc-ticket")
+    public ResponseEntity<Map<String, Object>> vncTicket(
+            @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        String sid = PathSafe.sanitize(sessionId);
+        String owner = assertOwned(sid, headerUserId);
+        try {
+            var out = new LinkedHashMap<String, Object>();
+            out.put("ticket", ticketStore.issue(sid, owner));
+            out.put("expires_in_seconds", ticketStore.ttlSeconds());
+            return ResponseEntity.ok(out);
+        } catch (BrowserControlUnavailableException e) {
+            return unavailable("view_ticket_unavailable", e);
         }
     }
 
-    private static String requester(String headerUserId) {
-        return (headerUserId == null || headerUserId.isBlank())
-            ? SessionAccessGuard.ANONYMOUS_USER : headerUserId;
+    private String assertOwned(String sessionId, String headerUserId) {
+        var owner = SessionAccessGuard.establishedOwner(sessionUserStore, sessionId, headerUserId);
+        if (owner == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                "Session '" + sessionId + "' not found");
+        }
+        return owner;
     }
 
-    private static ResponseEntity<Map<String, Object>> unavailable(BrowserControlUnavailableException e) {
+    private static ResponseEntity<Map<String, Object>> unavailable(String error,
+                                                                  BrowserControlUnavailableException e) {
         var body = new LinkedHashMap<String, Object>();
-        body.put("error", "control_store_unavailable");
+        body.put("error", error);
         body.put("message", e.getMessage());
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
     }
 
     private static ServerSentEvent<String> errorFrame(String message) {
         return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"error\",\"error\":\""
-                + io.agentmanager.framework.controller.AgentEventSseSerializer.jsonEsc(message) + "\"}")
+            .data("{\"type\":\"error\",\"error\":"
+                + io.agentmanager.framework.controller.AgentEventSseSerializer.jsonEsc(message) + "}")
             .build();
     }
 }

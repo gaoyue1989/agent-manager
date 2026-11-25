@@ -5,6 +5,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -1360,5 +1361,134 @@ func TestAgentMemoryFormLifecycle(t *testing.T) {
 	// (平台启用→openviking;与 TestPublishWithOpenVikingProvision 的派生键补齐同语义)
 	if env3[AgentMemoryProviderEnv] != MemoryProviderOpenViking {
 		t.Fatalf("default provider must re-derive from platform config: %v", env3)
+	}
+}
+
+func TestUpdateAgentSandboxOffDoesNotOverflowMaxEnvKeys(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := seedWs(t, c, "ws-sbx-cap", "沙箱键数上限空间")
+	if err := c.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: 1, Role: "owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-cap", "qwen-plus", "https://llm.example/v1")
+	off := false
+	svc, _, err := c.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "cap-agent", Description: "d", Prompt: "p1", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &off},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	env := map[string]string{}
+	_ = json.Unmarshal([]byte(svc.EnvJSON), &env)
+	for i := 0; len(env) < 58; i++ {
+		env[fmt.Sprintf("CUSTOM_KEY_%02d", i)] = fmt.Sprintf("val-%d", i)
+	}
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateEnv(svc.ID, env, nil); err != nil {
+		t.Fatalf("update env to 58 keys: %v", err)
+	}
+	if _, _, err := c.UpdateAgent(ws.ID, 1, svc.ID, &AgentForm{
+		Name: "cap-agent", Description: "d", Prompt: "p2", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &off},
+	}); err != nil {
+		t.Fatalf("update agent with 58 env keys and sandbox.enabled=false failed: %v", err)
+	}
+}
+
+func TestUpdateAgentSandboxOffClearsExistingPlainAndSecretKeys(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := seedWs(t, c, "ws-sbx-clr", "沙箱关闭清理空间")
+	if err := c.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: 1, Role: "owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-clr", "qwen-plus", "https://llm.example/v1")
+	on, off := true, false
+	svc, _, err := c.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "clr-agent", Description: "d", Prompt: "p1", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &on, Image: "sbx:v1"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	env := map[string]string{}
+	_ = json.Unmarshal([]byte(svc.EnvJSON), &env)
+	env["OPENSANDBOX_API_KEY"] = "secret-sbx-key"
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("status", store.StatusRunning).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateEnv(svc.ID, env, nil); err != nil {
+		t.Fatalf("inject sandbox secret: %v", err)
+	}
+	updated, _, err := c.UpdateAgent(ws.ID, 1, svc.ID, &AgentForm{
+		Name: "clr-agent", Description: "d", Prompt: "p2", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &off},
+	})
+	if err != nil {
+		t.Fatalf("update agent off: %v", err)
+	}
+	plain := map[string]string{}
+	secret := map[string]string{}
+	_ = json.Unmarshal([]byte(updated.EnvJSON), &plain)
+	_ = json.Unmarshal([]byte(updated.EnvSecretJSON), &secret)
+	if _, ok := plain["SANDBOX_IMAGE"]; ok {
+		t.Fatalf("SANDBOX_IMAGE must be cleared: %v", plain)
+	}
+	if _, ok := secret["OPENSANDBOX_API_KEY"]; ok {
+		t.Fatalf("OPENSANDBOX_API_KEY must be cleared: %v", secret)
+	}
+}
+
+func TestCreateAgentSandboxOffIgnoresSandboxResourceFields(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := seedWs(t, c, "ws-sbx-off-fields", "沙箱关字段门控空间")
+	if err := c.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: 1, Role: "owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-off", "qwen-plus", "https://llm.example/v1")
+	off := false
+	svc, _, err := c.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "off-fields-agent", Description: "d", Prompt: "p", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox: &SandboxForm{
+			Enabled:    &off,
+			Image:      "my-sbx:v1",
+			TimeoutMin: 45,
+			MemoryMB:   2048,
+			CPUCount:   2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	env := map[string]string{}
+	_ = json.Unmarshal([]byte(svc.EnvJSON), &env)
+	for _, k := range []string{"SANDBOX_IMAGE", "SANDBOX_TIMEOUT_MINUTES", "SANDBOX_MEMORY_MB", "SANDBOX_CPU_COUNT"} {
+		if v, ok := env[k]; ok {
+			t.Fatalf("sandbox.enabled=false must not inject %s (got %q)", k, v)
+		}
+	}
+
+	svcNil, _, err := c.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "nil-enabled-agent", Description: "d", Prompt: "p", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Image: "my-sbx:v2"},
+	})
+	if err != nil {
+		t.Fatalf("create nil enabled: %v", err)
+	}
+	envNil := map[string]string{}
+	_ = json.Unmarshal([]byte(svcNil.EnvJSON), &envNil)
+	if envNil["SANDBOX_IMAGE"] != "my-sbx:v2" {
+		t.Fatalf("sandbox.enabled=nil should preserve explicit SANDBOX_IMAGE, got %q", envNil["SANDBOX_IMAGE"])
 	}
 }

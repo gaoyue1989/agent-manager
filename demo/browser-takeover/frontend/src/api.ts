@@ -160,9 +160,17 @@ export async function confirmStream(
   await readSse(response, onFrame, signal);
 }
 
-// VNC 必须经同源业务代理：不接受 URL 参数或 localStorage 中的任意网关地址，
-// 避免恶意链接将后续人工接管流量（包括输入内容）持久重定向到攻击者服务器。
-export function vncUrl(sessionId: string, userId: string, _sandboxId: string | null): string {
+export async function vncUrl(
+  sessionId: string,
+  userId: string,
+  _sandboxId: string | null,
+): Promise<string> {
+  const response = await fetch(`${threadsUrl(sessionId)}/browser/vnc-ticket`, {
+    method: 'POST',
+    headers: { 'X-User-Id': userId },
+  });
+  if (!response.ok) throw new Error(`vnc ticket HTTP ${response.status}`);
+  const { ticket } = (await response.json()) as { ticket: string };
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${scheme}://${window.location.host}${threadsUrl(sessionId)}/browser/vnc?userId=${encodeURIComponent(userId)}`;
+  return `${scheme}://${window.location.host}${threadsUrl(sessionId)}/browser/vnc?ticket=${encodeURIComponent(ticket)}`;
 }

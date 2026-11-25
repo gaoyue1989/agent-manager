@@ -1050,7 +1050,7 @@ class A2AControllerTest {
         when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn(null);
         mockWrapper();
 
-        var result = mockMvc.perform(post("/")
+        var initial = mockMvc.perform(post("/")
                 .header("X-User-Id", "u-2002")
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -1059,8 +1059,12 @@ class A2AControllerTest {
                      "params":{"sessionId":"u-1001",
                        "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
                     """))
-            .andExpect(status().isOk())
             .andReturn();
+        var result = initial.getRequest().isAsyncStarted()
+            ? mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .asyncDispatch(initial)).andReturn()
+            : initial;
+        org.junit.jupiter.api.Assertions.assertEquals(200, result.getResponse().getStatus());
 
         org.junit.jupiter.api.Assertions.assertTrue(
             result.getResponse().getContentAsString().contains("-32001"),
