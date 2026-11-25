@@ -641,7 +641,7 @@ data: {"type":"AGENT_END","session_id":"...","replyId":"...","usage":{"input_tok
 | `file_ready` | `present_file` / `present_url` 工具产物就绪（含 `file_id`/`file_name`/`mime_type`/`size`/`download_url`，前端渲染下载卡片） |
 | `AGENT_RESULT` | 最终结果聚合（实测于 HITL 恢复段末尾，`AGENT_END` 之前） |
 | `USER_CONFIRM_RESULT` | HITL 确认结果落地（`confirm-stream` 恢复段首个业务事件） |
-| `AGENT_START` | 执行段开始；`created_at` = agent 开始处理的墙钟时刻（ISO-8601 UTC，SDK 原样透传） |
+| `AGENT_START` | 执行段开始；`created_at` = agent 开始处理的墙钟时刻（epoch 毫秒整数，SDK 事件构造时生成、下发时转换） |
 | `AGENT_END` | 执行段结束（**流关闭信号**，终态帧）；additive `usage`（`input_tokens`/`cached_tokens`/`output_tokens`/`total_tokens` 为本 turn 全部模型调用**求和** + `model_calls` 调用次数，2026-11-12 新增）与 `elapsed_ms`（agent 执行段耗时，不含排队等租约）；仅 lead 自身 AGENT_END 携带（远程子 agent 转发的 AGENT_END 不带） |
 | （通用，2026-11-11 新增） | 经 EventBus 的每条 data 帧（含 delta 热路径）顶层恒带 `session_id`；`/subscribe` 回放对升级前存量行由读端兜底补齐，客户端对极旧行仍应容忍缺失 |
 | `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 结果返回时发出，snake_case 四字段） |
