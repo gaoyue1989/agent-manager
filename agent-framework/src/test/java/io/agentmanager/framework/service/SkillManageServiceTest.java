@@ -486,4 +486,22 @@ class SkillManageServiceTest {
         }
         return baos.toByteArray();
     }
+
+    @Test
+    void resolveSkillDirShouldPreferCanonicalNameIndexOverPhysicalDirName() throws Exception {
+        var dirA = skillsDir.resolve("dirA");
+        var dirFoo = skillsDir.resolve("foo");
+        Files.createDirectories(dirA);
+        Files.createDirectories(dirFoo);
+        Files.writeString(dirA.resolve("SKILL.md"), "---\nname: foo\ndescription: real foo\n---\nCONTENT-OF-FOO");
+        Files.writeString(dirFoo.resolve("SKILL.md"), "---\nname: bar\ndescription: real bar\n---\nCONTENT-OF-BAR");
+
+        var service = createService();
+        assertTrue(service.readSkillContent("foo").contains("CONTENT-OF-FOO"));
+        assertTrue(service.readSkillContent("bar").contains("CONTENT-OF-BAR"));
+
+        service.deleteSkill("foo");
+        assertFalse(Files.exists(dirA));
+        assertTrue(Files.exists(dirFoo));
+    }
 }
