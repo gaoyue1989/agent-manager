@@ -467,17 +467,18 @@ public class ThreadController {
     public ResponseEntity<Map<String, Object>> llmCalls(
             @PathVariable String sessionId,
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        var safeSessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
-                sessionUserStore, sessionId, headerUserId)) {
-            return threadNotFound(io.agentmanager.framework.util.PathSafe.sanitize(sessionId));
+                sessionUserStore, safeSessionId, headerUserId)) {
+            return threadNotFound(safeSessionId);
         }
-        var calls = llmLogger.getCalls(sessionId).stream().map(c -> Map.<String, Object>of(
+        var calls = llmLogger.getCalls(safeSessionId).stream().map(c -> Map.<String, Object>of(
             "call_id", c.callId(),
             "timestamp", c.timestamp(),
             "request", c.request(),
             "response", c.response()
         )).toList();
-        return ResponseEntity.ok(Map.of("session_id", sessionId, "calls", calls));
+        return ResponseEntity.ok(Map.of("session_id", safeSessionId, "calls", calls));
     }
 
     /**
