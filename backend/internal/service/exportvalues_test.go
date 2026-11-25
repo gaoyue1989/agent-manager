@@ -391,3 +391,26 @@ func TestRenderExportManifestShape(t *testing.T) {
 		t.Fatalf("empty manifest tolerated: %v %v", m, err)
 	}
 }
+
+func TestResolveExportLayersIgnoresRetiredRuntimeDefaultKey(t *testing.T) {
+	core, _, ws, _, _, cleanup := newExportFixture(t)
+	defer cleanup()
+	if err := core.DB.Create(&store.WorkspaceRuntimeDefaultEntity{
+		WorkspaceID: ws.ID,
+		EnvKey:      "SKILLSYNC_TOKEN",
+		Value:       "tok-super-secret-legacy",
+		Category:    "sandbox",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	l1, merged, _, err := core.resolveExportLayers(ws.ID, &ExportOrderRequest{Marker: "1.0.0-e1"})
+	if err != nil {
+		t.Fatalf("resolveExportLayers: %v", err)
+	}
+	if _, ok := l1["SKILLSYNC_TOKEN"]; ok {
+		t.Fatalf("retired SKILLSYNC_TOKEN must not load into L1: %+v", l1)
+	}
+	if _, ok := merged["SKILLSYNC_TOKEN"]; ok {
+		t.Fatalf("retired SKILLSYNC_TOKEN must not leak into export merged env: %+v", merged)
+	}
+}
