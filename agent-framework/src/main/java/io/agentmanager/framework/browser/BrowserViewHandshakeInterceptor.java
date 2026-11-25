@@ -25,9 +25,12 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
     private static final Pattern VIEW_PATH = Pattern.compile(".*/threads/([^/]+)/browser/vnc/?$");
 
     private final SessionUserStore sessionUserStore;
+    private final BrowserViewTicketStore ticketStore;
 
-    public BrowserViewHandshakeInterceptor(SessionUserStore sessionUserStore) {
+    public BrowserViewHandshakeInterceptor(SessionUserStore sessionUserStore,
+                                           BrowserViewTicketStore ticketStore) {
         this.sessionUserStore = sessionUserStore;
+        this.ticketStore = ticketStore;
     }
 
     @Override
@@ -40,12 +43,24 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
             return false;
         }
         String sessionId = PathSafe.sanitize(matcher.group(1));
-        String headerUserId = request.getHeaders().getFirst("X-User-Id");
-        if (headerUserId == null || headerUserId.isBlank()) {
-            headerUserId = UriComponentsBuilder.fromUri(request.getURI()).build()
-                .getQueryParams().getFirst("userId");
+        String ticket = UriComponentsBuilder.fromUri(request.getURI()).build()
+            .getQueryParams().getFirst("ticket");
+        if (ticket == null || ticket.isBlank()) {
+            log.info("[browser-view] handshake rejected: missing view ticket (sid={})", sessionId);
+            return false;
         }
-        var owner = SessionAccessGuard.establishedOwner(sessionUserStore, sessionId, headerUserId);
+        var claim = ticketStore.consume(ticket);
+        if (claim == null || !sessionId.equals(claim.sessionId())) {
+            log.info("[browser-view] handshake rejected: invalid view ticket (sid={})", sessionId);
+            return false;
+        }
+        String headerUserId = request.getHeaders().getFirst("X-User-Id");
+        if (headerUserId != null && !headerUserId.isBlank() && !headerUserId.equals(claim.userId())) {
+            log.warn("[browser-view] handshake rejected: header identity conflicts with view ticket (sid={})",
+                sessionId);
+            return false;
+        }
+        var owner = SessionAccessGuard.establishedOwner(sessionUserStore, sessionId, claim.userId());
         if (owner == null) {
             log.info("[browser-view] handshake rejected: session ownership not established (sid={})", sessionId);
             return false;

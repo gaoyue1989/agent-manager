@@ -58,6 +58,7 @@ class BrowserTakeoverCrossUserTest {
     private SandboxLocator locator;
     private BrowserControlController controller;
     private BrowserViewHandshakeInterceptor interceptor;
+    private BrowserViewTicketStore ticketStore;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -85,18 +86,21 @@ class BrowserTakeoverCrossUserTest {
 
         var sandboxRuntime = mock(SandboxRuntime.class);
         when(sandboxRuntime.enabled()).thenReturn(true);
+        ticketStore = mock(BrowserViewTicketStore.class);
         var service = new BrowserControlService(controlStore, turnStopService, sandboxRuntime, locator);
-        controller = new BrowserControlController(service, sessionUserStore, chatStreamController);
-        interceptor = new BrowserViewHandshakeInterceptor(sessionUserStore);
+        controller = new BrowserControlController(service, sessionUserStore, chatStreamController, ticketStore);
+        interceptor = new BrowserViewHandshakeInterceptor(sessionUserStore, ticketStore);
 
         when(stateStore.load(any())).thenReturn(Optional.of(
             "{\"type\":\"opensandbox\",\"sandboxId\":\"" + VICTIM_SANDBOX + "\"}"));
         when(bindingStore.ownedByUserKey(anyString(), anyString())).thenReturn(false);
     }
 
-    private ServerHttpRequest request(String sessionId, String headerUserId) {
+    private ServerHttpRequest request(String sessionId, String headerUserId, String ticket) {
         var request = mock(ServerHttpRequest.class);
-        when(request.getURI()).thenReturn(URI.create("https://entry/threads/" + sessionId + "/browser/vnc"));
+        var uri = "https://entry/threads/" + sessionId + "/browser/vnc"
+            + (ticket == null ? "" : "?ticket=" + ticket);
+        when(request.getURI()).thenReturn(URI.create(uri));
         var headers = new HttpHeaders();
         if (headerUserId != null) {
             headers.set("X-User-Id", headerUserId);
@@ -117,7 +121,7 @@ class BrowserTakeoverCrossUserTest {
             () -> controller.takeover(VICTIM, ATTACKER, null));
         assertEquals(HttpStatus.NOT_FOUND, takeover.getStatusCode());
 
-        assertFalse(interceptor.beforeHandshake(request(VICTIM, ATTACKER),
+        assertFalse(interceptor.beforeHandshake(request(VICTIM, ATTACKER, null),
             mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
 
         verifyNoInteractions(stateStore);
@@ -135,8 +139,10 @@ class BrowserTakeoverCrossUserTest {
         assertEquals(false, sandbox.get("ready"));
         assertNull(sandbox.get("sandbox_id"));
 
+        when(ticketStore.consume("t-attacker"))
+            .thenReturn(new BrowserViewTicketStore.Claim(VICTIM, ATTACKER));
         var attributes = new HashMap<String, Object>();
-        assertTrue(interceptor.beforeHandshake(request(VICTIM, ATTACKER),
+        assertTrue(interceptor.beforeHandshake(request(VICTIM, ATTACKER, "t-attacker"),
             mock(ServerHttpResponse.class), mock(WebSocketHandler.class), attributes));
 
         var session = mock(WebSocketSession.class);
@@ -144,7 +150,7 @@ class BrowserTakeoverCrossUserTest {
         when(session.getId()).thenReturn("ws-attacker");
         when(session.isOpen()).thenReturn(true);
         var handler = new BrowserViewWebSocketHandler(
-            new BrowserProperties(true, 60, 6080, "/websockify"),
+            new BrowserProperties(true, 60, 6080, "/websockify", 60, List.of()),
             new SandboxConfig(false, "img", 60, 30, 1024, 1, List.of("/e"),
                 Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
                 new SandboxConfig.OpenSandboxConfig("server:8090", "api-key")),
@@ -166,7 +172,22 @@ class BrowserTakeoverCrossUserTest {
         var sandbox = (Map<?, ?>) response.getBody().get("sandbox");
         assertEquals(true, sandbox.get("ready"));
         assertEquals(VICTIM_SANDBOX, sandbox.get("sandbox_id"));
-        assertTrue(interceptor.beforeHandshake(request("sess-owner", VICTIM),
+        when(ticketStore.consume("t-owner"))
+            .thenReturn(new BrowserViewTicketStore.Claim("sess-owner", VICTIM));
+        assertTrue(interceptor.beforeHandshake(request("sess-owner", VICTIM, "t-owner"),
             mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+    }
+
+    @Test
+    void findingD02_queryParamUserIdMustNotAuthenticateVncHandshake() {
+        when(sessionUserStore.findUserIdBySession(VICTIM)).thenReturn(VICTIM);
+        var request = mock(ServerHttpRequest.class);
+        when(request.getURI()).thenReturn(URI.create(
+            "https://entry/threads/" + VICTIM + "/browser/vnc?userId=" + VICTIM));
+        when(request.getHeaders()).thenReturn(new HttpHeaders());
+
+        assertFalse(interceptor.beforeHandshake(request,
+            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+        verifyNoInteractions(ticketStore);
     }
 }

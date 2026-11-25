@@ -39,12 +39,15 @@ public class BrowserControlController {
     private final BrowserControlService control;
     private final SessionUserStore sessionUserStore;
     private final ChatStreamController chatStreamController;
+    private final BrowserViewTicketStore ticketStore;
 
     public BrowserControlController(BrowserControlService control, SessionUserStore sessionUserStore,
-                                    ChatStreamController chatStreamController) {
+                                    ChatStreamController chatStreamController,
+                                    BrowserViewTicketStore ticketStore) {
         this.control = control;
         this.sessionUserStore = sessionUserStore;
         this.chatStreamController = chatStreamController;
+        this.ticketStore = ticketStore;
     }
 
     public record TakeoverRequest(String reason) {
@@ -59,7 +62,7 @@ public class BrowserControlController {
         try {
             return ResponseEntity.ok(control.state(owner, sid));
         } catch (BrowserControlUnavailableException e) {
-            return unavailable(e);
+            return unavailable("control_store_unavailable", e);
         }
     }
 
@@ -78,7 +81,7 @@ public class BrowserControlController {
             out.put("stop_outcome", result.stopOutcome());
             return ResponseEntity.ok(out);
         } catch (BrowserControlUnavailableException e) {
-            return unavailable(e);
+            return unavailable("control_store_unavailable", e);
         }
     }
 
@@ -104,6 +107,22 @@ public class BrowserControlController {
         return chatStreamController.chat(request, owner, forwardedPrefixHeader, requestHeaders);
     }
 
+    @PostMapping("/threads/{sessionId}/browser/vnc-ticket")
+    public ResponseEntity<Map<String, Object>> vncTicket(
+            @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        String sid = PathSafe.sanitize(sessionId);
+        String owner = assertOwned(sid, headerUserId);
+        try {
+            var out = new LinkedHashMap<String, Object>();
+            out.put("ticket", ticketStore.issue(sid, owner));
+            out.put("expires_in_seconds", ticketStore.ttlSeconds());
+            return ResponseEntity.ok(out);
+        } catch (BrowserControlUnavailableException e) {
+            return unavailable("view_ticket_unavailable", e);
+        }
+    }
+
     private String assertOwned(String sessionId, String headerUserId) {
         var owner = SessionAccessGuard.establishedOwner(sessionUserStore, sessionId, headerUserId);
         if (owner == null) {
@@ -113,9 +132,10 @@ public class BrowserControlController {
         return owner;
     }
 
-    private static ResponseEntity<Map<String, Object>> unavailable(BrowserControlUnavailableException e) {
+    private static ResponseEntity<Map<String, Object>> unavailable(String error,
+                                                                  BrowserControlUnavailableException e) {
         var body = new LinkedHashMap<String, Object>();
-        body.put("error", "control_store_unavailable");
+        body.put("error", error);
         body.put("message", e.getMessage());
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
     }
