@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -57,8 +58,9 @@ type fakeOpenViking struct {
 	browseURI []string
 	conflict  bool
 	deleteErr bool
-	writeErr  bool
-	onCreate  func()
+	writeErr     bool
+	browseStatus int
+	onCreate     func()
 
 	accounts          map[string]bool
 	ensureDelay       time.Duration
@@ -206,6 +208,11 @@ func (f *fakeOpenViking) handler() http.HandlerFunc {
 				"result": map[string]string{}})
 		case r.URL.Path == "/api/v1/fs/ls" && r.Method == http.MethodGet:
 			f.recordBrowse(r.URL.Query().Get("uri"))
+			if f.browseStatus >= 400 {
+				w.WriteHeader(f.browseStatus)
+				_, _ = fmt.Fprint(w, `{"status":"error","error":{"code":"NOT_FOUND","message":"private path viking://user/u-1001/private-memory"}}`)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "result": []map[string]any{
 				{"uri": "viking://user/u-1001/memories/plan.md", "size": 9007199254740993,
 					"isDir": false, "modTime": "2026-11-18T10:00:00+08:00", "abstract": "user u-1001 的计划摘要"},
@@ -816,6 +823,42 @@ func mustDecodeBrowseList(t *testing.T, raw json.RawMessage) []map[string]any {
 		t.Fatalf("ls status = %q", env.Status)
 	}
 	return env.Result
+}
+
+// 上游浏览错误按 HTTP 状态映射本地错误，且绝不回显上游内部路径或响应正文。
+func TestMemoryBrowseMapsUpstreamErrorsWithoutLeakingDetails(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{
+		{http.StatusBadRequest, ErrInvalidForm},
+		{http.StatusForbidden, ErrForbidden},
+		{http.StatusNotFound, ErrNotFound},
+		{http.StatusInternalServerError, nil},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			fake := &fakeOpenViking{browseStatus: tc.status}
+			core, _ := newVikingTestCore(t, fake.handler())
+			pkg := uploadTestPkg(t, core, "")
+			svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+				Name: "svc", WorkspaceID: 7})
+			if err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+			waitForVikingTerminal(t, core, svc.ID)
+
+			_, err = core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://~/memories")
+			if err == nil {
+				t.Fatal("browse must return an error")
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want errors.Is(%v)", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "private-memory") || strings.Contains(err.Error(), "u-1001") {
+				t.Fatalf("upstream private details leaked: %v", err)
+			}
+		})
+	}
 }
 
 // 记忆浏览代理 URI 双向归一（issue #374）：入参 ~/ 与自有 user/{uid} 两形态等价、
