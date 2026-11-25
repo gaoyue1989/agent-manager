@@ -488,6 +488,39 @@ class SkillBundleServiceTest {
     }
 
     @Test
+    void duplicateCanonicalNameShouldKeepFirstDirByDirNameOrderWithSingleEntries() throws Exception {
+        // issue #504：两目录 frontmatter name 相同 → bundle 不得产生重复 tar 条目
+        //（覆盖结果不确定、fileCount 失真、跨副本 X-Bundle-Sha256 不一致）；
+        // 统一裁决 = 目录名字典序首个保留（skill-new 胜出，与创建/枚举序相反以区分两种裁决）
+        var service = service(Duration.ZERO);
+        skill("skill-old", "---\nname: dup-skill\n---\nold\n");
+        skill("skill-new", "---\nname: dup-skill\n---\nnew\n");
+
+        var version = service.currentVersion();
+
+        assertEquals(1, version.skillCount());
+        assertEquals(1, version.fileCount(), "冲突目录须整体去重，fileCount 不得重复计数");
+        assertEquals(List.of("dup-skill/SKILL.md"), bundleEntryNames(service, version.version()),
+            "tar 中不得出现重复条目");
+        assertEquals("---\nname: dup-skill\n---\nnew\n",
+            entryContent(bundleBytes(service, version.version()), "dup-skill/SKILL.md"),
+            "收录裁决必须按目录名字典序首个（skill-new），与文件系统枚举序无关");
+    }
+
+    private static String entryContent(byte[] bundleBytes, String entryName) throws IOException {
+        try (var tis = new TarArchiveInputStream(
+                new GzipCompressorInputStream(new ByteArrayInputStream(bundleBytes)))) {
+            TarArchiveEntry entry;
+            while ((entry = tis.getNextTarEntry()) != null) {
+                if (entry.getName().equals(entryName)) {
+                    return new String(tis.readAllBytes(), StandardCharsets.UTF_8);
+                }
+            }
+        }
+        throw new AssertionError("entry not found: " + entryName);
+    }
+
+    @Test
     void dirNameDisabledShouldStillExcludeCanonicalSkill() throws Exception {
         // 服务级禁用集键 = 目录名（SkillManageService.toggleSkill 按目录 resolve 校验），
         // 禁用判定保持目录名口径；被禁技能不进清单不进 bundle（规范名也不得出现）

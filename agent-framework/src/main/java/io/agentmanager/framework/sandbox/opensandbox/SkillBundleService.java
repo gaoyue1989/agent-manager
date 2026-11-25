@@ -217,22 +217,23 @@ public class SkillBundleService {
         }
         var files = new ArrayList<BundleFile>();
         try (var top = Files.list(dir)) {
-            for (var skillDir : top.filter(Files::isDirectory).toList()) {
-                var name = skillDir.getFileName().toString();
-                if (name.startsWith(".")) {
-                    continue;
-                }
-                // 打包规范名 = SKILL.md frontmatter name（issue #398）：SDK 渲染路径与
-                // farm 建链/解包顶层三方对齐；无 frontmatter/不安全名回落目录名。
-                // version.skills 清单由 rel 顶层段派生，自动同口径。
-                // 禁用集同为规范名口径（issue #480，getDisabledSet 已归一化）
-                var canonical = SkillZipSupport.canonicalSkillName(skillDir);
+            // 打包清单经 canonicalDirIndex 统一裁决（issue #504）：目录名字典序首个保留、
+            // 同规范名冲突目录整体跳过（WARN）——tar 无重复条目，同 version 跨副本字节一致。
+            // 打包规范名 = SKILL.md frontmatter name（issue #398）：SDK 渲染路径与
+            // farm 建链/解包顶层三方对齐；无 frontmatter/不安全名回落目录名。
+            // version.skills 清单由 rel 顶层段派生，自动同口径。
+            // 禁用集同为规范名口径（issue #480，getDisabledSet 已归一化）
+            for (var entry : SkillZipSupport.canonicalDirIndex(top.filter(Files::isDirectory).toList())
+                    .entrySet()) {
+                var canonical = entry.getKey();
+                var skillDir = entry.getValue();
                 if (disabled.contains(canonical)) {
                     continue;
                 }
                 try (var walk = Files.walk(skillDir)) {
                     for (var f : walk.filter(Files::isRegularFile).toList()) {
                         var rel = dir.relativize(f).toString().replace('\\', '/');
+                        var name = skillDir.getFileName().toString();
                         if (!canonical.equals(name)) {
                             rel = canonical + rel.substring(name.length());
                         }
