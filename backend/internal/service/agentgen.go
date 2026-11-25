@@ -1257,8 +1257,16 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	if err != nil {
 		return nil, nil, err
 	}
-	_, hasOldSbxURL := oldSecret["OPENSANDBOX_SERVER_URL"]
-	wasSandboxOn := oldPlain["SANDBOX_ENABLED"] == "true" || oldPlain["OPENSANDBOX_SERVER_URL"] != "" || hasOldSbxURL
+	wasSandboxOn := false
+	if v, ok := oldPlain["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
+		wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
+	} else if v, ok := oldSecret["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
+		wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
+	} else if rawMD, ok := baseFiles["AGENTS.md"]; ok {
+		if oldCfg, parseErr := parseOAFConfig(string(rawMD)); parseErr == nil && oldCfg.Config != nil && oldCfg.Config.Sandbox != nil {
+			wasSandboxOn = oldCfg.Config.Sandbox.Enabled
+		}
+	}
 	if !wasSandboxOn && form.Sandbox.sandboxOn() {
 		sbxKeys := platformconfig.GroupKeys("sandbox")
 		for k, v := range c.platformDefaultEnv(form) {
