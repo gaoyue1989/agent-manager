@@ -21,9 +21,9 @@ MC=$(req POST /console/workspaces/$WS/model-connections \
   "{\"name\":\"m10-llm-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN" | jqr "['data']['id']")
 ensure_verified "$TOKEN" "$WS" "$MC" >/dev/null
 
-A1=""; A2=""; A3=""; A4=""; A5=""
+A1=""; A2=""; A3=""; A4=""; A5=""; A6=""
 cleanup_m10() {
-  for id in $A1 $A2 $A3 $A4 $A5; do
+  for id in $A1 $A2 $A3 $A4 $A5 $A6; do
     [ -n "$id" ] && code DELETE /console/workspaces/$WS/agents/$id "" "$TOKEN" >/dev/null 2>&1
   done
 }
@@ -83,6 +83,18 @@ print(json.dumps({
 }, sort_keys=True))" "$A1ENV")
 assert_eq "A3 资源规格 env 注入且 SANDBOX_ENABLED 不注入" "$A1CHK" \
   '{"cpu": "2", "enabled": null, "image": "opensandbox/code-interpreter:v1.1.0", "memory": "2048", "timeout": "90"}'
+# 自动建池（CI 平台配置 OpenSandbox=mock-sandbox）：显式开启沙箱 → {k8s名}-pool + poolRef
+A1REF=$(python3 -c "
+import json,sys
+print((json.loads(sys.argv[1] or '{}').get('SANDBOX_POOL_REF') or ''))" "$A1ENV")
+POOLS=$(req GET /admin/sandboxes/pools "" "$TOKEN")
+if echo "$POOLS" | grep -q '"items"'; then
+  case "$A1REF" in *-pool) REF_OK=yes;; *) REF_OK=no;; esac
+  assert_eq "A3b 开启沙箱自动建池并注入 SANDBOX_POOL_REF" "$REF_OK" "yes"
+  assert_contains "A3c 自动池出现在运维池列表" "$POOLS" "$A1REF"
+else
+  skip "自动建池断言需平台配置 OpenSandbox（未配置时按设计跳过）"
+fi
 A1ROW=$(overview_row "m10-on-$TS")
 assert_eq "A4 总览来源=package" "$(echo "$A1ROW" | jqr "['source']")" "package"
 assert_eq "A5 总览 enabled=true" "$(echo "$A1ROW" | jqr "['enabled']")" "True"
@@ -130,22 +142,45 @@ D4ST=$(wait_status "$TOKEN" "$WS" "$A4" 240 running register_failed deploy_faile
 assert_eq "D1 空资源 Agent running" "$D4ST" "running"
 A4MD=$(md_of_pkg "$(pkg_of "$A4")")
 assert_contains "D2 包声明 enabled=true" "$A4MD" "enabled: true"
-assert_eq "D3 空资源不注入 SANDBOX_* env" \
+assert_eq "D3 空资源不注入资源四键（自动池仅注入 SANDBOX_POOL_REF）" \
   "$(python3 -c "
 import json,sys
 e=json.loads(sys.argv[1] or '{}')
-print(sorted(k for k in e if k.startswith('SANDBOX_')))" "$(env_json_of "$A4")")" "[]"
+print(sorted(k for k in e if k.startswith('SANDBOX_') and k != 'SANDBOX_POOL_REF'))" "$(env_json_of "$A4")")" "[]"
 
 # ---- E：负值归一为 0（不注入）----
 A5=$(create_agent "m10-neg-$TS" '{"enabled":true,"image":"","timeoutMinutes":-1,"memoryMb":-5,"cpuCount":-2}')
 E5ST=$(wait_status "$TOKEN" "$WS" "$A5" 240 running register_failed deploy_failed)
 assert_eq "E1 负值 Agent running" "$E5ST" "running"
-assert_eq "E2 负值归一后不注入 SANDBOX_* env" \
+assert_eq "E2 负值归一后不注入资源四键（自动池仅注入 SANDBOX_POOL_REF）" \
   "$(python3 -c "
 import json,sys
 e=json.loads(sys.argv[1] or '{}')
-print(sorted(k for k in e if k.startswith('SANDBOX_')))" "$(env_json_of "$A5")")" "[]"
+print(sorted(k for k in e if k.startswith('SANDBOX_') and k != 'SANDBOX_POOL_REF'))" "$(env_json_of "$A5")")" "[]"
 assert_contains "E3 负值仍落包声明 true" "$(md_of_pkg "$(pkg_of "$A5")")" "enabled: true"
+
+# ---- E2'：自动池容量四值 + 删除 agent 自动删池 ----
+A6=$(create_agent "m10-poolcap-$TS" '{"enabled":true,"image":"opensandbox/code-interpreter:v1.1.0","pool":{"poolMin":2,"bufferMin":2,"bufferMax":3,"poolMax":4}}')
+F6ST=$(wait_status "$TOKEN" "$WS" "$A6" 240 running register_failed deploy_failed)
+assert_eq "E2'1 自定义池容量 Agent running" "$F6ST" "running"
+A6REF=$(python3 -c "
+import json,sys
+print((json.loads(sys.argv[1] or '{}').get('SANDBOX_POOL_REF') or ''))" "$(env_json_of "$A6")")
+POOLS=$(req GET /admin/sandboxes/pools "" "$TOKEN")
+if [ -n "$A6REF" ] && echo "$POOLS" | grep -q '"items"'; then
+  CAP6=$(echo "$POOLS" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d.get('data',d)
+row=[p for p in d['items'] if p['name']=='$A6REF'][0]
+print(json.dumps(row['capacitySpec'], sort_keys=True))" 2>/dev/null)
+  assert_eq "E2'2 自动池容量四值取创建表单" "$CAP6" '{"bufferMax": 3, "bufferMin": 2, "poolMax": 4, "poolMin": 2}'
+  code DELETE /console/workspaces/$WS/agents/$A6 "" "$TOKEN" >/dev/null
+  A6=""
+  PL6=$(req GET /admin/sandboxes/pools "" "$TOKEN")
+  assert_not_contains "E2'3 删除 agent 自动删池" "$PL6" "$A6REF"
+else
+  skip "自动池容量断言需平台配置 OpenSandbox（未配置时按设计跳过）"
+fi
 
 # ---- F：env 优先于包声明 ----
 # F1 包声明 true + env SANDBOX_ENABLED=false → 生效 false，来源 env

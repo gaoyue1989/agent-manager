@@ -902,8 +902,8 @@ func TestAgentGenSandboxPlatformDefaultsGate(t *testing.T) {
 	owner := seedUserIn(t, c, "sbxo", "user", ws.ID, "owner")
 	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
 	if _, err := c.UpdatePlatformConfig(map[string]string{
-		"SANDBOX_IMAGE":        "registry.example.com/leak-probe:v1",
-		"SANDBOX_MEMORY_MB":    "2048",
+		"SANDBOX_IMAGE":                  "registry.example.com/leak-probe:v1",
+		"SANDBOX_MEMORY_MB":              "2048",
 		"AGENT_REDIS_COMMAND_TIMEOUT_MS": "2000",
 	}); err != nil {
 		t.Fatal(err)
@@ -1016,8 +1016,22 @@ func TestAgentGenSandboxGroupEnvGate(t *testing.T) {
 	ws := seedWs(t, c, "ws-sbx-0489", "沙箱组泄漏空间")
 	owner := seedUserIn(t, c, "sbxg", "user", ws.ID, "owner")
 	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+	// 自动建池（沙箱开启链路）会探测/创建池：用本地 httptest 模拟 OpenSandbox 管理面
+	sbxSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/pools/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer sbxSrv.Close()
+	sbxURL := strings.TrimPrefix(sbxSrv.URL, "http://")
 	if _, err := c.UpdatePlatformConfig(map[string]string{
-		"OPENSANDBOX_SERVER_URL":         "opensandbox.svc:8090",
+		"OPENSANDBOX_SERVER_URL":         sbxURL,
 		"OPENSANDBOX_API_KEY":            "sk-leak-probe",
 		"SANDBOX_IMAGE":                  "registry.example.com/leak-probe:v1",
 		"SANDBOX_MEMORY_MB":              "2048",
@@ -1084,7 +1098,7 @@ func TestAgentGenSandboxGroupEnvGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	envB := envOf(svcB)
-	if envB["OPENSANDBOX_SERVER_URL"] != "opensandbox.svc:8090" || envB["SANDBOX_IMAGE"] != "registry.example.com/leak-probe:v1" {
+	if envB["OPENSANDBOX_SERVER_URL"] != sbxURL || envB["SANDBOX_IMAGE"] != "registry.example.com/leak-probe:v1" {
 		t.Fatalf("开启沙箱时分组平台默认应照常预填：%v", envB)
 	}
 

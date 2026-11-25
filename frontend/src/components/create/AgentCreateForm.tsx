@@ -73,7 +73,8 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     image: initial?.image ?? "", modelConnections: initial?.modelConnections ?? [],
     prompt: initial?.prompt ?? "", skills: initial?.skills ?? [], subAgents: initial?.subAgents ?? [],
     mcpServers: initial?.mcpServers ?? [],
-    sandbox: initial?.sandbox ?? { enabled: null, image: "", timeoutMinutes: 0, memoryMb: 0, cpuCount: 0 },
+    sandbox: initial?.sandbox ?? { enabled: null, image: "", timeoutMinutes: 0, memoryMb: 0, cpuCount: 0,
+      pool: { poolMin: 1, bufferMin: 1, bufferMax: 2, poolMax: 3 } },
     memory: initial?.memory ?? { provider: "", sessionCommit: false, knowledgeImport: false, sharedSkills: false, mcpSharedContext: false },
     spec: initial?.spec || "small",
     replicas: initial?.replicas || 1, publicEndpoint: initial?.publicEndpoint ?? true,
@@ -185,6 +186,12 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
       if (state.modelConnections.length === 0) { setMsg("请至少勾选一条模型连接（先到「资产管理 → 模型连接」创建）"); submitLock.current = false; return; }
     }
     if (mode === "edit" && !state.prompt.trim()) { setMsg("系统提示词不能为空"); submitLock.current = false; return; }
+    if (mode === "create" && state.sandbox.enabled === true && state.sandbox.pool) {
+      const p = state.sandbox.pool;
+      if (!(p.poolMin <= p.bufferMin && p.bufferMin <= p.bufferMax && p.bufferMax <= p.poolMax)) {
+        setMsg("自动池容量须满足 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax"); submitLock.current = false; return;
+      }
+    }
     setSubmitting(true);
     try {
       if (mode === "create" && state.mode === "import") {
@@ -548,6 +555,27 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                 OpenSandbox Server：<span className="text-blue-600">使用平台默认配置</span>
                 <span className="ml-1 font-sans text-gray-400">（运维侧「默认配置」页维护；API Key 经服务 Secret 注入，不落包）</span>
               </div>
+              {mode === "create" && (
+                <div className="mt-3">
+                  <div className="mb-1 text-[12.5px] font-medium">自动池容量（显式开启时创建 {`{k8s名}`}-pool）</div>
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                    {(["poolMin", "bufferMin", "bufferMax", "poolMax"] as const).map((k) => (
+                      <Field key={k} label={k} hint={k === "poolMin" ? "0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax" : undefined}>
+                        <input type="number" min={0} value={state.sandbox.pool?.[k] ?? ""}
+                          data-testid={`sandbox-pool-${k === "poolMin" ? "min" : k === "bufferMin" ? "buffer-min" : k === "bufferMax" ? "buffer-max" : "max"}`}
+                          onChange={(e) => setState((s) => ({
+                            ...s,
+                            sandbox: { ...s.sandbox, pool: { ...(s.sandbox.pool ?? { poolMin: 1, bufferMin: 1, bufferMax: 2, poolMax: 3 }), [k]: Number(e.target.value) || 0 } },
+                          }))}
+                          className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm" />
+                      </Field>
+                    ))}
+                  </div>
+                  <div className="text-[11.5px] text-gray-400">
+                    发布后自动创建池并注入 SANDBOX_POOL_REF；池镜像 = 上方沙箱镜像，需包含 skills-syncd（overlay 镜像）否则技能同步不生效。
+                  </div>
+                </div>
+              )}
             </div>
             <div className="mt-1 text-[11.5px] text-gray-400">
               开关写入生成包 frontmatter config.sandbox.enabled（随包版本走）；镜像 / 超时 / 内存 / CPU 作为发布 env（SANDBOX_*）注入。

@@ -81,9 +81,22 @@ export interface SandboxCapacitySpec { bufferMin: number; bufferMax: number; poo
 export interface SandboxPoolStatus { total?: number; allocated?: number; available?: number; revision?: string; }
 // 建池技能同步三键（空 = 后端缺省：BASE_URL 按池名派生 / INTERVAL 1m / STORE_DIR 不注入）
 export interface SandboxPoolSkillsyncInput { baseUrl?: string; interval?: string; storeDir?: string; }
+// 平台侧池模板参数（后端 config 字段；外部创建的池无 config）
+export interface SandboxPoolConfig {
+  image: string; taskExecutorImage: string; execdImage: string;
+  skillsync?: SandboxPoolSkillsyncInput; extraEnv?: { name: string; value: string }[];
+  disableSyncd: boolean;
+}
+// 编辑池模板入参（全量替换语义；缺省字段 = 后端缺省回落）
+export interface SandboxPoolTemplateInput {
+  image?: string; taskExecutorImage?: string; execdImage?: string;
+  skillsync?: SandboxPoolSkillsyncInput; extraEnv?: { name: string; value: string }[];
+  disableSyncd?: boolean;
+}
 export interface SandboxPool {
   name: string; capacitySpec: SandboxCapacitySpec;
   status?: SandboxPoolStatus | null; createdAt?: string;
+  config?: SandboxPoolConfig;
 }
 export interface SandboxSummary { pools: number; warmAvailable: number; allocated: number; runningSandboxes: number; }
 // 上游 GET /v1/sandboxes 分页响应（d15：page/pageSize 语法）
@@ -166,6 +179,7 @@ export interface SandboxFormPayload {
   timeoutMinutes?: number;
   memoryMb?: number;
   cpuCount?: number;
+  pool?: { poolMin: number; bufferMin: number; bufferMax: number; poolMax: number };
 }
 export interface MemoryFormPayload {
   provider: "" | "local" | "openviking";
@@ -573,8 +587,8 @@ export const api = {
         capacitySpec: SandboxCapacitySpec; skillsync?: SandboxPoolSkillsyncInput }) =>
         requestRaw<{ name: string }>(`/admin/sandboxes/pools`, { method: "POST", body: JSON.stringify(body) }),
       getPool: (name: string) => request<SandboxPool>(`/admin/sandboxes/pools/${encodeURIComponent(name)}`),
-      updatePool: (name: string, capacitySpec: SandboxCapacitySpec) =>
-        request(`/admin/sandboxes/pools/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ capacitySpec }) }),
+      updatePool: (name: string, body: { capacitySpec: SandboxCapacitySpec; template?: SandboxPoolTemplateInput }) =>
+        request(`/admin/sandboxes/pools/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(body) }),
       deletePool: (name: string) => request(`/admin/sandboxes/pools/${encodeURIComponent(name)}`, { method: "DELETE" }),
       listSandboxes: (state = "", page = 1, pageSize = 20) =>
         request<SandboxListPage>(`/admin/sandboxes?state=${encodeURIComponent(state)}&page=${page}&pageSize=${pageSize}`),

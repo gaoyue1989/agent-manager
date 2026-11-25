@@ -134,6 +134,17 @@ assert_eq "容量调整（PUT 仅 capacitySpec）→ 200" "$UP" "200"
 ONE=$(req GET /admin/sandboxes/pools/$POOL "" "$TOKEN")
 assert_contains "单池详情回读新容量" "$ONE" '"bufferMin":2'
 
+# 平台配置行回显（编辑回显数据源）：列表 config 携带镜像/init 镜像/skillsync
+PLCFG=$(req GET /admin/sandboxes/pools "" "$TOKEN")
+P2CFG=$(echo "$PLCFG" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+d=d.get('data',d)
+row=[p for p in d['items'] if p['name']=='$POOL2'][0]
+c=row.get('config') or {}
+print(str(c.get('image'))+'|'+str(c.get('taskExecutorImage'))+'|'+str((c.get('skillsync') or {}).get('interval')))" 2>/dev/null)
+assert_eq "池列表回显平台配置（主镜像/init 镜像/skillsync）" "$P2CFG" "img-x:1|reg.example/te:v9|30s"
+
 # mock 收到正确载荷（预设模板：initContainers×2 + capacitySpec 原样；KUBE_OK 门控）。
 # 按池名容器内过滤取本运行记录（mock_pool_last）：整包 stats 经 mock_node 截 4000 字符，
 # 池模板 ~1.6KB/条 + 跨运行残留累积后截断，整串断言在 MockLifetime 内必 poison
@@ -223,6 +234,19 @@ else
   skip "skillsync 默认开启链路断言需 kubectl（KUBE_OK=0）"
 fi
 
+# ---- ②'' 池模板编辑：与平台记录不同 → 删除重建（上游 PUT 只收容量）----
+UPT=$(code PUT /admin/sandboxes/pools/$POOL2 "{\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3},\"template\":{\"image\":\"img-y:2\",\"taskExecutorImage\":\"reg.example/te:v10\",\"execdImage\":\"reg.example/execd:v10\",\"skillsync\":{\"interval\":\"45s\"}}}" "" "$TOKEN")
+assert_eq "模板编辑（删除重建）→ 200" "$UPT" "200"
+PLCFG=$(req GET /admin/sandboxes/pools "" "$TOKEN")
+assert_contains "平台配置随重建更新（init 镜像）" "$PLCFG" '"taskExecutorImage":"reg.example/te:v10"'
+if [ "$KUBE_OK" = "1" ]; then
+  P2M=$(mock_pool_last "$POOL2")
+  assert_contains "重建后主镜像为新技术模板" "$P2M" '"image":"img-y:2"'
+  assert_contains "重建后 skillsync interval 覆盖" "$P2M" '"value":"45s"'
+else
+  skip "模板重建载荷断言需 kubectl（KUBE_OK=0）"
+fi
+
 # 沙箱造数（直连 mock 建 3 个：2 个本 ws 服务名 + 1 个无关服务；KUBE_OK 门控）
 if [ "$KUBE_OK" = "1" ]; then
   for i in 1 2; do
@@ -289,6 +313,7 @@ DP=$(code DELETE /admin/sandboxes/pools/$POOL2 "" "$TOKEN")
 assert_eq "删除池 → 200（上游 204）" "$DP" "200"
 PL=$(req GET /admin/sandboxes/pools "" "$TOKEN")
 assert_not_contains "删除后列表不再含该池" "$PL" "$POOL2"
+assert_not_contains "删除后平台配置清理" "$PL" "img-y:2"
 AUD=$(req GET "/admin/audit-logs?page=1&size=50" "" "$TOKEN")
 assert_contains "审计含 sandbox.pool.delete" "$AUD" '"sandbox.pool.delete"'
 
