@@ -4,10 +4,12 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Function;
 
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.event.AgentEndEvent;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
@@ -23,25 +25,68 @@ import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.tool.ToolResultMessageBuilder;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Sinks;
 
 public final class ActingDenials {
 
     private static final String EVENT_BRIDGE_KEY = "oaf.acting_denials.event_bridge";
+
+    private static final class BridgeSlot {
+        final ConcurrentLinkedQueue<AgentEvent> queue = new ConcurrentLinkedQueue<>();
+        volatile boolean active = true;
+    }
 
     private ActingDenials() {
     }
 
     public static Flux<AgentEvent> bridge(RuntimeContext ctx, AgentInput input,
                                           Function<AgentInput, Flux<AgentEvent>> next) {
-        if (ctx == null || ctx.get(EVENT_BRIDGE_KEY) != null) {
+        if (ctx == null) {
             return next.apply(input);
         }
-        Sinks.Many<AgentEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
-        ctx.put(EVENT_BRIDGE_KEY, sink);
-        return Flux.merge(
-            next.apply(input).doFinally(sig -> sink.tryEmitComplete()),
-            sink.asFlux());
+        Object existing = ctx.get(EVENT_BRIDGE_KEY);
+        if (existing instanceof BridgeSlot slot && slot.active) {
+            return next.apply(input);
+        }
+        var slot = new BridgeSlot();
+        ctx.put(EVENT_BRIDGE_KEY, slot);
+        return next.apply(input)
+            .concatMap(event -> {
+                var drained = drain(slot.queue);
+                if (drained.isEmpty()) {
+                    return Flux.just(event);
+                }
+                if (event instanceof AgentEndEvent) {
+                    drained.add(event);
+                    return Flux.fromIterable(drained);
+                }
+                var out = new ArrayList<AgentEvent>(drained.size() + 1);
+                out.add(event);
+                out.addAll(drained);
+                return Flux.fromIterable(out);
+            })
+            .concatWith(Flux.defer(() -> {
+                var remaining = drain(slot.queue);
+                return remaining.isEmpty() ? Flux.empty() : Flux.fromIterable(remaining);
+            }))
+            .doFinally(sig -> {
+                slot.active = false;
+                try {
+                    var extra = ctx.getExtra();
+                    if (extra != null) {
+                        extra.remove(EVENT_BRIDGE_KEY, slot);
+                    }
+                } catch (UnsupportedOperationException ignored) {
+                }
+            });
+    }
+
+    private static List<AgentEvent> drain(ConcurrentLinkedQueue<AgentEvent> queue) {
+        var out = new ArrayList<AgentEvent>();
+        AgentEvent ev;
+        while ((ev = queue.poll()) != null) {
+            out.add(ev);
+        }
+        return out;
     }
 
     public static Set<ToolUseBlock> identitySet(List<ToolUseBlock> calls) {
@@ -50,7 +95,6 @@ public final class ActingDenials {
         return set;
     }
 
-    @SuppressWarnings("unchecked")
     public static Flux<AgentEvent> deny(Agent agent, RuntimeContext ctx, ActingInput input,
                                         Set<ToolUseBlock> denied, Function<ToolUseBlock, String> reasonFor,
                                         Function<ActingInput, Flux<AgentEvent>> next) {
@@ -71,7 +115,10 @@ public final class ActingDenials {
         if (state == null) {
             return next.apply(input);
         }
-        Sinks.Many<AgentEvent> bridge = ctx == null ? null : (Sinks.Many<AgentEvent>) ctx.get(EVENT_BRIDGE_KEY);
+        BridgeSlot bridge = null;
+        if (ctx != null && ctx.get(EVENT_BRIDGE_KEY) instanceof BridgeSlot slot && slot.active) {
+            bridge = slot;
+        }
         var syntheticEvents = new ArrayList<AgentEvent>();
         for (var call : blocked) {
             String toolId = call.getId();
@@ -86,9 +133,9 @@ public final class ActingDenials {
             syntheticEvents.add(resDelta);
             syntheticEvents.add(resEnd);
             if (bridge != null) {
-                bridge.tryEmitNext(resStart);
-                bridge.tryEmitNext(resDelta);
-                bridge.tryEmitNext(resEnd);
+                bridge.queue.offer(resStart);
+                bridge.queue.offer(resDelta);
+                bridge.queue.offer(resEnd);
             }
             ToolResultBlock deniedResult = ToolResultBlock.builder()
                 .id(toolId)
