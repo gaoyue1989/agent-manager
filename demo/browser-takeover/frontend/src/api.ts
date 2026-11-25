@@ -193,11 +193,21 @@ function gatewayBase(raw: string): string {
   return 'ws://' + trimmed;
 }
 
-export function vncUrl(sessionId: string, userId: string, sandboxId: string | null): string {
+export async function vncUrl(
+  sessionId: string,
+  userId: string,
+  sandboxId: string | null,
+): Promise<string> {
   const base = configuredVncBase();
   if (base && sandboxId) {
     return `${gatewayBase(base)}/v1/sandboxes/${sandboxId}/proxy/6080/websockify`;
   }
+  const response = await fetch(`${threadsUrl(sessionId)}/browser/vnc-ticket`, {
+    method: 'POST',
+    headers: { 'X-User-Id': userId },
+  });
+  if (!response.ok) throw new Error(`vnc ticket HTTP ${response.status}`);
+  const { ticket } = (await response.json()) as { ticket: string };
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${scheme}://${window.location.host}${threadsUrl(sessionId)}/browser/vnc?userId=${encodeURIComponent(userId)}`;
+  return `${scheme}://${window.location.host}${threadsUrl(sessionId)}/browser/vnc?ticket=${encodeURIComponent(ticket)}`;
 }

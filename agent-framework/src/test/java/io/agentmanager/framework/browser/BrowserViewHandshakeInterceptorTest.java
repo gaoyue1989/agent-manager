@@ -21,9 +21,12 @@ class BrowserViewHandshakeInterceptorTest {
 
     private static final String SESSION = "sess-1";
     private static final String USER = "u-1";
+    private static final String TICKET = "ticket-1";
 
     private final SessionUserStore store = mock(SessionUserStore.class);
-    private final BrowserViewHandshakeInterceptor interceptor = new BrowserViewHandshakeInterceptor(store);
+    private final BrowserViewTicketStore ticketStore = mock(BrowserViewTicketStore.class);
+    private final BrowserViewHandshakeInterceptor interceptor =
+        new BrowserViewHandshakeInterceptor(store, ticketStore);
 
     private ServerHttpRequest request(String uri, String headerUserId) {
         var request = mock(ServerHttpRequest.class);
@@ -36,57 +39,103 @@ class BrowserViewHandshakeInterceptorTest {
         return request;
     }
 
+    private boolean handshake(String uri, String headerUserId, HashMap<String, Object> attributes) {
+        return interceptor.beforeHandshake(request(uri, headerUserId),
+            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), attributes);
+    }
+
+    private static String vncUri(String sessionId, String ticket) {
+        return "https://entry/threads/" + sessionId + "/browser/vnc?ticket=" + ticket;
+    }
+
     @Test
-    void ownerShouldPassWithSessionAndUserAttributes() {
+    void ticketForOwnerShouldPassWithSessionAndUserAttributes() {
+        when(ticketStore.consume(TICKET)).thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER));
         when(store.findUserIdBySession(SESSION)).thenReturn(USER);
         var attributes = new HashMap<String, Object>();
 
-        assertTrue(interceptor.beforeHandshake(
-            request("https://entry/agent/demo/threads/" + SESSION + "/browser/vnc?afterSeq=1", USER),
-            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), attributes));
+        assertTrue(handshake(vncUri(SESSION, TICKET), null, attributes));
         assertEquals(SESSION, attributes.get(BrowserViewHandshakeInterceptor.ATTR_SESSION_ID));
         assertEquals(USER, attributes.get(BrowserViewHandshakeInterceptor.ATTR_USER_ID));
     }
 
     @Test
-    void queryParamUserIdShouldCoverBrowserWebSocketApi() {
+    void queryParamUserIdMustNotAuthenticate() {
         when(store.findUserIdBySession(SESSION)).thenReturn(USER);
-        var attributes = new HashMap<String, Object>();
 
-        assertTrue(interceptor.beforeHandshake(
-            request("https://entry/threads/" + SESSION + "/browser/vnc?userId=" + USER, null),
-            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), attributes));
-        assertEquals(USER, attributes.get(BrowserViewHandshakeInterceptor.ATTR_USER_ID));
+        assertFalse(handshake("https://entry/threads/" + SESSION + "/browser/vnc?userId=" + USER,
+            null, new HashMap<>()));
     }
 
     @Test
-    void foreignUserShouldBeRejected() {
+    void gatewayHeaderAloneMustNotAuthenticate() {
         when(store.findUserIdBySession(SESSION)).thenReturn(USER);
-        assertFalse(interceptor.beforeHandshake(
-            request("https://entry/threads/" + SESSION + "/browser/vnc", "someone-else"),
-            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+
+        assertFalse(handshake("https://entry/threads/" + SESSION + "/browser/vnc",
+            USER, new HashMap<>()));
+    }
+
+    @Test
+    void unknownTicketShouldBeRejected() {
+        when(ticketStore.consume("forged")).thenReturn(null);
+
+        assertFalse(handshake(vncUri(SESSION, "forged"), null, new HashMap<>()));
+    }
+
+    @Test
+    void replayedTicketShouldBeRejected() {
+        when(ticketStore.consume(TICKET))
+            .thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER))
+            .thenReturn(null);
+        when(store.findUserIdBySession(SESSION)).thenReturn(USER);
+
+        assertTrue(handshake(vncUri(SESSION, TICKET), null, new HashMap<>()));
+        assertFalse(handshake(vncUri(SESSION, TICKET), null, new HashMap<>()));
+    }
+
+    @Test
+    void ticketForAnotherSessionShouldBeRejected() {
+        when(ticketStore.consume(TICKET))
+            .thenReturn(new BrowserViewTicketStore.Claim("another-session", USER));
+
+        assertFalse(handshake(vncUri(SESSION, TICKET), null, new HashMap<>()));
+    }
+
+    @Test
+    void headerConflictingWithTicketShouldBeRejected() {
+        when(ticketStore.consume(TICKET)).thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER));
+        when(store.findUserIdBySession(SESSION)).thenReturn(USER);
+
+        assertFalse(handshake(vncUri(SESSION, TICKET), "someone-else", new HashMap<>()));
+    }
+
+    @Test
+    void foreignOwnerShouldBeRejected() {
+        when(ticketStore.consume(TICKET)).thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER));
+        when(store.findUserIdBySession(SESSION)).thenReturn("someone-else");
+
+        assertFalse(handshake(vncUri(SESSION, TICKET), null, new HashMap<>()));
     }
 
     @Test
     void unexpectedPathShouldBeRejected() {
-        assertFalse(interceptor.beforeHandshake(
-            request("https://entry/threads/" + SESSION + "/other", USER),
-            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+        assertFalse(handshake("https://entry/threads/" + SESSION + "/other?ticket=" + TICKET,
+            null, new HashMap<>()));
     }
 
     @Test
     void unclaimedSessionShouldBeRejected() {
+        when(ticketStore.consume(TICKET)).thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER));
         when(store.findUserIdBySession(SESSION)).thenReturn(null);
-        assertFalse(interceptor.beforeHandshake(
-            request("https://entry/threads/" + SESSION + "/browser/vnc", "someone-else"),
-            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+
+        assertFalse(handshake(vncUri(SESSION, TICKET), null, new HashMap<>()));
     }
 
     @Test
     void placeholderSessionShouldBeRejected() {
+        when(ticketStore.consume(TICKET)).thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER));
         when(store.findUserIdBySession(SESSION)).thenReturn(SessionUserStore.PLACEHOLDER_USER);
-        assertFalse(interceptor.beforeHandshake(
-            request("https://entry/threads/" + SESSION + "/browser/vnc", "someone-else"),
-            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+
+        assertFalse(handshake(vncUri(SESSION, TICKET), null, new HashMap<>()));
     }
 }

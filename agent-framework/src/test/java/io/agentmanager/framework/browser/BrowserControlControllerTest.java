@@ -34,6 +34,7 @@ class BrowserControlControllerTest {
     private BrowserControlService control;
     private SessionUserStore sessionUserStore;
     private ChatStreamController chatStreamController;
+    private BrowserViewTicketStore ticketStore;
     private BrowserControlController controller;
 
     @BeforeEach
@@ -41,7 +42,8 @@ class BrowserControlControllerTest {
         control = mock(BrowserControlService.class);
         sessionUserStore = mock(SessionUserStore.class);
         chatStreamController = mock(ChatStreamController.class);
-        controller = new BrowserControlController(control, sessionUserStore, chatStreamController);
+        ticketStore = mock(BrowserViewTicketStore.class);
+        controller = new BrowserControlController(control, sessionUserStore, chatStreamController, ticketStore);
         when(sessionUserStore.findUserIdBySession(SESSION)).thenReturn(USER);
     }
 
@@ -127,6 +129,36 @@ class BrowserControlControllerTest {
         var response = controller.takeover(SESSION, USER, null);
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
         assertEquals("control_store_unavailable", response.getBody().get("error"));
+    }
+
+    @Test
+    void vncTicketShouldBeIssuedOnlyToSessionOwner() {
+        when(ticketStore.issue(SESSION, USER)).thenReturn("ticket-1");
+        when(ticketStore.ttlSeconds()).thenReturn(60L);
+
+        var response = controller.vncTicket(SESSION, USER);
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals("ticket-1", response.getBody().get("ticket"));
+        assertEquals(60L, response.getBody().get("expires_in_seconds"));
+    }
+
+    @Test
+    void vncTicketShouldBeNotFoundForForeignUser() {
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.vncTicket(SESSION, "someone-else"));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(ticketStore, never()).issue(anyString(), anyString());
+    }
+
+    @Test
+    void vncTicketShouldReportStoreUnavailable() {
+        when(ticketStore.issue(SESSION, USER))
+            .thenThrow(new BrowserControlUnavailableException("down", new IllegalStateException("down")));
+
+        var response = controller.vncTicket(SESSION, USER);
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
+        assertEquals("view_ticket_unavailable", response.getBody().get("error"));
     }
 
     @Test

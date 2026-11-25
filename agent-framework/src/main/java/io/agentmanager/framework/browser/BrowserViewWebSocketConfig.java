@@ -20,11 +20,14 @@ public class BrowserViewWebSocketConfig implements WebSocketConfigurer {
 
     private final ObjectProvider<BrowserViewWebSocketHandler> handler;
     private final ObjectProvider<BrowserViewHandshakeInterceptor> interceptor;
+    private final BrowserProperties props;
 
     public BrowserViewWebSocketConfig(ObjectProvider<BrowserViewWebSocketHandler> handler,
-                                      ObjectProvider<BrowserViewHandshakeInterceptor> interceptor) {
+                                      ObjectProvider<BrowserViewHandshakeInterceptor> interceptor,
+                                      BrowserProperties props) {
         this.handler = handler;
         this.interceptor = interceptor;
+        this.props = props;
     }
 
     @Bean
@@ -36,14 +39,18 @@ public class BrowserViewWebSocketConfig implements WebSocketConfigurer {
     }
 
     @Bean
-    public BrowserViewHandshakeInterceptor browserViewHandshakeInterceptor(SessionUserStore sessionUserStore) {
-        return new BrowserViewHandshakeInterceptor(sessionUserStore);
+    public BrowserViewHandshakeInterceptor browserViewHandshakeInterceptor(
+            SessionUserStore sessionUserStore, BrowserViewTicketStore ticketStore) {
+        return new BrowserViewHandshakeInterceptor(sessionUserStore, ticketStore);
     }
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        registry.addHandler(handler.getObject(), "/threads/{sessionId}/browser/vnc")
-            .addInterceptors(interceptor.getObject())
-            .setAllowedOriginPatterns("*");
+        var registration = registry.addHandler(handler.getObject(), "/threads/{sessionId}/browser/vnc")
+            .addInterceptors(interceptor.getObject());
+        var patterns = props.originPatterns();
+        if (!patterns.isEmpty()) {
+            registration.setAllowedOriginPatterns(patterns.toArray(String[]::new));
+        }
     }
 }

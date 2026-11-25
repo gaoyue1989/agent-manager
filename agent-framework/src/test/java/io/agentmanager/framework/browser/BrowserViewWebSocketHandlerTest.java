@@ -61,7 +61,7 @@ class BrowserViewWebSocketHandlerTest {
         when(session.getId()).thenReturn("ws-1");
         when(session.isOpen()).thenReturn(true);
         handler = new BrowserViewWebSocketHandler(
-            new BrowserProperties(true, 60, 6080, "/websockify"),
+            new BrowserProperties(true, 60, 6080, "/websockify", 60, java.util.List.of()),
             new SandboxConfig(false, "img", 60, 30, 1024, 1, List.of("/e"),
                 java.time.Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
                 new SandboxConfig.OpenSandboxConfig("server:8090", "api-key")),
