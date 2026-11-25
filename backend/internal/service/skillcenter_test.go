@@ -68,7 +68,7 @@ func TestCreateSkillFromZip(t *testing.T) {
 	c, _, cleanup := newTestCore(t)
 	defer cleanup()
 	zipBytes, _ := buildZipBytes(map[string][]byte{
-		"skills/webapp-testing/SKILL.md":  []byte("---\nname: webapp-testing\ndescription: toolkit for web apps\n---\nbody"),
+		"skills/webapp-testing/SKILL.md":     []byte("---\nname: webapp-testing\ndescription: toolkit for web apps\n---\nbody"),
 		"skills/webapp-testing/scripts/a.sh": []byte("#!/bin/sh\necho hi"),
 	})
 	s, warnings, err := c.CreateSkillFromZip(7, 1, "w.zip", bytes.NewReader(zipBytes), "", "", "", nil, true)
@@ -281,8 +281,8 @@ func TestConsoleSkillUsages(t *testing.T) {
 	md := strings.Replace(testAgentsMD, "agentKey: demo", "agentKey: usage-demo", 1)
 	md = strings.Replace(md, "---\nname: Demo", "---\nname: Demo\nskills:\n  - name: ticket-escalation\n    source: local\n    version: 1.2.0", 1)
 	pkg, err := c.Packages.RegisterGeneratedFrom(7, nil, map[string][]byte{
-		"AGENTS.md":                      []byte(md),
-		"skills/extra-only/SKILL.md":     []byte("---\nname: extra-only\ndescription: dir only\n---\nbody"),
+		"AGENTS.md":                  []byte(md),
+		"skills/extra-only/SKILL.md": []byte("---\nname: extra-only\ndescription: dir only\n---\nbody"),
 	}, "")
 	if err != nil {
 		t.Skipf("package registration failed (fixture env): %v", err)
@@ -436,5 +436,110 @@ func TestCreateSkillFromZipLayouts(t *testing.T) {
 	_, _, err = c.CreateSkillFromZip(7, 1, "bad.zip", bytes.NewReader(bad), "", "", "", nil, false)
 	if err == nil || !strings.Contains(err.Error(), "SKILL.md at root") {
 		t.Fatalf("expected layout guidance error, got %v", err)
+	}
+}
+
+// TestCreateSkillFromZipWrappedLayouts 包装层 / 压缩元数据 / 多技能 zip（2026-11-25）：
+// 上传方常把技能文件夹再套一层包装目录（wrapper/<dir>/SKILL.md）、整包被 macOS 压缩带入
+// __MACOSX/._*/.DS_Store 元数据条目，或一个 zip 内含多个 skills/<name>——布局识别必须归一，
+// 且元数据条目不得落盘。
+func TestCreateSkillFromZipWrappedLayouts(t *testing.T) {
+	skillMD := func(name string) []byte {
+		return []byte("---\nname: " + name + "\ndescription: " + name + " desc\n---\nbody")
+	}
+	treePaths := func(c *Core, dir string) []string {
+		t.Helper()
+		tree, err := c.FS.Tree(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		var walk func(ents []store.FileEntry)
+		walk = func(ents []store.FileEntry) {
+			for _, e := range ents {
+				if e.IsDir {
+					walk(e.Children)
+					continue
+				}
+				out = append(out, e.Path)
+			}
+		}
+		walk(tree)
+		return out
+	}
+	cases := []struct {
+		name     string
+		files    map[string][]byte
+		wantName string
+	}{
+		{"wrapper-above-single-dir", map[string][]byte{
+			"wrapper/my-skill/SKILL.md":     skillMD("my-skill"),
+			"wrapper/my-skill/scripts/a.sh": []byte("#!/bin/sh\n"),
+		}, "my-skill"},
+		{"wrapper-around-skills-layout", map[string][]byte{
+			"pkg/skills/foo/SKILL.md": skillMD("foo"),
+		}, "foo"},
+		{"macos-metadata-mixed", map[string][]byte{
+			"skills/bar/SKILL.md":            skillMD("bar"),
+			"__MACOSX/skills/bar/._SKILL.md": []byte("junk"),
+			".DS_Store":                      []byte("junk"),
+		}, "bar"},
+		{"macos-metadata-single-dir", map[string][]byte{
+			"baz/SKILL.md":            skillMD("baz"),
+			"__MACOSX/baz/._SKILL.md": []byte("junk"),
+		}, "baz"},
+	}
+	for i, tc := range cases {
+		zipBytes, err := buildZipBytes(tc.files)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _, cleanup := newTestCore(t)
+		s, _, err := c.CreateSkillFromZip(uint(i+1), 1, "x.zip", bytes.NewReader(zipBytes), "", "", "", nil, false)
+		if err != nil {
+			cleanup()
+			t.Fatalf("%s rejected: %v", tc.name, err)
+		}
+		if s.Name != tc.wantName {
+			cleanup()
+			t.Fatalf("%s: name=%q want %q", tc.name, s.Name, tc.wantName)
+		}
+		files := treePaths(c, fmt.Sprintf("skills/%d/1.0.0", s.ID))
+		if len(files) == 0 {
+			cleanup()
+			t.Fatalf("%s: nothing stored", tc.name)
+		}
+		for _, p := range files {
+			if strings.HasPrefix(p, "skills/"+tc.wantName+"/") {
+				continue
+			}
+			cleanup()
+			t.Fatalf("%s: unexpected stored file %q", tc.name, p)
+		}
+		cleanup()
+	}
+
+	// 多技能 zip：表单 name 选定其一；不指定则 400 并列出候选
+	multi, _ := buildZipBytes(map[string][]byte{
+		"skills/alpha/SKILL.md": skillMD("alpha"),
+		"skills/beta/SKILL.md":  skillMD("beta"),
+	})
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	if _, _, err := c.CreateSkillFromZip(9, 1, "multi.zip", bytes.NewReader(multi), "", "", "", nil, false); err == nil ||
+		!strings.Contains(err.Error(), "multiple skill directories") || !strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("expected ambiguity error listing candidates, got %v", err)
+	}
+	s, _, err := c.CreateSkillFromZip(9, 1, "multi.zip", bytes.NewReader(multi), "beta", "", "", nil, false)
+	if err != nil {
+		t.Fatalf("selecting skill by name rejected: %v", err)
+	}
+	if s.Name != "beta" {
+		t.Fatalf("expected beta, got %q", s.Name)
+	}
+	for _, p := range treePaths(c, fmt.Sprintf("skills/%d/1.0.0", s.ID)) {
+		if !strings.HasPrefix(p, "skills/beta/") {
+			t.Fatalf("unexpected stored file %q", p)
+		}
 	}
 }
