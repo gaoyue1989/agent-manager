@@ -471,3 +471,37 @@ func TestIntrospectCookieChannel(t *testing.T) {
 func signTestJWT(uid uint) string {
 	return testIssueToken(uid, "u", "user")
 }
+
+func TestIntrospectApiKeyRejectsDisabledUserAndWorkspace(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	u := &store.User{Username: "u565", PasswordHash: "x", Role: "user", Status: "active"}
+	c.DB.Create(u)
+	ws := seedWs(t, c, "ws-565", "ws565")
+	agent := &store.ServiceEntity{K8sName: "oaf-565", DisplayName: "A565", WorkspaceID: ws.ID, ShortName: "a565"}
+	c.DB.Create(agent)
+	_, plain, err := c.IssueApiKey(IssueApiKeyInput{Name: "k565", UserID: u.ID, AgentID: &agent.ID, WorkspaceID: ws.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func() int {
+		req, _ := http.NewRequest(http.MethodGet, "http://router/api/v1/auth/introspect", nil)
+		req.Header.Set("Authorization", "Bearer "+plain)
+		req.Header.Set("X-Original-URI", "/agent/a565/threads/chat")
+		w := httptest.NewRecorder()
+		c.Introspect(w, req)
+		return w.Code
+	}
+	if code := call(); code != http.StatusOK {
+		t.Fatalf("active user+ws want 200, got %d", code)
+	}
+	c.DB.Model(u).Update("status", "disabled")
+	if code := call(); code != http.StatusForbidden {
+		t.Fatalf("disabled user want 403, got %d", code)
+	}
+	c.DB.Model(u).Update("status", "active")
+	c.DB.Model(ws).Update("status", "disabled")
+	if code := call(); code != http.StatusForbidden {
+		t.Fatalf("disabled workspace want 403, got %d", code)
+	}
+}
