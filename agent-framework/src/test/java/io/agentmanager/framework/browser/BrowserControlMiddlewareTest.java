@@ -128,4 +128,19 @@ class BrowserControlMiddlewareTest {
         org.junit.jupiter.api.Assertions.assertTrue(events.stream().anyMatch(e -> e instanceof ToolResultEndEvent end
             && end.getState() == ToolResultState.DENIED && "t1".equals(end.getToolCallId())));
     }
+
+    @Test
+    void parallelBatchWithRequestBrowserTakeoverShouldDenyExecuteEvenBeforeLockFlips() {
+        var run = run(false, List.of(
+            new ToolUseBlock("t1", "request_browser_takeover", Map.of("reason", "login")),
+            new ToolUseBlock("t2", "execute", Map.of("command", "echo sneaky"))));
+
+        assertNotNull(run.passed().get());
+        assertEquals(List.of("request_browser_takeover"),
+            run.passed().get().toolCalls().stream().map(ToolUseBlock::getName).toList());
+        assertEquals(5, run.events().size());
+        var last = (ToolResultEndEvent) run.events().get(run.events().size() - 1);
+        assertEquals(ToolResultState.DENIED, last.getState());
+        assertEquals("t2", last.getToolCallId());
+    }
 }
