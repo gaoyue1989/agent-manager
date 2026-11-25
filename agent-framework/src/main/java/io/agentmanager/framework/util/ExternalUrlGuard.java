@@ -1,5 +1,6 @@
 package io.agentmanager.framework.util;
 
+import java.net.InetAddress;
 import java.net.URI;
 import java.util.List;
 import java.util.Locale;
@@ -35,10 +36,11 @@ public final class ExternalUrlGuard {
         if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
             return null;
         }
-        var authority = uri.getRawAuthority();
-        if (authority == null || !hasNoEncodedTraversal(uri.getRawPath())) {
+        var host = uri.getHost();
+        if (host == null || uri.getRawUserInfo() != null || !hasNoEncodedTraversal(uri.getRawPath())) {
             return null;
         }
+        int port = effectivePort(scheme, uri.getPort());
         for (var prefix : prefixes) {
             URI p;
             try {
@@ -46,8 +48,11 @@ public final class ExternalUrlGuard {
             } catch (IllegalArgumentException e) {
                 continue;
             }
-            if (!scheme.equalsIgnoreCase(p.getScheme()) || p.getRawAuthority() == null
-                    || !authority.equals(p.getRawAuthority())) {
+            if (!scheme.equalsIgnoreCase(p.getScheme())
+                    || p.getHost() == null
+                    || p.getRawUserInfo() != null
+                    || port != effectivePort(p.getScheme(), p.getPort())
+                    || !hostsMatch(host, p.getHost())) {
                 continue;
             }
             var pPath = p.getRawPath();
@@ -76,5 +81,27 @@ public final class ExternalUrlGuard {
         }
         var lower = rawPath.toLowerCase(Locale.ROOT);
         return !lower.contains("%2e") && !lower.contains("%2f") && !lower.contains("%5c");
+    }
+
+    private static int effectivePort(String scheme, int port) {
+        if (port != -1) {
+            return port;
+        }
+        return "https".equalsIgnoreCase(scheme) ? 443 : 80;
+    }
+
+    private static boolean hostsMatch(String a, String b) {
+        if (a.equalsIgnoreCase(b)) {
+            return true;
+        }
+        if (a.startsWith("[") && a.endsWith("]") && b.startsWith("[") && b.endsWith("]")) {
+            try {
+                return InetAddress.getByName(a.substring(1, a.length() - 1))
+                    .equals(InetAddress.getByName(b.substring(1, b.length() - 1)));
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+        return false;
     }
 }

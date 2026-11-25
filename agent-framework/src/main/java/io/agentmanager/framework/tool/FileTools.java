@@ -262,7 +262,8 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             return err("url is required");
         }
         var u = url.trim();
-        if (!u.startsWith("http://") && !u.startsWith("https://")) {
+        var lower = u.toLowerCase(java.util.Locale.ROOT);
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
             return err("url must be http(s): " + u);
         }
         // 前缀白名单（SSRF 收敛，issue #483）：解析+规范化后逐段裁决，拒绝穿越/编码穿越变体

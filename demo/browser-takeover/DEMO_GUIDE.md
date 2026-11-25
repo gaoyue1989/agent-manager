@@ -16,6 +16,10 @@ npm run dev:https                                              # https://<主机
 `deploy.sh` 做的事：构建/导入沙箱镜像 → （可选）构建 agent-framework 镜像 → 应用 platform-router
 清单 → 上传 `packages/browser-agent` → 经平台 API 发布服务 `browser-takeover` → 等 running。
 
+> 实时画面 WS 握手要求 Origin 白名单：`deploy.sh` 缺省给业务服务注入
+> `AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS=http://*:5188,https://*`（对应 vite 代理后的
+> 演示前端来源）。换端口/域名时用 `DEMO_ORIGIN_PATTERNS=... ./deploy.sh` 覆盖，禁止配 `*`。
+
 > 工作区在 worktree 时 `.env.secrets` 不在 worktree 根目录，用 `SECRETS_FILE=` 指到主工作区。
 
 ## 二、演示剧本 A：Agent 主动请求接管（登录场景）

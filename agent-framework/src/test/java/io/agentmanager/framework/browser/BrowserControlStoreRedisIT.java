@@ -33,7 +33,7 @@ class BrowserControlStoreRedisIT {
         facade = RedisConnectionFacade.create(
             new AgentRedisProperties(url, 2000, 2000, 250_000,
                 AgentRedisProperties.Mode.standalone, "", prefix));
-        store = new BrowserControlStore(facade, new BrowserProperties(true, 60, 6080, "/websockify"));
+        store = new BrowserControlStore(facade, new BrowserProperties(true, 60, 6080, "/websockify", 60, java.util.List.of()));
     }
 
     @AfterAll
