@@ -3,6 +3,9 @@ package io.agentmanager.framework.tool;
 import java.util.Base64;
 import java.util.UUID;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +40,7 @@ import io.agentscope.core.tool.ToolParam;
 public class FileTools implements io.agentmanager.framework.tool.CustomTool {
 
     private static final Logger log = LoggerFactory.getLogger(FileTools.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final FileAssetStore fileAssetStore;
     private final FileStorage fileStorage;
@@ -217,11 +221,10 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             return err("metadata write failed: " + e.getMessage());
         }
         log.info("present_file: registered {} ({} bytes, mime={})", norm, size, mime);
-        // 5. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）；文件名经 escape()
-        //    （issue #424：#344 还原的含引号名不转义即产出非法 JSON，parseFileResult 正则
-        //    兜底在首个引号截断，构造 `a","error":"x` 形名可注入字段使 file_ready 丢失）
-        return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + escape(displayName)
-            + "\",\"mime_type\":\"" + escape(mime) + "\",\"size\":" + size + "}";
+        // 5. 返回 JSON（供 LLM 确认 + 供控制器合成 file_ready 帧）；Jackson 序列化保证
+        //    任意控制字符/引号文件名产出合法 JSON（issue #424/#506，parseFileResult 正则
+        //    兜底不再被非法 JSON 触发，`a","error":"x` 形名注入失效）
+        return resultJson(id, displayName, mime, size);
     }
 
     /**
@@ -291,8 +294,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             }
         }
         log.info("present_url: registered {} -> {}", name, registered);
-        return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + escape(name)
-            + "\",\"mime_type\":\"" + escape(mime) + "\",\"size\":" + sz + "}";
+        return resultJson(id, name, mime, sz);
     }
 
     /** 展示文件名 sanitize：basename、去控制字符、非空 */
@@ -309,8 +311,21 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         return base.isBlank() || ".".equals(base) || "..".equals(base) ? null : base;
     }
 
-    private static String escape(String s) {
-        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+    private static String resultJson(String id, String name, String mime, long size) {
+        var m = new java.util.LinkedHashMap<String, Object>();
+        m.put("file_id", id);
+        m.put("file_name", name);
+        m.put("mime_type", mime);
+        m.put("size", size);
+        return toJson(m);
+    }
+
+    private static String toJson(java.util.Map<String, Object> fields) {
+        try {
+            return JSON.writeValueAsString(fields);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("json serialization failed", e);
+        }
     }
 
     /**
@@ -395,8 +410,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
     }
 
     private static String err(String msg) {
-        var safe = msg.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
-        return "{\"error\":\"" + safe + "\"}";
+        return toJson(java.util.Map.of("error", msg));
     }
 
     /**
