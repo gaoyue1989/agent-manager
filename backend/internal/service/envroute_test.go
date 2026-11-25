@@ -138,3 +138,25 @@ func containsAll(s string, subs ...string) bool {
 	}
 	return true
 }
+
+func TestResolveEnvMergeRetiredSecretKeyDeleteAndUpdateWithoutSecretKeys(t *testing.T) {
+	oldSecret := map[string]string{"SKILLSYNC_TOKEN": "old-tok-secret"}
+
+	plainDel, secretDel := resolveEnvMerge(map[string]string{}, oldSecret,
+		map[string]string{"SKILLSYNC_TOKEN": ""}, nil)
+	if _, ok := secretDel["SKILLSYNC_TOKEN"]; ok {
+		t.Fatalf("retired secret key must be deleted on empty string without secretKeys: %+v", secretDel)
+	}
+	if _, ok := plainDel["SKILLSYNC_TOKEN"]; ok {
+		t.Fatalf("retired secret key must not appear in plain on delete: %+v", plainDel)
+	}
+
+	plainUpd, secretUpd := resolveEnvMerge(map[string]string{}, oldSecret,
+		map[string]string{"SKILLSYNC_TOKEN": "new-tok"}, nil)
+	if _, ok := plainUpd["SKILLSYNC_TOKEN"]; ok {
+		t.Fatalf("retired secret key must not downgrade into plain CM: %+v", plainUpd)
+	}
+	if secretUpd["SKILLSYNC_TOKEN"] != "new-tok" {
+		t.Fatalf("retired secret key must update in secret: %+v", secretUpd)
+	}
+}
