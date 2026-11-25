@@ -70,8 +70,12 @@ public class ReconnectableMcpClientWrapper extends McpClientWrapper {
     }
 
     /** 注册成功清除毒化（issue #493）：当前 delegate 经注册过程验证可用，历史失败标记失效 */
-    public void clearPoison() {
+    public synchronized boolean clearPoisonIfSame(McpClientWrapper expected) {
+        if (closed || delegate != expected) {
+            return false;
+        }
         poisoned = false;
+        return true;
     }
 
     public boolean poisoned() {

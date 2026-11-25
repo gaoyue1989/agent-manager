@@ -165,4 +165,21 @@ class ReconnectableMcpClientWrapperTest {
             assertTrue(handle.isClosed(), "句柄终态必须 closed");
         }
     }
+
+    @Test
+    void clearPoisonIfSameShouldIgnoreStaleDelegate() {
+        var base1 = mock(McpClientWrapper.class);
+        var base2 = mock(McpClientWrapper.class);
+        var handle = new ReconnectableMcpClientWrapper("srv", base1);
+
+        handle.swap(base2);
+        assertTrue(handle.markPoisonedIfSame(base2));
+        assertTrue(handle.poisoned());
+
+        assertFalse(handle.clearPoisonIfSame(base1));
+        assertTrue(handle.poisoned());
+
+        assertTrue(handle.clearPoisonIfSame(base2));
+        assertFalse(handle.poisoned());
+    }
 }

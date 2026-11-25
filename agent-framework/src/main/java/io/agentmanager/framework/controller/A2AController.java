@@ -205,14 +205,11 @@ public class A2AController {
             // 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId
             @SuppressWarnings("unchecked")
             var legacyMeta = (Map<String, Object>) params.get("metadata");
-            if (legacyMeta != null) {
-                if (!meta.containsKey("sessionId")) {
-                    var tid = legacyMeta.get("thread_id");
-                    if (tid != null && !tid.toString().isBlank()) {
-                        meta.put("sessionId", tid.toString());
-                    }
+            if (legacyMeta != null && !meta.containsKey("sessionId")) {
+                var tid = legacyMeta.get("thread_id");
+                if (tid != null && !tid.toString().isBlank()) {
+                    meta.put("sessionId", tid.toString());
                 }
-                // userId 回填与 sessionId 独立：新格式 sessionId + 旧格式 userId 可混用。
                 var uid = legacyMeta.get("userId");
                 if (uid != null && !meta.containsKey("userId")) {
                     meta.put("userId", uid.toString());
