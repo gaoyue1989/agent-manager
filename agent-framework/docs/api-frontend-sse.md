@@ -130,7 +130,7 @@ Accept: text/event-stream
 
 ```
 data: {"type":"session_created","session_id":"auto-uuid-xxx"}
-data: {"type":"AGENT_START","session_id":"auto-uuid-xxx","created_at":"2026-11-11T09:27:50.601Z","replyId":"r1","turnId":"r1",...}
+data: {"type":"AGENT_START","session_id":"auto-uuid-xxx","created_at":1794389270601,"replyId":"r1","turnId":"r1",...}
 data: {"type":"TEXT_BLOCK_DELTA","session_id":"auto-uuid-xxx","delta":"你好！","replyId":"r1","blockId":"b1",...}
 data: {"type":"AGENT_END","session_id":"auto-uuid-xxx","replyId":"r1","usage":{"input_tokens":123,"cached_tokens":98,"output_tokens":45,"total_tokens":168,"model_calls":1},"elapsed_ms":4200}
 ```
@@ -339,7 +339,7 @@ Accept: text/event-stream
 前端可复用同一渲染逻辑。
 
 ```
-data: {"type":"AGENT_START","session_id":"sid-1","created_at":"2026-11-11T09:30:01.120Z","replyId":"reply-001","id":"evt-100"}
+data: {"type":"AGENT_START","session_id":"sid-1","created_at":1794389401120,"replyId":"reply-001","id":"evt-100"}
 data: {"type":"TOOL_RESULT_START","session_id":"sid-1","toolCallId":"call-abc","toolCallName":"write_file",...,"id":"evt-101"}
 data: {"type":"TOOL_RESULT_TEXT_DELTA","session_id":"sid-1","delta":"File written successfully","toolCallId":"call-abc",...,"id":"evt-102"}
 data: {"type":"TOOL_RESULT_END","session_id":"sid-1","state":"SUCCESS","toolCallId":"call-abc",...,"id":"evt-103"}
@@ -1177,7 +1177,7 @@ GET /skills/manage
 | type | 触发时机 | 关键字段 |
 |------|---------|---------|
 | `session_created` | `POST /threads/chat` 未传 sessionId 时自动生成（**仅此端点**） | `session_id` |
-| `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role`, `created_at`（**agent 开始处理墙钟时刻**，ISO-8601 UTC，SDK 事件构造时生成、原样透传；与 AGENT_END 的 elapsed_ms 联合可拆「排队+准备/执行」两段） |
+| `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role`, `created_at`（**agent 开始处理墙钟时刻**，epoch 毫秒整数，SDK 事件构造时生成、下发时转换；与 AGENT_END 的 elapsed_ms 联合可拆「排队+准备/执行」两段） |
 | （通用） | 非 delta 事件（里程碑/合成帧） | additive `turnId`：**turn 信封 id**，`GET /subscribe?replyId=` 的过滤口径；delta 帧不注入（token 热路径），可从任一里程碑帧或 `/status.reply_id` 获取 |
 | `AGENT_END` | Agent 执行完成（**流关闭信号**，终态帧） | `replyId`；additive `usage`（`input_tokens`/`cached_tokens`/`output_tokens`/`total_tokens` 本 turn 全部模型调用**求和** + `model_calls`，usage 为 null 的调用计次不计量）与 `elapsed_ms`（agent 执行段耗时，不含排队等租约）——仅 lead 自身 AGENT_END 携带，远程转发的 AGENT_END 不带 |
 | `cancelled` | 用户停止（`POST /threads/{sid}/stop` 生效，排在 `AGENT_END` 前） | `reason:"user_stopped"` |
