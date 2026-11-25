@@ -16,12 +16,15 @@ import org.junit.jupiter.api.Test;
 import com.alibaba.opensandbox.sandbox.Sandbox;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionLogs;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.OutputMessage;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo;
 import com.alibaba.opensandbox.sandbox.domain.services.Commands;
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem;
+
+import io.agentmanager.framework.service.WorkspaceReader;
 
 
 /**
@@ -449,5 +452,114 @@ class OpenSandboxExecTranslateTest {
 
         var probe = "test -e 'tree/link/' && echo yes || echo no";
         assertNull(sandbox.translateForProbe(probe), "尾斜杠命中 symlink 条目必须回落（null，#394 语义保持）");
+    }
+
+    @Test
+    void testExistsTopLevelWorkspaceDirectoryUsesRootListingWithoutReadByteArray() throws Exception {
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.listDirectory("/workspace")).thenReturn(List.of(
+            new EntryInfo("/workspace/skills", 493, "root", "root", 0, epoch(), epoch(), "directory"),
+            new EntryInfo("/workspace/memory", 493, "root", "root", 0, epoch(), epoch(), "directory")));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var r1 = sandbox.translateForProbe("test -e '/workspace/skills' && echo yes || echo no");
+        var r2 = sandbox.translateForProbe("test -e 'memory' && echo yes || echo no");
+        assertNotNull(r1);
+        assertEquals("yes", r1.stdout());
+        assertNotNull(r2);
+        assertEquals("yes", r2.stdout());
+        verify(files, never()).readByteArray(anyString());
+    }
+
+    @Test
+    void testExistsDirectoryDownloadInternalExceptionFallsThroughToListDirectory() throws Exception {
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.readByteArray("etc/conf")).thenThrow(
+            new SandboxInternalException("Cannot buffer entire body for content length: 9223372036854775807", null));
+        when(files.listDirectory("etc/conf")).thenReturn(List.of());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var r = sandbox.translateForProbe("test -e '/etc/conf' && echo yes || echo no");
+        assertNotNull(r);
+        assertEquals("yes", r.stdout());
+    }
+
+    @Test
+    void readThroughLsAndGlobMemoryTrailingSlashShouldWork() throws Exception {
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        var reader = mock(WorkspaceReader.class);
+        when(files.listDirectory("memory/")).thenThrow(
+            new SandboxApiException("HTTP 404 Not Found", null, 404, new SandboxError(SandboxError.FILE_NOT_FOUND, "not found")));
+        when(reader.listRuntimeFiles("u1")).thenReturn(Map.of(
+            "MEMORY.md", 12,
+            "memory/2026-11-24.md", 20));
+        var sandbox = new OpenSandbox(state(), osb, options(), reader, null, null, null, null, false, false, true, false);
+        sandbox.setUserKey("u1");
+
+        var lsRes = sandbox.translateForProbe(lsTemplate("memory/"));
+        assertNotNull(lsRes);
+        assertEquals("FILE:memory/2026-11-24.md\t20\t0", lsRes.stdout());
+
+        var globRes = sandbox.translateForProbe(findTemplate("memory/", "*.md"));
+        assertNotNull(globRes);
+        assertEquals("memory/2026-11-24.md\t20\t0", globRes.stdout());
+    }
+
+    @Test
+    void testExistsMultiTrailingSlashDirAndKvFileTrailingSlash() throws Exception {
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        var reader = mock(WorkspaceReader.class);
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(
+            new EntryInfo("/workspace/skills/my-skill", 493, "root", "root", 0, epoch(), epoch(), "directory")));
+        when(files.listDirectory("/workspace")).thenReturn(List.of(
+            new EntryInfo("/workspace/skills", 493, "root", "root", 0, epoch(), epoch(), "directory")));
+        when(files.listDirectory("/workspace/memory")).thenReturn(List.of());
+        when(reader.readMemoryFile("u1", "MEMORY.md")).thenReturn("# mem");
+        when(reader.readMemoryFile("u1", "memory/2026-11-24.md")).thenReturn("daily");
+        when(reader.listRuntimeFiles("u1")).thenReturn(Map.of(
+            "MEMORY.md", 5,
+            "memory/2026-11-24.md", 5));
+        var sandbox = new OpenSandbox(state(), osb, options(), reader, null, null, null, null, false, false, true, false);
+        sandbox.setUserKey("u1");
+
+        var multiDir = sandbox.translateForProbe("test -e '/workspace/skills/my-skill//' && echo yes || echo no");
+        assertNotNull(multiDir);
+        assertEquals("yes", multiDir.stdout());
+
+        var kvRootFileSlash = sandbox.translateForProbe("test -e 'MEMORY.md/' && echo yes || echo no");
+        assertNotNull(kvRootFileSlash);
+        assertEquals("no", kvRootFileSlash.stdout());
+
+        var kvDailyFileSlash = sandbox.translateForProbe("test -e 'memory/2026-11-24.md/' && echo yes || echo no");
+        assertNotNull(kvDailyFileSlash);
+        assertEquals("no", kvDailyFileSlash.stdout());
+
+        var kvMemDirSlash = sandbox.translateForProbe("test -e 'memory//' && echo yes || echo no");
+        assertNotNull(kvMemDirSlash);
+        assertEquals("yes", kvMemDirSlash.stdout());
+    }
+
+    @Test
+    void readThroughRootGlobShouldIncludeKvMemorySubdirFiles() throws Exception {
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        var reader = mock(WorkspaceReader.class);
+        when(files.listDirectory("/workspace")).thenReturn(List.of(
+            new EntryInfo("/workspace/README.md", 420, "root", "root", 17, epoch(), epoch(), "file")));
+        when(reader.listRuntimeFiles("u1")).thenReturn(Map.of(
+            "MEMORY.md", 42,
+            "memory/2026-11-24.md", 11));
+        var sandbox = new OpenSandbox(state(), osb, options(), reader, null, null, null, null, false, false, true, false);
+        sandbox.setUserKey("u1");
+
+        var globRes = sandbox.translateForProbe(findTemplate("/workspace", "*.md"));
+        assertNotNull(globRes);
+        assertTrue(globRes.stdout().contains("MEMORY.md\t42\t0"), globRes.stdout());
+        assertTrue(globRes.stdout().contains("memory/2026-11-24.md\t11\t0"), globRes.stdout());
+        assertTrue(globRes.stdout().contains("README.md\t17\t"), globRes.stdout());
     }
 }

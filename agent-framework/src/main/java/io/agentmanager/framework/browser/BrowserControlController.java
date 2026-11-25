@@ -142,8 +142,8 @@ public class BrowserControlController {
 
     private static ServerSentEvent<String> errorFrame(String message) {
         return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"error\",\"error\":\""
-                + io.agentmanager.framework.controller.AgentEventSseSerializer.jsonEsc(message) + "\"}")
+            .data("{\"type\":\"error\",\"error\":"
+                + io.agentmanager.framework.controller.AgentEventSseSerializer.jsonEsc(message) + "}")
             .build();
     }
 }

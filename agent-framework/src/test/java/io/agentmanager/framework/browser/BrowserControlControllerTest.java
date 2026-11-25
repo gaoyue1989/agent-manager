@@ -212,4 +212,23 @@ class BrowserControlControllerTest {
         assertEquals(List.of(), frames);
         verify(chatStreamController).chat(any(), eq(USER), eq("/agent/demo"), any());
     }
+
+    @Test
+    void releaseErrorFramesMustBeValidJson() throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        when(control.release(SESSION)).thenReturn(false);
+        var notHeld = controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        assertEquals(1, notHeld.size());
+        var tree1 = mapper.readTree(notHeld.get(0).data());
+        assertEquals("error", tree1.get("type").asText());
+        assertTrue(tree1.get("error").asText().contains("not_taken_over"));
+
+        when(control.release(SESSION))
+            .thenThrow(new BrowserControlUnavailableException("redis down", new IllegalStateException("down")));
+        var unavailable = controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        assertEquals(1, unavailable.size());
+        var tree2 = mapper.readTree(unavailable.get(0).data());
+        assertEquals("error", tree2.get("type").asText());
+        assertTrue(tree2.get("error").asText().contains("control_store_unavailable"));
+    }
 }
