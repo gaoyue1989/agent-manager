@@ -559,15 +559,19 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	rollback := func(cause error) {
 		c.rollbackProvision(VikingAccountID(svc.K8sName), created, cause)
 	}
+	oldParams := c.params(svc.K8sName, svc.Image, oldPlain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
+	oldParams.EnvSecret = oldSecret
 	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
 	params.EnvSecret = secret
 	if err := c.applyServiceEnvObjects(params); err != nil {
+		_ = c.applyServiceEnvObjects(oldParams)
 		rollback(err)
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := c.K8s.RestartDeployment(ctx, c.Cfg.Namespace, svc.K8sName); err != nil {
+		_ = c.applyServiceEnvObjects(oldParams)
 		rollback(err)
 		return nil, err
 	}
@@ -578,7 +582,6 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if err := c.DB.Model(svc).Updates(map[string]interface{}{
 		"env_json": svc.EnvJSON, "env_secret_json": svc.EnvSecretJSON,
 	}).Error; err != nil {
-		rollback(err)
 		return nil, err
 	}
 	c.transition(svc, store.StatusDeploying, "env updated, rolling restart")
@@ -769,10 +772,11 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 
 // StartAgain stopped/error/deploy_failed/register_failed → 重新上线。
 func (c *Core) StartAgain(id uint) (*store.ServiceEntity, error) {
-	svc, err := c.Get(id)
+	svc, unlock, err := c.lockForService(id)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	switch svc.Status {
 	case store.StatusStopped, store.StatusError, store.StatusDeployFailed, store.StatusRegisterFailed:
 	default:
@@ -802,10 +806,11 @@ func (c *Core) StartAgain(id uint) (*store.ServiceEntity, error) {
 
 // Unpublish 下线：删 Ingress/Service/Deployment，保留 CM 与数据。
 func (c *Core) Unpublish(id uint) (*store.ServiceEntity, error) {
-	svc, err := c.Get(id)
+	svc, unlock, err := c.lockForService(id)
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	ns := c.Cfg.Namespace
 	_ = c.K8s.DeleteIngress(ns, svc.K8sName)
 	_ = c.K8s.DeleteService(ns, svc.K8sName+"-svc")

@@ -92,3 +92,46 @@ export function toolStatus(message: ToolMessage): ToolStatus {
   if (message.pending) return "running";
   return "unknown";
 }
+
+export interface InlineHistoryImage {
+  file_id: string;
+  file_name: string;
+  mime_type: string;
+  size: number;
+  download_url: string;
+}
+
+export interface HistoryAssistantMessage {
+  role: "assistant";
+  content: string;
+  files?: InlineHistoryImage[];
+}
+
+export function buildHistoryAssistantMessage(m: {
+  content?: string;
+  msg_id?: string | number;
+  blocks?: Array<{ type?: string; media_type?: string; url?: string; data?: string }>;
+}): HistoryAssistantMessage | null {
+  const inline: InlineHistoryImage[] = Array.isArray(m.blocks)
+    ? m.blocks
+        .filter((b) => b?.type === "image")
+        .map((b, i) => {
+          const mime = b.media_type ?? "image/png";
+          return {
+            file_id: `inline-direct-${m.msg_id ?? "img"}-${i}`,
+            file_name: "inline-image",
+            mime_type: mime,
+            size: 0,
+            download_url: b.url ?? `data:${mime};base64,${b.data}`,
+          };
+        })
+    : [];
+  if (!m.content && inline.length === 0) {
+    return null;
+  }
+  return {
+    role: "assistant",
+    content: m.content ?? "",
+    ...(inline.length > 0 ? { files: inline } : {}),
+  };
+}

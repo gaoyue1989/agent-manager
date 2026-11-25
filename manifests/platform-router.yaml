@@ -85,7 +85,7 @@ data:
       # 见 docs/deployment.md §七之二）：/agent/{short}/internal、/agent/{short}/actuator
       # 段边界匹配恒 404（/internalx 等业务路径不受影响）。skills-syncd 内部端点与
       # actuator 的合法消费仅集群内 svc 直连（守护 SKILLSYNC_BASE_URL 指向 svc，
-      # 不经 router），token 门为主控制——此排除使两种模式外部表现一致（纵深防御）。
+      # 不经 router）；入口排除是这两个内部路径唯一的对外防线（纵深防御）。
       # 正则 location 按声明顺序首匹配生效，必须置于下方泛化 location 之前
       location ~ "^/agent/[a-z0-9-]+/(internal|actuator)(/|;|$)" {
         return 404;

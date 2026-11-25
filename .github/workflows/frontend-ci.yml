@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
+      browser-demo: ${{ steps.filter.outputs.browser-demo }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +30,8 @@ jobs:
           filters: |
             frontend:
               - 'frontend/**'
+            browser-demo:
+              - 'demo/browser-takeover/frontend/**'
             workflows:
               - '.github/workflows/frontend-ci.yml'
 
@@ -55,6 +58,26 @@ jobs:
         run: npm run test
       - name: Build（含类型检查）
         working-directory: frontend
+        run: npm run build
+
+  # browser-takeover 是独立 Vite 应用，不属于根 frontend/；单独纳入类型检查与构建门禁。
+  browser-demo:
+    name: browser-takeover 前端构建（tsc + vite）
+    needs: changes
+    if: needs.changes.outputs.browser-demo == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: demo/browser-takeover/frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: demo/browser-takeover/frontend
+        run: npm ci
+      - name: Build（含 TypeScript 类型检查）
+        working-directory: demo/browser-takeover/frontend
         run: npm run build
 
   build-push:

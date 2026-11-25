@@ -86,7 +86,12 @@ func resolveEnvMerge(oldPlain, oldSecret, env map[string]string, secretKeys []st
 			secret[k] = v // 存量迁移
 		}
 	}
-	plain, inSecret := splitUserEnv(env, secretKeys)
+	effectiveSecretKeys := make([]string, 0, len(secretKeys)+len(secret))
+	effectiveSecretKeys = append(effectiveSecretKeys, secretKeys...)
+	for k := range secret {
+		effectiveSecretKeys = append(effectiveSecretKeys, k)
+	}
+	plain, inSecret := splitUserEnv(env, effectiveSecretKeys)
 	dropEmptyEnv(plain) // 空串=不设置（设计 §3.3）：非敏感份与 secret 份的空串删除对齐
 	for k, v := range inSecret {
 		if v == "" {

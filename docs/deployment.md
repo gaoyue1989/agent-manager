@@ -262,7 +262,7 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    `kubectl delete clusterrole,clusterrolebinding platform-backend-skillsync --ignore-not-found`、
    `kubectl -n opensandbox delete role,rolebinding platform-backend-skillsync platform-backend-skillsync-token --ignore-not-found`（脚本 4.1 与更早清单的两个历史名）、
    `kubectl -n opensandbox delete secret -l app.kubernetes.io/managed-by=oaf-platform`。
-   平台配置与服务 env 里残留的 `SKILLSYNC_TOKEN` 值不再被读取，可留可清。
+   平台配置（`platform_config`）与工作空间运行时默认（`workspace_runtime_defaults`）中残留的 `SKILLSYNC_TOKEN` 行不再被运行时或跨集群导出读取；服务 `env_secret_json` 中的残留值可通过 `PATCH /services/:id/env` 传 `{"SKILLSYNC_TOKEN": ""}` 清除；如需从库中彻底清理残留配置行，可执行 `DELETE FROM platform_config WHERE env_key = 'SKILLSYNC_TOKEN'; DELETE FROM workspace_runtime_defaults WHERE env_key = 'SKILLSYNC_TOKEN';`。
 
 **升级**：重跑 `./scripts/build-skillsync-image.sh`（同 tag 覆盖）→ 直建新沙箱即用新镜像；池化 Pod
 须重建才换镜像（沙箱管理页销毁 warm 实例，或删池重建——上游改模板必须删池重建）。
