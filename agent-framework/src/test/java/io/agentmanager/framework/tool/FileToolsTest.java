@@ -646,6 +646,36 @@ class FileToolsTest {
             "剥 /workspace/ 前缀后仍为绝对路径应拒绝: " + result);
     }
 
+    /** 文件名含 < 0x20 控制字符（RFC 8259 禁止裸出现在 JSON 字符串）必须转义为合法 JSON 且无损往返 */
+    @Test
+    void presentFileShouldEscapeControlCharsInReturnedJson() throws Exception {
+        var result = tools.presentFile(ctx(), "outputs/report\t1\nx\u0001y\u000c.txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("report\t1\nx\u0001y\u000c.txt", node.get("file_name").asText(),
+            "控制字符文件名经转义后可无损往返: " + result);
+    }
+
+    /** err 分支（invalid path 拼原 filePath）含控制字符时同样必须返回合法 JSON */
+    @Test
+    void presentFileErrorResultShouldEscapeControlChars() throws Exception {
+        var result = tools.presentFile(ctx(), "a\tb/../etc/passwd",
+            Base64.getEncoder().encodeToString(new byte[]{1}));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertTrue(node.get("error") != null, "拒绝路径应返回 error 字段: " + result);
+        assertTrue(node.get("error").asText().contains("invalid path"), "error 语义保留: " + result);
+    }
+
+    /** present_url 文件名含引号经 sanitize（控制字符替换、引号保留）后必须产出合法 JSON */
+    @Test
+    void presentUrlShouldEscapeQuotesAndControlCharsInReturnedJson() throws Exception {
+        var t = toolsWithPrefixes("http://ok.example/");
+        var result = t.presentUrl(ctx(), "we\"ird\tname.zip", "http://ok.example/a.zip", null, null);
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("we\"ird_name.zip", node.get("file_name").asText(),
+            "引号转义保留、控制字符 sanitize: " + result);
+    }
+
     /** 沙箱直读路径同样不得收到剥前缀后的绝对路径（execd files API 可读容器任意文件） */
     @Test
     void presentFileSandboxMustNotOpenAbsoluteEscapePath() {
