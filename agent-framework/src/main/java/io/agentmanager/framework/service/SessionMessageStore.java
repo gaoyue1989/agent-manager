@@ -213,20 +213,21 @@ public class SessionMessageStore {
         }
         var sql = "SELECT id, msg_id, kind, role, reply_id, trace_id, msg_data, created_at FROM session_message "
             + "WHERE (session_id = ? "
-            +   "OR session_id LIKE CONCAT(?, ':%') "
-            +   "OR session_id LIKE CONCAT(?, '__%') "
-            +   "OR session_id LIKE CONCAT('%:', ?) "
-            +   "OR session_id LIKE CONCAT('%__', ?)) "
+            +   "OR session_id LIKE CONCAT(?, ':%') ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT(?, '!_!_%') ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT('%:', ?) ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT('%!_!_', ?) ESCAPE '!') "
             + (beforeId != null ? "AND id < ? " : "")
             + "ORDER BY id DESC"
             + (limit > 0 ? " LIMIT ?" : "");
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(sql)) {
+            var escaped = AgentStateReader.escapeLike(sessionId);
             ps.setString(1, sessionId);
-            ps.setString(2, sessionId);
-            ps.setString(3, sessionId);
-            ps.setString(4, sessionId);
-            ps.setString(5, sessionId);
+            ps.setString(2, escaped);
+            ps.setString(3, escaped);
+            ps.setString(4, escaped);
+            ps.setString(5, escaped);
             int idx = 6;
             if (beforeId != null) {
                 ps.setLong(idx++, beforeId);
@@ -261,14 +262,16 @@ public class SessionMessageStore {
         }
         var sql = "SELECT DISTINCT msg_id FROM session_message "
             + "WHERE session_id = ? "
-            +   "OR session_id LIKE CONCAT(?, ':%') "
-            +   "OR session_id LIKE CONCAT(?, '__%') "
-            +   "OR session_id LIKE CONCAT('%:', ?) "
-            +   "OR session_id LIKE CONCAT('%__', ?)";
+            +   "OR session_id LIKE CONCAT(?, ':%') ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT(?, '!_!_%') ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT('%:', ?) ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT('%!_!_', ?) ESCAPE '!'";
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(sql)) {
-            for (int i = 1; i <= 5; i++) {
-                ps.setString(i, sessionId);
+            var escaped = AgentStateReader.escapeLike(sessionId);
+            ps.setString(1, sessionId);
+            for (int i = 2; i <= 5; i++) {
+                ps.setString(i, escaped);
             }
             try (var rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -288,14 +291,16 @@ public class SessionMessageStore {
         }
         var sql = "DELETE FROM session_message "
             + "WHERE session_id = ? "
-            +   "OR session_id LIKE CONCAT(?, ':%') "
-            +   "OR session_id LIKE CONCAT(?, '__%') "
-            +   "OR session_id LIKE CONCAT('%:', ?) "
-            +   "OR session_id LIKE CONCAT('%__', ?)";
+            +   "OR session_id LIKE CONCAT(?, ':%') ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT(?, '!_!_%') ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT('%:', ?) ESCAPE '!' "
+            +   "OR session_id LIKE CONCAT('%!_!_', ?) ESCAPE '!'";
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(sql)) {
-            for (int i = 1; i <= 5; i++) {
-                ps.setString(i, sessionId);
+            var escaped = AgentStateReader.escapeLike(sessionId);
+            ps.setString(1, sessionId);
+            for (int i = 2; i <= 5; i++) {
+                ps.setString(i, escaped);
             }
             return ps.executeUpdate();
         } catch (Exception e) {
