@@ -2050,6 +2050,8 @@ const DIRECT_TOOLS = {
   empty: 'mcp__order__empty_render',
   lookup: 'mcp__order__lookup_order',
   notify: 'mcp__order__notify_warehouse',
+  image: 'mcp__order__render_chart_png',
+  twoPart: 'mcp__order__render_two_part_card',
 } as const;
 
 const directTextOf = (frames: Frame[]) => frames
@@ -2191,8 +2193,8 @@ test('DR7 同批混合调用不短路：直返工具与普通工具同一步执�
 test('DR8 /tools 的 directReturn 标记与 config.yaml 声明一致', async ({ request }) => {
   const tools = await (await request.get('/tools')).json() as { tools: Array<Record<string, unknown>> };
   const order = new Map(tools.tools.filter(t => t.server === 'order').map(t => [String(t.name), t]));
-  expect([...order.keys()].sort()).toEqual(['broken_render', 'empty_render', 'lookup_order', 'notify_warehouse', 'render_confirm_card', 'submit_order']);
-  for (const name of ['render_confirm_card', 'submit_order', 'broken_render', 'empty_render']) {
+  expect([...order.keys()].sort()).toEqual(['broken_render', 'empty_render', 'lookup_order', 'notify_warehouse', 'render_chart_png', 'render_confirm_card', 'render_two_part_card', 'submit_order']);
+  for (const name of ['render_confirm_card', 'submit_order', 'broken_render', 'empty_render', 'render_chart_png', 'render_two_part_card']) {
     expect(order.get(name)?.directReturn, `${name} 应标记直返`).toBe(true);
   }
   for (const name of ['lookup_order', 'notify_warehouse']) {
@@ -2203,5 +2205,81 @@ test('DR8 /tools 的 directReturn 标记与 config.yaml 声明一致', async ({ 
   };
   expect(full.sdkInternal.map(t => String(t.name)).filter(name => name.startsWith('mcp__order__')),
     '直返工具以装饰器注册，仍须按注册名归入 MCP 段而非 SDK 内置段').toEqual([]);
-  expect(full.tools.filter(t => t.server === 'order'), 'MCP 段不应重复列出').toHaveLength(6);
+  expect(full.tools.filter(t => t.server === 'order'), 'MCP 段不应重复列出').toHaveLength(8);
+});
+
+test('DR9 纯图片直返：无文本信号时框架补发直返完成信号，history 保留图片块', async () => {
+  const { sid, frames } = await directChat('direct:image', 'dr9');
+  const start = callStartOf(frames, DIRECT_TOOLS.image);
+  expect(start, '缺少 render_chart_png 的 TOOL_CALL_START').toBeTruthy();
+  expect(start!.directReturn, 'TOOL_CALL_START 应携带 directReturn').toBe(true);
+  expect(String(toolResults(frames).find(r => r.toolCallId === start!.toolCallId)?.state)).toBe('SUCCESS');
+
+  // 工具结果图片数据帧（既有图片帧先例，词表 snake_case）
+  const imageFrame = frames.find(f => f.type === 'TOOL_RESULT_DATA_DELTA'
+    && f.tool_call_id === start!.toolCallId) as Record<string, unknown> | undefined;
+  expect(imageFrame, '纯图片结果应有 TOOL_RESULT_DATA_DELTA 帧').toBeTruthy();
+  expect(imageFrame!.media_type).toBe('image/png');
+  expect(String(imageFrame!.data ?? '').length, '图片 base64 应随帧下发').toBeGreaterThan(0);
+
+  // 直返文本（SDK 只对 TextBlock 发信号）恒为空
+  expect(directTextOf(frames), '纯图片直返无收尾文本').toBe('');
+  // 框架补发的直返完成信号帧（issue #492）：空 delta + 权威标记，AGENT_END 前恰一帧
+  const signals = frames.filter(f => f.type === 'TEXT_BLOCK_DELTA'
+    && f.generateReason === 'TOOL_RETURN_DIRECT');
+  expect(signals, '框架应补发直返完成信号帧').toHaveLength(1);
+  expect(signals[0].delta ?? '', '信号帧 delta 为空').toBe('');
+  const sigIdx = frames.indexOf(signals[0]);
+  const endIdx = frames.findIndex(f => f.type === 'AGENT_END');
+  expect(sigIdx, '信号帧应在 AGENT_END 之前').toBeLessThan(endIdx);
+  expect(frames.filter(f => f.type === 'MODEL_CALL_START'), '本轮只应有一次模型调用').toHaveLength(1);
+  expect(await dialogueCalls('direct-image'), 'mock LLM 只应收到 1 次主对话请求').toBe(1);
+
+  // history：直返收尾消息不得被丢弃，图片经 blocks[].image 下发
+  const h = await history(sid, BASE, U);
+  const msgs = (h.messages ?? []) as Array<Record<string, unknown>>;
+  const closing = msgs.filter(m => m.generate_reason === 'TOOL_RETURN_DIRECT');
+  expect(closing, 'history 应有且仅有一条直返收尾消息').toHaveLength(1);
+  expect(closing[0].content ?? '', '纯图片直返 content 为空').toBe('');
+  const imageBlocks = ((closing[0].blocks ?? []) as Array<Record<string, unknown>>)
+    .filter(b => b.type === 'image');
+  expect(imageBlocks, '直返收尾消息应携带 image 块').toHaveLength(1);
+  expect(imageBlocks[0].media_type).toBe('image/png');
+  expect(imageBlocks[0].data, 'history 图片块应携带 base64 数据').toBe(String(imageFrame!.data));
+
+  // 续传回放：合成信号帧落库后回放一致
+  const replay = subscribe(sid, 0, BASE, undefined, U);
+  await waitTerminal(replay);
+  const replaySignals = replay.frames.filter(f => f.type === 'TEXT_BLOCK_DELTA'
+    && f.generateReason === 'TOOL_RETURN_DIRECT');
+  expect(replaySignals, '续传回放应还原直返完成信号帧').toHaveLength(1);
+  expectSequence(replay.frames, ['AGENT_END', 'done']);
+});
+
+test('DR10 多 text 块直返：SSE 块间换行分隔，与 /history 拼接逐字符一致（issue #494）', async () => {
+  const { sid, frames } = await directChat('direct:two-part', 'dr10');
+  const start = callStartOf(frames, DIRECT_TOOLS.twoPart);
+  expect(start, '缺少 render_two_part_card 的 TOOL_CALL_START').toBeTruthy();
+  expect(start!.directReturn, 'TOOL_CALL_START 应携带 directReturn').toBe(true);
+  expect(String(toolResults(frames).find(r => r.toolCallId === start!.toolCallId)?.state)).toBe('SUCCESS');
+
+  const joined = directTextOf(frames);
+  expect(joined, '两块之间应以换行分隔（对齐 /history extractContentText 口径）').toBe(
+    '订单确认卡上半部分：机械键盘 x1、USB-C 数据线 x2\n订单确认卡下半部分：合计 409.0 元，确认后即可发货');
+  expect(frames.filter(f => f.type === 'MODEL_CALL_START'), '本轮只应有一次模型调用').toHaveLength(1);
+  expect(await dialogueCalls('direct-two-part'), 'mock LLM 只应收到 1 次主对话请求').toBe(1);
+
+  // 真相源断言：history 的换行拼接与 SSE 拼接逐字符一致（修复前 SSE 为无分隔拼接）
+  const h = await history(sid, BASE, U);
+  const msgs = (h.messages ?? []) as Array<Record<string, unknown>>;
+  const closing = msgs.filter(m => m.generate_reason === 'TOOL_RETURN_DIRECT');
+  expect(closing, 'history 应有且仅有一条直返收尾消息').toHaveLength(1);
+  expect(closing[0].content, 'history 换行拼接应与 SSE 拼接逐字符一致').toBe(joined);
+
+  // 续传回放一致（重写后的 delta 帧落库，回放即分隔后文本）
+  const replay = subscribe(sid, 0, BASE, undefined, U);
+  await waitTerminal(replay);
+  expect(directTextOf(replay.frames), '续传回放应还原带分隔的收尾文本').toBe(joined);
+  expectSequence(frames, ['TOOL_CALL_START', 'TOOL_RESULT_END', 'TEXT_BLOCK_START', 'TEXT_BLOCK_DELTA',
+    'TEXT_BLOCK_END', 'TEXT_BLOCK_START', 'TEXT_BLOCK_DELTA', 'TEXT_BLOCK_END', 'AGENT_END']);
 });

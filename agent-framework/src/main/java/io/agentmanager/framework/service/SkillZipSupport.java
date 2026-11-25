@@ -341,10 +341,10 @@ public final class SkillZipSupport {
      * 同一规范名对齐，否则按提示词路径访问 404。
      *
      * <p>回落目录名：SKILL.md 缺失 / 无 frontmatter / 无 name / 解析抛异常（二进制 SKILL.md，
-     * {@link #extractSkillName} 契约）；以及规范名不 shell-safe（含 {@code ..}、引号、空白、
-     * {@code /}、以 {@code /} 开头——与 SkillsFarm 链名防线同规则，规范名进 tar rel 与容器
-     * 命令拼接，不得改写名字，改写会再次与 SDK 渲染口径错位）。管理面禁用集与寻址键同为
-     * 规范名口径（SkillManageService 读取时归一化，issue #480）。
+     * {@link #extractSkillName} 契约）；以及规范名非白名单（{@link #isShellSafeSegment}，issue
+     * #501——与 SkillsFarm 链名防线同规则，规范名进 tar rel 与容器命令拼接，不得改写名字，
+     * 改写会再次与 SDK 渲染口径错位）。管理面禁用集与寻址键同为规范名口径（SkillManageService
+     * 读取时归一化，issue #480）。
      */
     public static String canonicalSkillName(Path skillDir) {
         var dirName = skillDir.getFileName().toString();
@@ -360,28 +360,65 @@ public final class SkillZipSupport {
         return isShellSafeSegment(frontmatter) ? frontmatter : dirName;
     }
 
-    /** 单路径段 shell-safe（不含 {@code ..} / 引号 / 空白 / {@code /} / 以 {@code /} 开头） */
-    private static boolean isShellSafeSegment(String name) {
-        if (name == null || name.isBlank() || name.startsWith("/")) {
+    /** 技能名白名单字符集（字母/数字/下划线/中文/点/连字符），sanitize 与 shell-safe 判定同源 */
+    private static final String SKILL_NAME_CHARS = "\\w\\u4e00-\\u9fff.\\-";
+
+    /**
+     * 单路径段 shell-safe 白名单（issue #501）：仅 {@link #SKILL_NAME_CHARS}，禁 {@code .} /
+     * {@code ..} 开头与含 {@code ..}——段名进 tar rel、farm 建链引号段与孤儿差集 {@code |}
+     * 分隔 case 字面集，{@code |}、{@code \} 等白名单外字符会破坏命令与差集边界
+     * （{@code name: .} 曾生成 {@code rm -rf '<cache>/oaf-package/.'}，GNU rm 拒绝删除
+     * {@code .} 使整条 && 链中断）。不安全段在 {@link #canonicalSkillName} 回落目录名、
+     * SkillsFarm 链名防线按段复用本判定跳过。
+     */
+    public static boolean isShellSafeSegment(String name) {
+        if (name == null || name.isBlank()) {
             return false;
         }
-        if (name.contains("'") || name.contains("..") || name.contains("/")) {
+        if (name.startsWith(".") || name.contains("..")) {
             return false;
         }
-        return name.chars().allMatch(c -> c > 32);
+        return name.matches("[" + SKILL_NAME_CHARS + "]+");
     }
 
-    /** 技能名安全化：只允许字母、数字、中文、下划线、连字符、点；不允许以 . 开头 */
+    /** 技能名安全化：白名单外字符替换为下划线，不允许以 . 开头 */
     public static String sanitizeSkillName(String name) {
         if (name == null || name.isBlank()) {
             return null;
         }
-        var sanitized = name.replaceAll("[^\\w\\u4e00-\\u9fff.\\-]", "_");
+        var sanitized = name.replaceAll("[^" + SKILL_NAME_CHARS + "]", "_");
         // 不允许以 . 开头（隐藏文件/目录）
         while (sanitized.startsWith(".")) {
             sanitized = "_" + sanitized.substring(1);
         }
         return sanitized.isBlank() ? null : sanitized;
+    }
+
+    /**
+     * 技能目录清单的规范名索引（issue #504，#513 寻址歧义的统一裁决）：隐藏目录（. 开头）
+     * 不参与；候选按目录名字典序排序，frontmatter 规范名（{@link #canonicalSkillName}）
+     * 首次出现者保留、冲突目录打 WARN 跳过。bundle 打包与 resolveSkillDir 索引寻址共用
+     * 本规则：「规范名 → 目录内容」映射唯一且跨节点确定——bundle 同输入字节一致
+     * （X-Bundle-Sha256 跨副本稳定），寻址命中的目录与 bundle 收录的内容恒为同一份。
+     */
+    public static java.util.SortedMap<String, Path> canonicalDirIndex(Iterable<Path> dirs) {
+        var sorted = new java.util.ArrayList<Path>();
+        for (var dir : dirs) {
+            if (!dir.getFileName().toString().startsWith(".")) {
+                sorted.add(dir);
+            }
+        }
+        sorted.sort(Comparator.comparing(p -> p.getFileName().toString()));
+        java.util.SortedMap<String, Path> index = new java.util.TreeMap<>();
+        for (var dir : sorted) {
+            var canonical = canonicalSkillName(dir);
+            var winner = index.putIfAbsent(canonical, dir);
+            if (winner != null) {
+                log.warn("Duplicate canonical skill name '{}': '{}' kept by dir-name order, '{}' skipped",
+                    canonical, winner.getFileName(), dir.getFileName());
+            }
+        }
+        return java.util.Collections.unmodifiableSortedMap(index);
     }
 
     /** 去掉文件扩展名；空/无扩展名回退 unnamed-skill */

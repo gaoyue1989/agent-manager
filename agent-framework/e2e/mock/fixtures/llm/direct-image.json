@@ -1,0 +1,34 @@
+{
+  "scenario": "direct-image",
+  "model": "mimo-v2.6-flash",
+  "recordedAt": "2026-11-24T00:00:00.000Z",
+  "rewrites": [
+    ""
+  ],
+  "calls": [
+    {
+      "request": {
+        "stream": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "E2E direct-image 场景占位（回放按 calls[0] 命中，request 不参与匹配）"
+          },
+          {
+            "role": "user",
+            "content": "请调用 render_chart_png 工具，参数 order_id 为 o-1，把图表展示给我。"
+          }
+        ]
+      },
+      "chunks": [
+        "{\"id\": \"dr9-fixture-image-direct-return\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1795526400, \"model\": \"mimo-v2.6-flash\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"dr9-fixture-image-direct-return\", \"choices\": [{\"delta\": {\"reasoning_content\": \" User asks to render the chart image. Direct tool call.\"}, \"finish_reason\": null, \"index\": 0}], \"created\": 1795526400, \"model\": \"mimo-v2.6-flash\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"dr9-fixture-image-direct-return\", \"choices\": [{\"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_dr9_chart_png\", \"function\": {\"arguments\": \"\", \"name\": \"mcp__order__render_chart_png\"}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1795526400, \"model\": \"mimo-v2.6-flash\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"dr9-fixture-image-direct-return\", \"choices\": [{\"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": null, \"function\": {\"arguments\": \"{\\\"order_id\\\": \\\"o-1\\\"}\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1795526400, \"model\": \"mimo-v2.6-flash\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"dr9-fixture-image-direct-return\", \"choices\": [{\"delta\": {}, \"finish_reason\": \"tool_calls\", \"index\": 0}], \"created\": 1795526400, \"model\": \"mimo-v2.6-flash\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"dr9-fixture-image-direct-return\", \"choices\": [], \"created\": 1795526400, \"model\": \"mimo-v2.6-flash\", \"object\": \"chat.completion.chunk\", \"usage\": {\"prompt_tokens\": 120, \"completion_tokens\": 24, \"total_tokens\": 144}}",
+        "[DONE]"
+      ]
+    }
+  ]
+}

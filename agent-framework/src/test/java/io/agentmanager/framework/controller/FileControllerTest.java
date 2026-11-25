@@ -11,6 +11,7 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.storage.FileStorage;
+import io.agentmanager.framework.util.FileNameBudget;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -368,8 +369,8 @@ public class FileControllerTest {
     void sanitizeFileNameShouldCapToStorageLayoutBudget() {
         var capped = FileController.sanitizeFileName("测".repeat(70) + ".txt"); // 210+4=214 字节
         var len = capped.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        assertTrue(len <= FileController.MAX_FILE_NAME_BYTES,
-            "存储末段预算 " + FileController.MAX_FILE_NAME_BYTES + " 字节内，实际 " + len);
+        assertTrue(len <= FileNameBudget.MAX_FILE_NAME_BYTES,
+            "存储末段预算 " + FileNameBudget.MAX_FILE_NAME_BYTES + " 字节内，实际 " + len);
         assertTrue(capped.endsWith(".txt"), "截断保扩展名（下游 extensionConsistentWithMime 依赖）: " + capped);
         assertFalse(capped.contains("\uFFFD"), "字符边界截断不产生替换字符: " + capped);
     }
@@ -380,7 +381,7 @@ public class FileControllerTest {
         // stem 预算 201 字节落在"测"（3 字节）的第 2 字节上：须回退到字符起点
         var capped = FileController.sanitizeFileName("a".repeat(200) + "测".repeat(10) + ".png");
         var bytes = capped.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        assertTrue(bytes.length <= FileController.MAX_FILE_NAME_BYTES, "预算内: " + bytes.length);
+        assertTrue(bytes.length <= FileNameBudget.MAX_FILE_NAME_BYTES, "预算内: " + bytes.length);
         assertTrue(capped.endsWith(".png"), "扩展名保留: " + capped);
         assertEquals(capped, new String(bytes, java.nio.charset.StandardCharsets.UTF_8), "可无损往返解码");
     }

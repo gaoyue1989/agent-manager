@@ -230,11 +230,14 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 
 2. **egress 放行**：池 Pod → 本服务 svc 出网须在 OpenSandbox egress 策略放行
    `oaf-{name}-svc.agent-platform.svc`（或集群内网段），否则守护拉取持续退避、store 无库（fail-open）。
-3. **建池**（默认开启）：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag——建池请求缺省即
-   注入两键（`SKILLSYNC_BASE_URL` 按 `{k8s名}-svc.{ns}.svc` 派生 + `SKILLSYNC_INTERVAL=1m`）并开启
-   commandWrapper，无需手填；`extraEnv` 仅作键级覆盖通道（灰度改 INTERVAL 等，只收非空 value）；
-   `disableSyncd: true` 显式关闭（与 extraEnv 互斥）。镜像/模板任一先行或回退均被偏斜守卫兜底为
-   无守护旧行为，不 crashloop（D-1）。
+3. **建池**（默认开启）：池名 `{name}-pool`（与服务绑定唯一校验），主镜像填上述 tag。创建池表单
+   （或同契约 admin API）可逐项覆盖：主镜像 `image`、两个 initContainer 镜像 `taskExecutorImage` /
+   `execdImage`（留空 = 内置 `release-1.1.0` installer 缺省）、技能同步三键
+   `skillsync.baseUrl/interval/storeDir`（留空 = `{k8s名}-svc.{ns}.svc` 派生 / `1m` / 不注入即守护
+   缺省 `/skills-store`）。建池请求缺省即注入两键并开启 commandWrapper，无需手填；`extraEnv` 仍作
+   其余 `SKILLSYNC_*` 键的覆盖通道（只收非空 value）；`disableSyncd: true` 显式关闭（与
+   extraEnv/skillsync 互斥）。`skillsync.storeDir` 须与平台配置 `SANDBOX_SKILLS_SHARED_STORE` 同值
+   （见下文总闸默认值）。镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不 crashloop（D-1）。
    **OpenSandbox 是外部服务**：平台只经其 API（建池模板的 env/args）传递同步配置，不向其命名空间写
    任何 K8s 对象、不持有其 RBAC（`/internal/skills/*` 端点无鉴权，见「内部端点安全模型」）。
    删除守卫（issue #359）：绑定池在运行时删除服务被拒（409 提示先删池）——池与服务一一对应；

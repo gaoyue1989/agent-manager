@@ -746,7 +746,7 @@ public class OpenSandbox extends AbstractBaseSandbox
      */
     private void onRealExecBeforeRun(String command) {
         invalidateProbeCache();
-        if (runtimeReadThroughEnabled && looksLikeMemoryAccess(command)
+        if (runtimeReadThroughEnabled && (looksLikeMemoryAccess(command) || looksLikeRootGlobOverMemory(command))
                 && lazyRuntimeInjected.compareAndSet(false, true)) {
             injectRuntimeFilesLazily();
         }
@@ -765,6 +765,24 @@ public class OpenSandbox extends AbstractBaseSandbox
         return command.contains(WorkspaceReader.MEMORY_FILE)
             || command.contains(WorkspaceReader.MEMORY_DIR)
             || command.startsWith("python3 -c");
+    }
+
+    /**
+     * D1 触发判定扩展（issue #500）：glob 回落真 exec 的命令文本不含记忆字样（根级
+     * {@code *.md} 模式检索长期记忆的典型形态），触发判据按语义补齐——P_FIND 完整模板命中
+     * 且 root 为工作区根（与 translateGlob 根级判定同口径）、pattern 可命中 MEMORY.md 时
+     * 视作记忆访问，懒注入后 find -L 地面真相包含已注入文件（用户软链触发回落的残余场景
+     * 读穿不漏 KV）。
+     */
+    private boolean looksLikeRootGlobOverMemory(String command) {
+        var m = P_FIND.matcher(command);
+        if (!m.matches()) {
+            return false;
+        }
+        String root = m.group(1);
+        var rootRel = normalizeRel(root);
+        boolean rootIsWorkspace = root.equals(getWorkspaceRoot()) || rootRel.isEmpty() || rootRel.equals(".");
+        return rootIsWorkspace && globMatch(m.group(2), WorkspaceReader.MEMORY_FILE);
     }
 
     /** D1 补注入：读 KV 运行时文件写入容器（与预热注入同一数据面；失败可重试、不阻塞命令） */
@@ -796,7 +814,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         var truncated = new AtomicBoolean(false);
         var memoryRoot = memoryRelUnder(root);
         if (memoryRoot != null) {
-            // D1 读穿：memory/ 目录容器为空，从 KV 清单应答（path/size，mtime=0）
+            // D1 读穿（issue #498）：容器遍历 ∪ KV 清单并集（walk 对容器 404 视作空目录；
+            // 容器条目先入 TreeSet、同 rel 的 KV 条目被拒 = 容器元数据优先），与
+            // translateRead/translateExists 的「容器优先 + KV 补全」同口径（issue #423 先例）
+            if (!walkFilesSkippingDirs(root, pattern, files, 0, truncated, java.util.Set.of())) {
+                return null;
+            }
             fillGlobFromMemoryKv(memoryRoot, pattern, files);
         } else {
             // D4：SKILL.md 探针模式下缓存已覆盖的技能目录跳过容器遍历、合并缓存条目；
@@ -922,7 +945,9 @@ public class OpenSandbox extends AbstractBaseSandbox
 
     /**
      * ls 目录翻译：__NOT_EXISTS__/__NOT_A_DIR__/DIR:path\tmtime + FILE:path\tsize\tmtime。
-     * 容器缺失的 memory/ 目录在读穿模式下从 KV 清单应答（first-reasoning D1，mtime=0）。
+     * 容器缺失的 memory/ 目录在读穿模式下从 KV 清单应答（first-reasoning D1，mtime=0）；
+     * memory/ 目录容器存在时同样并入 KV 条目（issue #498：容器 ∪ KV 合并视图，同 rel
+     * 容器条目优先去重，与 translateRead/translateExists 口径一致）。
      *
      * @return null = 目录含 type=symlink 条目，翻译层不可裁决（无 link target），整目录
      *         回落原 P_LS 真 exec——shell [ -d ]/[ -f ] 解引用语义兜底（issue #394）
@@ -943,6 +968,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             return readThroughMemoryLs(dir);
         }
         var sb = new StringBuilder();
+        var seen = new java.util.HashSet<String>();
         for (var e : entries) {
             if ("symlink".equalsIgnoreCase(e.getType())) {
                 return null;
@@ -952,6 +978,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 continue;
             }
             p = normalizeRel(p);
+            seen.add(p);
             boolean isDir = "directory".equalsIgnoreCase(e.getType()) || "dir".equalsIgnoreCase(e.getType());
             long mtime = epochSeconds(e);
             if (!sb.isEmpty()) {
@@ -963,7 +990,38 @@ public class OpenSandbox extends AbstractBaseSandbox
                 sb.append("FILE:").append(p).append('\t').append(Math.max(e.getSize(), 0)).append('\t').append(mtime);
             }
         }
+        if (WorkspaceReader.MEMORY_DIR.equals(normalizeRel(dir))) {
+            fillLsFromMemoryKv(seen, sb);
+        }
         return new ExecResult(0, sb.toString(), "", false);
+    }
+
+    /**
+     * D1 读穿 ls 的 KV 条目补全（issue #498）：KV 运行时清单里 memory/ 一级 .md 拼装
+     * 与容器同构的 FILE: 行（path\tsize\tmtime=0），skip 中的 rel（容器已有条目）跳过；
+     * KV 查询失败时静默跳过（容器列举结果已足够，fail-soft）。@return false = KV 查询异常。
+     */
+    private boolean fillLsFromMemoryKv(java.util.Set<String> skip, StringBuilder sb) {
+        if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()) {
+            return true;
+        }
+        try {
+            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
+                var rel = entry.getKey();
+                if (!rel.startsWith(WorkspaceReader.MEMORY_DIR + "/") || skip.contains(rel)) {
+                    continue;
+                }
+                if (!sb.isEmpty()) {
+                    sb.append('\n');
+                }
+                sb.append("FILE:").append(rel).append('\t')
+                    .append(entry.getValue() == null ? 0 : entry.getValue()).append('\t').append(0);
+            }
+            return true;
+        } catch (Exception e) {
+            log.debug("[sandbox-open] read-through memory ls failed: {}", e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -977,22 +1035,8 @@ public class OpenSandbox extends AbstractBaseSandbox
             return new ExecResult(0, "__NOT_EXISTS__", "", false);
         }
         var sb = new StringBuilder();
-        try {
-            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
-                if (!entry.getKey().startsWith(WorkspaceReader.MEMORY_DIR + "/")) {
-                    continue;
-                }
-                if (!sb.isEmpty()) {
-                    sb.append('\n');
-                }
-                sb.append("FILE:").append(entry.getKey()).append('\t')
-                    .append(entry.getValue() == null ? 0 : entry.getValue()).append('\t').append(0);
-            }
-        } catch (Exception e) {
-            log.debug("[sandbox-open] read-through memory ls failed: {}", e.getMessage());
-            return new ExecResult(0, "__NOT_EXISTS__", "", false);
-        }
-        return new ExecResult(0, sb.toString(), "", false);
+        boolean ok = fillLsFromMemoryKv(java.util.Set.of(), sb);
+        return new ExecResult(0, ok ? sb.toString() : "__NOT_EXISTS__", "", false);
     }
 
     /**
@@ -1008,6 +1052,10 @@ public class OpenSandbox extends AbstractBaseSandbox
      */
     private Boolean translateExists(String relPath) throws Exception {
         var normalized = normalizeRel(relPath);
+        boolean trailingSlash = normalized.length() > 1 && normalized.endsWith("/");
+        if (trailingSlash) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
         // 父目录列举仅对工作区相对路径/工作区内绝对路径生效：非工作区绝对路径（/etc/hosts 等）
         // 不得改写成 /workspace 镜像路径判存在，直接回落旧两步实现
         var workspaceScoped = !relPath.startsWith("/") || relPath.startsWith(getWorkspaceRoot() + "/");
@@ -1023,18 +1071,18 @@ public class OpenSandbox extends AbstractBaseSandbox
                             if ("symlink".equalsIgnoreCase(e.getType())) {
                                 return null;
                             }
-                            return true;
+                            return !trailingSlash || "directory".equalsIgnoreCase(e.getType());
                         }
                     }
-                    return memoryKvExists(relPath);
+                    return memoryKvExists(normalized);
                 }
             } catch (Exception ignoreParent) {
                 // 父目录列举失败（适配器差异等）→ 回落旧两步实现
             }
         }
         try {
-            osbSandbox.files().readByteArray(relPath);
-            return true;
+            osbSandbox.files().readByteArray(normalized);
+            return !trailingSlash;
         } catch (SandboxApiException e) {
             // 404 = 确定不是文件 → 继续目录探测；其余异常向上抛，交外层回落真 exec（issue #296）
             if (!isPathMissing(e)) {
@@ -1042,12 +1090,15 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         try {
-            var entries = osbSandbox.files().listDirectory(relPath);
-            return entries != null ? Boolean.TRUE : memoryKvExists(relPath);
+            var entries = osbSandbox.files().listDirectory(normalized);
+            if (entries != null) {
+                return Boolean.TRUE;
+            }
+            return memoryKvExists(normalized);
         } catch (SandboxApiException e) {
             // 两层均 404 = 确定缺失 → 记忆路径回落 KV；其余异常向上抛回落真 exec（test -e / test -d）
             if (isPathMissing(e)) {
-                return memoryKvExists(relPath);
+                return memoryKvExists(normalized);
             }
             throw e;
         }
@@ -1105,6 +1156,13 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 补齐（fillGlobFromProbeCache），跳过免重复 execd 往返。跳过目录的隐含约束：其内容与
      * 缓存逐字一致（SKILL.md 模式 + 物化后窗口内），由失效不变量保证。
      *
+     * <p>受控缓存子树（issue #500）：{@code .skills-cache} 是 SDK MarketplaceStager 的技能
+     * 缓存投影（软链农场，skills-syncd §6.2，软链目标 = 平台守护目录 /skills-store），不属于
+     * 用户工作区数据语义——遍历根不在其内时整目录跳过（与 supportsFileTransfer 的排除口径
+     * 同源）：农场软链不再触发整树回落（根 glob 翻译快路径 + 读穿根级 KV 合并恢复），农场
+     * 内部文件也不再经 find -L 解引用混入用户 glob 视野。root 位于 .skills-cache 内的显式
+     * 枚举照旧走软链回落（#394 技能枚举语义）；用户内容软链防护不变。
+     *
      * @return false = 子树含 type=symlink 条目，需整体回落真 exec find -L（软链不递归不解引用——
      *         execd 对软链根拒绝穿透、EntryInfo 无 link target，files API 无法枚举，issue #394）；
      *         true = 完成遍历或截断（截断语义不变：经 {@code truncated} 出参上报，
@@ -1121,6 +1179,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             truncated.set(true);
             return true;
         }
+        boolean insideSkillCache = insideSkillCacheDir(relDir);
         List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
         try {
             entries = osbSandbox.files().listDirectory(relDir);
@@ -1146,6 +1205,9 @@ public class OpenSandbox extends AbstractBaseSandbox
                 if (skipDirs.contains(rel)) {
                     continue; // 缓存已覆盖：容器遍历跳过（缓存条目另行补齐）
                 }
+                if (!insideSkillCache && SkillCacheScope.CACHE_DIR.equals(rel)) {
+                    continue; // 受控技能缓存投影：不进用户 glob 视野（issue #500）
+                }
                 if (!walkFilesSkippingDirs(rel, pattern, out, depth + 1, truncated, skipDirs)) {
                     return false;
                 }
@@ -1156,6 +1218,12 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         return true;
+    }
+
+    /** 遍历根是否位于受控技能缓存子树内（normalizeRel 归一后等于 .skills-cache 或其子路径） */
+    private boolean insideSkillCacheDir(String relDir) {
+        var rel = normalizeRel(relDir);
+        return rel.equals(SkillCacheScope.CACHE_DIR) || rel.startsWith(SkillCacheScope.CACHE_DIR + "/");
     }
 
     /** glob 命中条目（rel/size/mtime 三元组，排序按 rel） */

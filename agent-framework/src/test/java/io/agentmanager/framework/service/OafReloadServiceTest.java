@@ -270,6 +270,69 @@ class OafReloadServiceTest {
         assertNotNull(result.error());
     }
 
+    // ---------- A 路径 MCP reload 与 SessionAgentCache 的世代一致（issue #491） ----------
+
+    /**
+     * issue #491 复现：A 路径 reload 刷新的是单例 toolkit 与全局 registeredTools
+     * （SSE directReturn 标记面），若不驱逐 SessionAgentCache，存量会话继续持旧
+     * Toolkit 按旧配置执行（标记/执行脱节最长一个 TTL）。修复后必须换代重建。
+     */
+    @Test
+    void reloadMcpPathShouldRebuildCachedSessionAgentsForExistingSessions() throws IOException {
+        when(registrar.registerOne(any(), any())).thenReturn("server-a");
+        var realRuntime = new AgentRuntimeService(oafWithMcpServers("server-a"),
+            runtimeService.getAgent(), List.of(), new LLMLogger(),
+            mock(ConfirmContextStore.class), true, 10, 30);
+        realRuntime.setSessionAgentFactory(() -> mock(HarnessAgent.class));
+        var svc = new OafReloadService(loader, holder, props, factory, registrar,
+            resourceProxy, workspaceInitializer, realRuntime, a2aHolder,
+            mock(DistributedStore.class), new LLMLogger(), mock(UiContextStore.class),
+            mock(SessionUserStore.class),
+            mock(io.agentmanager.framework.service.ModelCatalog.class), noopSandboxProvider);
+
+        var cached = realRuntime.getAgent("sid-1");
+        var mcpDir = tempDir.resolve("mcp-configs/server-a");
+        Files.createDirectories(mcpDir);
+        Files.writeString(mcpDir.resolve("config.yaml"), "connection:\n  type: sse\n  url: http://x\n");
+
+        var result = svc.reload();
+
+        assertEquals("mcp", result.scope());
+        assertNotSame(cached, realRuntime.getAgent("sid-1"),
+            "A 路径 reload 后存量会话必须换代重建，不得沿用旧配置实例");
+    }
+
+    @Test
+    void reloadMcpAllShouldEvictAllSessionAgents() throws IOException {
+        when(registrar.registerOne(any(), any())).thenReturn("server-a");
+        var mcpDir = tempDir.resolve("mcp-configs/server-a");
+        Files.createDirectories(mcpDir);
+        Files.writeString(mcpDir.resolve("config.yaml"), "connection:\n  type: sse\n  url: http://x\n");
+
+        var result = service.reload();
+
+        assertEquals("mcp", result.scope());
+        org.mockito.Mockito.verify(runtimeService).evictAllSessionAgents();
+    }
+
+    @Test
+    void reloadMcpServerSuccessShouldEvictAllSessionAgents() {
+        when(registrar.registerOne(any(), any())).thenReturn("server-a");
+
+        var result = service.reloadMcpServer("server-a");
+
+        assertEquals("reloaded", result.mcpServers().get(0).get("action"));
+        org.mockito.Mockito.verify(runtimeService).evictAllSessionAgents();
+    }
+
+    /** 状态未变（未声明/换芯失败保留旧注册）不驱逐：避免无谓的全量会话重建 */
+    @Test
+    void reloadMcpServerWithoutStateChangeShouldKeepSessionAgents() {
+        service.reloadMcpServer("no-such-server");
+        org.mockito.Mockito.verify(runtimeService, org.mockito.Mockito.never())
+            .evictAllSessionAgents();
+    }
+
     // ---------- 合成注册表代际收口（issue #415 评审 g1） ----------
 
     private void stubSyntheticResidual() {

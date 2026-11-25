@@ -110,6 +110,11 @@ public class AskingContentBackfillStateStore implements AgentStateStore {
         return delegate.listSessionIds(stateKey);
     }
 
+    @Override
+    public void close() {
+        delegate.close();
+    }
+
     /**
      * 就地修补 state：最后一条 assistant 消息中 ASKING 的 tool_use 块，content 补为 input 的 JSON 字符串。
      *

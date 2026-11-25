@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -44,8 +45,9 @@ func (e *SandboxUpstreamError) Error() string { return e.Msg }
 // 池 Pod 预设模板常量（§5.2：模板由后端预设生成，不接收自由 PodTemplateSpec JSON，
 // 避免任意 Pod spec 注入面）。逐字段复刻上游官方 Pool sample
 // （opensandbox kubernetes/config/samples/sandbox_v1alpha1_pool.yaml，评审 d18：
-// command/env/volumes/initContainers 全量，image 参数只替换主容器镜像）；
-// installer 镜像 tag 与 §8 deploy-opensandbox.sh 载入 kind 的 release-1.1.0 BOM 同源。
+// command/env/volumes/initContainers 全量，镜像按建池入参替换：主容器 + 两个 initContainer）；
+// installer 镜像 tag 与 §8 deploy-opensandbox.sh 载入 kind 的 release-1.1.0 BOM 同源，
+// 建池入参留空时回落此缺省。
 const (
 	sandboxPresetTaskExecutorImage = "docker.io/opensandbox/task-executor:release-1.1.0"
 	sandboxPresetExecdImage        = "docker.io/opensandbox/execd:release-1.1.0"
@@ -69,6 +71,7 @@ const (
 const (
 	skillsyncEnvBaseURL  = "SKILLSYNC_BASE_URL"
 	skillsyncEnvInterval = "SKILLSYNC_INTERVAL"
+	skillsyncEnvStoreDir = "SKILLSYNC_STORE_DIR"
 	skillsyncInterval    = "1m"
 )
 
@@ -102,6 +105,44 @@ type SandboxPoolExtraEnv struct {
 	Value string `json:"value"`
 }
 
+// SandboxPoolSkillsync 建池技能同步三键（skills-syncd §5.2 受控参数化）：空值 = 沿用缺省
+// （baseUrl 按池名派生、interval=1m、storeDir 不注入即守护缺省 /skills-store）。
+type SandboxPoolSkillsync struct {
+	BaseURL  string `json:"baseUrl,omitempty"`
+	Interval string `json:"interval,omitempty"`
+	StoreDir string `json:"storeDir,omitempty"`
+}
+
+// envEntries 校验并转换为 extraEnv 条目（空值不注入）。入口校验防守护侧解析失败：
+// 非法 interval 会让 skills-syncd 启动即退出、launcher watchdog 30s 反复拉起。
+func (s *SandboxPoolSkillsync) envEntries() ([]SandboxPoolExtraEnv, error) {
+	if s == nil {
+		return nil, nil
+	}
+	out := make([]SandboxPoolExtraEnv, 0, 3)
+	if v := strings.TrimSpace(s.BaseURL); v != "" {
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("%w: skillsync.baseUrl 须为 http(s) URL（got %q）", ErrInvalidForm, v)
+		}
+		out = append(out, SandboxPoolExtraEnv{Name: skillsyncEnvBaseURL, Value: v})
+	}
+	if v := strings.TrimSpace(s.Interval); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("%w: skillsync.interval 须为正向 Go duration（如 30s/1m，got %q）", ErrInvalidForm, v)
+		}
+		out = append(out, SandboxPoolExtraEnv{Name: skillsyncEnvInterval, Value: v})
+	}
+	if v := strings.TrimSpace(s.StoreDir); v != "" {
+		if !path.IsAbs(v) {
+			return nil, fmt.Errorf("%w: skillsync.storeDir 须为绝对路径（got %q）", ErrInvalidForm, v)
+		}
+		out = append(out, SandboxPoolExtraEnv{Name: skillsyncEnvStoreDir, Value: v})
+	}
+	return out, nil
+}
+
 // CreateSandboxPoolInput 创建池入参。评审 d7：recycleStrategy 不是上游 POST /v1/pools 的
 // 请求字段（CreatePoolRequest 仅 name/template/capacitySpec，release-1.1.0 schema.py
 // 实证），收了会被 FastAPI 静默忽略——契约不收，回收策略取 CRD 默认 Delete（V4 语义不变）。
@@ -112,13 +153,17 @@ type SandboxPoolExtraEnv struct {
 // 显式关闭入参（灰度/排障/回滚 runbook「池模板参数摘除」的替代）——true = 模板逐字段与
 // 历史形态一致（旧代码 dormant 保留，拨开关可完整回退）。ExtraEnv 为 C-2 手动通道：
 // 键级覆盖缺省派生值（同名后者胜）或追加其他 SKILLSYNC_* 键；不接受自由 PodSpec。
+// TaskExecutorImage / ExecdImage 为空 = 内置 installer 缺省；Skillsync 三键为空 = 现有缺省。
 type CreateSandboxPoolInput struct {
-	Name            string                `json:"name"`
-	Image           string                `json:"image,omitempty"`
-	CapacitySpec    SandboxCapacitySpec   `json:"capacitySpec"`
-	RecycleStrategy string                `json:"recycleStrategy,omitempty"`
-	ExtraEnv        []SandboxPoolExtraEnv `json:"extraEnv,omitempty"`
-	DisableSyncd    bool                  `json:"disableSyncd,omitempty"`
+	Name              string                `json:"name"`
+	Image             string                `json:"image,omitempty"`
+	TaskExecutorImage string                `json:"taskExecutorImage,omitempty"`
+	ExecdImage        string                `json:"execdImage,omitempty"`
+	CapacitySpec      SandboxCapacitySpec   `json:"capacitySpec"`
+	RecycleStrategy   string                `json:"recycleStrategy,omitempty"`
+	ExtraEnv          []SandboxPoolExtraEnv `json:"extraEnv,omitempty"`
+	Skillsync         *SandboxPoolSkillsync `json:"skillsync,omitempty"`
+	DisableSyncd      bool                  `json:"disableSyncd,omitempty"`
 }
 
 // validateSandboxExtraEnv 受控 extraEnv 校验：键白名单 + 非空 value + 重复键 + 数量上限；
@@ -322,11 +367,12 @@ func (c *Core) AdminGetSandboxPool(name string) (json.RawMessage, error) {
 }
 
 // AdminCreateSandboxPool POST /api/v1/admin/sandboxes/pools → POST /v1/pools
-// （Pod 模板由后端预设常量生成；image 缺省取平台默认 SANDBOX_IMAGE）。
+// （Pod 模板由后端预设常量生成；image 缺省取平台默认 SANDBOX_IMAGE；两个 initContainer
+// 镜像缺省取内置 installer 版本；skillsync 三键与 extraEnv 合并后走同一注入通道）。
 // 技能同步缺省开启（skills-syncd §11）：DisableSyncd=false → 注入缺省两键 +
 // commandWrapper（D-1 内联守卫，模板/镜像偏斜退化无守护旧行为）。DisableSyncd=true =
-// 显式关闭（灰度/排障/回滚 runbook「池模板参数摘除」的替代），与 extraEnv 互斥（关同步
-// 又携同步 env 是矛盾语义）。
+// 显式关闭（灰度/排障/回滚 runbook「池模板参数摘除」的替代），与 extraEnv/skillsync
+// 互斥（关同步又携同步 env 是矛盾语义）。
 func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (json.RawMessage, error) {
 	if err := validateSandboxName(in.Name); err != nil {
 		return nil, err
@@ -337,11 +383,16 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 	if err := validateRecycleStrategy(in.RecycleStrategy); err != nil {
 		return nil, err
 	}
-	if err := validateSandboxExtraEnv(in.ExtraEnv); err != nil {
+	skillsyncEnv, err := in.Skillsync.envEntries()
+	if err != nil {
 		return nil, err
 	}
-	if in.DisableSyncd && len(in.ExtraEnv) > 0 {
-		return nil, fmt.Errorf("%w: disableSyncd 与 extraEnv 互斥（显式关闭 = 完全旧行为）", ErrInvalidForm)
+	manualEnv := append(append([]SandboxPoolExtraEnv{}, in.ExtraEnv...), skillsyncEnv...)
+	if err := validateSandboxExtraEnv(manualEnv); err != nil {
+		return nil, err
+	}
+	if in.DisableSyncd && len(manualEnv) > 0 {
+		return nil, fmt.Errorf("%w: disableSyncd 与 extraEnv/skillsync 互斥（显式关闭 = 完全旧行为）", ErrInvalidForm)
 	}
 	k8sName, err := c.validateSandboxPoolBinding(in.Name)
 	if err != nil {
@@ -356,17 +407,27 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 			}
 		}
 	}
-	extraEnv, wrapper, syncdMode := in.ExtraEnv, false, "disabled"
+	taskExecutorImage := strings.TrimSpace(in.TaskExecutorImage)
+	if taskExecutorImage == "" {
+		taskExecutorImage = sandboxPresetTaskExecutorImage
+	}
+	execdImage := strings.TrimSpace(in.ExecdImage)
+	if execdImage == "" {
+		execdImage = sandboxPresetExecdImage
+	}
+	extraEnv, wrapper, syncdMode := manualEnv, false, "disabled"
 	if !in.DisableSyncd {
-		extraEnv, wrapper, syncdMode = withSkillsyncDefaults(k8sName, c.Cfg.Namespace, in.ExtraEnv), true, "default"
+		extraEnv, wrapper, syncdMode = withSkillsyncDefaults(k8sName, c.Cfg.Namespace, manualEnv), true, "default"
 	}
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
 		return nil, err
 	}
 	payload, err := json.Marshal(map[string]interface{}{
-		"name":         in.Name,
-		"template":     sandboxPresetPodTemplate(image, extraEnv, wrapper),
+		"name": in.Name,
+		"template": sandboxPresetPodTemplate(sandboxPresetImages{
+			main: image, taskExecutor: taskExecutorImage, execd: execdImage,
+		}, extraEnv, wrapper),
 		"capacitySpec": in.CapacitySpec,
 	})
 	if err != nil {
@@ -379,7 +440,8 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 	// 管理操作审计（PlatformConfigEvent 同款先例：只记动作与对象，不记值；§10）；
 	// syncd 记缺省注入两态（default/disabled）
 	c.recordAudit("sandbox.pool.create", in.Name, actor, map[string]interface{}{
-		"capacitySpec": in.CapacitySpec, "image": image, "syncd": syncdMode,
+		"capacitySpec": in.CapacitySpec, "image": image,
+		"taskExecutorImage": taskExecutorImage, "execdImage": execdImage, "syncd": syncdMode,
 	})
 	return json.RawMessage(body), nil
 }
@@ -637,12 +699,20 @@ func (c *Core) ConsoleSandboxInstances(wsID uint) ([]SandboxInstanceItem, error)
 	return out, nil
 }
 
+// sandboxPresetImages 池 Pod 模板三镜像（主容器 + task-executor/execd 两个 initContainer）；
+// init 镜像由建池入参覆盖，空值由调用方回落内置 installer 缺省。
+type sandboxPresetImages struct {
+	main         string
+	taskExecutor string
+	execd        string
+}
+
 // sandboxPresetPodTemplate 池 Pod 模板预设（官方 sample sandbox_v1alpha1_pool.yaml
-// 逐字段复刻，d18：image 只替换主容器镜像）。extraEnv 追加主容器 env；
-// commandWrapper 开启时 args 换为 D-1 内联守卫字面（launcher 脚本缺失 → 未加引号的 $W
-// 展开为空 → 原命令原样执行，偏斜退化为无守护运行而非 crashloop）；
-// 两参数缺省 = 模板逐字段与历史形态一致。
-func sandboxPresetPodTemplate(mainImage string, extraEnv []SandboxPoolExtraEnv, commandWrapper bool) map[string]interface{} {
+// 逐字段复刻，d18：镜像按 sandboxPresetImages 替换三处，其余字段全量）。extraEnv 追加
+// 主容器 env；commandWrapper 开启时 args 换为 D-1 内联守卫字面（launcher 脚本缺失 →
+// 未加引号的 $W 展开为空 → 原命令原样执行，偏斜退化为无守护运行而非 crashloop）；
+// extraEnv 空 + commandWrapper=false = 模板逐字段与历史形态一致。
+func sandboxPresetPodTemplate(images sandboxPresetImages, extraEnv []SandboxPoolExtraEnv, commandWrapper bool) map[string]interface{} {
 	taskExecutorCmd := fmt.Sprintf("/opt/opensandbox/task-executor -listen-addr=%s -log-dir=/tmp", sandboxPresetExecdPort)
 	args := taskExecutorCmd
 	if commandWrapper {
@@ -669,7 +739,7 @@ func sandboxPresetPodTemplate(mainImage string, extraEnv []SandboxPoolExtraEnv, 
 			"initContainers": []map[string]interface{}{
 				{
 					"name":    "task-executor-installer",
-					"image":   sandboxPresetTaskExecutorImage,
+					"image":   images.taskExecutor,
 					"command": []string{"/bin/sh", "-c"},
 					"args":    []string{"cp /workspace/server /opt/opensandbox/task-executor && chmod +x /opt/opensandbox/task-executor"},
 					"volumeMounts": []map[string]interface{}{
@@ -678,7 +748,7 @@ func sandboxPresetPodTemplate(mainImage string, extraEnv []SandboxPoolExtraEnv, 
 				},
 				{
 					"name":    "execd-installer",
-					"image":   sandboxPresetExecdImage,
+					"image":   images.execd,
 					"command": []string{"/bin/sh", "-c"},
 					"args":    []string{"cp ./execd /opt/opensandbox/execd && cp ./bootstrap.sh /opt/opensandbox/bootstrap.sh && chmod +x /opt/opensandbox/execd && chmod +x /opt/opensandbox/bootstrap.sh"},
 					"volumeMounts": []map[string]interface{}{
@@ -689,7 +759,7 @@ func sandboxPresetPodTemplate(mainImage string, extraEnv []SandboxPoolExtraEnv, 
 			"containers": []map[string]interface{}{
 				{
 					"name":    sandboxPresetMainContainer,
-					"image":   mainImage,
+					"image":   images.main,
 					"command": []string{"/bin/sh", "-c"},
 					"args":    []string{args},
 					"env":     env,

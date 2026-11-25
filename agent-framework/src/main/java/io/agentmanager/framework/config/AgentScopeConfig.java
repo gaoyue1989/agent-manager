@@ -517,6 +517,17 @@ public class AgentScopeConfig {
         return store;
     }
 
+    /**
+     * agent_state 装饰链的关停回调（issue #496）：DistributedStore 本身无 close，Spring
+     * inferred destroyMethod 无生效目标，VikingSessionCommitStateStore 的 worker 排空
+     * （close → delegate.close() 逐层透传至 MysqlAgentStateStore）在关停时不会被触发。
+     */
+    @Bean
+    public org.springframework.beans.factory.DisposableBean agentStateStoreShutdownHook(
+            DistributedStore distributedStore) {
+        return () -> distributedStore.agentStateStore().close();
+    }
+
     @Bean
     public io.agentmanager.framework.tool.BusinessTools businessTools() {
         return new io.agentmanager.framework.tool.BusinessTools();

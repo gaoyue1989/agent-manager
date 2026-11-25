@@ -109,6 +109,14 @@
     "direct-mixed": {
       "marker": "[E2E:direct:mixed]",
       "calls": 2
+    },
+    "direct-image": {
+      "marker": "[E2E:direct:image]",
+      "calls": 1
+    },
+    "direct-two-part": {
+      "marker": "[E2E:direct:two-part]",
+      "calls": 1
     }
   },
   "sandbox": [

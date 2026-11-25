@@ -469,7 +469,7 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 |------|------|
 | `msg_id` | SDK Msg.id（toRoleContentList 透传；tool_calls 内层的 `id` 是工具调用 id，勿混淆） |
 | `origin` | `archive`（来自消息轨归档，压缩前原文）/ `state`（来自 agent_state 当前上下文） |
-| `generate_reason` | 仅 SDK 写入了生成原因的 assistant 消息携带（只增不改）：`TOOL_RETURN_DIRECT` = 直返工具结果的收尾消息，`content` 即原样内容（见 [mcp-direct-return-design-261123.md](../../docs/design/mcp-direct-return-design-261123.md)）；`INTERRUPTED` = 用户停止后的恢复消息 |
+| `generate_reason` | 仅 SDK 写入了生成原因的 assistant 消息携带（只增不改）：`TOOL_RETURN_DIRECT` = 直返工具结果的收尾消息，`content` 即原样内容；纯图片直返（无 text 块）时 `content` 为空，图片数据经 `blocks[]` 的 `image` 块下发（`{type:"image", media_type, data?/url?}`，见 [mcp-direct-return-design-261123.md](../../docs/design/mcp-direct-return-design-261123.md)）；`INTERRUPTED` = 用户停止后的恢复消息 |
 | `role=compaction` 项 | 压缩分隔条合成项：`type=compaction_summary`，`content` 为摘要文本；老前端忽略即可 |
 | `reply_id` | 仅 assistant 携带；**按轮分配**——同一轮的多条 assistant 消息共享同一个 turn replyId（ReAct 一轮可产生多条 assistant）。取值优先级：归档行 > 消息 metadata 锚点（`/threads/chat`、AG-UI 写入的 user 消息 turn id；SDK ASKING 消息的 confirm replyId）> Redis reply 索引顺序兜底（按首个事件 seq，逐轮消费一个 id）。与 `files[].reply_id` 同源，可直接对应 |
 | `hasMore` / `nextBeforeId` | 归档分页游标；`nextBeforeId` 传回 `beforeId` 取更早一页 |
@@ -630,7 +630,7 @@ data: {"type":"AGENT_END","session_id":"...","replyId":"...","usage":{"input_tok
 |------|------|
 | `session_created` | 新会话创建（仅当请求未传 `sessionId`，作为首个事件下发） |
 | `waiting` | 排队等待（同 session 有活跃 turn 时，每 15s 一帧） |
-| `TEXT_BLOCK_DELTA` | 文本 token（流式累加）。直返收尾文本（`direct_return` 工具结果原样作为本轮最终输出）额外携带 `generateReason: "TOOL_RETURN_DIRECT"`，前端据此与模型正文区分 |
+| `TEXT_BLOCK_DELTA` | 文本 token（流式累加）。直返收尾文本（`direct_return` 工具结果原样作为本轮最终输出）额外携带 `generateReason: "TOOL_RETURN_DIRECT"`，前端据此与模型正文区分；多块直返（单工具多 text 块或同批多个直返工具）时块间以 `\n` 分隔，与 /history 的 content 拼接逐字符一致（issue #494）；纯图片直返（SDK 只对 TextBlock 发该信号）由框架在 `AGENT_END` 前补一帧 `delta` 为空的合成信号帧（`generateReason` 同值），该帧仍为本轮以直返结束的权威信号 |
 | `THINKING_BLOCK_DELTA` | 深度思考内容增量（`LLM_ENABLE_THINKING=true` 时出现） |
 | `MODEL_CALL_END` | 模型调用结束，携带 `inputTokens`/`outputTokens`/`totalTokens`（usage 为 null 时三字段缺省） |
 | `TOOL_CALL_START` | 工具调用开始（MCP Apps 工具携带 `ui` 元数据；`direct_return` 工具携带 `directReturn: true`） |
@@ -641,7 +641,7 @@ data: {"type":"AGENT_END","session_id":"...","replyId":"...","usage":{"input_tok
 | `file_ready` | `present_file` / `present_url` 工具产物就绪（含 `file_id`/`file_name`/`mime_type`/`size`/`download_url`，前端渲染下载卡片） |
 | `AGENT_RESULT` | 最终结果聚合（实测于 HITL 恢复段末尾，`AGENT_END` 之前） |
 | `USER_CONFIRM_RESULT` | HITL 确认结果落地（`confirm-stream` 恢复段首个业务事件） |
-| `AGENT_START` | 执行段开始；`created_at` = agent 开始处理的墙钟时刻（ISO-8601 UTC，SDK 原样透传） |
+| `AGENT_START` | 执行段开始；`created_at` = agent 开始处理的墙钟时刻（epoch 毫秒整数，SDK 事件构造时生成、下发时转换） |
 | `AGENT_END` | 执行段结束（**流关闭信号**，终态帧）；additive `usage`（`input_tokens`/`cached_tokens`/`output_tokens`/`total_tokens` 为本 turn 全部模型调用**求和** + `model_calls` 调用次数，2026-11-12 新增）与 `elapsed_ms`（agent 执行段耗时，不含排队等租约）；仅 lead 自身 AGENT_END 携带（远程子 agent 转发的 AGENT_END 不带） |
 | （通用，2026-11-11 新增） | 经 EventBus 的每条 data 帧（含 delta 热路径）顶层恒带 `session_id`；`/subscribe` 回放对升级前存量行由读端兜底补齐，客户端对极旧行仍应容忍缺失 |
 | `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 结果返回时发出，snake_case 四字段） |

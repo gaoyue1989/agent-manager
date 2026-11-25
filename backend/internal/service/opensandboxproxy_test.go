@@ -327,8 +327,8 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 			t.Fatalf("recycleStrategy Bogus 应 400 ErrInvalidForm, got %v", err)
 		}
 	}
-	// image 缺省 → 取平台默认 SANDBOX_IMAGE；DisableSyncd=true 时模板与官方 sample 逐字段一致
-	// （单 arg 直启 + 三固定 env），image 参数只换主容器镜像
+	// image 缺省 → 取平台默认 SANDBOX_IMAGE；三处镜像（主容器 + 两个 initContainer）按入参
+	// 替换，空 = 内置 installer 缺省；DisableSyncd=true 时模板其余字段与官方 sample 逐字段一致
 	core, _, h, done := newProxyCore(t, map[string]string{"SANDBOX_IMAGE": "reg.example.com/ci:v9"})
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
@@ -337,26 +337,35 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
 	})
 	capSpec := SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3}
-	for _, in := range []CreateSandboxPoolInput{
-		{Name: "oaf-demo-pool", DisableSyncd: true, CapacitySpec: capSpec},
-		{Name: "oaf-demo-pool", Image: "custom:2", DisableSyncd: true, CapacitySpec: capSpec},
-	} {
-		if _, err := core.AdminCreateSandboxPool(in, 0); err != nil {
+	cases := []struct {
+		in                          CreateSandboxPoolInput
+		wantMain, wantTE, wantExecd string
+	}{
+		{CreateSandboxPoolInput{Name: "oaf-demo-pool", DisableSyncd: true, CapacitySpec: capSpec},
+			"reg.example.com/ci:v9", sandboxPresetTaskExecutorImage, sandboxPresetExecdImage},
+		{CreateSandboxPoolInput{Name: "oaf-demo-pool", Image: "custom:2", DisableSyncd: true, CapacitySpec: capSpec},
+			"custom:2", sandboxPresetTaskExecutorImage, sandboxPresetExecdImage},
+		{CreateSandboxPoolInput{Name: "oaf-demo-pool", TaskExecutorImage: "reg.local/te:v9", ExecdImage: "reg.local/execd:v9",
+			DisableSyncd: true, CapacitySpec: capSpec},
+			"reg.example.com/ci:v9", "reg.local/te:v9", "reg.local/execd:v9"},
+	}
+	for _, tc := range cases {
+		if _, err := core.AdminCreateSandboxPool(tc.in, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.Reqs) != 2 {
+	if len(h.Reqs) != len(cases) {
 		t.Fatalf("requests = %d", len(h.Reqs))
 	}
 	// 官方 sample 三要素：task-executor 监听命令 / SANDBOX_MAIN_CONTAINER+EXECD_ENVS+EXECD env / installer×2
-	assertPreset := func(t *testing.T, body string, wantImage string) {
+	assertPreset := func(t *testing.T, body, wantMain, wantTE, wantExecd string) {
 		t.Helper()
 		tpl := parsePresetTemplate(t, body)
 		main := tpl.Main
-		if main.Image != wantImage {
-			t.Fatalf("main image = %q, want %q", main.Image, wantImage)
+		if main.Image != wantMain {
+			t.Fatalf("main image = %q, want %q", main.Image, wantMain)
 		}
 		if len(main.Args) != 1 || main.Args[0] != presetLegacyArgs {
 			t.Fatalf("main args must stay exact official sample literal, got %v", main.Args)
@@ -376,6 +385,16 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 		if len(tpl.InitContainers) != 2 {
 			t.Fatalf("initContainers = %d, want 2 (task-executor-installer + execd-installer)", len(tpl.InitContainers))
 		}
+		initImages := map[string]string{}
+		for _, ic := range tpl.InitContainers {
+			initImages[ic.Name] = ic.Image
+		}
+		if got := initImages["task-executor-installer"]; got != wantTE {
+			t.Fatalf("task-executor installer image = %q, want %q", got, wantTE)
+		}
+		if got := initImages["execd-installer"]; got != wantExecd {
+			t.Fatalf("execd installer image = %q, want %q", got, wantExecd)
+		}
 		if len(tpl.Volumes) < 3 {
 			t.Fatalf("volumes = %d, want 3 (emptyDir trio)", len(tpl.Volumes))
 		}
@@ -383,8 +402,9 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 			t.Fatal("tolerations missing (official sample)")
 		}
 	}
-	assertPreset(t, h.Reqs[0].Body, "reg.example.com/ci:v9")
-	assertPreset(t, h.Reqs[1].Body, "custom:2")
+	for i, tc := range cases {
+		assertPreset(t, h.Reqs[i].Body, tc.wantMain, tc.wantTE, tc.wantExecd)
+	}
 }
 
 // TestSandboxProxyPoolSyncdDefaultOn 技能同步默认开启两态（skills-syncd §11）：绑定服务的新建池
@@ -423,6 +443,11 @@ func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
 			t.Fatalf("derived env[%d] = %+v, want %+v", 3+i, e, want)
 		}
 	}
+	for _, e := range main.Env {
+		if e.Name == skillsyncEnvStoreDir {
+			t.Fatalf("default-on must not inject %s (daemon default /skills-store): %+v", skillsyncEnvStoreDir, e)
+		}
+	}
 
 	// 2) 显式关闭：模板逐字段与历史形态一致
 	main = parsePresetTemplate(t, h.Reqs[1].Body).Main
@@ -451,6 +476,47 @@ func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
 	}
 	if len(syncd) != 2 || syncd[0] != "default" || syncd[1] != "disabled" {
 		t.Fatalf("audit syncd modes = %v, want [default disabled]", syncd)
+	}
+}
+
+// TestSandboxProxyPoolSkillsyncOverrides 建池技能同步三键入参（BASE_URL/INTERVAL/STORE_DIR）：
+// 非空值覆盖缺省派生并按 BASE_URL→INTERVAL→STORE_DIR 顺序注入（空值不注入，STORE_DIR
+// 缺省由守护 /skills-store 兜底）。
+func TestSandboxProxyPoolSkillsyncOverrides(t *testing.T) {
+	core, _, h, done := newProxyCore(t, nil)
+	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+	})
+	in := CreateSandboxPoolInput{
+		Name:         "oaf-demo-pool",
+		CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+		Skillsync: &SandboxPoolSkillsync{
+			BaseURL:  "http://custom-svc.other.svc:9100",
+			Interval: "30s",
+			StoreDir: "/skills-store-2",
+		},
+	}
+	if _, err := core.AdminCreateSandboxPool(in, 0); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	body := h.Reqs[0].Body
+	h.mu.Unlock()
+	main := parsePresetTemplate(t, body).Main
+	if len(main.Env) != 6 {
+		t.Fatalf("env = %d entries, want 3 fixed + 3 skillsync: %+v", len(main.Env), main.Env)
+	}
+	for i, want := range []presetEnv{
+		{"SKILLSYNC_BASE_URL", "http://custom-svc.other.svc:9100"},
+		{"SKILLSYNC_INTERVAL", "30s"},
+		{"SKILLSYNC_STORE_DIR", "/skills-store-2"},
+	} {
+		if e := main.Env[3+i]; e != want {
+			t.Fatalf("skillsync env[%d] = %+v, want %+v", 3+i, e, want)
+		}
 	}
 }
 
@@ -536,6 +602,21 @@ func TestSandboxProxyValidation(t *testing.T) {
 		{"extraEnv over limit", overLimit},
 		{"disableSyncd with extraEnv", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
 			DisableSyncd: true, ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_INTERVAL", Value: "1m"}}}},
+		{"skillsync invalid interval", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			Skillsync: &SandboxPoolSkillsync{Interval: "5min"}}},
+		{"skillsync negative interval", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			Skillsync: &SandboxPoolSkillsync{Interval: "-30s"}}},
+		{"skillsync relative storeDir", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			Skillsync: &SandboxPoolSkillsync{StoreDir: "skills-store"}}},
+		{"skillsync non-http baseUrl", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			Skillsync: &SandboxPoolSkillsync{BaseURL: "ftp://x"}}},
+		{"skillsync baseUrl missing host", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			Skillsync: &SandboxPoolSkillsync{BaseURL: "http://"}}},
+		{"disableSyncd with skillsync", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			DisableSyncd: true, Skillsync: &SandboxPoolSkillsync{Interval: "1m"}}},
+		{"skillsync duplicates extraEnv key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			Skillsync: &SandboxPoolSkillsync{Interval: "1m"},
+			ExtraEnv:  []SandboxPoolExtraEnv{{Name: "SKILLSYNC_INTERVAL", Value: "2m"}}}},
 	}
 	for _, tc := range cases {
 		if _, err := core.AdminCreateSandboxPool(tc.in, 0); !errors.Is(err, ErrInvalidForm) {

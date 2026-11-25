@@ -320,7 +320,9 @@ public class SkillManageService {
     /**
      * 管理面统一寻址入口：{@code name} 优先按目录名直取（兼容历史目录名调用与
      * 规范名==目录名的常见形态），未命中再按 {@link SkillZipSupport#canonicalSkillName}
-     * 索引解析（catalog/SDK 暴露的是 frontmatter 规范名）。路径越出 skills 目录
+     * 索引解析（catalog/SDK 暴露的是 frontmatter 规范名；重复规范名按
+     * {@link SkillZipSupport#canonicalDirIndex} 目录名字典序裁决，issue #504——
+     * 与 bundle 打包收录同一目录）。路径越出 skills 目录
      * 抛 {@link IllegalArgumentException}；无匹配返回 null，由调用方按各自契约处理。
      */
     private Path resolveSkillDir(String name) {
@@ -335,11 +337,8 @@ public class SkillManageService {
             return direct;
         }
         try (var stream = Files.list(skillsDir)) {
-            for (var dir : stream.filter(Files::isDirectory).toList()) {
-                if (SkillZipSupport.canonicalSkillName(dir).equals(name)) {
-                    return dir;
-                }
-            }
+            return SkillZipSupport.canonicalDirIndex(stream.filter(Files::isDirectory).toList())
+                .get(name);
         } catch (IOException e) {
             log.warn("Failed to resolve skill dir '{}': {}", name, e.getMessage());
         }

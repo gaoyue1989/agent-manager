@@ -493,17 +493,12 @@ public class AgentRuntimeService {
             m.put("task_id", tid);
             putIfNotNull(m, "tool_call_id", e.getToolCallId());
             putIfNotNull(m, "tool_call_name", e.getToolCallName());
-            // ContentBlock 可能是 DataBlock，提取 source (Base64Source / URLSource)
-            if (e.getData() instanceof io.agentscope.core.message.DataBlock dataBlock) {
-                var source = dataBlock.getSource();
-                if (source instanceof io.agentscope.core.message.Base64Source base64) {
-                    putIfNotNull(m, "media_type", base64.getMediaType());
-                    putIfNotNull(m, "data", base64.getData());
-                } else if (source instanceof io.agentscope.core.message.URLSource urlSource) {
-                    putIfNotNull(m, "media_type", urlSource.getMimeType());
-                    putIfNotNull(m, "url", urlSource.getUrl());
-                }
-            }
+            // DataBlock（SDK 原生二进制）与 ImageBlock（MCP ImageContent 转换产物，issue #492）
+            // 统一经 ToolResultMedia 提取，与 AgentEventSseSerializer 词表对齐（snake_case）
+            var media = ToolResultMedia.extract(e.getData());
+            putIfNotNull(m, "media_type", media.mediaType());
+            putIfNotNull(m, "data", media.data());
+            putIfNotNull(m, "url", media.url());
             sink.next(m);
         }
         else if (type == AgentEventType.TOOL_RESULT_END) {
