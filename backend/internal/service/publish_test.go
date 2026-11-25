@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -873,5 +874,51 @@ func TestPublishObjectNameBudget(t *testing.T) {
 	_, err = c.Publish(PublishRequest{PackageID: pkg.ID, Name: strings.Repeat("长", 200)})
 	if err == nil || !errors.Is(err, ErrInvalidForm) || !strings.Contains(err.Error(), "name too long (max 128)") {
 		t.Fatalf("200-rune name: %v", err)
+	}
+}
+
+func TestRepublishRejectsCrossWorkspacePackage(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkgA := uploadTestPkg(t, core, "")
+	pkgB := uploadTestPkg(t, core, "2")
+	pubPkg := uploadTestPkg(t, core, "3")
+	if err := core.DB.Model(&store.OafPackage{}).Where("id = ?", pkgA.ID).Update("workspace_id", 10).Error; err != nil {
+		t.Fatalf("update pkgA ws: %v", err)
+	}
+	if err := core.DB.Model(&store.OafPackage{}).Where("id = ?", pkgB.ID).Update("workspace_id", 20).Error; err != nil {
+		t.Fatalf("update pkgB ws: %v", err)
+	}
+	svc := publishToRegisterFailed(t, core, fk, pkgA.ID, "")
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("workspace_id", 10).Error; err != nil {
+		t.Fatalf("update svc ws: %v", err)
+	}
+	if _, err := core.Republish(svc.ID, RepublishOptions{PackageID: &pkgB.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-workspace package, got %v", err)
+	}
+	updated, err := core.Republish(svc.ID, RepublishOptions{PackageID: &pubPkg.ID})
+	if err != nil {
+		t.Fatalf("public package should be allowed, got %v", err)
+	}
+	if updated.PackageID != pubPkg.ID {
+		t.Fatalf("expected package_id %d, got %d", pubPkg.ID, updated.PackageID)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
+}
+
+func TestRepublishOptionsJSONIgnoresInternalFields(t *testing.T) {
+	raw := []byte(`{"packageId":42,"ProvisionSandboxPool":true,"Actor":1}`)
+	var opt RepublishOptions
+	if err := json.Unmarshal(raw, &opt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if opt.PackageID == nil || *opt.PackageID != 42 {
+		t.Fatalf("expected packageId=42, got %v", opt.PackageID)
+	}
+	if opt.ProvisionSandboxPool {
+		t.Fatalf("ProvisionSandboxPool must not be bindable from JSON")
+	}
+	if opt.Actor != 0 {
+		t.Fatalf("Actor must not be bindable from JSON, got %d", opt.Actor)
 	}
 }
