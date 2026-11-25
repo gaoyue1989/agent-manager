@@ -6,6 +6,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -657,14 +658,21 @@ var vikingWritableExt = map[string]bool{
 // （resources 与 agent/skills 均为 account 内共享段，身份由 key 决定，URI 不含 account）。
 // 非文本扩展跳过（二进制走 OpenViking temp_upload 流程，属二期导出链路），不阻断发布。
 // secret 由调用方（applyOpenVikingEnv）持有——ADMIN key 注入完成后才进入本函数。
+var vikingImportTimeout = 2 * time.Minute
+
 func (c *Core) importPackageDirWith(secret map[string]string, pkg *store.OafPackage, sub, targetBase string) error {
 	data, err := newVikingDataClient(c.Viking.baseURL, secret[OvkAdminKeyEnv])
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), vikingImportTimeout)
+	defer cancel()
 	var walk func(entries []store.FileEntry) error
 	walk = func(entries []store.FileEntry) error {
 		for _, e := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if e.IsDir {
 				if err := walk(e.Children); err != nil {
 					return err
@@ -679,7 +687,7 @@ func (c *Core) importPackageDirWith(secret map[string]string, pkg *store.OafPack
 			if err != nil {
 				return fmt.Errorf("read %s: %w", e.Path, err)
 			}
-			if err := data.writeText("viking://"+targetBase+"/"+rel, string(content)); err != nil {
+			if err := data.writeText(ctx, "viking://"+targetBase+"/"+rel, string(content)); err != nil {
 				return err
 			}
 		}
@@ -712,9 +720,9 @@ func newVikingDataClient(baseURL, apiKey string) (*vikingDataClient, error) {
 
 // writeText 写入文本文件（覆盖语义，异步向量化 wait=false；语义/向量刷新失败不回滚
 // 内容，重试同一写即重提交派生维护——OpenViking 官方口径）。
-func (d *vikingDataClient) writeText(uri, content string) error {
+func (d *vikingDataClient) writeText(ctx context.Context, uri, content string) error {
 	body, _ := json.Marshal(map[string]any{"uri": uri, "content": content, "mode": "replace"})
-	req, err := http.NewRequest(http.MethodPost, d.baseURL+"/api/v1/content/write", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.baseURL+"/api/v1/content/write", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
