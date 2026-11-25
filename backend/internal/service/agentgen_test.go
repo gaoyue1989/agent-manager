@@ -1531,3 +1531,76 @@ func TestUpdateAgentSandboxOffClearsExplicitSandboxEnabledEnv(t *testing.T) {
 		t.Fatalf("expected OPENSANDBOX_SERVER_URL removed on sandbox off, got %q", plain["OPENSANDBOX_SERVER_URL"])
 	}
 }
+
+func TestUpdateAgentWasSandboxOnRespectsFrontmatterAndExplicitEnv(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	osbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"name":"ok"}`))
+	}))
+	defer osbSrv.Close()
+	ws := seedWs(t, c, "ws-617", "ws617")
+	if err := c.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: 1, Role: "owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-617", "qwen-plus", "https://llm.example/v1")
+	on := true
+
+	svcA, _, err := c.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "sbx617a", Description: "d", Prompt: "v1", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &on},
+	})
+	if err != nil {
+		t.Fatalf("create svcA: %v", err)
+	}
+	c.DB.Model(svcA).Update("status", store.StatusRunning)
+	if _, err := c.UpdatePlatformConfig(map[string]string{
+		"OPENSANDBOX_SERVER_URL": osbSrv.URL,
+		"SANDBOX_USER_QUOTA":     "9",
+		"OPENSANDBOX_API_KEY":    "sbx-secret-key",
+	}); err != nil {
+		t.Fatalf("upsert platform cfg: %v", err)
+	}
+	updatedA, _, err := c.UpdateAgent(ws.ID, 1, svcA.ID, &AgentForm{
+		Name: "sbx617a", Description: "d", Prompt: "v2", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &on},
+	})
+	if err != nil {
+		t.Fatalf("update svcA: %v", err)
+	}
+	plainA, _, _ := c.partitionServiceEnv(updatedA)
+	if _, leaked := plainA["SANDBOX_USER_QUOTA"]; leaked {
+		t.Fatalf("prompt-only edit on frontmatter-enabled sandbox must not inject SANDBOX_USER_QUOTA, got %v", plainA)
+	}
+
+	svcB, _, err := c.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "sbx617b", Description: "d", Prompt: "v1", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+	})
+	if err != nil {
+		t.Fatalf("create svcB: %v", err)
+	}
+	c.DB.Model(svcB).Updates(map[string]any{
+		"status":   store.StatusRunning,
+		"env_json": fmt.Sprintf(`{"SANDBOX_ENABLED":"false","OPENSANDBOX_SERVER_URL":%q}`, osbSrv.URL),
+	})
+	updatedB, _, err := c.UpdateAgent(ws.ID, 1, svcB.ID, &AgentForm{
+		Name: "sbx617b", Description: "d", Prompt: "v2", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &on},
+	})
+	if err != nil {
+		t.Fatalf("update svcB toggle on: %v", err)
+	}
+	plainB, secretB, _ := c.partitionServiceEnv(updatedB)
+	if plainB["SANDBOX_ENABLED"] != "" {
+		t.Fatalf("SANDBOX_ENABLED should be cleared, got %q", plainB["SANDBOX_ENABLED"])
+	}
+	if secretB["OPENSANDBOX_API_KEY"] != "sbx-secret-key" && plainB["OPENSANDBOX_API_KEY"] != "sbx-secret-key" {
+		t.Fatalf("toggling SANDBOX_ENABLED=false -> on must backfill OPENSANDBOX_API_KEY, plain=%v secret=%v", plainB, secretB)
+	}
+}
