@@ -466,4 +466,17 @@ class ToolCallObservabilityMiddlewareTest {
                 .tag("tool", "__unknown__").tag("result", "success").counter(),
             "内置工具实名命中名单，不得再落 __unknown__ 序列");
     }
+
+    @Test
+    void shouldIgnoreRemoteForwardedToolResultEndEvent() {
+        var middleware = middlewareWithRegisteredTools("read_file", "execute");
+        var forwarded = new ToolResultEndEvent("r1", "call-remote", "remote_tool", ToolResultState.SUCCESS);
+        forwarded.withSource("child-agent");
+
+        middleware.onAgent(mock(Agent.class), ctx(), agentInput(), i -> stream(forwarded)).blockLast();
+
+        assertNull(registry.find("oaf.tool.calls").tag("tool", "__unknown__").counter());
+        assertNull(registry.find("oaf.tool.calls").tag("tool", "remote_tool").counter());
+        verify(auditStore, org.mockito.Mockito.never()).record(any(), any(), eq("call-remote"), any(), any(), any());
+    }
 }

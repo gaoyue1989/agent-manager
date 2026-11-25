@@ -418,14 +418,15 @@ public class A2AController {
                 return null;
             }
             var sanitizedSid = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+            var sanitizedUid = userId != null ? io.agentmanager.framework.util.PathSafe.sanitize(userId) : null;
             if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
-                    sessionUserStore, sanitizedSid, userId)) {
-                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, userId);
+                    sessionUserStore, sanitizedSid, sanitizedUid)) {
+                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, sanitizedUid);
                 return sessionAccessDenied(req.get("id"));
             }
-            if (userId != null) {
-                sessionUserStore.upsert(sanitizedSid, io.agentmanager.framework.util.PathSafe.sanitize(userId));
-                log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, userId);
+            if (sanitizedUid != null) {
+                sessionUserStore.upsert(sanitizedSid, sanitizedUid);
+                log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, sanitizedUid);
             }
             return null;
         } catch (Exception e) {

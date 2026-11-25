@@ -1086,4 +1086,33 @@ class A2AControllerTest {
         verify(sessionUserStore).upsert("team_s1", "alice");
         verify(wrapper).handleRequest(anyString(), anyMap(), any());
     }
+
+    @Test
+    void messageSendShouldAllowSecondTurnWhenUserIdRequiresSanitization() throws Exception {
+        when(sessionUserStore.findUserIdBySession("s-lockout"))
+            .thenReturn(null)
+            .thenReturn("tenant_alice");
+        mockWrapper();
+
+        var body = """
+            {"jsonrpc":"2.0","id":"80","method":"message/send",
+             "params":{"sessionId":"s-lockout",
+               "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+            """;
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "tenant:alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "tenant:alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        verify(sessionUserStore, org.mockito.Mockito.times(2)).upsert("s-lockout", "tenant_alice");
+    }
 }
