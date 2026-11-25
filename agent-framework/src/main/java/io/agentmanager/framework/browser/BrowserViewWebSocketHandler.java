@@ -21,6 +21,7 @@ import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 
 import io.agentmanager.framework.config.BrowserProperties;
 import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxEndpoints;
 import io.agentmanager.framework.sandbox.opensandbox.SandboxLocator;
 import io.agentscope.harness.agent.IsolationScope;
 
@@ -61,7 +62,9 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
         String userId = (String) session.getAttributes().get(BrowserViewHandshakeInterceptor.ATTR_USER_ID);
         String endpoint;
         try (var located = sandboxLocator.locateOwned(userId, sessionId, IsolationScope.USER)) {
-            endpoint = located.sandbox().getEndpoint(props.viewPort()).getEndpoint();
+            endpoint = OpenSandboxEndpoints.correct(
+                located.sandbox().getEndpoint(props.viewPort()).getEndpoint(),
+                sandboxConfig.opensandbox() != null ? sandboxConfig.opensandbox().serverUrl() : null);
         } catch (Exception e) {
             log.warn("[browser-view] sandbox not reachable (sid={}): {}", sessionId, e.getMessage());
             closeQuietly(session, CLOSE_SANDBOX_NOT_FOUND, "sandbox_not_found");
