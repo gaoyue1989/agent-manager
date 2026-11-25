@@ -14,6 +14,7 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
+import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.middleware.ReasoningInput;
 import io.agentscope.core.model.ToolSchema;
@@ -120,6 +121,12 @@ public class ToolFilterMiddleware implements MiddlewareBase {
     }
 
     // ===== 次防线：兜底拦截白名单外业务工具调用 =====
+
+    @Override
+    public Flux<AgentEvent> onAgent(Agent agent, RuntimeContext ctx, AgentInput input,
+                                    Function<AgentInput, Flux<AgentEvent>> next) {
+        return io.agentmanager.framework.service.ActingDenials.bridge(ctx, input, next);
+    }
 
     @Override
     public Flux<AgentEvent> onActing(Agent agent, RuntimeContext ctx, ActingInput input,

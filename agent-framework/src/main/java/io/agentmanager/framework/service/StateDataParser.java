@@ -87,16 +87,19 @@ public final class StateDataParser {
             return content.asText();
         }
         if (content.isArray()) {
+            boolean directReturn = io.agentscope.core.message.GenerateReason.TOOL_RETURN_DIRECT.name()
+                .equals(msg.path("metadata").path(io.agentscope.core.message.Msg.METADATA_GENERATE_REASON).asText(""));
             var sb = new StringBuilder();
             for (var block : content) {
                 if ("text".equals(block.path("type").asText(""))) {
                     var text = block.path("text").asText("");
-                    if (!text.isBlank()) {
+                    if (directReturn) {
+                        sb.append(text);
+                    } else if (!text.isBlank()) {
                         if (!sb.isEmpty()) sb.append("\n");
                         sb.append(text);
                     }
                 }
-                // thinking/tool_use/tool_result 块跳过，仅展示纯文本
             }
             return sb.toString();
         }

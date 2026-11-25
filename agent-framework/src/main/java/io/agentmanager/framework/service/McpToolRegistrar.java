@@ -664,7 +664,7 @@ public class McpToolRegistrar {
      */
     void recordRegisteredTools(McpClientWrapper wrapper, String serverName, UiMapping uiMapping) {
         try {
-            var tools = wrapper.listTools().block();
+            var tools = wrapper.listTools().block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
             if (tools == null) {
                 log.warn("MCP {} listTools returned null, tools not recorded", serverName);
                 return;
