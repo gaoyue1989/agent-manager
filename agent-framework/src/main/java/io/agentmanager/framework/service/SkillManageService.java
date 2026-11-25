@@ -329,20 +329,26 @@ public class SkillManageService {
         if (name == null || name.isBlank()) {
             return null;
         }
+        var root = skillsDir.normalize();
         var direct = skillsDir.resolve(name).normalize();
-        if (!direct.startsWith(skillsDir.normalize())) {
+        if (!direct.startsWith(root)) {
             throw new IllegalArgumentException("路径遍历攻击防护");
         }
-        if (Files.isDirectory(direct)) {
+        boolean directChild = direct.getParent() != null && direct.getParent().equals(root)
+            && !name.startsWith(".") && Files.isDirectory(direct);
+        if (directChild && name.equals(SkillZipSupport.canonicalSkillName(direct))) {
             return direct;
         }
         try (var stream = Files.list(skillsDir)) {
-            return SkillZipSupport.canonicalDirIndex(stream.filter(Files::isDirectory).toList())
+            var matched = SkillZipSupport.canonicalDirIndex(stream.filter(Files::isDirectory).toList())
                 .get(name);
+            if (matched != null) {
+                return matched;
+            }
         } catch (IOException e) {
             log.warn("Failed to resolve skill dir '{}': {}", name, e.getMessage());
         }
-        return null;
+        return directChild ? direct : null;
     }
 
     // ========== 启停状态持久化 ==========

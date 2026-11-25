@@ -562,4 +562,25 @@ class OpenSandboxExecTranslateTest {
         assertTrue(globRes.stdout().contains("memory/2026-11-24.md\t11\t0"), globRes.stdout());
         assertTrue(globRes.stdout().contains("README.md\t17\t"), globRes.stdout());
     }
+
+    @Test
+    void translateExistsShouldPreserveLeadingSlashForNonWorkspaceAbsolutePathsAndWorkspaceRoot() throws Exception {
+        var osb = mock(Sandbox.class);
+        var files = mockOsb(osb);
+        when(files.readByteArray("/etc/hosts")).thenReturn("127.0.0.1 localhost".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(files.readByteArray("/workspace")).thenThrow(new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException("Cannot buffer entire body", null));
+        when(files.listDirectory("/workspace")).thenReturn(List.of());
+
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var r1 = sandbox.translateForProbe("test -e '/etc/hosts' && echo yes || echo no");
+        assertNotNull(r1);
+        assertEquals("yes", r1.stdout().trim());
+        verify(files).readByteArray("/etc/hosts");
+
+        var r2 = sandbox.translateForProbe("test -e '/workspace' && echo yes || echo no");
+        assertNotNull(r2);
+        assertEquals("yes", r2.stdout().trim());
+        verify(files).listDirectory("/workspace");
+    }
 }

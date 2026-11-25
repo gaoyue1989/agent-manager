@@ -1031,6 +1031,10 @@ public class OpenSandbox extends AbstractBaseSandbox
         var rawNormalized = normalizeRel(relPath);
         boolean trailingSlash = rawNormalized.length() > 1 && rawNormalized.endsWith("/");
         var normalized = stripTrailingSlashes(rawNormalized);
+        var execdPath = relPath.length() > 1 ? stripTrailingSlashes(relPath) : relPath;
+        if (execdPath.isEmpty() && relPath.startsWith("/")) {
+            execdPath = "/";
+        }
         var workspaceScoped = !relPath.startsWith("/") || relPath.startsWith(getWorkspaceRoot() + "/");
         int slash = normalized.lastIndexOf('/');
         var parent = slash <= 0 ? "" : normalized.substring(0, slash);
@@ -1056,7 +1060,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         try {
-            osbSandbox.files().readByteArray(normalized);
+            osbSandbox.files().readByteArray(execdPath);
             return !trailingSlash;
         } catch (SandboxApiException e) {
             if (!isPathMissing(e)) {
@@ -1068,7 +1072,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         try {
-            var entries = osbSandbox.files().listDirectory(normalized);
+            var entries = osbSandbox.files().listDirectory(execdPath);
             if (entries != null) {
                 return Boolean.TRUE;
             }
