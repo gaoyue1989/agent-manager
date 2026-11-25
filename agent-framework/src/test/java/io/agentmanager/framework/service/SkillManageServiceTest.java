@@ -392,6 +392,21 @@ class SkillManageServiceTest {
     }
 
     @Test
+    void duplicateCanonicalNameShouldResolveByDirNameOrder() throws IOException {
+        // issue #504 统一裁决：同规范名重复目录按目录名字典序首个命中（与 bundle 打包
+        // 同口径，与文件系统扫描序无关；写入顺序与字典序相反以区分两种裁决）
+        // ——#513 遗留的「扫描序首个」歧义在此收口
+        var service = createService();
+        writeMismatchedSkill("skill-old", "dup-skill");
+        writeMismatchedSkill("skill-new", "dup-skill");
+
+        assertTrue(service.deleteSkill("dup-skill"));
+
+        assertFalse(Files.exists(skillsDir.resolve("skill-new")), "字典序首个（skill-new）被寻址命中并删除");
+        assertTrue(Files.exists(skillsDir.resolve("skill-old")), "冲突目录保持不动");
+    }
+
+    @Test
     void resolveShouldRejectPathTraversal() throws IOException {
         var service = createService();
         Files.createDirectories(tempDir.resolve("outside"));

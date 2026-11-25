@@ -418,11 +418,18 @@ public class WorkspaceSyncService {
         Map<String, Long> baseline = new LinkedHashMap<>();
         try (var stream = Files.walk(baselineDir)) {
             for (var path : stream.filter(Files::isRegularFile).toList()) {
-                var rel = baselineDir.relativize(path).toString().replace('\\', '/');
-                if (isMetadataSegment(rel)) {
+                var relPath = baselineDir.relativize(path);
+                boolean metadata = false;
+                for (var seg : relPath) {
+                    if (isMetadataSegment(seg.toString())) {
+                        metadata = true;
+                        break;
+                    }
+                }
+                if (metadata) {
                     continue;
                 }
-                baseline.put(rel, Files.size(path));
+                baseline.put(relPath.toString().replace('\\', '/'), Files.size(path));
             }
         } catch (Exception e) {
             // 基线读不到：按“非纯基线”处理（回写路径行为不变，fail-soft）

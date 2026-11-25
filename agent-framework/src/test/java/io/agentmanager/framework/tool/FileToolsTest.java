@@ -14,6 +14,7 @@ import io.agentmanager.framework.service.storage.FileStorage;
 import io.agentscope.core.agent.RuntimeContext;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -274,6 +275,37 @@ class FileToolsTest {
             Base64.getEncoder().encodeToString("x".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         assertTrue(result.contains("metadata write failed"), "落库失败应报错: " + result);
         verify(fileStorage).delete(anyString());
+    }
+
+    /**
+     * 存储末段字节预算（issue #499，与上传侧 #425 同预算同语义）：presentFile 的
+     * storageKey 末段为 {uuid36}-{name}，LocalFileStorage 原子写再拼 .{uuid8}.tmp，
+     * 预算 205 字节内才不触 ext4 单段 255 上限（214 字节中文名落盘 264 字节即
+     * File name too long，file_ready 丢失）。file_name 与 storageKey 段须同源截断。
+     */
+    @Test
+    void presentFileShouldBudgetLongChineseFileName() throws Exception {
+        var longName = "测".repeat(70) + ".txt"; // 210+4=214 字节，ext4 合法、落盘超限
+        var result = tools.presentFile(ctx(), "outputs/" + longName,
+            Base64.getEncoder().encodeToString("r".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+
+        assertTrue(result.contains("\"file_id\""), "长名应登记成功而非 storage write failed: " + result);
+        var keyCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(fileStorage).write(keyCaptor.capture(), any(), any(Long.class), anyString());
+        var lastSegment = keyCaptor.getValue().substring(keyCaptor.getValue().lastIndexOf('/') + 1);
+        var storedName = lastSegment.substring(37); // {uuid36}- 前缀
+        var budget = io.agentmanager.framework.util.FileNameBudget.MAX_FILE_NAME_BYTES;
+        assertTrue(storedName.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= budget,
+            "storageKey 末段名须在 " + budget + " 字节预算内: " + storedName);
+        assertTrue(storedName.endsWith(".txt"), "截断保扩展名: " + storedName);
+        assertFalse(storedName.contains("\uFFFD"), "字符边界截断不产生替换字符: " + storedName);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        assertEquals(storedName, captor.getValue().fileName(),
+            "登记 file_name 与 storageKey 段同源同截断");
+        assertTrue(result.contains("\"file_name\":\"" + storedName + "\""),
+            "返回 JSON file_name 与 storageKey 段一致: " + result);
     }
 
     @Test
@@ -612,6 +644,36 @@ class FileToolsTest {
         var result = tools.presentFile(ctx(), "/workspace//etc/passwd", null);
         assertTrue(result.contains("invalid path"),
             "剥 /workspace/ 前缀后仍为绝对路径应拒绝: " + result);
+    }
+
+    /** 文件名含 < 0x20 控制字符（RFC 8259 禁止裸出现在 JSON 字符串）必须转义为合法 JSON 且无损往返 */
+    @Test
+    void presentFileShouldEscapeControlCharsInReturnedJson() throws Exception {
+        var result = tools.presentFile(ctx(), "outputs/report\t1\nx\u0001y\u000c.txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("report\t1\nx\u0001y\u000c.txt", node.get("file_name").asText(),
+            "控制字符文件名经转义后可无损往返: " + result);
+    }
+
+    /** err 分支（invalid path 拼原 filePath）含控制字符时同样必须返回合法 JSON */
+    @Test
+    void presentFileErrorResultShouldEscapeControlChars() throws Exception {
+        var result = tools.presentFile(ctx(), "a\tb/../etc/passwd",
+            Base64.getEncoder().encodeToString(new byte[]{1}));
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertTrue(node.get("error") != null, "拒绝路径应返回 error 字段: " + result);
+        assertTrue(node.get("error").asText().contains("invalid path"), "error 语义保留: " + result);
+    }
+
+    /** present_url 文件名含引号经 sanitize（控制字符替换、引号保留）后必须产出合法 JSON */
+    @Test
+    void presentUrlShouldEscapeQuotesAndControlCharsInReturnedJson() throws Exception {
+        var t = toolsWithPrefixes("http://ok.example/");
+        var result = t.presentUrl(ctx(), "we\"ird\tname.zip", "http://ok.example/a.zip", null, null);
+        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+        assertEquals("we\"ird_name.zip", node.get("file_name").asText(),
+            "引号转义保留、控制字符 sanitize: " + result);
     }
 
     /** 沙箱直读路径同样不得收到剥前缀后的绝对路径（execd files API 可读容器任意文件） */

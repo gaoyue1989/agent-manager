@@ -143,12 +143,17 @@ GET {BASE_URL}/internal/skills/bundle?version=<v>
 `name`（打包规范名，`SkillZipSupport.canonicalSkillName`），非文件系统目录名——SDK 提示词渲染
 （MarketplaceStager Cached → ShellPathPolicy）按 frontmatter name 推导容器路径
 `/workspace/.skills-cache/<scope>/<ns>/<name>`，farm 建链与 bundle 解包顶层同口径才不 404。
-frontmatter 缺失/无 name/不 shell-safe（`..`、引号、空白、`/`）回落目录名；服务级禁用集键与
+frontmatter 缺失/无 name/非白名单（issue #501：仅字母/数字/下划线/中文/点/连字符，`.`/`..`
+开头与含 `..` 拒绝——`.` 曾生成 `rm -rf '<cache>/oaf-package/.'` 使整沙箱农场收敛失败，
+`|` 曾污染孤儿差集 case 字面集边界）回落目录名；服务级禁用集键与
 管理面寻址同为规范名口径（issue #480）：`SkillManageService` 统一经 `resolveSkillDir` 解析
 （规范名与历史目录名均可寻址），`.skill-states.json` 读写按规范名键、读取时对历史目录名
 条目按现存目录归一化，`getDisabledSet()` 输出与 SDK `skill.getName()` 同键——目录合并视图
 （SkillCatalogService）、SDK SkillFilter、沙箱投放禁用判定（SkillsFarm/ManagedSkillDisabledChecker）
-三方一致。
+三方一致。多个目录映射到同一规范名时按 `SkillZipSupport.canonicalDirIndex` 统一裁决
+（issue #504）：候选按目录名字典序排序、首个保留、冲突目录 WARN 跳过——bundle 打包与
+`resolveSkillDir` 寻址共用该规则，tar 无重复条目、fileCount 不失真、同 version 跨副本
+字节一致（X-Bundle-Sha256 稳定），寻址命中的目录与 bundle 收录内容恒为同一份。
 
 一服务一包：每个 agent-framework 服务实例只承载一个 OAF 包（服务即包身份的单一真相源），
 端点无需 package 参数——`BASE_URL` 已标识请求的是哪个服务/包。
@@ -465,6 +470,23 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 > glob（回落命令不含记忆字样，不触发 onRealExecBeforeRun 懒注入触发判据），同 turn 内
 > read 探测（KV 应答有）与 glob 回落应答短暂矛盾，懒注入后自愈；爆炸半径有限且与
 > §6.2-4 已接受的容器态盲点同姿态，显式接受，不为 KV-真 exec 结果合并增加复杂度。
+
+> 补记（2026-11-25，issue #500）：上段「已接受的连带影响」在 SkillsFarm 默认开启
+> （#392）后升级为正式缺陷——工作区根 glob 必然穿透 `.skills-cache` 命中农场软链整树
+> 回落，P0-12 翻译快路径对根 glob 100% 失效（先 4 次 listDirectory 再 exec），读穿开启
+> 时根级 MEMORY.md 100% 漏报（#356 回归）。修复（信任模型细化，#394 用户内容软链防护
+> 不变）：`walkFilesSkippingDirs` 遍历根不在 `.skills-cache` 内时对该受控缓存目录整目
+> 跳过——`.skills-cache` 是 SDK MarketplaceStager 技能缓存投影（软链目标 = 平台守护目
+> 录 /skills-store），不属于用户工作区数据语义，与 supportsFileTransfer 的排除口径同源
+> （#394「禁路径前缀嗅探」约束针对软链**识别判据**，目录级信任裁决与之正交）；效果 =
+> 农场软链不再触发整树回落（快路径 + 读穿根级 KV 合并恢复），农场内部文件也不再经
+> find -L 解引用混入用户根 glob 视野（旧回落的暴露面，本就非预期语义）。root 位于
+> `.skills-cache` 内的显式枚举照旧软链回落（技能文件枚举走 find -L）。残余边界（如实
+> 披露）：用户自建软链触发回落的根 glob，find -L 仍穿透农场链（真 exec 地面真相，#394
+> 归一化语义）——与翻译应答存在不一致窗口，触发需用户软链+根 glob 同时成立，罕见；
+> 该场景的 MEMORY.md 漏报由懒注入触发判据按语义补齐收口（`looksLikeRootGlobOverMemory`：
+> P_FIND 完整模板 + 工作区根 + pattern 可命中 MEMORY.md，复用既有 CAS 一次性机制，
+> 仍不做 KV-真 exec 结果合并），见 first-reasoning-memory-readthrough §3.1 补记。
 
 ### 6.4 回退与开关
 

@@ -161,4 +161,11 @@ class AskingContentBackfillStateStoreTest {
         verify(delegate).save(eq("s1"), eq("u1"), eq("agent_state"), captor.capture());
         assertEquals(1, ((AgentState) captor.getValue()).getContext().size());
     }
+
+    /** issue #496：close 必须透传 delegate（default 空实现会吞掉装饰链的关停传播） */
+    @Test
+    void closeShouldPassThroughToDelegate() {
+        store.close();
+        verify(delegate).close();
+    }
 }

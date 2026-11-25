@@ -40,6 +40,8 @@ const MARKER_MAP = {
   'proto:member-echo': 'proto-member-echo',   // 协议多副本 P 组：member 调 bench_echo 回显
   'direct:render': 'direct-render', 'direct:fail': 'direct-fail', 'direct:empty': 'direct-empty',
   'direct:plain': 'direct-plain', 'direct:submit': 'direct-submit', 'direct:mixed': 'direct-mixed',
+  'direct:image': 'direct-image',   // DR9 纯图片直返（issue #492）
+  'direct:two-part': 'direct-two-part',   // DR10 多 text 块直返（issue #494）
 };
 
 // 需要运行时参数的场景：tool_call arguments 整体重写为指定 JSON（{{appId}} → 标记参数）。

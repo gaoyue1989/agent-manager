@@ -301,8 +301,10 @@ public class DebugApiController {
      * {@code result_state='error'}；存量行（result_state 为 NULL 的历史数据）按未失败计。
      * 最近明细取 TOOL_CALL_START 行 LEFT JOIN 结果行带回终态——部分模型供应商的
      * tool_call_id 只在单次响应内唯一（如 call_0 跨会话/跨轮复用），匹配限定同会话内
-     * START 之后最早的 END 行（否则状态串扰且行数翻倍）。该端点同时是平台观测面板
-     * 「最近调用」的 fan-out 数据源。
+     * 自身调用序列（本 START 之后、同会话同 id 下一次 START 之前）最早的 END 行
+     * （否则状态串扰且行数翻倍；仅按 created_at 限定时，同毫秒复用会吞前一轮终态、
+     * 被中断调用会偷下一次调用的终态）。该端点同时是平台观测面板「最近调用」的
+     * fan-out 数据源。
      *
      * @param limit 最近明细返回上限（默认 50，钳制在 [1, {@value #MONITOR_TOOL_RECENT_MAX_LIMIT}]）
      */
@@ -348,6 +350,10 @@ public class DebugApiController {
                          + "SELECT e2.id FROM tool_audit_log e2 "
                          + "WHERE e2.tool_call_id = s.tool_call_id AND e2.session_id = s.session_id "
                          + "AND e2.state = 'TOOL_RESULT_END' AND e2.created_at >= s.created_at "
+                         + "AND e2.id > s.id "
+                         + "AND e2.id < COALESCE((SELECT MIN(s2.id) FROM tool_audit_log s2 "
+                         + "WHERE s2.tool_call_id = s.tool_call_id AND s2.session_id = s.session_id "
+                         + "AND s2.state = 'TOOL_CALL_START' AND s2.id > s.id), 9223372036854775807) "
                          + "ORDER BY e2.created_at ASC, e2.id ASC LIMIT 1) "
                          + "WHERE s.state = 'TOOL_CALL_START' "
                          + "ORDER BY s.created_at DESC LIMIT ?")) {

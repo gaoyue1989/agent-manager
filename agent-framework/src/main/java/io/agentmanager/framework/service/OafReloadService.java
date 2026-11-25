@@ -30,8 +30,8 @@ import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
  *
  * <ul>
  *   <li><b>A：MCP 原地 reload</b>——重解析 frontmatter 取最新 mcpServers 声明，逐 server
- *       共享句柄换芯 + clearServer/registerOne 重注册（issue #348：连接换芯对全部会话生效，
- *       工具面刷新落在单例 toolkit）；</li>
+ *       共享句柄换芯 + clearServer/registerOne 重注册（issue #348：连接换芯对全部会话生效），
+ *       成功后驱逐 SessionAgentCache 世代失效，存量会话按新配置惰性重建（issue #491）；</li>
  *   <li><b>B：整包重建 agent</b>——AGENTS.md 变化（sysPrompt/model/权限/mcpServers 声明）
  *       时，重新解析 OafConfig → WorkspaceInitializer.reinitialize 覆盖 workspace 生成文件
  *       → HarnessAgentFactory.build 全新 agent → 原子切换引用 → 旧 agent 的 MCP 连接关闭。</li>
@@ -187,6 +187,9 @@ public class OafReloadService {
 
         oafConfigHolder.update(freshConfig);
         fingerprint.set(scanFingerprint());
+        // issue #491：工具面新配置只落在单例 toolkit 与全局 registeredTools（SSE 标记面），
+        // per-session 隔离下存量会话仍持旧 Toolkit——世代失效全清，下次请求按新配置惰性重建
+        agentRuntimeService.evictAllSessionAgents();
         log.info("[Reload] MCP reloaded: {} servers processed", detail.size());
         return new ReloadResult("mcp", true, false, detail, null);
     }
@@ -224,6 +227,7 @@ public class OafReloadService {
         if (ok) {
             oafConfigHolder.update(oafConfig);
             fingerprint.set(scanFingerprint());
+            agentRuntimeService.evictAllSessionAgents();
         }
         return new ReloadResult("mcp", true, false, detail, null);
     }

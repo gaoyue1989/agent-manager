@@ -23,7 +23,11 @@ public class ReconnectableMcpClientWrapper extends McpClientWrapper {
     private volatile McpClientWrapper delegate;
     private volatile boolean closed;
 
-    /** 毒化标记（issue #417）：注册失败的句柄留缓存原地换芯（不驱逐脱管），换芯成功即清除 */
+    /**
+     * 毒化标记（issue #417）：注册失败的句柄留缓存原地换芯（不驱逐脱管）。置位带 delegate
+     * 版本防混淆（{@link #markPoisonedIfSame}，issue #493），清除点为换芯成功（swap）与
+     * 复用句柄注册成功（注册过程即验证当前 delegate 可用）
+     */
     private volatile boolean poisoned;
 
     public ReconnectableMcpClientWrapper(String name, McpClientWrapper delegate) {
@@ -50,9 +54,24 @@ public class ReconnectableMcpClientWrapper extends McpClientWrapper {
         return true;
     }
 
-    /** 注册失败毒化（issue #417）：句柄留缓存，看门狗/下一会话经 swap 原地重建 */
-    public void markPoisoned() {
+    /**
+     * 注册失败毒化（issue #417），带 delegate 版本防混淆（issue #493）：仅当当前 delegate
+     * 仍是 expected 时才置毒化。会话持旧连接调用失败期间，看门狗可能已换芯健康新连接并清毒化
+     * ——旧连接的迟到失败不得把新 delegate 重新毒化（否则触发不必要的销毁重建）。与 swap/close
+     * 同锁：毒化判定与置位之间插入换芯会把新连接误标。返回 false 表示失败来自旧 delegate
+     * 或句柄已 closed，毒化被跳过。
+     */
+    public synchronized boolean markPoisonedIfSame(McpClientWrapper expected) {
+        if (closed || delegate != expected) {
+            return false;
+        }
         poisoned = true;
+        return true;
+    }
+
+    /** 注册成功清除毒化（issue #493）：当前 delegate 经注册过程验证可用，历史失败标记失效 */
+    public void clearPoison() {
+        poisoned = false;
     }
 
     public boolean poisoned() {

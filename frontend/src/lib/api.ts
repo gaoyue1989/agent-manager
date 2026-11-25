@@ -79,6 +79,8 @@ export interface SandboxCapacitySpec { bufferMin: number; bufferMax: number; poo
 // 池运行状态（上游 PoolResponse.status 仅 total/allocated/available/revision——d19：无 updated；
 // 未 reconcile 时 status 缺失）
 export interface SandboxPoolStatus { total?: number; allocated?: number; available?: number; revision?: string; }
+// 建池技能同步三键（空 = 后端缺省：BASE_URL 按池名派生 / INTERVAL 1m / STORE_DIR 不注入）
+export interface SandboxPoolSkillsyncInput { baseUrl?: string; interval?: string; storeDir?: string; }
 export interface SandboxPool {
   name: string; capacitySpec: SandboxCapacitySpec;
   status?: SandboxPoolStatus | null; createdAt?: string;
@@ -567,7 +569,8 @@ export const api = {
     sandboxes: {
       summary: () => request<SandboxSummary>(`/admin/sandboxes/summary`),
       listPools: () => request<{ items: SandboxPool[] }>(`/admin/sandboxes/pools`),
-      createPool: (body: { name: string; image?: string; capacitySpec: SandboxCapacitySpec }) =>
+      createPool: (body: { name: string; image?: string; taskExecutorImage?: string; execdImage?: string;
+        capacitySpec: SandboxCapacitySpec; skillsync?: SandboxPoolSkillsyncInput }) =>
         requestRaw<{ name: string }>(`/admin/sandboxes/pools`, { method: "POST", body: JSON.stringify(body) }),
       getPool: (name: string) => request<SandboxPool>(`/admin/sandboxes/pools/${encodeURIComponent(name)}`),
       updatePool: (name: string, capacitySpec: SandboxCapacitySpec) =>
