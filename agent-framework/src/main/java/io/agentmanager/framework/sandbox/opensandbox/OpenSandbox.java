@@ -26,6 +26,7 @@ import io.agentscope.harness.agent.sandbox.SandboxException;
 
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException;
 
 /**
  * OpenSandbox 沙箱运行时：包装 SDK Sandbox 句柄，
@@ -605,6 +606,14 @@ public class OpenSandbox extends AbstractBaseSandbox
         return error != null && SandboxError.FILE_NOT_FOUND.equals(error.getCode());
     }
 
+    private static boolean isDirectoryDownloadError(Throwable e) {
+        if (!(e instanceof SandboxInternalException)) {
+            return false;
+        }
+        String msg = e.getMessage();
+        return msg != null && (msg.contains("Cannot buffer entire body") || msg.contains("9223372036854775807"));
+    }
+
     /**
      * read 翻译：缺文件 → __NOT_FOUND__；空文件 → __EMPTY__；否则按 sed '1,Np' 语义取行。
      * 容器缺失时记忆路径回落 KV（first-reasoning D1 读穿，开关关闭时行为不变）；
@@ -801,11 +810,10 @@ public class OpenSandbox extends AbstractBaseSandbox
             // 不匹配即零开销，补注入后容器条目与 KV 条目同 rel 去重无害。根判定用绝对路径
             // 精确等值或归一化空/点（normalizeRel 对 '/workspace' 只剥前导斜杠得 'workspace'，
             // 不能作为根判定）
-            var rootRel = normalizeRel(root);
-            if (runtimeReadThroughEnabled && (root.equals(getWorkspaceRoot())
-                    || rootRel.isEmpty() || rootRel.equals("."))
-                    && globMatch(pattern, WorkspaceReader.MEMORY_FILE)) {
-                fillGlobFromMemoryRootFile(files);
+            var rootRel = stripTrailingSlashes(normalizeRel(root));
+            if (runtimeReadThroughEnabled && (stripTrailingSlashes(root).equals(getWorkspaceRoot())
+                    || rootRel.isEmpty() || rootRel.equals("."))) {
+                fillGlobFromMemoryWorkspaceRoot(pattern, files);
             }
         }
         // 截断可观测性（issue #296）：每次 translateGlob 仅一条 WARN，避免深树逐分支刷屏
@@ -825,7 +833,7 @@ public class OpenSandbox extends AbstractBaseSandbox
 
     /** root 归一化后落在 memory/ 子树内则返回其相对形态（如 {@code memory} / {@code memory/sub}），否则 null */
     private String memoryRelUnder(String root) {
-        var rel = normalizeRel(root);
+        var rel = stripTrailingSlashes(normalizeRel(root));
         if (!runtimeReadThroughEnabled) {
             return null;
         }
@@ -854,14 +862,16 @@ public class OpenSandbox extends AbstractBaseSandbox
      * mtime=0）——仅工作区根级 glob 且 pattern 匹配时由 translateGlob 调用（调用方已做模式
      * 预检），memory/ 子树语义由 {@link #fillGlobFromMemoryKv} 负责、不含根级文件。
      */
-    private void fillGlobFromMemoryRootFile(java.util.TreeSet<FileEntry> out) {
+    private void fillGlobFromMemoryWorkspaceRoot(String pattern, java.util.TreeSet<FileEntry> out) {
         if (workspaceReader == null || userKey == null || userKey.isBlank() || out.size() > 5000) {
             return;
         }
         try {
-            var size = workspaceReader.listRuntimeFiles(userKey).get(WorkspaceReader.MEMORY_FILE);
-            if (size != null) {
-                out.add(new FileEntry(WorkspaceReader.MEMORY_FILE, size, 0));
+            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
+                var rel = entry.getKey();
+                if (globMatch(pattern, leaf(rel))) {
+                    out.add(new FileEntry(rel, entry.getValue() == null ? 0 : entry.getValue(), 0));
+                }
             }
         } catch (Exception e) {
             log.debug("[sandbox-open] read-through memory root glob failed: {}", e.getMessage());
@@ -957,7 +967,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 sb.append("FILE:").append(p).append('\t').append(Math.max(e.getSize(), 0)).append('\t').append(mtime);
             }
         }
-        if (WorkspaceReader.MEMORY_DIR.equals(normalizeRel(dir))) {
+        if (WorkspaceReader.MEMORY_DIR.equals(stripTrailingSlashes(normalizeRel(dir)))) {
             fillLsFromMemoryKv(seen, sb);
         }
         return new ExecResult(0, sb.toString(), "", false);
@@ -996,7 +1006,7 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 拼装与容器同构的 FILE: 行（path\tsize\tmtime=0）；其余情况维持 __NOT_EXISTS__。
      */
     private ExecResult readThroughMemoryLs(String dir) throws Exception {
-        var rel = normalizeRel(dir);
+        var rel = stripTrailingSlashes(normalizeRel(dir));
         if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()
                 || !WorkspaceReader.MEMORY_DIR.equals(rel)) {
             return new ExecResult(0, "__NOT_EXISTS__", "", false);
@@ -1018,41 +1028,42 @@ public class OpenSandbox extends AbstractBaseSandbox
      *         有效链 yes/no），回落原 test -e 真 exec（issue #394）
      */
     private Boolean translateExists(String relPath) throws Exception {
-        var normalized = normalizeRel(relPath);
-        boolean trailingSlash = normalized.length() > 1 && normalized.endsWith("/");
-        if (trailingSlash) {
-            normalized = normalized.substring(0, normalized.length() - 1);
-        }
-        // 父目录列举仅对工作区相对路径/工作区内绝对路径生效：非工作区绝对路径（/etc/hosts 等）
-        // 不得改写成 /workspace 镜像路径判存在，直接回落旧两步实现
+        var rawNormalized = normalizeRel(relPath);
+        boolean trailingSlash = rawNormalized.length() > 1 && rawNormalized.endsWith("/");
+        var normalized = stripTrailingSlashes(rawNormalized);
         var workspaceScoped = !relPath.startsWith("/") || relPath.startsWith(getWorkspaceRoot() + "/");
         int slash = normalized.lastIndexOf('/');
         var parent = slash <= 0 ? "" : normalized.substring(0, slash);
         var leafPath = leaf(normalized);
-        if (workspaceScoped && !parent.isEmpty()) {
+        if (workspaceScoped && !leafPath.isEmpty()) {
+            String parentDir = parent.isEmpty() ? getWorkspaceRoot() : getWorkspaceRoot() + "/" + parent;
             try {
-                var entries = osbSandbox.files().listDirectory(getWorkspaceRoot() + "/" + parent);
-                if (entries != null) {
+                var entries = osbSandbox.files().listDirectory(parentDir);
+                if (entries != null && (!parent.isEmpty() || !entries.isEmpty())) {
                     for (var e : entries) {
                         if (e.getPath() != null && leaf(normalizeRel(e.getPath())).equals(leafPath)) {
                             if ("symlink".equalsIgnoreCase(e.getType())) {
                                 return null;
                             }
-                            return !trailingSlash || "directory".equalsIgnoreCase(e.getType());
+                            return !trailingSlash
+                                || "directory".equalsIgnoreCase(e.getType())
+                                || "dir".equalsIgnoreCase(e.getType());
                         }
                     }
-                    return memoryKvExists(normalized);
+                    return memoryKvExists(normalized, trailingSlash);
                 }
             } catch (Exception ignoreParent) {
-                // 父目录列举失败（适配器差异等）→ 回落旧两步实现
             }
         }
         try {
             osbSandbox.files().readByteArray(normalized);
             return !trailingSlash;
         } catch (SandboxApiException e) {
-            // 404 = 确定不是文件 → 继续目录探测；其余异常向上抛，交外层回落真 exec（issue #296）
             if (!isPathMissing(e)) {
+                throw e;
+            }
+        } catch (SandboxInternalException e) {
+            if (!isDirectoryDownloadError(e)) {
                 throw e;
             }
         }
@@ -1061,11 +1072,10 @@ public class OpenSandbox extends AbstractBaseSandbox
             if (entries != null) {
                 return Boolean.TRUE;
             }
-            return memoryKvExists(normalized);
+            return memoryKvExists(normalized, trailingSlash);
         } catch (SandboxApiException e) {
-            // 两层均 404 = 确定缺失 → 记忆路径回落 KV；其余异常向上抛回落真 exec（test -e / test -d）
             if (isPathMissing(e)) {
-                return memoryKvExists(normalized);
+                return memoryKvExists(normalized, trailingSlash);
             }
             throw e;
         }
@@ -1078,14 +1088,17 @@ public class OpenSandbox extends AbstractBaseSandbox
      * （KV 空内容 → yes，与 read 的 __EMPTY__ 一致，issue #356）；非记忆路径、读穿关闭、
      * 用户未绑定 → false。
      */
-    private boolean memoryKvExists(String relPath) {
+    private boolean memoryKvExists(String relPath, boolean requireDir) {
         if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()) {
             return false;
         }
-        var rel = normalizeRel(relPath);
+        var rel = stripTrailingSlashes(normalizeRel(relPath));
         if (WorkspaceReader.MEMORY_DIR.equals(rel)) {
             return workspaceReader.listRuntimeFiles(userKey).keySet().stream()
                 .anyMatch(k -> k.startsWith(WorkspaceReader.MEMORY_DIR + "/"));
+        }
+        if (requireDir) {
+            return false;
         }
         var isKvRuntimeKey = WorkspaceReader.MEMORY_FILE.equals(rel)
             || (rel.startsWith(WorkspaceReader.MEMORY_DIR + "/") && rel.endsWith(".md")
@@ -1205,6 +1218,14 @@ public class OpenSandbox extends AbstractBaseSandbox
             p = p.substring(1);
         }
         return p;
+    }
+
+    private static String stripTrailingSlashes(String p) {
+        int end = p.length();
+        while (end > 1 && p.charAt(end - 1) == '/') {
+            end--;
+        }
+        return end == p.length() ? p : p.substring(0, end);
     }
 
     /**
