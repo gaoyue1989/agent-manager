@@ -86,6 +86,17 @@ public class BrowserControlService implements SandboxHoldSignal {
         return released;
     }
 
+    public void restore(String sessionId, ControlView prev) {
+        if (prev == null || !"HUMAN".equals(prev.owner())) {
+            return;
+        }
+        try {
+            store.takeover(sessionId, prev.reason(), prev.by(), prev.trigger());
+        } catch (Exception e) {
+            log.warn("[browser-control] restore control lock failed (sid={}): {}", sessionId, e.getMessage());
+        }
+    }
+
     public Map<String, Object> state(String ownerUserId, String sessionId) {
         var control = control(sessionId);
         var controlView = new LinkedHashMap<String, Object>();

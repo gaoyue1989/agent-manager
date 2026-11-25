@@ -231,4 +231,35 @@ class BrowserControlControllerTest {
         assertEquals("error", tree2.get("type").asText());
         assertTrue(tree2.get("error").asText().contains("control_store_unavailable"));
     }
+
+    @Test
+    void releaseShouldRestoreControlLockWhenChatThrowsOrReturnsTurnInProgress() {
+        var prev = new BrowserControlService.ControlView("HUMAN", "login", USER, "user", "2026-11-25T00:00:00Z", 600);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenThrow(new IllegalStateException("quota full"));
+
+        assertThrows(IllegalStateException.class,
+            () -> controller.release(SESSION, USER, null, new HttpHeaders()));
+        verify(control).restore(SESSION, prev);
+
+        org.mockito.Mockito.reset(control, chatStreamController);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenReturn(Flux.just(ServerSentEvent.<String>builder()
+                .event("error").data("{\"type\":\"error\",\"error\":\"turn_in_progress\"}").build()));
+
+        controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        verify(control).restore(SESSION, prev);
+    }
+
+    @Test
+    void releaseMappingShouldNotPinProducesTextEventStream() throws Exception {
+        var method = BrowserControlController.class.getMethod("release",
+            String.class, String.class, String.class, HttpHeaders.class);
+        var mapping = method.getAnnotation(org.springframework.web.bind.annotation.PostMapping.class);
+        assertEquals(0, mapping.produces().length);
+    }
 }
