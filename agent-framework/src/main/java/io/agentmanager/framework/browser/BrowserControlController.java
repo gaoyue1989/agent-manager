@@ -85,8 +85,7 @@ public class BrowserControlController {
         }
     }
 
-    @PostMapping(value = "/threads/{sessionId}/browser/release",
-        produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @PostMapping("/threads/{sessionId}/browser/release")
     public Flux<ServerSentEvent<String>> release(
             @PathVariable String sessionId,
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
@@ -94,7 +93,9 @@ public class BrowserControlController {
             @RequestHeader(required = false) HttpHeaders requestHeaders) {
         String sid = PathSafe.sanitize(sessionId);
         String owner = assertOwned(sid, headerUserId);
+        BrowserControlService.ControlView prev;
         try {
+            prev = control.control(sid);
             if (!control.release(sid)) {
                 return Flux.just(errorFrame("not_taken_over: browser control is not held by the human"));
             }
@@ -104,7 +105,28 @@ public class BrowserControlController {
         var request = new ChatStreamController.ChatRequest(RESUME_MESSAGE, owner,
             sid, null, null, null, null);
         log.info("[browser-control] release accepted, resuming agent turn (sid={})", sid);
-        return chatStreamController.chat(request, owner, forwardedPrefixHeader, requestHeaders);
+        Flux<ServerSentEvent<String>> stream;
+        try {
+            stream = chatStreamController.chat(request, owner, forwardedPrefixHeader, requestHeaders);
+        } catch (RuntimeException e) {
+            control.restore(sid, prev);
+            throw e;
+        }
+        var firstFrame = new java.util.concurrent.atomic.AtomicBoolean(true);
+        return stream
+            .doOnNext(sse -> {
+                if (firstFrame.compareAndSet(true, false) && sse != null) {
+                    var data = sse.data();
+                    if ("error".equals(sse.event()) || (data != null && data.contains("turn_in_progress"))) {
+                        control.restore(sid, prev);
+                    }
+                }
+            })
+            .doOnError(e -> {
+                if (firstFrame.compareAndSet(true, false)) {
+                    control.restore(sid, prev);
+                }
+            });
     }
 
     @PostMapping("/threads/{sessionId}/browser/vnc-ticket")
