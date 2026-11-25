@@ -1672,9 +1672,14 @@ test('HA7 /Skill 注入区块不上屏：history 只显示用户原文', async (
   await deleteThread(sid, BASE, U).catch(() => undefined);
 });
 
+async function agentTurnCalls(scenario: string) {
+  return (await llmStats()).calls.filter(c => c.scenario === scenario
+    && String(c.systemContent).includes('## AgentStateStore Context'));
+}
+
 async function plainCallSystemContent() {
-  const call = (await llmStats()).calls.filter(c => c.scenario === 'plain').pop();
-  expect(call, '缺少 plain 场景的模型调用记录').toBeTruthy();
+  const call = (await agentTurnCalls('plain')).pop();
+  expect(call, '缺少 plain 场景的 agent 对话调用记录').toBeTruthy();
   return String(call!.systemContent);
 }
 
@@ -1802,10 +1807,15 @@ test('CX5 HITL 挂起期间注入：批准后的恢复轮带上下文', async ()
   await waitTerminal(rec);
   expect(rec.terminal?.type).toBe('done');
 
-  const hitlCalls = (await llmStats()).calls.filter(c => c.scenario === 'hitl-submit');
-  expect(hitlCalls.length).toBeGreaterThanOrEqual(2);
-  expect(String(hitlCalls[0].systemContent)).not.toContain(mark);
-  for (const call of hitlCalls.slice(1)) {
+  const hitlCalls = await agentTurnCalls('hitl-submit');
+  const askCalls = hitlCalls.filter(c => !(c.roles as string[]).includes('tool'));
+  const resumeCalls = hitlCalls.filter(c => (c.roles as string[]).includes('tool'));
+  expect(askCalls.length, '挂起轮应至少有一次模型调用').toBeGreaterThanOrEqual(1);
+  expect(resumeCalls.length, '恢复轮应至少有一次模型调用').toBeGreaterThanOrEqual(1);
+  for (const call of askCalls) {
+    expect(String(call.systemContent)).not.toContain(mark);
+  }
+  for (const call of resumeCalls) {
     expect(String(call.systemContent)).toContain(mark);
   }
 });
