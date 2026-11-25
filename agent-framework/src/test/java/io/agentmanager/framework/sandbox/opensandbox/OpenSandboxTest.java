@@ -2216,36 +2216,38 @@ class OpenSandboxTest {
     }
 
     @Test
-    void statWorkspaceFileShouldMatchEntryByBasenameAndReturnSize() throws Exception {
+    void statWorkspaceFileShouldReadTargetMetadataWithoutListingParentDirectory() throws Exception {
         var osb = mockOsb(mockExecution(0, "", ""));
         var files = osb.files();
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);
 
-        // 多级路径形态：relPath 相对 /workspace，entry.getPath 带目录前缀——按 basename 等值匹配
-        when(files.listDirectory("tree/sub"))
-            .thenReturn(List.of(fileEntry("/workspace/tree/sub/x.md", 42)));
+        when(files.readFileInfo(List.of("tree/sub/x.md")))
+            .thenReturn(Map.of("tree/sub/x.md", fileEntry("/workspace/tree/sub/x.md", 42)));
         assertEquals(42, sandbox.statWorkspaceFile("tree/sub/x.md"));
 
-        // 无目录前缀形态：根下文件，dir 为空串
-        when(files.listDirectory("")).thenReturn(List.of(fileEntry("MEMORY.md", 7)));
+        when(files.readFileInfo(List.of("MEMORY.md")))
+            .thenReturn(Map.of("MEMORY.md", fileEntry("MEMORY.md", 7)));
         assertEquals(7, sandbox.statWorkspaceFile("MEMORY.md"));
+        verify(files, never()).listDirectory(anyString());
     }
 
     @Test
-    void statWorkspaceFileShouldDegradeToMinusOneOnListFailureAndMissingEntry() throws Exception {
+    void statWorkspaceFileShouldTreatSymlinkAsUnknownAndDegradeOnFailure() throws Exception {
         var osb = mockOsb(mockExecution(0, "", ""));
         var files = osb.files();
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);
 
-        // 链式单次打桩（thenThrow → thenReturn），规避 throwing 桩重打桩触发旧桩（同 §execTranslate）
-        // 父目录列举失败（execd 5xx）：降级 -1 交调用方走 writeBounded 兜底
-        when(files.listDirectory("docs")).thenThrow(sandboxApi500())
-            .thenReturn(List.of(fileEntry("/workspace/docs/other.txt", 9)));
-        assertEquals(-1, sandbox.statWorkspaceFile("docs/report.pdf"), "列举失败降级 -1");
+        when(files.readFileInfo(List.of("docs/link")))
+            .thenReturn(Map.of("docs/link", new EntryInfo("docs/link", 511, "root", "root", 28,
+                java.time.OffsetDateTime.now(), java.time.OffsetDateTime.now(), "symlink")));
+        assertEquals(-1, sandbox.statWorkspaceFile("docs/link"),
+            "软链本身大小未知，不得把目标路径字符串长度当文件大小");
 
-        // 列举成功但入口缺失：同样 -1（缺失非错误，不抛）
-        assertEquals(-1, sandbox.statWorkspaceFile("docs/report.pdf"), "入口缺失降级 -1");
+        when(files.readFileInfo(List.of("docs/missing"))).thenReturn(Map.of());
+        assertEquals(-1, sandbox.statWorkspaceFile("docs/missing"), "元数据缺失降级 -1");
 
+        when(files.readFileInfo(List.of("docs/unavailable"))).thenThrow(sandboxApi500());
+        assertEquals(-1, sandbox.statWorkspaceFile("docs/unavailable"), "端点失败降级 -1");
         assertEquals(-1, sandbox.statWorkspaceFile(" "), "blank 路径防御性降级 -1");
     }
 

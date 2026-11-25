@@ -1690,18 +1690,21 @@ public class OpenSandbox extends AbstractBaseSandbox
         if (relPath.contains(SkillCacheScope.CACHE_DIR)) {
             hydrateScopedSkillCache();
         }
-        int slash = relPath.lastIndexOf('/');
-        var dir = slash >= 0 ? relPath.substring(0, slash) : "";
-        var name = slash >= 0 ? relPath.substring(slash + 1) : relPath;
         try {
-            for (var entry : osbSandbox.files().listDirectory(dir)) {
-                var p = entry.getPath();
-                var entryName = p != null && p.lastIndexOf('/') >= 0 ? p.substring(p.lastIndexOf('/') + 1) : p;
-                if (name.equals(entryName)) {
-                    return entry.getSize();
-                }
+            // readFileInfo 直接查询目标路径：不遍历父目录，因此可读取位于技能软链目录
+            // 下的真实文件元数据。对软链本身保持未知大小，避免把链接目标字符串长度
+            // 当作文件大小（Lstat 语义）。
+            var infoMap = osbSandbox.files().readFileInfo(List.of(relPath));
+            var info = infoMap == null ? null
+                : infoMap.getOrDefault(relPath, infoMap.size() == 1 ? infoMap.values().iterator().next() : null);
+            if (info == null) {
+                return -1;
             }
-            return -1;
+            var type = info.getType();
+            if (type != null && type.toString().toLowerCase(java.util.Locale.ROOT).contains("link")) {
+                return -1;
+            }
+            return info.getSize();
         } catch (Exception e) {
             log.debug("[sandbox-open] stat workspace file failed ({}): {}", relPath, e.getMessage());
             return -1;
