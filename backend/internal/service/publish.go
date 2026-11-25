@@ -600,8 +600,8 @@ type RepublishOptions struct {
 	PublicEndpoint *bool             // 对外入口开关
 	// ProvisionSandboxPool 编辑表单显式开启沙箱 → 自动 ensure {k8sName}-pool 并注入
 	// SANDBOX_POOL_REF（编辑链路只确保存在，容量沿用池现状/缺省）
-	ProvisionSandboxPool bool
-	Actor                uint // 审计用操作者（0 = 系统）
+	ProvisionSandboxPool bool `json:"-"`
+	Actor                uint `json:"-"`
 }
 
 // applySpec 将规格档直译进 ObjectParams resources（limits 同值，决议 4）。
@@ -664,6 +664,9 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		p, err := c.Packages.Get(*opt.PackageID)
 		if err != nil {
 			return nil, err
+		}
+		if p.WorkspaceID != 0 && p.WorkspaceID != svc.WorkspaceID {
+			return nil, ErrNotFound
 		}
 		newPkgID = *opt.PackageID
 		newPkg = p
