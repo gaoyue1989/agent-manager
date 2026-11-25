@@ -22,6 +22,7 @@ public class BrowserControlMiddleware implements MiddlewareBase {
     private static final Logger log = LoggerFactory.getLogger(BrowserControlMiddleware.class);
 
     public static final String EXECUTE_TOOL = "execute";
+    public static final String REQUEST_TAKEOVER_TOOL = "request_browser_takeover";
 
     static final String DENY_REASON = "Error: the sandbox is under human takeover; all sandbox command "
         + "execution by the agent is paused until control is returned. The command was not executed. "
@@ -48,8 +49,11 @@ public class BrowserControlMiddleware implements MiddlewareBase {
         if (ctx == null || calls == null || calls.isEmpty()) {
             return next.apply(input);
         }
+        boolean batchRequestsTakeover = calls.stream()
+            .anyMatch(c -> REQUEST_TAKEOVER_TOOL.equals(c.getName()));
         var sessionId = sessionKeyResolver.canonicalSessionId(ctx);
-        if (sessionId == null || sessionId.isBlank() || !control.isHumanControlled(sessionId)) {
+        boolean humanControlled = sessionId != null && !sessionId.isBlank() && control.isHumanControlled(sessionId);
+        if (!batchRequestsTakeover && !humanControlled) {
             return next.apply(input);
         }
         var denied = new ArrayList<ToolUseBlock>();
