@@ -781,4 +781,25 @@ class ThreadControllerTest {
         assertEquals(404, response.getStatusCode().value());
         assertEquals("thread_not_found", response.getBody().get("error"));
     }
+
+    @Test
+    void llmCallsShouldRejectLeadingSpaceReservedNamespaceAndPrefixForgery() {
+        when(sessionUserStore.findUserIdBySession("webui-alice1")).thenReturn("u-1001");
+        llmLogger.logCall("webui-alice1", Map.of("system", "secret-ctx"), Map.of("text", "ok"));
+
+        var forgedUnderscore = controller.llmCalls("x_webui-alice1", "u-2002");
+        assertEquals(200, forgedUnderscore.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        var forgedCalls = (List<?>) forgedUnderscore.getBody().get("calls");
+        assertTrue(forgedCalls.isEmpty());
+
+        var forgedColon = controller.llmCalls("x:webui-alice1", "u-2002");
+        assertEquals(200, forgedColon.getStatusCode().value());
+        @SuppressWarnings("unchecked")
+        var forgedColonCalls = (List<?>) forgedColon.getBody().get("calls");
+        assertTrue(forgedColonCalls.isEmpty());
+
+        var leadingSpaceReserved = controller.llmCalls(" u-1001", "u-2002");
+        assertEquals(404, leadingSpaceReserved.getStatusCode().value());
+    }
 }
