@@ -56,8 +56,7 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
             // ctx.userId=网关 peer（=前端 sid，=turn_lease 键）、A2A 链路=真实用户，
             // 与守卫注入同值——守卫失效组合下的兜底窗口。同一值也是上传注入的会话过滤键
             // （issue #345：与 file_asset.session_id 的 bind-at-use 绑定值同命名空间）
-            var pendingSessionId = ctx.getUserId() != null && !ctx.getUserId().isBlank()
-                ? ctx.getUserId() : ctx.getSessionId();
+            var pendingSessionId = resolvePendingSessionId(ctx);
             spec.setPendingSessionId(pendingSessionId);
             // SDK 技能缓存 scope（.skills-cache/<scope>）：与 HarnessSkillMiddleware.scopeKeyFor 同源，
             // 用于沙箱投影只投放当前会话的 scope 目录（否则整棵 .skills-cache 历史 scope 全灌进容器）
@@ -144,5 +143,16 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
         }
         var sessionId = ctx.getSessionId();
         return sessionId != null && !sessionId.isBlank() ? sessionId : null;
+    }
+
+    private String resolvePendingSessionId(RuntimeContext ctx) {
+        if (sessionKeyResolver != null) {
+            var canonical = sessionKeyResolver.canonicalSessionId(ctx);
+            if (canonical != null && !canonical.isBlank()) {
+                return canonical;
+            }
+        }
+        return ctx.getUserId() != null && !ctx.getUserId().isBlank()
+            ? ctx.getUserId() : ctx.getSessionId();
     }
 }
