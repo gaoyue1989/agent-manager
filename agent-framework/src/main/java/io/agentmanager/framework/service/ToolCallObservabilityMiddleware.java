@@ -81,7 +81,7 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         String sessionId = canonicalSessionId(ctx);
         return next.apply(input)
             .doOnNext(evt -> {
-                if (evt instanceof ToolResultEndEvent end) {
+                if (evt instanceof ToolResultEndEvent end && !AgentEventSseSerializer.isRemoteForwarded(evt)) {
                     boolean success = end.getState() == ToolResultState.SUCCESS;
                     count(end.getToolCallName(), success);
                     auditResult(end, sessionId, end.getToolCallName(), end.getToolCallId(),

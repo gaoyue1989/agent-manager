@@ -2264,8 +2264,8 @@ test('DR10 多 text 块直返：SSE 块间换行分隔，与 /history 拼接逐�
   expect(String(toolResults(frames).find(r => r.toolCallId === start!.toolCallId)?.state)).toBe('SUCCESS');
 
   const joined = directTextOf(frames);
-  expect(joined, '两块之间应以换行分隔（对齐 /history extractContentText 口径）').toBe(
-    '订单确认卡上半部分：机械键盘 x1、USB-C 数据线 x2\n订单确认卡下半部分：合计 409.0 元，确认后即可发货');
+  expect(joined, '直返多块文本应按原始分块无分隔拼接（对齐 /history 与 TOOL_RESULT_TEXT_DELTA，避免破坏跨块 JSON，issue #586）').toBe(
+    '订单确认卡上半部分：机械键盘 x1、USB-C 数据线 x2订单确认卡下半部分：合计 409.0 元，确认后即可发货');
   expect(frames.filter(f => f.type === 'MODEL_CALL_START'), '本轮只应有一次模型调用').toHaveLength(1);
   expect(await dialogueCalls('direct-two-part'), 'mock LLM 只应收到 1 次主对话请求').toBe(1);
 

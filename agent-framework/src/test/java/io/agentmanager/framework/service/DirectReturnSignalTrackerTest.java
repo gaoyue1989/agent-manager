@@ -116,4 +116,58 @@ class DirectReturnSignalTrackerTest {
 
         assertEquals("TEXT_BLOCK_DELTA", run.single().type());
     }
+
+    @Test
+    void confirmStreamWithoutToolCallStartShouldEmitSignal() {
+        var run = feed(META,
+            new ToolResultEndEvent(RID, "call-1", "mcp__chart__render_png", ToolResultState.SUCCESS),
+            new AgentEndEvent(RID));
+
+        assertEquals(1, run.frames().size());
+        assertEquals("TEXT_BLOCK_DELTA", run.single().type());
+    }
+
+    @Test
+    void mixedBatchDirectErrorAndNormalSuccessShouldNotEmitSignal() {
+        var run = feed(META,
+            new ToolCallStartEvent(RID, "call-1", "mcp__chart__render_png"),
+            new ToolCallStartEvent(RID, "call-2", "mcp__chart__plain"),
+            new ToolResultEndEvent(RID, "call-1", "mcp__chart__render_png", ToolResultState.ERROR),
+            new ToolResultEndEvent(RID, "call-2", "mcp__chart__plain", ToolResultState.SUCCESS),
+            new AgentEndEvent(RID));
+
+        assertTrue(run.frames().isEmpty());
+    }
+
+    @Test
+    void mixedBatchDirectSuccessAndNormalSuccessShouldNotEmitSignal() {
+        var run = feed(META,
+            new ToolResultEndEvent(RID, "call-1", "mcp__chart__render_png", ToolResultState.SUCCESS),
+            new ToolResultEndEvent(RID, "call-2", "mcp__chart__plain", ToolResultState.SUCCESS),
+            new AgentEndEvent(RID));
+
+        assertTrue(run.frames().isEmpty());
+    }
+
+    @Test
+    void multiStepDirectErrorThenNormalSuccessShouldNotEmitSignal() {
+        var run = feed(META,
+            new ToolCallStartEvent(RID, "call-1", "mcp__chart__render_png"),
+            new ToolResultEndEvent(RID, "call-1", "mcp__chart__render_png", ToolResultState.ERROR),
+            new ModelCallStartEvent(RID),
+            new ToolCallStartEvent(RID, "call-2", "mcp__chart__plain"),
+            new ToolResultEndEvent(RID, "call-2", "mcp__chart__plain", ToolResultState.SUCCESS),
+            new AgentEndEvent(RID));
+
+        assertTrue(run.frames().isEmpty());
+    }
+
+    @Test
+    void remoteForwardedDirectReturnEndShouldBeIgnored() {
+        var forwarded = new ToolResultEndEvent(RID, "call-1", "mcp__chart__render_png", ToolResultState.SUCCESS);
+        forwarded.withSource("child-agent");
+        var run = feed(META, forwarded, new AgentEndEvent(RID));
+
+        assertTrue(run.frames().isEmpty());
+    }
 }
