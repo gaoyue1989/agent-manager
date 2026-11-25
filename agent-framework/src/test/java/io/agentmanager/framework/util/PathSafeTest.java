@@ -93,4 +93,10 @@ class PathSafeTest {
     void windowsBackslashReplaced() {
         assertEquals("a_b_c", invoke("a\\b\\c"));
     }
+
+    @Test
+    void percentWildcardSanitized() {
+        assertEquals("unknown", invoke("%"));
+        assertEquals("w_", invoke("w%"));
+    }
 }

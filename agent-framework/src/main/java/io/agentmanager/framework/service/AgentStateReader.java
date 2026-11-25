@@ -49,17 +49,18 @@ public class AgentStateReader {
              var stmt = conn.prepareStatement(
                  "SELECT state_data FROM agent_state "
                      + "WHERE (session_id = ? "
-                     +   "OR session_id LIKE CONCAT(?, ':%') "
-                     +   "OR session_id LIKE CONCAT(?, '__%') "
-                     +   "OR session_id LIKE CONCAT('%:', ?) "
-                     +   "OR session_id LIKE CONCAT('%__', ?)) "
+                     +   "OR session_id LIKE CONCAT(?, ':%') ESCAPE '!' "
+                     +   "OR session_id LIKE CONCAT(?, '!_!_%') ESCAPE '!' "
+                     +   "OR session_id LIKE CONCAT('%:', ?) ESCAPE '!' "
+                     +   "OR session_id LIKE CONCAT('%!_!_', ?) ESCAPE '!') "
                      + "AND state_key = 'agent_state' "
                      + "ORDER BY item_index")) {
+            var escaped = escapeLike(sessionId);
             stmt.setString(1, sessionId);
-            stmt.setString(2, sessionId);
-            stmt.setString(3, sessionId);
-            stmt.setString(4, sessionId);
-            stmt.setString(5, sessionId);
+            stmt.setString(2, escaped);
+            stmt.setString(3, escaped);
+            stmt.setString(4, escaped);
+            stmt.setString(5, escaped);
             try (var rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     fragments.add(rs.getString("state_data"));
@@ -185,5 +186,9 @@ public class AgentStateReader {
                 StateDataParser.extractRuntimeIdentity(stateData));
         }
         return emptySnapshot();
+    }
+
+    static String escapeLike(String raw) {
+        return raw.replace("!", "!!").replace("%", "!%").replace("_", "!_");
     }
 }
