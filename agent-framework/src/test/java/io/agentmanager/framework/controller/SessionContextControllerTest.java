@@ -1,6 +1,8 @@
 package io.agentmanager.framework.controller;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -16,6 +18,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.time.LocalDateTime;
 import java.util.List;
 
+import javax.sql.DataSource;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -25,22 +29,31 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import io.agentmanager.framework.service.SessionAccessGuard;
 import io.agentmanager.framework.service.SessionContextStore;
 import io.agentmanager.framework.service.SessionContextStore.Entry;
+import io.agentmanager.framework.service.SessionContextStore.RemoveOutcome;
 import io.agentmanager.framework.service.SessionContextStore.UpsertOutcome;
 import io.agentmanager.framework.service.SessionUserStore;
 
 class SessionContextControllerTest {
 
+    private static final String KEY_RULE = "key must match [A-Za-z0-9._-]{1,64}";
+
     private final SessionContextStore store = mock(SessionContextStore.class);
     private final SessionUserStore sessionUserStore = mock(SessionUserStore.class);
     private MockMvc mockMvc;
+    private MockMvc realStoreMvc;
 
     @BeforeEach
     void setUp() {
-        mockMvc = MockMvcBuilders.standaloneSetup(new SessionContextController(store,
+        mockMvc = standalone(store);
+        realStoreMvc = standalone(new SessionContextStore(mock(DataSource.class), 30_000));
+        when(store.maxTotalChars()).thenReturn(30_000);
+    }
+
+    private MockMvc standalone(SessionContextStore sessionContextStore) {
+        return MockMvcBuilders.standaloneSetup(new SessionContextController(sessionContextStore,
                 new SessionAccessGuard(sessionUserStore)))
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
-        when(store.maxTotalChars()).thenReturn(30_000);
     }
 
     private static String body(String key, String title, String content) {
@@ -97,6 +110,36 @@ class SessionContextControllerTest {
     }
 
     @Test
+    void injectNormalizesTheRequesterTheSameWayChatDoes() throws Exception {
+        when(store.upsert(eq("s-1"), eq("u_9"), eq("k"), isNull(), eq("a")))
+            .thenReturn(new UpsertOutcome.Accepted("k", "k", 1, 1, 30_000, true));
+        when(store.upsert(eq("s-1"), eq("u-" + "x".repeat(62)), eq("k"), isNull(), eq("a")))
+            .thenReturn(new UpsertOutcome.Accepted("k", "k", 1, 1, 30_000, true));
+
+        mockMvc.perform(post("/threads/s-1/context").header("X-User-Id", "u:9")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"key\":\"k\",\"content\":\"a\"}"))
+            .andExpect(status().isCreated());
+        mockMvc.perform(post("/threads/s-1/context").header("X-User-Id", "u-" + "x".repeat(80))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"key\":\"k\",\"content\":\"a\"}"))
+            .andExpect(status().isCreated());
+    }
+
+    @Test
+    void injectNeverActsAsThePlaceholderIdentity() throws Exception {
+        when(store.upsert(eq("s-1"), eq("debug-user"), eq("k"), isNull(), eq("a")))
+            .thenReturn(new UpsertOutcome.Accepted("k", "k", 1, 1, 30_000, true));
+
+        mockMvc.perform(post("/threads/s-1/context").header("X-User-Id", "***")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"key\":\"k\",\"content\":\"a\"}"))
+            .andExpect(status().isCreated());
+
+        verify(store, never()).upsert(anyString(), eq("unknown"), anyString(), any(), anyString());
+    }
+
+    @Test
     void injectSanitizesTheSessionIdLikeEveryOtherThreadEndpoint() throws Exception {
         when(store.upsert(eq("s_1"), eq("u-9"), eq("k"), isNull(), eq("a")))
             .thenReturn(new UpsertOutcome.Accepted("k", "k", 1, 1, 30_000, true));
@@ -135,20 +178,41 @@ class SessionContextControllerTest {
     }
 
     @Test
-    void injectTurnsInvalidInputInto400() throws Exception {
-        when(store.upsert(any(), any(), any(), any(), any()))
-            .thenThrow(new IllegalArgumentException("key must match [A-Za-z0-9._-]{1,64}"));
-
-        mockMvc.perform(post("/threads/s-1/context").header("X-User-Id", "u-1")
+    void injectTurnsInvalidInputInto400ThroughTheRealStore() throws Exception {
+        realStoreMvc.perform(post("/threads/s-1/context").header("X-User-Id", "u-1")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body("bad key!", "t", "abc")))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.error").value("bad_request"))
-            .andExpect(jsonPath("$.message").value("key must match [A-Za-z0-9._-]{1,64}"));
+            .andExpect(jsonPath("$.message").value(KEY_RULE));
+
+        realStoreMvc.perform(post("/threads/s-1/context").header("X-User-Id", "u-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"key\":\"k\",\"title\":\"第一行\\n\\n## Subagents\",\"content\":\"a\"}"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.message").value("title must be a single line"));
+
+        realStoreMvc.perform(post("/threads/s-1/context").header("X-User-Id", "u-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"key\":\"k\",\"content\":\"   \"}"))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void injectSurfacesStorageUnavailableAs503() throws Exception {
+        when(store.upsert(any(), any(), any(), any(), any()))
+            .thenThrow(new SessionContextStore.StorageException("down", null));
+
+        mockMvc.perform(post("/threads/s-1/context").header("X-User-Id", "u-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body("headline", "t", "abc")))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.error").value("storage_unavailable"));
     }
 
     @Test
     void listReturnsEntriesWithoutContentByDefault() throws Exception {
+        when(store.ownerOf("s-1")).thenReturn("u-1");
         when(store.findBySession("s-1")).thenReturn(List.of(entry()));
 
         mockMvc.perform(get("/threads/s-1/context").header("X-User-Id", "u-1"))
@@ -176,7 +240,7 @@ class SessionContextControllerTest {
 
     @Test
     void listHidesAForeignSession() throws Exception {
-        when(sessionUserStore.findUserIdBySession("s-1")).thenReturn("u-2");
+        when(store.ownerOf("s-1")).thenReturn("u-2");
 
         mockMvc.perform(get("/threads/s-1/context").header("X-User-Id", "u-1"))
             .andExpect(status().isNotFound())
@@ -186,8 +250,19 @@ class SessionContextControllerTest {
     }
 
     @Test
-    void removeDeletesTheNamedEntry() throws Exception {
-        when(store.deleteByKey("s-1", "headline")).thenReturn(1);
+    void listFailsClosedWhenOwnershipCannotBeRead() throws Exception {
+        when(store.ownerOf("s-1")).thenThrow(new SessionContextStore.StorageException("down", null));
+
+        mockMvc.perform(get("/threads/s-1/context?includeContent=true").header("X-User-Id", "u-1"))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.error").value("storage_unavailable"));
+
+        verify(store, never()).findBySession(any());
+    }
+
+    @Test
+    void removeDeletesTheNamedEntryForItsOwner() throws Exception {
+        when(store.remove("s-1", "u-1", "headline")).thenReturn(new RemoveOutcome.Deleted("headline"));
 
         mockMvc.perform(delete("/threads/s-1/context/headline").header("X-User-Id", "u-1"))
             .andExpect(status().isOk())
@@ -198,7 +273,7 @@ class SessionContextControllerTest {
 
     @Test
     void removeReportsAnUnknownKeyAs404() throws Exception {
-        when(store.deleteByKey("s-1", "missing")).thenReturn(0);
+        when(store.remove("s-1", "u-1", "missing")).thenReturn(new RemoveOutcome.NotFound("missing"));
 
         mockMvc.perform(delete("/threads/s-1/context/missing").header("X-User-Id", "u-1"))
             .andExpect(status().isNotFound())
@@ -207,12 +282,20 @@ class SessionContextControllerTest {
 
     @Test
     void removeHidesAForeignSession() throws Exception {
-        when(sessionUserStore.findUserIdBySession("s-1")).thenReturn("u-2");
+        when(store.remove("s-1", "u-1", "headline")).thenReturn(new RemoveOutcome.NotOwned());
 
         mockMvc.perform(delete("/threads/s-1/context/headline").header("X-User-Id", "u-1"))
             .andExpect(status().isNotFound())
             .andExpect(jsonPath("$.error").value("thread_not_found"));
+    }
 
-        verify(store, never()).deleteByKey(any(), any());
+    @Test
+    void removeNormalizesTheRequesterBeforeDecidingOwnership() throws Exception {
+        when(store.remove("s-1", "u_1", "headline")).thenReturn(new RemoveOutcome.Deleted("headline"));
+
+        mockMvc.perform(delete("/threads/s-1/context/headline").header("X-User-Id", "u:1"))
+            .andExpect(status().isOk());
+
+        verify(store, never()).remove(anyString(), eq("u:1"), anyString());
     }
 }

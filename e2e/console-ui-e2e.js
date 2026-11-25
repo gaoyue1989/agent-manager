@@ -532,13 +532,21 @@ console.log("seeded");`);
       const ctxTitle = `E2E 今日头条 ${TS}`;
       const ctxMark = `E2E 上下文标记 ${TS}`;
       const ctxContent = `1. ${ctxMark}\n2. 第二条`;
-      const injected = await page.evaluate(async ({ shortName, sid, body }) => {
-        const r = await fetch(`/agent/${shortName}/threads/${encodeURIComponent(sid)}/context`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-        return r.status;
-      }, { shortName: detail.shortName, sid: ctxSid, body: { key: "headline", title: ctxTitle, content: ctxContent } });
-      if (injected !== 201) {
-        console.log(`  ⏭️ SKIP：业务镜像尚无会话上下文接口（注入 HTTP ${injected}），合并发布镜像后本节生效`);
+      const endpointProbe = await page.evaluate(async (p) => (await fetch(p)).status,
+        `/agent/${detail.shortName}/threads/ctx-probe-${TS}/context`);
+      let injected = null;
+      if (endpointProbe !== 404) {
+        injected = await page.evaluate(async ({ shortName, sid, body }) => {
+          const r = await fetch(`/agent/${shortName}/threads/${encodeURIComponent(sid)}/context`, {
+            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+          return r.status;
+        }, { shortName: detail.shortName, sid: ctxSid, body: { key: "headline", title: ctxTitle, content: ctxContent } });
+        check("数据面注入会话上下文 201", injected === 201, `http=${injected}`);
+      }
+      if (endpointProbe === 404) {
+        console.log("  ⏭️ SKIP：业务镜像尚无会话上下文接口（GET /threads/{sid}/context 返回 404），合并发布镜像后本节生效");
+      } else if (injected !== 201) {
+        console.log("  ⏭️ 注入未成功（已计 FAIL），跳过卡片断言");
       } else {
         const cardText = (pane, sel) => page.$eval(`${testid(pane)} ${testid(sel)}`, (el) => (el.textContent || "").trim()).catch(() => "");
         const cardBody = (pane) => page.$(`${testid(pane)} ${testid("context-card-content")}`);

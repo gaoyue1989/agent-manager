@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,7 +21,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.SessionAccessGuard;
 import io.agentmanager.framework.service.SessionContextStore;
+import io.agentmanager.framework.service.SessionContextStore.RemoveOutcome;
 import io.agentmanager.framework.service.SessionContextStore.UpsertOutcome;
+import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.util.PathSafe;
 
 @RestController
@@ -47,7 +50,7 @@ public class SessionContextController {
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestBody InjectRequest request) {
         var sid = PathSafe.sanitize(sessionId);
-        var requester = sessionAccessGuard.resolveRequester(headerUserId);
+        var requester = requester(headerUserId);
         var outcome = sessionContextStore.upsert(sid, requester, request.key(), request.title(), request.content());
         if (outcome instanceof UpsertOutcome.BudgetExceeded exceeded) {
             var body = new LinkedHashMap<String, Object>();
@@ -83,7 +86,8 @@ public class SessionContextController {
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestParam(value = "includeContent", required = false, defaultValue = "false") boolean includeContent) {
         var sid = PathSafe.sanitize(sessionId);
-        if (!sessionAccessGuard.ownedBy(sid, headerUserId)) {
+        var requester = requester(headerUserId);
+        if (!SessionAccessGuard.isOwner(sessionContextStore.ownerOf(sid), requester)) {
             return threadNotFound(sid);
         }
         var entries = new ArrayList<Map<String, Object>>();
@@ -115,10 +119,13 @@ public class SessionContextController {
             @PathVariable String key,
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
         var sid = PathSafe.sanitize(sessionId);
-        if (!sessionAccessGuard.ownedBy(sid, headerUserId)) {
+        var requester = requester(headerUserId);
+        var outcome = sessionContextStore.remove(sid, requester, key);
+        if (outcome instanceof RemoveOutcome.NotOwned) {
+            log.info("[session-context] reject foreign session: sid={}, requester={}", sid, requester);
             return threadNotFound(sid);
         }
-        if (sessionContextStore.deleteByKey(sid, key) == 0) {
+        if (outcome instanceof RemoveOutcome.NotFound) {
             var body = new LinkedHashMap<String, Object>();
             body.put("error", "context_not_found");
             body.put("message", "Context '" + key + "' not found in session '" + sid + "'");
@@ -130,6 +137,21 @@ public class SessionContextController {
         body.put("key", key);
         body.put("deleted", true);
         return ResponseEntity.ok(body);
+    }
+
+    @ExceptionHandler(SessionContextStore.StorageException.class)
+    public ResponseEntity<Map<String, Object>> storageUnavailable(SessionContextStore.StorageException e) {
+        log.error("[session-context] storage unavailable: {}", e.getMessage());
+        var body = new LinkedHashMap<String, Object>();
+        body.put("error", "storage_unavailable");
+        body.put("message", "Session context storage is unavailable, retry later");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
+    }
+
+    private String requester(String headerUserId) {
+        var sanitized = PathSafe.sanitize(sessionAccessGuard.resolveRequester(headerUserId));
+        return SessionUserStore.PLACEHOLDER_USER.equals(sanitized)
+            ? SessionAccessGuard.ANONYMOUS_USER : sanitized;
     }
 
     private static ResponseEntity<Map<String, Object>> threadNotFound(String sessionId) {

@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -14,15 +15,21 @@ public class SessionContextStore {
     private static final Pattern KEY_PATTERN = Pattern.compile("[A-Za-z0-9._-]{1,64}");
     private static final int MAX_TITLE_CHARS = 255;
     private static final String STORAGE_ERROR = "session context store unavailable";
+    static final int ORPHAN_BATCH_SIZE = 1000;
+    static final int ORPHAN_MAX_BATCHES = 20;
 
     private static final String CLAIM_SESSION_SQL = """
         INSERT INTO session_user (session_id, user_id, created_at, updated_at)
         VALUES (?, ?, NOW(3), NOW(3))
-        ON DUPLICATE KEY UPDATE session_id = session_id
+        ON DUPLICATE KEY UPDATE updated_at = NOW(3)
         """;
 
     private static final String LOCK_OWNER_SQL = """
         SELECT user_id FROM session_user WHERE session_id = ? FOR UPDATE
+        """;
+
+    private static final String FIND_OWNER_SQL = """
+        SELECT user_id FROM session_user WHERE session_id = ?
         """;
 
     private static final String TAKE_OWNERSHIP_SQL = """
@@ -53,10 +60,12 @@ public class SessionContextStore {
         DELETE FROM session_context WHERE session_id = ?
         """;
 
-    private static final String DELETE_ORPHANS_SQL = """
-        DELETE c FROM session_context c
+    private static final String FIND_ORPHAN_IDS_SQL = """
+        SELECT c.id FROM session_context c
         LEFT JOIN session_user u ON u.session_id = c.session_id
         WHERE u.session_id IS NULL
+        ORDER BY c.id
+        LIMIT ?
         """;
 
     private final DataSource dataSource;
@@ -87,11 +96,29 @@ public class SessionContextStore {
         }
     }
 
+    public sealed interface RemoveOutcome {
+
+        record Deleted(String key) implements RemoveOutcome {
+        }
+
+        record NotFound(String key) implements RemoveOutcome {
+        }
+
+        record NotOwned() implements RemoveOutcome {
+        }
+    }
+
     public static class StorageException extends RuntimeException {
 
         public StorageException(String message, Throwable cause) {
             super(message, cause);
         }
+    }
+
+    @FunctionalInterface
+    private interface TransactionWork<T> {
+
+        T run(Connection conn) throws SQLException;
     }
 
     private record LockedEntries(int otherChars, boolean keyExists) {
@@ -107,28 +134,75 @@ public class SessionContextStore {
             return new UpsertOutcome.NotOwned();
         }
         var effectiveTitle = title == null || title.isBlank() ? key : title;
-        try (var conn = dataSource.getConnection()) {
-            var originalAutoCommit = conn.getAutoCommit();
-            conn.setAutoCommit(false);
-            UpsertOutcome outcome;
-            try {
-                outcome = writeLocked(conn, sessionId, requester, key, effectiveTitle, content);
-                if (outcome instanceof UpsertOutcome.Accepted) {
-                    conn.commit();
-                } else {
-                    conn.rollback();
-                }
-            } catch (SQLException | RuntimeException e) {
-                try {
-                    conn.rollback();
-                } catch (SQLException rollbackError) {
-                    e.addSuppressed(rollbackError);
-                }
-                throw e;
-            } finally {
-                conn.setAutoCommit(originalAutoCommit);
+        return inTransaction(conn -> {
+            try (var claim = conn.prepareStatement(CLAIM_SESSION_SQL)) {
+                claim.setString(1, sessionId);
+                claim.setString(2, requester);
+                claim.executeUpdate();
             }
-            return outcome;
+            var owner = lockOwner(conn, sessionId);
+            if (!SessionAccessGuard.isOwner(owner, requester)) {
+                conn.rollback();
+                return new UpsertOutcome.NotOwned();
+            }
+            if (SessionUserStore.PLACEHOLDER_USER.equals(owner)) {
+                try (var take = conn.prepareStatement(TAKE_OWNERSHIP_SQL)) {
+                    take.setString(1, requester);
+                    take.setString(2, sessionId);
+                    take.executeUpdate();
+                }
+            }
+            var locked = lockEntries(conn, sessionId, key);
+            var totalChars = locked.otherChars() + content.length();
+            if (totalChars > maxTotalChars) {
+                conn.rollback();
+                return new UpsertOutcome.BudgetExceeded(content.length(), totalChars, maxTotalChars);
+            }
+            try (var write = conn.prepareStatement(WRITE_SQL)) {
+                write.setString(1, sessionId);
+                write.setString(2, key);
+                write.setString(3, effectiveTitle);
+                write.setString(4, content);
+                write.setInt(5, content.length());
+                write.setString(6, requester);
+                write.executeUpdate();
+            }
+            return new UpsertOutcome.Accepted(key, effectiveTitle, content.length(), totalChars, maxTotalChars,
+                !locked.keyExists());
+        });
+    }
+
+    public RemoveOutcome remove(String sessionId, String requester, String key) {
+        if (sessionId == null || sessionId.isBlank() || requester == null || requester.isBlank()
+                || key == null || key.isBlank()) {
+            throw new IllegalArgumentException("sessionId, requester and key are required");
+        }
+        if (SessionKeyNamespace.isReservedSessionId(sessionId)) {
+            return new RemoveOutcome.NotOwned();
+        }
+        return inTransaction(conn -> {
+            var owner = lockOwner(conn, sessionId);
+            if (!SessionAccessGuard.isOwner(owner, requester)) {
+                conn.rollback();
+                return new RemoveOutcome.NotOwned();
+            }
+            int rows;
+            try (var del = conn.prepareStatement(DELETE_BY_KEY_SQL)) {
+                del.setString(1, sessionId);
+                del.setString(2, key);
+                rows = del.executeUpdate();
+            }
+            return rows == 0 ? new RemoveOutcome.NotFound(key) : new RemoveOutcome.Deleted(key);
+        });
+    }
+
+    public String ownerOf(String sessionId) {
+        try (var conn = dataSource.getConnection();
+             var query = conn.prepareStatement(FIND_OWNER_SQL)) {
+            query.setString(1, sessionId);
+            try (var rows = query.executeQuery()) {
+                return rows.next() ? rows.getString(1) : null;
+            }
         } catch (SQLException e) {
             throw new StorageException(STORAGE_ERROR, e);
         }
@@ -152,17 +226,6 @@ public class SessionContextStore {
         }
     }
 
-    public int deleteByKey(String sessionId, String key) {
-        try (var conn = dataSource.getConnection();
-             var del = conn.prepareStatement(DELETE_BY_KEY_SQL)) {
-            del.setString(1, sessionId);
-            del.setString(2, key);
-            return del.executeUpdate();
-        } catch (SQLException e) {
-            throw new StorageException(STORAGE_ERROR, e);
-        }
-    }
-
     public int deleteBySession(String sessionId) {
         try (var conn = dataSource.getConnection();
              var del = conn.prepareStatement(DELETE_BY_SESSION_SQL)) {
@@ -174,57 +237,80 @@ public class SessionContextStore {
     }
 
     public int deleteOrphans() {
-        try (var conn = dataSource.getConnection();
-             var del = conn.prepareStatement(DELETE_ORPHANS_SQL)) {
-            return del.executeUpdate();
+        int removed = 0;
+        try (var conn = dataSource.getConnection()) {
+            for (int batch = 0; batch < ORPHAN_MAX_BATCHES; batch++) {
+                var ids = new ArrayList<Long>();
+                try (var query = conn.prepareStatement(FIND_ORPHAN_IDS_SQL)) {
+                    query.setInt(1, ORPHAN_BATCH_SIZE);
+                    try (var rows = query.executeQuery()) {
+                        while (rows.next()) {
+                            ids.add(rows.getLong(1));
+                        }
+                    }
+                }
+                if (ids.isEmpty()) {
+                    return removed;
+                }
+                var placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
+                try (var del = conn.prepareStatement("DELETE FROM session_context WHERE id IN (" + placeholders + ")")) {
+                    for (int i = 0; i < ids.size(); i++) {
+                        del.setLong(i + 1, ids.get(i));
+                    }
+                    removed += del.executeUpdate();
+                }
+                if (ids.size() < ORPHAN_BATCH_SIZE) {
+                    return removed;
+                }
+            }
+            return removed;
         } catch (SQLException e) {
             throw new StorageException(STORAGE_ERROR, e);
         }
     }
 
-    private UpsertOutcome writeLocked(Connection conn, String sessionId, String requester,
-                                      String key, String title, String content) throws SQLException {
-        try (var claim = conn.prepareStatement(CLAIM_SESSION_SQL)) {
-            claim.setString(1, sessionId);
-            claim.setString(2, requester);
-            claim.executeUpdate();
+    private <T> T inTransaction(TransactionWork<T> work) {
+        try (var conn = dataSource.getConnection()) {
+            var originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            Throwable failure = null;
+            try {
+                var outcome = work.run(conn);
+                conn.commit();
+                return outcome;
+            } catch (SQLException | RuntimeException e) {
+                failure = e;
+                try {
+                    conn.rollback();
+                } catch (SQLException rollbackError) {
+                    e.addSuppressed(rollbackError);
+                }
+                throw e;
+            } finally {
+                try {
+                    conn.setAutoCommit(originalAutoCommit);
+                } catch (SQLException restoreError) {
+                    if (failure == null) {
+                        throw new StorageException(STORAGE_ERROR, restoreError);
+                    }
+                    failure.addSuppressed(restoreError);
+                }
+            }
+        } catch (SQLException e) {
+            throw new StorageException(STORAGE_ERROR, e);
         }
-        String owner;
+    }
+
+    private static String lockOwner(Connection conn, String sessionId) throws SQLException {
         try (var lock = conn.prepareStatement(LOCK_OWNER_SQL)) {
             lock.setString(1, sessionId);
             try (var rows = lock.executeQuery()) {
-                owner = rows.next() ? rows.getString(1) : null;
+                return rows.next() ? rows.getString(1) : null;
             }
         }
-        if (!SessionAccessGuard.isOwner(owner, requester)) {
-            return new UpsertOutcome.NotOwned();
-        }
-        if (SessionUserStore.PLACEHOLDER_USER.equals(owner)) {
-            try (var take = conn.prepareStatement(TAKE_OWNERSHIP_SQL)) {
-                take.setString(1, requester);
-                take.setString(2, sessionId);
-                take.executeUpdate();
-            }
-        }
-        var locked = lockEntries(conn, sessionId, key);
-        var totalChars = locked.otherChars() + content.length();
-        if (totalChars > maxTotalChars) {
-            return new UpsertOutcome.BudgetExceeded(content.length(), totalChars, maxTotalChars);
-        }
-        try (var write = conn.prepareStatement(WRITE_SQL)) {
-            write.setString(1, sessionId);
-            write.setString(2, key);
-            write.setString(3, title);
-            write.setString(4, content);
-            write.setInt(5, content.length());
-            write.setString(6, requester);
-            write.executeUpdate();
-        }
-        return new UpsertOutcome.Accepted(key, title, content.length(), totalChars, maxTotalChars,
-            !locked.keyExists());
     }
 
-    private LockedEntries lockEntries(Connection conn, String sessionId, String key) throws SQLException {
+    private static LockedEntries lockEntries(Connection conn, String sessionId, String key) throws SQLException {
         int otherChars = 0;
         boolean keyExists = false;
         try (var lock = conn.prepareStatement(LOCK_ENTRIES_SQL)) {
@@ -254,6 +340,9 @@ public class SessionContextStore {
         }
         if (title != null && title.length() > MAX_TITLE_CHARS) {
             throw new IllegalArgumentException("title must not exceed " + MAX_TITLE_CHARS + " characters");
+        }
+        if (title != null && (title.indexOf('\n') >= 0 || title.indexOf('\r') >= 0)) {
+            throw new IllegalArgumentException("title must be a single line");
         }
         if (content == null || content.isBlank()) {
             throw new IllegalArgumentException("content is required");
