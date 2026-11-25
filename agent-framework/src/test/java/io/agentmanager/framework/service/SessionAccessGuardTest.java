@@ -39,6 +39,14 @@ class SessionAccessGuardTest {
     }
 
     @Test
+    void isOwnerIsThePredicateBehindOwnedBy() {
+        assertTrue(SessionAccessGuard.isOwner(null, "u-1"));
+        assertTrue(SessionAccessGuard.isOwner(SessionUserStore.PLACEHOLDER_USER, "u-2"));
+        assertTrue(SessionAccessGuard.isOwner("u-1", "u-1"));
+        assertFalse(SessionAccessGuard.isOwner("u-1", "u-2"));
+    }
+
+    @Test
     void establishedOwnerRequiresExplicitOwnershipRow() {
         when(store.findUserIdBySession("s-1")).thenReturn("u-1");
         when(store.findUserIdBySession("s-ph")).thenReturn(SessionUserStore.PLACEHOLDER_USER);

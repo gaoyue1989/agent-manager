@@ -683,6 +683,13 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.service.ToolAuditStore(dataSource, retention);
     }
 
+    @Bean
+    public io.agentmanager.framework.service.SessionContextStore sessionContextStore(DataSource dataSource,
+            io.agentmanager.framework.config.SessionContextConfig sessionContextConfig) {
+        return new io.agentmanager.framework.service.SessionContextStore(dataSource,
+            sessionContextConfig.maxTotalChars());
+    }
+
     /**
      * session_event 的 Redis Streams 存储层（只有它需要真 Redis）。
      * 惰性连接：这里不建连，所以 Redis 不可达不会影响启动。
@@ -742,6 +749,7 @@ public class AgentScopeConfig {
     @Bean
     public AgentRuntimeService agentRuntimeService(
         OafConfig oafConfig,
+        OafConfigHolder oafConfigHolder,
         HarnessAgent harnessAgent,
         List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger,
@@ -766,7 +774,7 @@ public class AgentScopeConfig {
         if (isolation) {
             // 会话级工厂与 OafReloadService 的 B 路径同参（build 入参完全一致）；
             // reload 时 OafReloadService 会更新此工厂并清缓存（世代失效）
-            service.setSessionAgentFactory(() -> harnessAgentFactory.build(oafConfig,
+            service.setSessionAgentFactory(() -> harnessAgentFactory.build(oafConfigHolder.get(),
                 distributedStore, llmLogger, uiContextStore, sessionUserStore, modelCatalog,
                 sandboxSpecProvider.getIfAvailable()));
             log.info("Per-session agent isolation enabled (cacheMax={}, ttlMinutes={}m)",

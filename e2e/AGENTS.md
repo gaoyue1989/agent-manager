@@ -9,7 +9,7 @@
 | `console-split/lib.sh` | 公共断言/登录/空间种子/`wait_status`/legacy `AUTH_TOKEN` 通道/`resolve_llm_env`/`runtime_is_real` |
 | `m0-auth.sh` | 登录三分支、cookie 属性、me 双通道、路由分层、introspect、logout、权限撤销即时生效（#148） |
 | `m1-governance.sh` | 用户/工作空间 CRUD、成员矩阵、bind 三态、删除保护、审计、owner 转移（#157）、长度上限（#149） |
-| `m2-console-foundation.sh` | `resolveWorkspace` 矩阵、summary/agents 视图、templates/packages/images、proxy 身份注入 |
+| `m2-console-foundation.sh` | `resolveWorkspace` 矩阵、summary/agents 视图、templates/packages/images、proxy 身份注入、会话上下文注入经统一入口（先正向探测查询接口，只有接口不存在才跳过，其余严格断言） |
 | `m3-agent-create.sh` | Agent 创建校验矩阵、preview-name、创建→running→A2A、包契约、env 分级、导入模式（#161）、模板导入、纳管（adopt）、子 Agent/远程凭证、多副本/非公开入口、编辑 copy-on-write、member 403 |
 | `m4-agent-detail.sh` | 详情聚合（pods/events/envSecretKeys）、列表过滤、edit-form 回显、生命周期状态机、版本链/升级、非成员 404、member 只读矩阵、删除副作用（包保留/refCount=0/K8s 清理） |
 | `m5-model-connection.sh` | CRUD/掩码/唯一性/校验、test 成功与失败、PATCH→pending→重新下发 synced、跨空间同名、usage、`/models` 回读、会话级模型切换（真实运行时）、默认连接删除保护 |
@@ -30,6 +30,10 @@
 登录 → 工作空间 → Agent 列表/创建（import 模式）/详情/编辑 → 模型连接新建 → MCP 连接器新建/权限表 →
 技能中心（我的/广场/使用情况）→ 沙箱配置总览。数据准备走 API（含沙箱 Agent + 技能引用），
 浏览器只驱动 UI；`E2E_AGENT_RUNTIME=mock` 时跳过会话/调试类断言。
+
+真实运行时下还覆盖会话回放，以及会话上下文卡片：经数据面注入后，回放面板与调试面板顶部渲染卡片
+（标题、默认展开的正文、可折叠、仅上下文的会话仍是欢迎态）。业务镜像取 Docker Hub 上的最新发布件，
+跳过条件是正向探测：查询接口对全新会话恒 200，只有接口不存在（404）才跳过；探测通过后一律严格断言，合并发布镜像后自动生效。
 
 ### 平台发布链路 / 业务运行时
 

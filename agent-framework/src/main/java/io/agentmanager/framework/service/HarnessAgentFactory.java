@@ -126,6 +126,9 @@ public class HarnessAgentFactory {
     @Autowired(required = false)
     private io.agentmanager.framework.browser.BrowserControlService browserControlService;
 
+    @Autowired(required = false)
+    private SessionContextStore sessionContextStore;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -287,7 +290,12 @@ public class HarnessAgentFactory {
                 // 远程子 agent 动态 DENY（travel-fulfillment F16/§6.1）：协议任务携带的
                 // context.deny_rules 按工具名拦截执行；非协议轮次无该 RuntimeContext 属性，
                 // 零开销直通
-                .middleware(new io.agentmanager.framework.service.protocol.ProtocolDenyRulesMiddleware())
+                .middleware(new io.agentmanager.framework.service.protocol.ProtocolDenyRulesMiddleware());
+            if (browserControlService != null) {
+                builder.middleware(new io.agentmanager.framework.browser.BrowserControlMiddleware(
+                    browserControlService, sessionKeyResolver));
+            }
+            builder
                 // 工具调用观测（指标计数 + 审计单一写点，覆盖全部协议链路）：置于工具过滤链
                 // 内侧（ToolFilter/ProtocolDeny 短路不经过本层），只计真实执行的调用；
                 // sessionKeyResolver 复用上方同一实例（turn 级 memo 共享）；toolkit 名单经
@@ -347,12 +355,6 @@ public class HarnessAgentFactory {
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
-
-            // 人工接管闸门（agent.browser.enabled 时装配）：控制权在人工侧时拒绝沙箱命令执行
-            if (browserControlService != null) {
-                builder.middleware(new io.agentmanager.framework.browser.BrowserControlMiddleware(
-                    browserControlService, sessionKeyResolver));
-            }
 
             // 回合起始用户输入归档（2026-10-12）：SDK 整轮结束才落库 agent_state/session_message，
             // turn 执行中 /history 为空——刷新/进历史会话详情前置归档用户提问，助手回复待
@@ -440,6 +442,10 @@ public class HarnessAgentFactory {
                 } else {
                     log.info("Memory fully disabled (agent.harness.memory-enabled=false)");
                 }
+            }
+
+            if (sessionContextStore != null) {
+                builder.middleware(new SessionContextInjectionMiddleware(sessionContextStore, sessionKeyResolver));
             }
 
             var agent = builder

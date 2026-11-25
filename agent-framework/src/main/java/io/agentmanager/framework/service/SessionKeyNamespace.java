@@ -31,9 +31,12 @@ public final class SessionKeyNamespace {
 
     /** 用户身份命名空间的值（u-* 或匿名 debug-user） */
     public static boolean isUserIdentity(String value) {
-        return value != null
-            && (value.startsWith(USER_IDENTITY_PREFIX)
-                || SessionAccessGuard.ANONYMOUS_USER.equals(value));
+        return value != null && isUserIdentityLowerCase(value.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private static boolean isUserIdentityLowerCase(String lowered) {
+        return lowered.startsWith(USER_IDENTITY_PREFIX)
+            || SessionAccessGuard.ANONYMOUS_USER.equals(lowered);
     }
 
     /** Channel 链路网关派生的会话键（严格形态，用于识别 peer 链路） */
@@ -43,8 +46,11 @@ public final class SessionKeyNamespace {
 
     /** 保留命名空间：客户端 sessionId 不得认领（用户身份 + 网关运行时键） */
     public static boolean isReservedSessionId(String value) {
-        return value != null
-            && (value.startsWith(GATEWAY_SESSION_PREFIX) || isUserIdentity(value));
+        if (value == null) {
+            return false;
+        }
+        var lowered = value.toLowerCase(java.util.Locale.ROOT);
+        return lowered.startsWith(GATEWAY_SESSION_PREFIX) || isUserIdentityLowerCase(lowered);
     }
 
     /** Channel 链路网关会话键派生（与 HarnessGateway 一致） */

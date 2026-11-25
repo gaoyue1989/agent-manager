@@ -147,10 +147,10 @@ class SandboxUserKeyMiddlewareTest {
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(mock(SessionUserStore.class)));
 
         run(mw, turnCtx("s-1", "alice", sandbox));
-        verify(store, times(1)).resetInjectedToPending("alice");
+        verify(store, times(1)).resetInjectedToPending("s-1");
 
         run(mw, turnCtx("s-1", "alice", sandbox));
-        verify(store, times(1)).resetInjectedToPending("alice");
+        verify(store, times(1)).resetInjectedToPending("s-1");
         verify(sandbox, times(2)).setUserKey("alice");
     }
 
@@ -366,5 +366,35 @@ class SandboxUserKeyMiddlewareTest {
         verify(foreignSandbox, never()).setUserKey(anyString());
         verify(foreignSandbox, never()).injectPendingUploads();
         verify(foreignSandbox, never()).materializeUserSkills();
+    }
+
+    @Test
+    void onAgentShouldUseCanonicalSessionIdInA2aModeInsteadOfUserId() {
+        var spec = mock(OpenSandboxFilesystemSpec.class);
+        var resolver = mock(io.agentmanager.framework.service.SessionKeyResolver.class);
+        var ctx = RuntimeContext.builder().userId("u-1").sessionId("a2a-A").build();
+        when(resolver.realUserId(ctx)).thenReturn("u-1");
+        when(resolver.canonicalSessionId(ctx)).thenReturn("a2a-A");
+
+        var sandbox = mock(OpenSandbox.class);
+        var osbState = mock(OpenSandboxState.class);
+        when(osbState.getSandboxId()).thenReturn("sbx-a2a-A");
+        when(sandbox.getOsbState()).thenReturn(osbState);
+        var acquire = mock(io.agentscope.harness.agent.sandbox.SandboxAcquireResult.class);
+        when(acquire.getSandbox()).thenReturn(sandbox);
+        ctx.put(io.agentscope.harness.agent.sandbox.SandboxAcquireResult.class, acquire);
+
+        var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        when(spec.getFileAssetStore()).thenReturn(store);
+        when(spec.isInjectedOnSandbox("a2a-A", "sbx-a2a-A")).thenReturn(false);
+        when(store.resetInjectedToPending("a2a-A")).thenReturn(1);
+
+        var mw = new SandboxUserKeyMiddleware(spec, resolver);
+        mw.onAgent(mock(Agent.class), ctx, mock(AgentInput.class), i -> Flux.empty()).blockLast();
+
+        verify(spec).setPendingSessionId("a2a-A");
+        verify(sandbox).setSessionId("a2a-A");
+        verify(store).resetInjectedToPending("a2a-A");
+        verify(spec).markInjectedOnSandbox("a2a-A", "sbx-a2a-A");
     }
 }

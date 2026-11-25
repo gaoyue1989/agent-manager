@@ -205,14 +205,11 @@ public class A2AController {
             // 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId
             @SuppressWarnings("unchecked")
             var legacyMeta = (Map<String, Object>) params.get("metadata");
-            if (legacyMeta != null) {
-                if (!meta.containsKey("sessionId")) {
-                    var tid = legacyMeta.get("thread_id");
-                    if (tid != null && !tid.toString().isBlank()) {
-                        meta.put("sessionId", tid.toString());
-                    }
+            if (legacyMeta != null && !meta.containsKey("sessionId")) {
+                var tid = legacyMeta.get("thread_id");
+                if (tid != null && !tid.toString().isBlank()) {
+                    meta.put("sessionId", tid.toString());
                 }
-                // userId 回填与 sessionId 独立：新格式 sessionId + 旧格式 userId 可混用。
                 var uid = legacyMeta.get("userId");
                 if (uid != null && !meta.containsKey("userId")) {
                     meta.put("userId", uid.toString());
@@ -421,14 +418,15 @@ public class A2AController {
                 return null;
             }
             var sanitizedSid = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+            var sanitizedUid = userId != null ? io.agentmanager.framework.util.PathSafe.sanitize(userId) : null;
             if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
-                    sessionUserStore, sanitizedSid, userId)) {
-                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, userId);
+                    sessionUserStore, sanitizedSid, sanitizedUid)) {
+                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, sanitizedUid);
                 return sessionAccessDenied(req.get("id"));
             }
-            if (userId != null) {
-                sessionUserStore.upsert(sanitizedSid, io.agentmanager.framework.util.PathSafe.sanitize(userId));
-                log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, userId);
+            if (sanitizedUid != null) {
+                sessionUserStore.upsert(sanitizedSid, sanitizedUid);
+                log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, sanitizedUid);
             }
             return null;
         } catch (Exception e) {

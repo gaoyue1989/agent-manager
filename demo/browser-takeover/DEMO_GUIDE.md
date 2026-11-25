@@ -9,7 +9,8 @@ cd frontend && npm install && npm run dev                        # http://<主�
 #   若访问链路会重置 WebSocket 升级（表现为「画面连接断开，正在重试」+ DevTools 里
 #   ws:// ERR_CONNECTION_RESET、且服务端无请求记录），可改用 HTTPS 入口：
 npm run dev:https                                              # https://<主机IP>/（自签证书需点继续）
-#   实时画面统一经同源业务代理，不再支持通过 vncBase 参数指定外部网关。
+#   或把实时画面直连 OpenSandbox 网关（绕过业务面的 WS 代理，仅本地演示用）：
+#   http://<主机IP>:5188/?vncBase=42.194.213.236（OpenSandbox 网关公网 IP；VPC 内网地址为 100.66.1.6）
 ```
 
 `deploy.sh` 做的事：构建/导入沙箱镜像 → （可选）构建 agent-framework 镜像 → 应用 platform-router

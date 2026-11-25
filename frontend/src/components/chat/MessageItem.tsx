@@ -140,7 +140,29 @@ function FileCards({ files }: { files: NonNullable<ChatMsg["files"]> }) {
   );
 }
 
+function ContextCard({ msg }: { msg: ChatMsg }) {
+  const [open, setOpen] = useState(true);
+  const time = msg.context?.updatedAt.replace("T", " ").slice(0, 16);
+  return (
+    <div data-testid="context-card" className="mx-auto w-full max-w-2xl rounded-xl border border-gray-200/80 bg-white/60 shadow-sm">
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-gray-600">
+        <IconFileText className="size-3.5 shrink-0 text-blue-500" />
+        <span data-testid="context-card-title" className="truncate font-medium">{msg.context?.title ?? "会话上下文"}</span>
+        {time && <span className="shrink-0 text-[11px] text-gray-400">{time}</span>}
+        <IconChevronDown className={`ml-auto size-3 shrink-0 text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <pre data-testid="context-card-content" className="chat-scroll mx-3 mb-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-gray-700">
+          {msg.content}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 function MessageItem({ msg }: { msg: ChatMsg }) {
+  if (msg.role === "context") return <ContextCard msg={msg} />;
   if (msg.role === "tool") return <ToolStep msg={msg} />;
   if (msg.role === "system") return <SystemBanner content={msg.content} />;
   if (msg.role === "user") {

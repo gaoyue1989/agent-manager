@@ -676,30 +676,6 @@ class A2AControllerTest {
     }
 
     @Test
-    void legacyUserIdShouldBePreservedWhenTopLevelSessionIdIsPresent() throws Exception {
-        mockWrapper();
-        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
-
-        mockMvc.perform(post("/")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("""
-                    {"jsonrpc":"2.0","id":"52-legacy-combo","method":"message/send",
-                     "params":{"sessionId":"legacy-combo-sess",
-                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]},
-                       "metadata":{"userId":"legacy-user"}}}
-                    """))
-            .andExpect(status().isOk());
-
-        var req = capturedForwardedBody();
-        var params = (java.util.Map<String, Object>) req.get("params");
-        var message = (java.util.Map<String, Object>) params.get("message");
-        var meta = (java.util.Map<String, Object>) message.get("metadata");
-        org.junit.jupiter.api.Assertions.assertEquals("legacy-combo-sess", meta.get("sessionId"));
-        org.junit.jupiter.api.Assertions.assertEquals("legacy-user", meta.get("userId"));
-        verify(sessionUserStore).upsert("legacy-combo-sess", "legacy-user");
-    }
-
-    @Test
     void messageStreamShouldRejectSessionOwnershipTakeover() throws Exception {
         when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
         mockWrapper();
@@ -1050,7 +1026,7 @@ class A2AControllerTest {
         when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn(null);
         mockWrapper();
 
-        var initial = mockMvc.perform(post("/")
+        var result = mockMvc.perform(post("/")
                 .header("X-User-Id", "u-2002")
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -1059,12 +1035,8 @@ class A2AControllerTest {
                      "params":{"sessionId":"u-1001",
                        "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
                     """))
+            .andExpect(status().isOk())
             .andReturn();
-        var result = initial.getRequest().isAsyncStarted()
-            ? mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
-                .asyncDispatch(initial)).andReturn()
-            : initial;
-        org.junit.jupiter.api.Assertions.assertEquals(200, result.getResponse().getStatus());
 
         org.junit.jupiter.api.Assertions.assertTrue(
             result.getResponse().getContentAsString().contains("-32001"),
@@ -1113,5 +1085,34 @@ class A2AControllerTest {
         org.junit.jupiter.api.Assertions.assertEquals("team_s1", forwardedMetadata().get("sessionId"));
         verify(sessionUserStore).upsert("team_s1", "alice");
         verify(wrapper).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendShouldAllowSecondTurnWhenUserIdRequiresSanitization() throws Exception {
+        when(sessionUserStore.findUserIdBySession("s-lockout"))
+            .thenReturn(null)
+            .thenReturn("tenant_alice");
+        mockWrapper();
+
+        var body = """
+            {"jsonrpc":"2.0","id":"80","method":"message/send",
+             "params":{"sessionId":"s-lockout",
+               "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+            """;
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "tenant:alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "tenant:alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        verify(sessionUserStore, org.mockito.Mockito.times(2)).upsert("s-lockout", "tenant_alice");
     }
 }

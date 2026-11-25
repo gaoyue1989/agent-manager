@@ -43,8 +43,8 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
         return reactAgent.getMiddlewares();
     }
 
-    @Test
-    void buildShouldRegisterSpawnCaptureMiddlewareWiredToInjectedBridge() throws Exception {
+    private HarnessAgent buildAgent(RemoteConfirmBridge bridge,
+            java.util.function.Consumer<HarnessAgentFactory> customize) throws Exception {
         var oaf = mock(OafConfig.class);
         when(oaf.name()).thenReturn("test-agent");
         when(oaf.systemPrompt()).thenReturn("prompt");
@@ -80,12 +80,18 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             AgentManagerProperties.HarnessConfig.defaults(),
             AgentManagerProperties.AgentProtocolSettings.defaults());
-        var bridge = mock(RemoteConfirmBridge.class);
 
         var factory = new HarnessAgentFactory(props, ws, mcp, List.of(), bridge, null, null,
             mock(SessionToolScopeService.class));
-        var agent = factory.build(oaf, store, new LLMLogger(), null, null,
+        customize.accept(factory);
+        return factory.build(oaf, store, new LLMLogger(), null, null,
             mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+    }
+
+    @Test
+    void buildShouldRegisterSpawnCaptureMiddlewareWiredToInjectedBridge() throws Exception {
+        var bridge = mock(RemoteConfirmBridge.class);
+        var agent = buildAgent(bridge, factory -> { });
 
         var middlewares = middlewaresOf(agent);
         var capture = middlewares.stream()
@@ -104,6 +110,38 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
         // 同链上保留身份规范化中间件（F10 前置语义），防后续重构静默摘除
         assertTrue(middlewares.stream().anyMatch(RemoteUserIdMiddleware.class::isInstance),
             "RemoteUserIdMiddleware 必须同链保留");
+    }
+
+    private static boolean transformsSystemPrompt(MiddlewareBase middleware) {
+        try {
+            return middleware.getClass()
+                .getMethod("onSystemPrompt", io.agentscope.core.agent.Agent.class,
+                    io.agentscope.core.agent.RuntimeContext.class, String.class)
+                .getDeclaringClass() != MiddlewareBase.class;
+        } catch (NoSuchMethodException e) {
+            return false;
+        }
+    }
+
+    @Test
+    void buildShouldRegisterSessionContextInjectionAsTheLastSystemPromptTransformer() throws Exception {
+        var agent = buildAgent(mock(RemoteConfirmBridge.class), factory ->
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                factory, "sessionContextStore", mock(SessionContextStore.class)));
+
+        var transformers = middlewaresOf(agent).stream()
+            .filter(HarnessAgentFactoryMiddlewareAssemblyTest::transformsSystemPrompt).toList();
+
+        assertTrue(transformers.stream().anyMatch(mw -> mw.getClass().getName().startsWith("io.agentscope.")),
+            "SDK 自带的系统提示词转换器应在链上，否则尾部断言没有对照面");
+        assertEquals(SessionContextInjectionMiddleware.class, transformers.get(transformers.size() - 1).getClass());
+    }
+
+    @Test
+    void buildSkipsSessionContextInjectionWhenNoStoreIsWired() throws Exception {
+        var agent = buildAgent(mock(RemoteConfirmBridge.class), factory -> { });
+
+        assertTrue(middlewaresOf(agent).stream().noneMatch(SessionContextInjectionMiddleware.class::isInstance));
     }
 
     // ===== 远程子 agent 声明：映射正确 ≠ 注册进构建产物 =====

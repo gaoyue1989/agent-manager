@@ -2,7 +2,8 @@
 /**
  * 控制台浏览器 E2E（Puppeteer）：登录 → 工作空间 → Agent 列表/创建/详情/编辑 →
  * 模型连接 → 工具（MCP）→ 技能中心 → 沙箱配置总览 → 沙箱管理（admin）+ 分页回归（issue #298）
- * → 沙箱实例（console）→ 会话回放（issue #386 回归：回放初始会话取 replayTo 而非调试 persistKey 残留）。
+ * → 沙箱实例（console）→ 会话回放（issue #386 回归：回放初始会话取 replayTo 而非调试 persistKey 残留）
+ * → 会话上下文卡片（数据面注入后，回放面板与调试面板顶部可见）。
  *
  * 设计：
  *  - 数据准备走 API（登录/建空间/模型连接/工具/技能/导入包/沙箱 Agent），浏览器只驱动 UI；
@@ -525,6 +526,57 @@ console.log("seeded");`);
       await waitFor(async () => (await userMsgs("debug-pane")).some((t) => t.includes(markerB)), 60000, 2000);
       const dbgTop = await page.$eval(`${testid("debug-pane")} .font-mono`, (el) => (el.textContent || "").trim());
       check("调试 Tab 恢复点随回放切换（persistKey 单真相源）", dbgTop === sidB, `top=${dbgTop} want=${sidB}`);
+
+      console.log("== UI：会话上下文卡片（会话回放 + 调试面板）==");
+      const ctxSid = `webui-ui-ctx-${TS}`;
+      const ctxTitle = `E2E 今日头条 ${TS}`;
+      const ctxMark = `E2E 上下文标记 ${TS}`;
+      const ctxContent = `1. ${ctxMark}\n2. 第二条`;
+      const endpointProbe = await page.evaluate(async (p) => (await fetch(p)).status,
+        `/agent/${detail.shortName}/threads/ctx-probe-${TS}/context`);
+      let injected = null;
+      if (endpointProbe !== 404) {
+        injected = await page.evaluate(async ({ shortName, sid, body }) => {
+          const r = await fetch(`/agent/${shortName}/threads/${encodeURIComponent(sid)}/context`, {
+            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+          return r.status;
+        }, { shortName: detail.shortName, sid: ctxSid, body: { key: "headline", title: ctxTitle, content: ctxContent } });
+        check("数据面注入会话上下文 201", injected === 201, `http=${injected}`);
+      }
+      if (endpointProbe === 404) {
+        console.log("  ⏭️ SKIP：业务镜像尚无会话上下文接口（GET /threads/{sid}/context 返回 404），合并发布镜像后本节生效");
+      } else if (injected !== 201) {
+        console.log("  ⏭️ 注入未成功（已计 FAIL），跳过卡片断言");
+      } else {
+        const cardText = (pane, sel) => page.$eval(`${testid(pane)} ${testid(sel)}`, (el) => (el.textContent || "").trim()).catch(() => "");
+        const cardBody = (pane) => page.$(`${testid(pane)} ${testid("context-card-content")}`);
+        const firstMono = (pane) => page.$eval(`${testid(pane)} .font-mono`, (el) => (el.textContent || "").trim()).catch(() => "");
+
+        await goto(`/console/agents/${ctx.svcId}?tab=threads`, testid("threads-table"));
+        await click(`thread-replay-${ctxSid}`);
+        await page.waitForSelector(`${testid("replay-pane")} ${testid("context-card")}`, { timeout: 20000 });
+        check("回放面板渲染上下文卡片，标题为注入标题", (await cardText("replay-pane", "context-card-title")) === ctxTitle, await cardText("replay-pane", "context-card-title"));
+        check("卡片正文默认展开且为注入正文", (await cardText("replay-pane", "context-card-content")) === ctxContent);
+        check("只有上下文、尚无对话的会话仍是欢迎态（无顶部会话条）", (await firstMono("replay-pane")) === ctxContent, await firstMono("replay-pane"));
+        await page.click(`${testid("replay-pane")} ${testid("context-card")} button`);
+        await waitFor(async () => !(await cardBody("replay-pane")), 5000, 200);
+        check("点击标题行折叠正文", !(await cardBody("replay-pane")));
+        await page.click(`${testid("replay-pane")} ${testid("context-card")} button`);
+        await waitFor(async () => !!(await cardBody("replay-pane")), 5000, 200);
+        check("再次点击展开正文", !!(await cardBody("replay-pane")));
+
+        await goto(`/console/agents/${ctx.svcId}?tab=debug`, testid("debug-pane"));
+        await waitFor(async () => {
+          if (await page.$(`${testid("debug-pane")} ${testid("context-card")}`)) return true;
+          for (const item of await page.$$(`${testid("debug-pane")} ${testid("history-item")}`)) {
+            const label = (await item.evaluate((el) => el.textContent || "")) || "";
+            if (label.includes(ctxSid)) { await item.click().catch(() => {}); break; }
+          }
+          return false;
+        }, 30000, 1000);
+        check("调试面板从历史会话切入后渲染同一张卡片", (await cardText("debug-pane", "context-card-title")) === ctxTitle);
+        check("调试面板卡片正文含注入标记", (await cardText("debug-pane", "context-card-content")).includes(ctxMark));
+      }
     }
 
     if (RUNTIME === "mock") {

@@ -375,4 +375,22 @@ class VikingSessionCommitStateStoreTest {
             "worker 卡死时 close 必须有界返回（3s 排空上限），took " + elapsedMs + "ms");
         assertTrue(s.commitWorker.isTerminated(), "close 返回时 commitWorker 必须已终止");
     }
+
+    @Test
+    void appendBatchShouldStopImmediatelyWhenWorkerThreadIsInterrupted() {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        Mockito.doAnswer(inv -> {
+            calls.incrementAndGet();
+            Thread.currentThread().interrupt();
+            return null;
+        }).when(client).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        var s = store();
+        s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(
+                msg("m1", MsgRole.USER, "first"),
+                msg("m2", MsgRole.ASSISTANT, "second"),
+                msg("m3", MsgRole.USER, "third"))));
+        s.close();
+        assertEquals(1, calls.get());
+    }
 }

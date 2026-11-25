@@ -276,8 +276,17 @@ public class McpToolRegistrar {
                     log.info("[MCP] synthetic server '{}' closed shared handle replaced with fresh build",
                         mcp.server());
                 } else {
-                    closeQuietly(wrapper);
-                    wrapper = prev;
+                    var current = sharedWrappers.get(mcp.server());
+                    if (current != null && !(current instanceof ReconnectableMcpClientWrapper c && c.isClosed())) {
+                        closeQuietly(wrapper);
+                        wrapper = current;
+                    } else {
+                        var raced = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
+                        if (raced != null && raced != wrapper) {
+                            closeQuietly(wrapper);
+                            wrapper = raced;
+                        }
+                    }
                 }
             } else if (prev instanceof ReconnectableMcpClientWrapper reconnectable && reconnectable.poisoned()) {
                 // 毒化句柄换芯（issue #417，issue #493 与 rebuildSharedWrapper 语义对称化）：
@@ -305,7 +314,7 @@ public class McpToolRegistrar {
             recordRegisteredTools(wrapper, mcp.server());
             registeredWrappers.put(mcp.server(), wrapper);
             if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
-                reconnectable.clearPoison();
+                reconnectable.clearPoisonIfSame(poisonTarget);
             }
             log.info("[MCP] synthetic client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
@@ -444,7 +453,7 @@ public class McpToolRegistrar {
                 closeQuietly(prev);
             }
             if (wrapper instanceof ReconnectableMcpClientWrapper reconnectable) {
-                reconnectable.clearPoison();
+                reconnectable.clearPoisonIfSame(poisonTarget);
             }
             log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
@@ -664,7 +673,7 @@ public class McpToolRegistrar {
      */
     void recordRegisteredTools(McpClientWrapper wrapper, String serverName, UiMapping uiMapping) {
         try {
-            var tools = wrapper.listTools().block();
+            var tools = wrapper.listTools().block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
             if (tools == null) {
                 log.warn("MCP {} listTools returned null, tools not recorded", serverName);
                 return;

@@ -38,4 +38,15 @@ class SessionKeyNamespaceTest {
         assertFalse(SessionKeyNamespace.isReservedSessionId("webui-abc"));
         assertFalse(SessionKeyNamespace.isReservedSessionId(null));
     }
+
+    @Test
+    void reservedNamespacesIgnoreCaseBecauseSessionIdsCompareCaseInsensitively() {
+        for (var reserved : java.util.List.of("U-1001", "Debug-User", "DEBUG-USER", "GW-anything", "Gw-3f20f08c5499")) {
+            assertTrue(SessionKeyNamespace.isReservedSessionId(reserved), reserved);
+        }
+        assertTrue(SessionKeyNamespace.isUserIdentity("U-1001"));
+        assertTrue(SessionKeyNamespace.isUserIdentity("DEBUG-USER"));
+        assertFalse(SessionKeyNamespace.isReservedSessionId("Webui-abc"));
+        assertFalse(SessionKeyNamespace.isUserIdentity("U1001"));
+    }
 }

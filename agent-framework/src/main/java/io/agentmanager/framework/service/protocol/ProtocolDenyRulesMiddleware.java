@@ -13,6 +13,7 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
+import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.middleware.MiddlewareBase;
 import reactor.core.publisher.Flux;
 
@@ -35,6 +36,12 @@ import reactor.core.publisher.Flux;
 public class ProtocolDenyRulesMiddleware implements MiddlewareBase {
 
     private static final Logger log = LoggerFactory.getLogger(ProtocolDenyRulesMiddleware.class);
+
+    @Override
+    public Flux<AgentEvent> onAgent(Agent agent, RuntimeContext ctx, AgentInput input,
+                                    Function<AgentInput, Flux<AgentEvent>> next) {
+        return io.agentmanager.framework.service.ActingDenials.bridge(ctx, input, next);
+    }
 
     @Override
     public Flux<AgentEvent> onActing(Agent agent, RuntimeContext ctx, ActingInput input,
