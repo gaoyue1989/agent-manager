@@ -676,6 +676,30 @@ class A2AControllerTest {
     }
 
     @Test
+    void legacyUserIdShouldBePreservedWhenTopLevelSessionIdIsPresent() throws Exception {
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"52-legacy-combo","method":"message/send",
+                     "params":{"sessionId":"legacy-combo-sess",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]},
+                       "metadata":{"userId":"legacy-user"}}}
+                    """))
+            .andExpect(status().isOk());
+
+        var req = capturedForwardedBody();
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals("legacy-combo-sess", meta.get("sessionId"));
+        org.junit.jupiter.api.Assertions.assertEquals("legacy-user", meta.get("userId"));
+        verify(sessionUserStore).upsert("legacy-combo-sess", "legacy-user");
+    }
+
+    @Test
     void messageStreamShouldRejectSessionOwnershipTakeover() throws Exception {
         when(sessionUserStore.findUserIdBySession("alice-sess")).thenReturn("alice");
         mockWrapper();
