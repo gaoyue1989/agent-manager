@@ -112,6 +112,9 @@ public class VikingMemoryClient {
                 abbreviate(resp.body()));
             return false;
         } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             log.warn("[viking] ensureUser {} failed: {}", userId, e.getMessage());
             return false;
         }
@@ -154,6 +157,9 @@ public class VikingMemoryClient {
             var rendered = root.path("result").path("rendered").asText("");
             return rendered.isBlank() ? null : rendered;
         } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             log.warn("[viking] searchContext failed for {}: {}", userId, e.getMessage());
             return null;
         }
@@ -184,6 +190,9 @@ public class VikingMemoryClient {
                     resp == null ? "null" : resp.statusCode());
             }
         } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             log.warn("[viking] remember failed for {}: {}", userId, e.getMessage());
         }
     }
@@ -227,6 +236,9 @@ public class VikingMemoryClient {
                     resp == null ? "null" : resp.statusCode());
             }
         } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             log.warn("[viking] appendSessionMessage failed (sid={}): {}", platformSessionId, e.getMessage());
         }
     }
@@ -245,6 +257,9 @@ public class VikingMemoryClient {
             var id = MAPPER.readTree(resp.body()).path("result").path("session_id").asText("");
             return id.isBlank() ? null : id;
         } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             log.warn("[viking] createSession failed: {}", e.getMessage());
             return null;
         }

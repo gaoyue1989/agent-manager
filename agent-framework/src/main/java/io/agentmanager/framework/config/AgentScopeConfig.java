@@ -742,6 +742,7 @@ public class AgentScopeConfig {
     @Bean
     public AgentRuntimeService agentRuntimeService(
         OafConfig oafConfig,
+        OafConfigHolder oafConfigHolder,
         HarnessAgent harnessAgent,
         List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger,
@@ -766,7 +767,7 @@ public class AgentScopeConfig {
         if (isolation) {
             // 会话级工厂与 OafReloadService 的 B 路径同参（build 入参完全一致）；
             // reload 时 OafReloadService 会更新此工厂并清缓存（世代失效）
-            service.setSessionAgentFactory(() -> harnessAgentFactory.build(oafConfig,
+            service.setSessionAgentFactory(() -> harnessAgentFactory.build(oafConfigHolder.get(),
                 distributedStore, llmLogger, uiContextStore, sessionUserStore, modelCatalog,
                 sandboxSpecProvider.getIfAvailable()));
             log.info("Per-session agent isolation enabled (cacheMax={}, ttlMinutes={}m)",

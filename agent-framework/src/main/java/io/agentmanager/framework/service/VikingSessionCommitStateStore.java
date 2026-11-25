@@ -227,6 +227,9 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
                 realUser = userId;
             }
             for (var pending : batch) {
+                if (Thread.currentThread().isInterrupted()) {
+                    break;
+                }
                 client.appendSessionMessage(realUser, slot, pending.role(), pending.content());
             }
         } catch (Exception e) {
