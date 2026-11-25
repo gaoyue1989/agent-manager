@@ -15,6 +15,8 @@ type LiveStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
 export function LiveView({ sessionId, userId, sandboxId, viewOnly, ready, owner }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<{ viewOnly: boolean; disconnect: () => void } | null>(null);
+  const viewOnlyRef = useRef(viewOnly);
+  viewOnlyRef.current = viewOnly;
   const failuresRef = useRef(0);
   const [status, setStatus] = useState<LiveStatus>('idle');
 
@@ -50,7 +52,7 @@ export function LiveView({ sessionId, userId, sandboxId, viewOnly, ready, owner 
       containerRef.current.innerHTML = '';
       const rfb = new RFB(containerRef.current, api.vncUrl(sessionId, userId, sandboxId), { wsProtocols: ['binary'] });
       rfb.scaleViewport = true;
-      rfb.viewOnly = viewOnly;
+      rfb.viewOnly = viewOnlyRef.current;
       rfb.addEventListener('connect', () => {
         failuresRef.current = 0;
         setStatus('connected');
@@ -71,7 +73,7 @@ export function LiveView({ sessionId, userId, sandboxId, viewOnly, ready, owner 
       rfbRef.current?.disconnect();
       rfbRef.current = null;
     };
-  }, [ready, sandboxId, sessionId, userId, viewOnly]);
+  }, [ready, sandboxId, sessionId, userId]);
 
   useEffect(() => {
     if (rfbRef.current) rfbRef.current.viewOnly = viewOnly;
