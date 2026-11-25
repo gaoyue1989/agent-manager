@@ -117,3 +117,41 @@ test("RUNNING snapshot keeps the step in progress instead of neutral", () => {
   assert.equal(toolStatus({ role: "tool", content: "t", pending: false, state: "running" }), "running");
   assert.equal(toolStatus({ role: "tool", content: "t", pending: false, state: "RUNNING" }), "running");
 });
+
+test("buildHistoryAssistantMessage keeps both text and inline images for mixed direct_return", async () => {
+  const { buildHistoryAssistantMessage } = await import("./assistant-events.ts");
+  const msg = buildHistoryAssistantMessage({
+    msg_id: "m-1",
+    content: "Order chart summary",
+    blocks: [
+      { type: "text", text: "Order chart summary" },
+      { type: "image", media_type: "image/png", data: "iVBORw0KGgo=" },
+    ],
+  });
+  assert.deepEqual(msg, {
+    role: "assistant",
+    content: "Order chart summary",
+    files: [
+      {
+        file_id: "inline-direct-m-1-0",
+        file_name: "inline-image",
+        mime_type: "image/png",
+        size: 0,
+        download_url: "data:image/png;base64,iVBORw0KGgo=",
+      },
+    ],
+  });
+
+  const imgOnly = buildHistoryAssistantMessage({
+    msg_id: "m-2",
+    content: "",
+    blocks: [{ type: "image", url: "https://example.com/chart.png", media_type: "image/webp" }],
+  });
+  assert.equal(imgOnly?.content, "");
+  assert.equal(imgOnly?.files?.[0].download_url, "https://example.com/chart.png");
+
+  const textOnly = buildHistoryAssistantMessage({ content: "hello", blocks: [] });
+  assert.deepEqual(textOnly, { role: "assistant", content: "hello" });
+
+  assert.equal(buildHistoryAssistantMessage({ content: "", blocks: [] }), null);
+});

@@ -91,4 +91,22 @@ class ExternalUrlGuardTest {
         assertNotNull(ExternalUrlGuard.allowlisted("http://b.example/y/z", multi));
         assertNull(ExternalUrlGuard.allowlisted("http://a.example/y/z", multi), "只匹配各自路径前缀");
     }
+
+    @Test
+    void shouldNormalizeHostCaseDefaultPortsAndIpv6PerRfc3986() {
+        var httpPrefix = List.of("http://files.internal/api/v1/packages");
+        assertNotNull(ExternalUrlGuard.allowlisted("HTTP://FILES.INTERNAL/api/v1/packages/a.zip", httpPrefix));
+        assertNotNull(ExternalUrlGuard.allowlisted("http://files.internal:80/api/v1/packages/a.zip", httpPrefix));
+        assertNull(ExternalUrlGuard.allowlisted("http://files.internal:8080/api/v1/packages/a.zip", httpPrefix));
+
+        var httpsPrefix = List.of("https://cdn.example.com/files");
+        assertNotNull(ExternalUrlGuard.allowlisted("HTTPS://CDN.EXAMPLE.COM:443/files/out.pdf", httpsPrefix));
+        assertNull(ExternalUrlGuard.allowlisted("https://cdn.example.com:80/files/out.pdf", httpsPrefix));
+
+        var ipv6Prefix = List.of("http://[2001:db8::1]:8080/pkg");
+        assertNotNull(ExternalUrlGuard.allowlisted("http://[2001:DB8::1]:8080/pkg/a.zip", ipv6Prefix));
+        assertNotNull(ExternalUrlGuard.allowlisted("http://[2001:0db8:0:0::1]:8080/pkg/a.zip", ipv6Prefix));
+
+        assertNull(ExternalUrlGuard.allowlisted("http://user:pass@files.internal/api/v1/packages/a.zip", httpPrefix));
+    }
 }

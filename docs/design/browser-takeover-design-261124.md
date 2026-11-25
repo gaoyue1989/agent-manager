@@ -51,9 +51,12 @@
 | GET | `/threads/{sid}/browser` | `{control:{owner,reason,by,trigger,since,expires_in_seconds}, sandbox:{ready,sandbox_id}, vnc_path}`；沙箱就绪为只读探测（不连接不占位）；`sandbox_id` 仅下发给已建立归属的会话所有者 |
 | POST | `/threads/{sid}/browser/takeover` | body `{reason?}` → `{control, stop_outcome}` |
 | POST | `/threads/{sid}/browser/release` | SSE；非 HUMAN 持有时返回 `not_taken_over` 错误帧 |
-| GET | `/threads/{sid}/browser/vnc` | WebSocket；握手校验会话归属（`X-User-Id` 头 > `?userId=` > 匿名），上游=沙箱固定端口（缺省 6080）+ server 代理 |
+| POST | `/threads/{sid}/browser/vnc-ticket` | 为已建立归属的会话所有者签发一次性 WS ticket `{ticket, expires_in_seconds}`（Redis `brw:vnc:{ticket}`，TTL 缺省 60s，握手消费即销毁）；无归属 404，Redis 不可用 503 `view_ticket_unavailable` |
+| GET | `/threads/{sid}/browser/vnc?ticket=` | WebSocket；握手只认一次性 ticket（ticket 内的 `sid` 必须等于路径 sid，且 claim 用户仍是会话归属者），上游=沙箱固定端口（缺省 6080）+ server 代理 |
 
-四个端点统一走 `SessionAccessGuard.establishedOwner`（fail-closed）：`session_user` 必须存在明确归属且归属者 = 请求者；无映射行 / 占位行 `unknown` / 保留命名空间（`u-*`、`debug-user`、`gw-*`）一律 404（不泄露会话存在性）。沙箱解析走 `SandboxLocator.locateOwned` / `sandboxIdOwned`，要求绑定行 `sandbox_binding.user_key` = 会话归属者（`user_key` 恒为沙箱创建时的真实用户，是区分「会话键」与「用户身份」的唯一可靠判据）；无绑定簿记（`SANDBOX_LIFECYCLE_ENABLED=false`）或归属不符 → 视为无沙箱（WS 4404 / `ready=false`），禁止把 `sessionId` 当 `USER(sessionId)` 跨用户寻址（issue #559）。
+四个 HTTP 端点统一走 `SessionAccessGuard.establishedOwner`（fail-closed）：`session_user` 必须存在明确归属且归属者 = 请求者；无映射行 / 占位行 `unknown` / 保留命名空间（`u-*`、`debug-user`、`gw-*`）一律 404（不泄露会话存在性）。沙箱解析走 `SandboxLocator.locateOwned` / `sandboxIdOwned`，要求绑定行 `sandbox_binding.user_key` = 会话归属者（`user_key` 恒为沙箱创建时的真实用户，是区分「会话键」与「用户身份」的唯一可靠判据）；无绑定簿记（`SANDBOX_LIFECYCLE_ENABLED=false`）或归属不符 → 视为无沙箱（WS 4404 / `ready=false`），禁止把 `sessionId` 当 `USER(sessionId)` 跨用户寻址（issue #559）。
+
+WS 身份信任源与 HTTP 端点同构（issue #560）：ticket 由已鉴权的 `POST /browser/vnc-ticket` 签发（该端点与其余 HTTP 端点一样只认网关注入的 `X-User-Id`），握手不再读取 URL `?userId=`、也不单独信任 `X-User-Id` 头——浏览器无法在 WS 握手设置自定义头，ticket 是唯一可用的、与 HTTP 同源的凭证；握手同时拒绝与 ticket claim 冲突的 `X-User-Id`。Origin 校验交给 Spring `OriginHandshakeInterceptor`：缺省（`AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS` 为空）同源放行，配置后按白名单匹配；**禁止 `*`**（防 CSWSH）。TLS 在入口终止（Origin 为 https、内部请求为 http）或演示前端经 vite 代理跨源时，必须显式配置白名单。
 
 总开关 `AGENT_BROWSER_ENABLED`（默认 false）：关闭时零装配（无端点/无中间件/无工具，存量服务零影响）。
 
@@ -71,5 +74,6 @@
 - 沙箱内 Xtigervnc 以 `-SecurityTypes None` 启动：6080/5901 只在 server 代理之后可达，画面鉴权由业务面的 WS 代理（会话归属校验 + API key 注入）承担，VNC 层不再叠加密码。
 - noVNC 画面必须经归属校验的代理；上游 API key 只在业务进程侧注入。
 - **接管授权规则（issue #559，P0）**：会话归属 fail-closed（见 §4）；沙箱归属以 `sandbox_binding.user_key` = 会话归属者为证明，跨用户/无簿记一律拒绝。攻击面：`session_user` 无行时旧 `ownedBy` 放行 + `SandboxLocator` 把 `sessionId` 当 `USER(sessionId)` 候选，使任意已认证用户以受害者 `userId` 作 sid 即可读到受害者 `sandbox_id` 并经 noVNC 全权操控。`SandboxLocator.locate` / `sandboxId`（无归属证明）仅供 env-update 等非实时控制链路复用，浏览器接管不得回退到这两个方法。
+- **WS 握手信任源（issue #560，P1）**：修复前握手在 `X-User-Id` 缺失时回退信任 URL `?userId=`，且 `setAllowedOriginPatterns("*")` 无来源校验。攻击面有二：(a) `ROUTER_AUTH_MODE=off|report` 或集群内直连时，网关注入头缺失/被剥离，浏览器用 `?userId=<victim>` 即可冒充受害者通过 `establishedOwner`（`off` 下头部本就自报，但 `?userId=` 让**无头能力的浏览器**也能自报，report/enforce 下则绕过「不信任自报头」的网关语义）；(b) httpOnly 登录 cookie 鉴权下，任意第三方页面可发起跨站 WebSocket（CSWSH），浏览器自动带 cookie → 网关注入受害者身份 → 恶意脚本拿到完整 VNC 控制。修复：身份只认一次性 WS ticket（由已鉴权的 HTTP 端点签发，信任源与其余 HTTP 端点同构），URL `?userId=` 与单独的 `X-User-Id` 头都不再构成握手身份；Origin 缺省同源、可配置白名单、禁止 `*`。VNC 层无密码，WS 代理是唯一安全边界，这两项缺一不可。
 - `viewOnly` 是前端约束：接管期间 Agent 不动浏览器由服务端闸门保证；反向（人工不在 Agent 控制时误触）不做服务端强制，后续可在 WS 代理层做 RFB 输入帧过滤。
 - 后续：宿主机 nginx(:8911) `/agent/` 需补 WebSocket 升级头（属系统配置，未在本次改动内）；多实例 noVNC 输入审计；WebRTC 高帧率方案。

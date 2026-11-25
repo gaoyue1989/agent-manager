@@ -88,6 +88,9 @@ func (c *Core) loadRuntimeDefaultValues(wsID uint) (map[string]string, error) {
 	}
 	values := make(map[string]string, len(rows))
 	for _, r := range rows {
+		if _, ok := runtimeDefaultKeys[r.EnvKey]; !ok {
+			continue
+		}
 		values[r.EnvKey] = r.Value
 	}
 	return values, nil
