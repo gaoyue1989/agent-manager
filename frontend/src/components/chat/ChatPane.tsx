@@ -662,7 +662,7 @@ export default function ChatPane({
     if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
     setAttachments([]);
     setInput("");
-    const sid = `${userId}-${uid()}`;
+    const sid = `webui-${uid()}`;
     persistSessionId(persistKey, sid, persistCookie);
     sessionId.current = sid;
     setMessages([{ role: "system", content: "已开启新会话。" }]);
