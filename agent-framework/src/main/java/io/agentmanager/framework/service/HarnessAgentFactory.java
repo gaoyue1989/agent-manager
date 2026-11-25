@@ -126,6 +126,9 @@ public class HarnessAgentFactory {
     @Autowired(required = false)
     private io.agentmanager.framework.browser.BrowserControlService browserControlService;
 
+    @Autowired(required = false)
+    private SessionContextStore sessionContextStore;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -439,6 +442,10 @@ public class HarnessAgentFactory {
                 } else {
                     log.info("Memory fully disabled (agent.harness.memory-enabled=false)");
                 }
+            }
+
+            if (sessionContextStore != null) {
+                builder.middleware(new SessionContextInjectionMiddleware(sessionContextStore, sessionKeyResolver));
             }
 
             var agent = builder
