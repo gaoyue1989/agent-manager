@@ -295,6 +295,10 @@ public class AguiRunController {
             var toolSummary = new TurnToolSummaryTracker(threadId, runId,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
                 mcpToolRegistrar::displayNameFor);
+            var directReturnSignal = new io.agentmanager.framework.service.DirectReturnSignalTracker(
+                mcpToolRegistrar::resolveToolCallMeta,
+                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
+            var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
             // run 级编码上下文：blockId→messageId 映射、token 累计、pending interrupts
             // 都是 run 级状态——必须跨事件复用，不能逐事件新建
             var codecCtx = codec.newContext(threadId, runId);
@@ -352,7 +356,8 @@ public class AguiRunController {
                 channel.dispatchStream(inbound)
                     .subscribe(
                         event -> handleEventAndEmit(event, threadId, runId, lease, sink,
-                            turnEnded, toolSummary, codecCtx, turnBucketKeys, null),
+                            turnEnded, toolSummary, codecCtx, turnBucketKeys, null,
+                            directReturnSignal, directReturnJoiner),
                         e -> {
                             log.warn("[agui] run stream error (sid={}): {}", threadId, e.getMessage());
                             if (!lease.isLost()) {
@@ -429,6 +434,10 @@ public class AguiRunController {
             var toolSummary = new TurnToolSummaryTracker(threadId, runId,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
                 mcpToolRegistrar::displayNameFor);
+            var directReturnSignal = new io.agentmanager.framework.service.DirectReturnSignalTracker(
+                mcpToolRegistrar::resolveToolCallMeta,
+                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
+            var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
             var codecCtx = codec.newContext(threadId, runId);
             var renderer = new AguiTailRenderer(threadId, runId);
 
@@ -492,7 +501,8 @@ public class AguiRunController {
             resumeFlux.subscribe(
                 event -> handleEventAndEmit(event, threadId, runId, lease, sink,
                     turnEnded, toolSummary, codecCtx,
-                    java.util.concurrent.ConcurrentHashMap.newKeySet(), turnSkills),
+                    java.util.concurrent.ConcurrentHashMap.newKeySet(), turnSkills,
+                    directReturnSignal, directReturnJoiner),
                 e -> {
                     log.warn("[agui] resume stream error (sid={}): {}", threadId, e.getMessage());
                     if (!lease.isLost()) {
@@ -573,12 +583,16 @@ public class AguiRunController {
                                     AtomicBoolean turnEnded, TurnToolSummaryTracker toolSummary,
                                     AguiStreamContext codecCtx,
                                     java.util.Set<String> turnBucketKeys,
-                                    java.util.List<String> turnSkills) {
+                                    java.util.List<String> turnSkills,
+                                    io.agentmanager.framework.service.DirectReturnSignalTracker directReturnSignal,
+                                    io.agentmanager.framework.service.DirectReturnDeltaJoiner directReturnJoiner) {
         // 租约丢失：停写 + 本连接 RUN_ERROR（不走 TurnFinalizer——其终态帧是 native 词表，
         // 本面客户端需要 AG-UI 语义的帧）
         if (stopIfLeaseLost(lease, sessionId, replyId, sink)) {
             return;
         }
+        event = directReturnJoiner.apply(event);
+        directReturnSignal.onEvent(event);
 
         if (event instanceof ToolCallStartEvent start
                 && start.getToolCallId() != null && start.getToolCallName() != null) {

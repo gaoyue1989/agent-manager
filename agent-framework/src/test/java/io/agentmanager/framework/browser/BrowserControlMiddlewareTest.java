@@ -102,4 +102,30 @@ class BrowserControlMiddlewareTest {
         assertNotNull(run.passed(), "无命令调用时直通");
         assertEquals(0, run.events().size());
     }
+
+    @Test
+    void onAgentBridgeShouldDeliverDeniedResultEventsEvenWhenOnActingReturnIsDropped() {
+        var control = mock(BrowserControlService.class);
+        when(control.isHumanControlled("s1")).thenReturn(true);
+        var resolver = mock(SessionKeyResolver.class);
+        when(resolver.canonicalSessionId(org.mockito.ArgumentMatchers.any())).thenReturn("s1");
+        var mw = new BrowserControlMiddleware(control, resolver);
+
+        var ctx = RuntimeContext.builder().sessionId("s1").userId("u1").build();
+        var state = mock(AgentState.class);
+        when(state.contextMutable()).thenReturn(new java.util.ArrayList<>());
+        ctx.setAgentState(state);
+        var agent = mock(Agent.class);
+        when(agent.getName()).thenReturn("a1");
+
+        var events = mw.onAgent(agent, ctx, mock(io.agentscope.core.middleware.AgentInput.class), input -> {
+            var calls = List.of(new ToolUseBlock("t1", "execute", Map.of("command", "echo hi")));
+            mw.onActing(agent, ctx, new ActingInput(calls), next -> Flux.empty()).then().block();
+            return Flux.empty();
+        }).collectList().block();
+
+        assertNotNull(events);
+        org.junit.jupiter.api.Assertions.assertTrue(events.stream().anyMatch(e -> e instanceof ToolResultEndEvent end
+            && end.getState() == ToolResultState.DENIED && "t1".equals(end.getToolCallId())));
+    }
 }

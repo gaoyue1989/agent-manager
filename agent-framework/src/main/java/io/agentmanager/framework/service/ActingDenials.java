@@ -19,13 +19,29 @@ import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.ActingInput;
+import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.tool.ToolResultMessageBuilder;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 
 public final class ActingDenials {
 
+    private static final String EVENT_BRIDGE_KEY = "oaf.acting_denials.event_bridge";
+
     private ActingDenials() {
+    }
+
+    public static Flux<AgentEvent> bridge(RuntimeContext ctx, AgentInput input,
+                                          Function<AgentInput, Flux<AgentEvent>> next) {
+        if (ctx == null || ctx.get(EVENT_BRIDGE_KEY) != null) {
+            return next.apply(input);
+        }
+        Sinks.Many<AgentEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
+        ctx.put(EVENT_BRIDGE_KEY, sink);
+        return Flux.merge(
+            next.apply(input).doFinally(sig -> sink.tryEmitComplete()),
+            sink.asFlux());
     }
 
     public static Set<ToolUseBlock> identitySet(List<ToolUseBlock> calls) {
@@ -34,6 +50,7 @@ public final class ActingDenials {
         return set;
     }
 
+    @SuppressWarnings("unchecked")
     public static Flux<AgentEvent> deny(Agent agent, RuntimeContext ctx, ActingInput input,
                                         Set<ToolUseBlock> denied, Function<ToolUseBlock, String> reasonFor,
                                         Function<ActingInput, Flux<AgentEvent>> next) {
@@ -54,17 +71,25 @@ public final class ActingDenials {
         if (state == null) {
             return next.apply(input);
         }
+        Sinks.Many<AgentEvent> bridge = ctx == null ? null : (Sinks.Many<AgentEvent>) ctx.get(EVENT_BRIDGE_KEY);
         var syntheticEvents = new ArrayList<AgentEvent>();
         for (var call : blocked) {
             String toolId = call.getId();
             String replyId = java.util.UUID.randomUUID().toString().replace("-", "");
             String reason = reasonFor.apply(call);
+            var resStart = new ToolResultStartEvent(replyId, toolId, call.getName());
+            var resDelta = new ToolResultTextDeltaEvent(replyId, toolId, call.getName(), reason);
+            var resEnd = new ToolResultEndEvent(replyId, toolId, call.getName(), ToolResultState.DENIED);
             syntheticEvents.add(new ToolCallStartEvent(replyId, toolId, call.getName()));
             syntheticEvents.add(new ToolCallEndEvent(replyId, toolId, call.getName()));
-            syntheticEvents.add(new ToolResultStartEvent(replyId, toolId, call.getName()));
-            syntheticEvents.add(new ToolResultTextDeltaEvent(replyId, toolId, call.getName(), reason));
-            syntheticEvents.add(new ToolResultEndEvent(replyId, toolId, call.getName(),
-                ToolResultState.DENIED));
+            syntheticEvents.add(resStart);
+            syntheticEvents.add(resDelta);
+            syntheticEvents.add(resEnd);
+            if (bridge != null) {
+                bridge.tryEmitNext(resStart);
+                bridge.tryEmitNext(resDelta);
+                bridge.tryEmitNext(resEnd);
+            }
             ToolResultBlock deniedResult = ToolResultBlock.builder()
                 .id(toolId)
                 .name(call.getName())
