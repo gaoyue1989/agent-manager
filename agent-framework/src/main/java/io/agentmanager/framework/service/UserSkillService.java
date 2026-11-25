@@ -51,7 +51,7 @@ import io.agentscope.core.skill.util.MarkdownSkillParser;
 public class UserSkillService {
     private static final Logger log = LoggerFactory.getLogger(UserSkillService.class);
 
-    /** 单个技能文件内容上限（写入 KV 的单文件大小；1MB） */
+    /** 单个技能文本文件内容上限（写入 KV 的单文件大小；1MB；图片等资源文件不落 KV，不受此限） */
     public static final int MAX_CONTENT_BYTES = 1024 * 1024;
     /** 单技能所有文件的总字节上限（防单技能物化/回写过大；20MB） */
     public static final long MAX_SKILL_TOTAL_BYTES = 20L * 1024 * 1024;
@@ -701,9 +701,10 @@ public class UserSkillService {
      *
      * <p>文本 UTF-8 优先、GBK 自动转码；真正的二进制（图片等）显式跳过（KV 只存字符串，
      * 替换成 U+FFFD 等于下发即损坏数据），跳过清单随 {@link SyncOutcome#skipped()} 返回并打告警日志。
+     * 单文件上限只约束落 KV 的文本文件，资源文件不参与；整个技能的总字节上限对所有文件生效。
      *
      * @return 下发结果（files / skipped）；包内无此技能返回 empty（调用方映射 404）
-     * @throws ContentTooLargeException 单文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
+     * @throws ContentTooLargeException 文本文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
      *                                  单技能总大小超 {@link #MAX_SKILL_TOTAL_BYTES}（20MB）
      * @throws IllegalArgumentException 包内技能缺 SKILL.md / 文件数超限 / key 组合超长
      * @throws IllegalStateException    源目录不可读或 KV 写入失败
@@ -736,7 +737,8 @@ public class UserSkillService {
      * 拒绝整个包（KV 只存字符串，硬拒绝会让带配图的技能完全传不上来）；两者都不是才拒绝。
      *
      * <p>压缩包体积上限 {@link #MAX_ZIP_BYTES}（10MB）由调用方（控制器）前置校验；
-     * 解压后的条目数/总大小上限见 {@link SkillZipSupport}。
+     * 解压后的条目数/总大小上限见 {@link SkillZipSupport}。单文件上限只约束文本文件，
+     * 资源文件不参与，整个技能总大小仍受 {@link #MAX_SKILL_TOTAL_BYTES}（20MB）约束。
      *
      * @param zipStream   zip 输入流
      * @param zipFileName 原始文件名（无 frontmatter name 且非包裹结构时用作技能名）
@@ -745,7 +747,7 @@ public class UserSkillService {
      *                                  文件数超限 / key 组合超长
      * @throws SkillNameConflictException 解析出的技能名与包内（L2）公共技能重名，且该用户尚无
      *                                    该技能的 L4 个人覆盖（避免新建即静默覆盖公共技能）
-     * @throws ContentTooLargeException 单文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
+     * @throws ContentTooLargeException 文本文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
      *                                  单技能总大小超 {@link #MAX_SKILL_TOTAL_BYTES}（20MB）
      * @throws IllegalStateException    zip 解压或 KV 写入失败
      */
@@ -805,7 +807,8 @@ public class UserSkillService {
      *
      * <p>文本解码走 {@link SkillZipSupport#decodeText}（UTF-8 优先、GBK 自动转码，用户分不清
      * 两者）；真正的二进制/未知编码（图片等）跳过并记入 {@code skipped}——KV 只存字符串，
-     * 强行落库会损坏数据；SKILL.md 本身解不出文本必须显式拒绝。
+     * 强行落库会损坏数据；SKILL.md 本身解不出文本必须显式拒绝。单文件上限只校验文本文件
+     * （落 KV 的实际字节），资源文件只计入技能总大小。
      *
      * @param sourceDir 含 SKILL.md 的源目录（包内技能目录 或 zip 解压根目录）
      */
@@ -831,10 +834,6 @@ public class UserSkillService {
                 }
                 packagePaths.add(rel);
                 var bytes = Files.readAllBytes(path);
-                if (bytes.length > MAX_CONTENT_BYTES) {
-                    throw new ContentTooLargeException("技能文件「" + rel + "」超过单文件 "
-                        + (MAX_CONTENT_BYTES / 1024 / 1024) + "MB 限制，请精简后重试");
-                }
                 totalBytes += bytes.length;
                 if (totalBytes > MAX_SKILL_TOTAL_BYTES) {
                     throw new ContentTooLargeException("技能「" + name + "」所有文件总大小超过 "
@@ -848,6 +847,11 @@ public class UserSkillService {
                     log.warn("materialize_skill: 跳过非文本/未知编码文件 {}/{}（{} 字节）",
                         name, rel, bytes.length);
                     continue;
+                }
+                // 单文件上限只约束落 KV 的文本文件；资源文件不落 KV，仅受技能总大小约束
+                if (content.getBytes(StandardCharsets.UTF_8).length > MAX_CONTENT_BYTES) {
+                    throw new ContentTooLargeException("技能文本文件「" + rel + "」超过单文件 "
+                        + (MAX_CONTENT_BYTES / 1024 / 1024) + "MB 限制，请精简后重试");
                 }
                 sourceFiles.put(rel, content);
             }
