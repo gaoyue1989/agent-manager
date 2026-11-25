@@ -303,7 +303,7 @@ function CreateSkillButton({ ws, onDone }: { ws: number; onDone: (msg: string) =
                   <label className="mb-1 block text-[12.5px] font-medium">技能包（zip）<em className="not-italic text-red-500">*</em></label>
                   <input type="file" accept=".zip" onChange={(e) => setFile(e.target.files?.[0] ?? null)} data-testid="skill-zip-file"
                     className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-[13px]" />
-                  <div className="mt-1 text-[11.5px] text-gray-400">支持标准技能包布局：根目录 SKILL.md（可带 _meta.json 与 scripts/、references/、assets/）或 skills/&lt;name&gt;/SKILL.md；技能名取 SKILL.md frontmatter name，缺省用 zip 文件名。≤20MB、≤2000 条目（与 OAF 包上传同护栏）；上传即跑合规检查，warnings 明细回显（宽松不阻断）。</div>
+                  <div className="mt-1 text-[11.5px] text-gray-400">支持标准技能包布局：根目录 SKILL.md（可带 _meta.json 与 scripts/、references/、assets/）、&lt;dir&gt;/SKILL.md 或 skills/&lt;name&gt;/SKILL.md；包装目录多层套壳与 macOS 压缩元数据（__MACOSX/、._*、.DS_Store）自动忽略；技能名取表单 name，缺省依次用目录名、SKILL.md frontmatter name、zip 文件名。≤20MB、≤2000 条目（与 OAF 包上传同护栏）；上传即跑合规检查，warnings 明细回显（宽松不阻断）。</div>
                 </div>
               ) : (
                 <div>
