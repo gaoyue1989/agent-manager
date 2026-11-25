@@ -88,6 +88,18 @@ public class SandboxLocator {
      * 只读定位：返回本会话已登记的沙箱 id（不连接、不占位、无副作用）；无登记返回 null。
      */
     public String sandboxId(String userId, String sessionId, IsolationScope scope) {
+        return sandboxId(userId, sessionId, scope, null);
+    }
+
+    /**
+     * 只读定位（沙箱归属证明，issue #559）：仅返回绑定 user_key = ownerUserId 的沙箱；
+     * 无绑定簿记（lifecycle 关闭）或归属不符 → null（fail-closed）。
+     */
+    public String sandboxIdOwned(String ownerUserId, String sessionId, IsolationScope scope) {
+        return sandboxId(ownerUserId, sessionId, scope, ownerUserId);
+    }
+
+    private String sandboxId(String userId, String sessionId, IsolationScope scope, String requiredOwner) {
         for (SandboxIsolationKey key : candidates(userId, sessionId, scope)) {
             try {
                 var stateJson = stateStore.load(key).orElse(null);
@@ -95,7 +107,7 @@ public class SandboxLocator {
                     continue;
                 }
                 var sandboxId = extractSandboxId(stateJson);
-                if (sandboxId != null && !sandboxId.isBlank()) {
+                if (sandboxId != null && !sandboxId.isBlank() && ownerBound(sandboxId, requiredOwner)) {
                     return sandboxId;
                 }
             } catch (Exception e) {
@@ -111,6 +123,18 @@ public class SandboxLocator {
      * 调用方负责 {@link LocatedSandbox#close()}（仅释放 HTTP 客户端，不 kill 沙箱）。
      */
     public LocatedSandbox locate(String userId, String sessionId, IsolationScope scope) {
+        return locate(userId, sessionId, scope, null);
+    }
+
+    /**
+     * 定位并连接沙箱（沙箱归属证明，issue #559）：候选沙箱的绑定 user_key 必须等于
+     * ownerUserId，否则跳过；无绑定簿记（lifecycle 关闭）→ 视同无归属证据，404。
+     */
+    public LocatedSandbox locateOwned(String ownerUserId, String sessionId, IsolationScope scope) {
+        return locate(ownerUserId, sessionId, scope, ownerUserId);
+    }
+
+    private LocatedSandbox locate(String userId, String sessionId, IsolationScope scope, String requiredOwner) {
         for (SandboxIsolationKey key : candidates(userId, sessionId, scope)) {
             String stateJson;
             try {
@@ -123,7 +147,7 @@ public class SandboxLocator {
                 continue;
             }
             String sandboxId = extractSandboxId(stateJson);
-            if (sandboxId == null || sandboxId.isBlank()) {
+            if (sandboxId == null || sandboxId.isBlank() || !ownerBound(sandboxId, requiredOwner)) {
                 continue;
             }
             try {
@@ -152,6 +176,28 @@ public class SandboxLocator {
         }
         throw new SandboxEnvException("sandbox_not_found", 404,
             "no live sandbox for this user/session");
+    }
+
+    /**
+     * 沙箱归属证明（issue #559）：绑定 user_key 必须等于 requiredOwner。
+     * 无绑定簿记（lifecycle 关闭）或读失败 → 拒绝（fail-closed）。
+     */
+    private boolean ownerBound(String sandboxId, String requiredOwner) {
+        if (requiredOwner == null) {
+            return true;
+        }
+        var store = bindingStoreProvider != null ? bindingStoreProvider.getIfAvailable() : null;
+        if (store == null) {
+            log.warn("[sandbox-locator] ownership proof unavailable (lifecycle disabled), reject sandbox={}",
+                sandboxId);
+            return false;
+        }
+        try {
+            return store.ownedByUserKey(sandboxId, requiredOwner);
+        } catch (SandboxBindingStore.DataAccessException e) {
+            log.warn("[sandbox-locator] ownership proof failed, reject sandbox={}: {}", sandboxId, e.getMessage());
+            return false;
+        }
     }
 
     /**

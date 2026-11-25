@@ -60,7 +60,7 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
         String sessionId = (String) session.getAttributes().get(BrowserViewHandshakeInterceptor.ATTR_SESSION_ID);
         String userId = (String) session.getAttributes().get(BrowserViewHandshakeInterceptor.ATTR_USER_ID);
         String endpoint;
-        try (var located = sandboxLocator.locate(userId, sessionId, IsolationScope.USER)) {
+        try (var located = sandboxLocator.locateOwned(userId, sessionId, IsolationScope.USER)) {
             endpoint = located.sandbox().getEndpoint(props.viewPort()).getEndpoint();
         } catch (Exception e) {
             log.warn("[browser-view] sandbox not reachable (sid={}): {}", sessionId, e.getMessage());

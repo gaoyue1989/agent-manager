@@ -108,13 +108,14 @@ class BrowserControlServiceTest {
     void stateShouldReportSandboxReadinessWithoutSideEffects() {
         when(store.find(SESSION)).thenReturn(null);
         when(sandboxRuntime.enabled()).thenReturn(true);
-        when(sandboxLocator.sandboxId(USER, SESSION, IsolationScope.USER)).thenReturn("sb-1");
+        when(sandboxLocator.sandboxIdOwned(USER, SESSION, IsolationScope.USER)).thenReturn("sb-1");
 
         var state = service.state(USER, SESSION);
         var sandbox = (java.util.Map<?, ?>) state.get("sandbox");
         assertEquals(true, sandbox.get("ready"));
         assertEquals("sb-1", sandbox.get("sandbox_id"));
         assertEquals("/threads/" + SESSION + "/browser/vnc", state.get("vnc_path"));
+        verify(sandboxLocator, never()).sandboxId(anyString(), anyString(), any());
     }
 
     @Test

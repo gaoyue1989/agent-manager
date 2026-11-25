@@ -2,6 +2,7 @@ package io.agentmanager.framework.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -9,6 +10,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -316,5 +318,85 @@ class SandboxLocatorTest {
     void sandboxIdProbeShouldHandleStateReadFailure() throws Exception {
         when(stateStore.load(any())).thenThrow(new IOException("kv down"));
         org.junit.jupiter.api.Assertions.assertNull(locator.sandboxId(USER, SESSION, IsolationScope.USER));
+    }
+
+    // ---------- 浏览器接管：沙箱归属证明（issue #559） ----------
+
+    @Test
+    void locateOwnedShouldRejectSandboxBoundToAnotherUser() throws Exception {
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(store.ownedByUserKey("sbx-alice", "bob")).thenReturn(false);
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-alice")));
+        var locator = locateWithLifecycle(store, manager);
+        var handle = handle();
+        MockedStatic<Sandbox> sdk = connectReturns(List.of(handle));
+        try {
+            SandboxEnvException e = assertThrows(SandboxEnvException.class,
+                () -> locator.locateOwned("bob", SESSION, IsolationScope.USER));
+            assertEquals("sandbox_not_found", e.getErrorCode());
+            assertEquals(404, e.getHttpStatus());
+            verify(handle, never()).close();
+            verify(store, never()).occupyWrite(anyString(), anyList());
+        } finally {
+            sdk.close();
+        }
+    }
+
+    @Test
+    void locateOwnedShouldAcceptSandboxBoundToOwner() throws Exception {
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(store.ownedByUserKey("sbx-own", USER)).thenReturn(true);
+        when(store.occupyWrite(anyString(), anyList())).thenReturn(true);
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-own")));
+        var locator = locateWithLifecycle(store, manager);
+        MockedStatic<Sandbox> sdk = connectReturns(List.of(handle()));
+        try {
+            assertEquals("sbx-own", locator.locateOwned(USER, SESSION, IsolationScope.USER).sandboxId());
+            verify(store).ownedByUserKey("sbx-own", USER);
+        } finally {
+            sdk.close();
+        }
+    }
+
+    @Test
+    void locateOwnedShouldFailClosedWithoutBindingStore() throws Exception {
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-1")));
+        SandboxEnvException e = assertThrows(SandboxEnvException.class,
+            () -> locator.locateOwned(USER, SESSION, IsolationScope.USER));
+        assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void locateOwnedShouldFailClosedOnBindingReadFailure() throws Exception {
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(store.ownedByUserKey(anyString(), anyString()))
+            .thenThrow(new SandboxBindingStore.DataAccessException("db down", null));
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-1")));
+        var locator = locateWithLifecycle(store, manager);
+        SandboxEnvException e = assertThrows(SandboxEnvException.class,
+            () -> locator.locateOwned(USER, SESSION, IsolationScope.USER));
+        assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void sandboxIdOwnedShouldOnlyReturnOwnerBoundSandbox() throws Exception {
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-1")));
+        var locator = locateWithLifecycle(store, manager);
+
+        assertNull(locator.sandboxIdOwned("alice", SESSION, IsolationScope.USER));
+
+        when(store.ownedByUserKey("sbx-1", "bob")).thenReturn(true);
+        assertEquals("sbx-1", locator.sandboxIdOwned("bob", SESSION, IsolationScope.USER));
+    }
+
+    @Test
+    void sandboxIdOwnedShouldFailClosedWithoutBindingStore() throws Exception {
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-1")));
+        assertNull(locator.sandboxIdOwned(USER, SESSION, IsolationScope.USER));
     }
 }

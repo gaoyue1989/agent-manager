@@ -73,12 +73,13 @@ class BrowserViewWebSocketHandlerTest {
         var sandboxEndpoint = mock(SandboxEndpoint.class);
         when(sandboxEndpoint.getEndpoint()).thenReturn(endpoint);
         when(sandbox.getEndpoint(anyInt())).thenReturn(sandboxEndpoint);
-        when(locator.locate(USER, SESSION, IsolationScope.USER)).thenReturn(new LocatedSandbox("sb-1", sandbox));
+        when(locator.locateOwned(USER, SESSION, IsolationScope.USER))
+            .thenReturn(new LocatedSandbox("sb-1", sandbox));
     }
 
     @Test
     void missingSandboxShouldCloseWithNotFound() throws Exception {
-        when(locator.locate(anyString(), anyString(), any()))
+        when(locator.locateOwned(anyString(), anyString(), any()))
             .thenThrow(new SandboxEnvException("sandbox_not_found", 404, "nope"));
 
         handler.afterConnectionEstablished(session);

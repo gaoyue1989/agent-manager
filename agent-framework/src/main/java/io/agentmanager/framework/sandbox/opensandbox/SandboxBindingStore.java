@@ -95,6 +95,28 @@ public class SandboxBindingStore {
     }
 
     /**
+     * 沙箱归属证明（issue #559）：绑定行的 user_key 是否为指定用户。
+     *
+     * <p>绑定 user_key 恒为沙箱创建时的真实用户（Channel 经 SessionKeyResolver 反查、
+     * A2A 即 ctx.userId），因此「user_key == 请求者」是跨用户寻址的唯一可靠判据：
+     * 会话键与用户身份共用字符串空间，仅靠 session_id 无法区分受害者的 USER(userId) 槽位。
+     */
+    public boolean ownedByUserKey(String sandboxId, String userKey) {
+        String sql = "SELECT 1 FROM sandbox_binding WHERE sandbox_id = ? AND user_key = ? "
+            + "AND sandbox_id NOT LIKE 'pending:%' LIMIT 1";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, sandboxId);
+            ps.setString(2, userKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            throw new DataAccessException("ownedByUserKey failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * ① touch 先行（终审 d2/cold-R1-1）：在 probe/connect 之前占住 updated_at（毫秒精度），
      * 封「acquire 后、守护线程首拍续期前」的 grace 空窗。只写 updated_at 不动 expires_at
      * （终审 R2：此刻不存在服务端响应可回填，expires_at 由 renew 响应/T2 终刷回填）。
