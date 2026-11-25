@@ -630,6 +630,30 @@ class UserSkillServiceTest {
         assertNull(store.get(skillNs(USER), "/huge/SKILL.md"), "超限必须整体失败，不留半份覆盖");
     }
 
+    /**
+     * 资源文件（图片等二进制）不参与单文件大小校验：超大图片跳过并列入 skipped，不再让整个技能
+     * 413；技能总大小仍受 {@link UserSkillService#MAX_SKILL_TOTAL_BYTES} 约束。
+     */
+    @Test
+    void syncFromPackageShouldSkipOversizedBinaryInsteadOfRejecting() throws IOException {
+        seedPackageSkill("demo-big-asset", PKG_SKILL_MD, null, null);
+        var dir = skillManageService.getSkillsDir().resolve("demo-big-asset");
+        Files.createDirectories(dir.resolve("assets"));
+        var binary = new byte[UserSkillService.MAX_CONTENT_BYTES + 1024];
+        binary[0] = (byte) 0x89;
+        binary[1] = 'P';
+        binary[2] = 'N';
+        binary[3] = 'G';
+        Files.write(dir.resolve("assets/logo.png"), binary);
+
+        var outcome = service().syncFromPackage(USER, "demo-big-asset").orElseThrow();
+
+        assertEquals(List.of("SKILL.md"), outcome.files());
+        assertEquals(List.of("assets/logo.png"), outcome.skipped(), "超大二进制只跳过，不做单文件 413");
+        assertEquals(PKG_SKILL_MD,
+            store.get(skillNs(USER), "/demo-big-asset/SKILL.md").value().get("content"));
+    }
+
     // ========== zip 上传（个人技能 L4） ==========
 
     /** 扁平 zip（根目录含 SKILL.md）：解析 frontmatter name、落库 SKILL.md + 资源文件 */
@@ -768,6 +792,26 @@ class UserSkillServiceTest {
         assertEquals(USER_SKILL_MD, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"));
         assertEquals("echo hi", store.get(skillNs(USER), "/demo-a/scripts/run.sh").value().get("content"));
         assertNull(store.get(skillNs(USER), "/demo-a/assets/logo.png"), "二进制不得以损坏文本形式落库");
+    }
+
+    /** 资源文件不参与单文件大小校验：zip 内超大图片跳过，SKILL.md 照常落库（不再整包 413） */
+    @Test
+    void uploadZipShouldSkipOversizedBinaryInsteadOfRejecting() throws IOException {
+        var entries = new java.util.LinkedHashMap<String, byte[]>();
+        entries.put(WorkspaceReader.SKILL_FILE, USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
+        var binary = new byte[UserSkillService.MAX_CONTENT_BYTES + 1024];
+        binary[0] = (byte) 0x89;
+        binary[1] = 'P';
+        binary[2] = 'N';
+        binary[3] = 'G';
+        entries.put("assets/logo.png", binary);
+
+        var outcome = service().uploadSkillZip(USER, bais(zipBytes(entries)), "demo-a.zip");
+
+        assertEquals(List.of("SKILL.md"), outcome.files());
+        assertEquals(List.of("assets/logo.png"), outcome.skipped(), "超大二进制只跳过，不做单文件 413");
+        assertEquals(USER_SKILL_MD, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"));
+        assertNull(store.get(skillNs(USER), "/demo-a/assets/logo.png"));
     }
 
     /**
