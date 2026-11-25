@@ -794,7 +794,7 @@ func (c *Core) buildFormEnv(workspaceID uint, def *store.ModelConnection, form *
 	// 沙箱资源项（demo §5）：显式填写的 SANDBOX_* 覆盖平台默认值预填；
 	// 全空/未提交不注入（运行时默认镜像与资源上限）。开关键不在此注入——
 	// env 显式设置会永久压过包声明（platformconfig 模板排除 SANDBOX_ENABLED 同因）
-	if form.Sandbox != nil {
+	if form.Sandbox != nil && (form.Sandbox.Enabled == nil || *form.Sandbox.Enabled) {
 		s := form.Sandbox
 		s.normalized()
 		if s.Image != "" {
@@ -1272,7 +1272,10 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	}
 	if form.Sandbox != nil && form.Sandbox.Enabled != nil && !*form.Sandbox.Enabled {
 		for k := range platformconfig.GroupKeys("sandbox") {
-			oldPlain[k] = ""
+			delete(oldPlain, k)
+			if _, inSecret := oldSecret[k]; inSecret {
+				oldPlain[k] = ""
+			}
 		}
 	}
 	if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {

@@ -62,7 +62,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - skills/ 目录合规检查（issue #163）：`service/skillcheck.go` `checkSkillDirs` 宽松模式——上传登记写包 `warningsJson`、`SpaceSkills` 产条目 `issues`；规则对齐运行时 OafConfigLoader 降级验证（SKILL.md 存在性 / frontmatter name/description / 名称正则与 64 长度 / 描述 1024），只提示不阻断
 - 导入模式 env（issue #161）：`CreateAgentImport` 与 harness 同走 `buildPublishEnv`——平台默认恒合并、模型连接可选（勾选则校验+注入+下发登记）；派生副本发布失败回删，本空间已上传包保留
 - 平台默认的 sandbox 分组键（`SANDBOX_*` / `OPENSANDBOX_SERVER_URL` / `OPENSANDBOX_API_KEY`）按表单沙箱开关整组过滤（issue #402/#489）：`platformDefaultEnv` 仅在 `sandbox.enabled=true` 时预填（表单显式值优先、平台默认补空）；关闭/未声明整组不注入（m10 B3 契约，管理面凭据不下发无沙箱 Pod），其余分组键不受影响
-- 编辑保存 env 合并（issue #478）：`UpdateAgent` 仅用表单管辖键（`buildFormEnv`：LLM_* / MCP_TOKEN_* / 集成认证头 / 沙箱表单四键 / Memory 注入键）覆盖既有服务 env；表单显式关闭沙箱时 sandbox 分组键（含敏感份）整组清理（issue #489，空串走 `resolveEnvMerge` 三态显式删除）；平台默认（`platformDefaultEnv`）只对 plain 与 secret 均缺失的键补位——用户经 UpdateEnv 显式自定义的 `CHECKPOINT_JDBC_URL` / `AGENT_REDIS_URL` / `SANDBOX_SKILLS_SHARED_STORE` 等不被覆盖、不触发共享库再派生（服务静默切库根因）；`buildPublishEnv`（平台默认全量预填 + 表单覆盖）仅保留创建态语义
+- 编辑保存 env 合并（issue #478）：`UpdateAgent` 仅用表单管辖键（`buildFormEnv`：LLM_* / MCP_TOKEN_* / 集成认证头 / 沙箱表单四键 / Memory 注入键）覆盖既有服务 env；表单显式关闭沙箱时 sandbox 分组键按需清理（issue #489/#570：非敏感键直接 `delete`，仅对 `oldSecret` 中实际存在的敏感键写空串走 `resolveEnvMerge` 三态删除，避免撑爆 64 键上限）；`buildFormEnv` 在 `sandbox.enabled=false` 时不注入沙箱表单四键（issue #578）；平台默认（`platformDefaultEnv`）只对 plain 与 secret 均缺失的键补位——用户经 UpdateEnv 显式自定义的 `CHECKPOINT_JDBC_URL` / `AGENT_REDIS_URL` / `SANDBOX_SKILLS_SHARED_STORE` 等不被覆盖、不触发共享库再派生（服务静默切库根因）；`buildPublishEnv`（平台默认全量预填 + 表单覆盖）仅保留创建态语义
 
 ## 控制台与跨集群导出（auth/console/admin + export/workspaceconfig + imagebuilder）
 
