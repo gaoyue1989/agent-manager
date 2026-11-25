@@ -32,7 +32,7 @@ envFrom 两源与平台发布链路同序：**服务 Secret `{fullname}-env-secr
 不经业务 Ingress 对外暴露（仅集群内访问）。两模式的排除表都改道 `{fullname}-blocked`
 无 endpoints 占位 Service，恒 **503 fail-closed**（平台形态 router 在位时为 404、缺失时
 503；本 chart 自包含无平台路由器，统一 503）。host 模式为无尾斜杠 Prefix（同盖裸
-`/actuator` 发现页）；router 模式为 `{prefix}{path}(/|$)(.*)` 正则（与主路径同捕获组序，
+`/actuator` 发现页）；router 模式为 `{prefix}{path}(/|;|$)(.*)` 正则（与主路径同捕获组序，
 rewrite-target `/$2` 统一生效；ingress-nginx 正则按长度降序，更长先命中）。
 
 ## values 必填项

@@ -457,6 +457,27 @@ const server = http.createServer((req, res) => {
           res.writeHead(200, { 'content-type': 'application/octet-stream' });
           return res.end(fs.readFileSync(target));
         }
+        if (route === '/files/info' && req.method === 'GET') {
+          const reqPaths = u.searchParams.getAll('path');
+          const out = {};
+          for (const reqPath of reqPaths) {
+            const target = sandboxPath(id, reqPath);
+            if (!target || !fs.existsSync(target)) continue;
+            const st = fs.lstatSync(target);
+            const type = st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'directory' : st.isFile() ? 'file' : 'other';
+            out[reqPath] = {
+              path: reqPath,
+              size: st.isFile() ? st.size : 0,
+              modified_at: new Date(st.mtimeMs).toISOString(),
+              created_at: new Date(st.birthtimeMs || st.mtimeMs).toISOString(),
+              mode: st.isDirectory() ? 755 : 644,
+              owner: 'root',
+              group: 'root',
+              type,
+            };
+          }
+          return json(200, out);
+        }
         if (route === '/directories/list' && req.method === 'GET') {
           const target = sandboxPath(id, u.searchParams.get('path') ?? '');
           if (!target || !fs.existsSync(target) || !fs.statSync(target).isDirectory()) { res.writeHead(404); return res.end(); }
