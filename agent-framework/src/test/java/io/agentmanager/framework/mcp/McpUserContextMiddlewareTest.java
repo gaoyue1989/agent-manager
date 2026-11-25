@@ -35,7 +35,8 @@ class McpUserContextMiddlewareTest {
         when(store.findUserIdBySession("debug-user_mt1")).thenReturn("alice");
         var mw = new McpUserContextMiddleware(store);
 
-        var context = ctx("debug-user_mt1");
+        var context = RuntimeContext.builder()
+            .sessionId("gw-3f20f08c5499").userId("debug-user_mt1").build();
         run(mw, context);
 
         var meta = context.get(McpMeta.class);
@@ -44,10 +45,25 @@ class McpUserContextMiddlewareTest {
     }
 
     @Test
-    void shouldFallbackToRawUserIdWhenSessionNotMapped() {
-        // A2A / invoke 链路：userId 即真实用户，反查未命中 → 原值
+    void a2aMustNotResolveUserIdAsSessionKey() {
         var store = mock(SessionUserStore.class);
-        when(store.findUserIdBySession("u-42")).thenReturn(null);
+        when(store.findUserIdBySession("alice-sess")).thenReturn(null);
+        when(store.findUserIdBySession("u-1001")).thenReturn("u-2002");
+        var mw = new McpUserContextMiddleware(store);
+
+        var context = RuntimeContext.builder().sessionId("alice-sess").userId("u-1001").build();
+        run(mw, context);
+
+        assertEquals("u-1001", context.get(McpMeta.class).entries()
+            .get(McpUserContextMiddleware.KEY_USER_ID));
+        verify(store, never()).findUserIdBySession("u-1001");
+    }
+
+    @Test
+    void shouldFallbackToRawUserIdWhenSessionNotMapped() {
+        // A2A / invoke 链路：userId 即真实用户，会话行未命中 → 原值
+        var store = mock(SessionUserStore.class);
+        when(store.findUserIdBySession("s-1")).thenReturn(null);
         var mw = new McpUserContextMiddleware(store);
 
         var context = ctx("u-42");
@@ -60,7 +76,7 @@ class McpUserContextMiddlewareTest {
     @Test
     void shouldFallbackWhenStoreThrows() {
         var store = mock(SessionUserStore.class);
-        when(store.findUserIdBySession("u-42")).thenThrow(new IllegalStateException("db down"));
+        when(store.findUserIdBySession("s-1")).thenThrow(new IllegalStateException("db down"));
         var mw = new McpUserContextMiddleware(store);
 
         var context = ctx("u-42");

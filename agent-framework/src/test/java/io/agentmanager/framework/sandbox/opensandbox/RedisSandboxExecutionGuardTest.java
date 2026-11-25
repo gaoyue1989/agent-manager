@@ -95,6 +95,18 @@ class RedisSandboxExecutionGuardTest {
     }
 
     @Test
+    void userIdentityValueMustNotBeResolvedAsSessionKey() {
+        // 用户身份命名空间的值（u-*/debug-user）不是会话键：即便存在抢注行也不得反查
+        var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("u-1001")).thenReturn("u-2002");
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store);
+        assertEquals("u-1001", guard.resolveUserLockValue("u-1001"));
+        assertEquals("debug-user", guard.resolveUserLockValue("debug-user"));
+        org.mockito.Mockito.verify(store, org.mockito.Mockito.never())
+            .findUserIdBySession(org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
     void lookupShouldBeCachedWithinTtlWindow() {
         // 自旋重试每 200ms 一次 tryEnter：反查必须被缓存挡住，否则打爆 DB
         var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);

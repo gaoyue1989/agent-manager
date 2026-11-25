@@ -195,12 +195,17 @@ AGENT 协作
 - 分发与落表前对非空 `sessionId` 做归属校验，不符返回 JSON-RPC 错误 `-32001`（语义 = task/session not found，不泄露存在性），拒绝执行与覆写——封堵「伪造请求体 userId 接管他人会话/冒充任意用户」两条攻击链（#411 归属校验在 A2A 面的前置失效点）；
 - 头存在但 body 非 JSON 时 fail-closed 拒绝（身份覆盖无法保证不透传）；无头（host 模式 ingress / `ROUTER_AUTH_MODE=off` 自报 / 直连调试）回落请求体身份，与 §5.4 所列「绕过 frontend 的直连调用仍可行（与今天同等暴露面）」的既有信任边界一致，不为 A2A 单独加严造成行为分叉。
 - **保留键类型裁决（issue #557，2026-11-25 起）**：`message.metadata.sessionId` / `userId` 在入口归一为下游实际消费的形态——SDK `AgentScopeAgentExecutor` 按 `containsKey + String.valueOf` 读取，故非 String JSON 值（数字/小数/布尔/数组/对象）统一 `String.valueOf` 写回（与修复前 SDK 读到的字符串逐一相同，合法数字会话 ID 续接不回归），JSON `null` 移除视为未传（与顶层 `params.sessionId: null` 同语义，杜绝字面量 `"null"` 成为会话 ID）；`recordSessionUser` 的归属校验改用同一读取语义，类型归一先于校验完成，下游不再见未校验值。修复前 `instanceof String` 提取遇非字符串即 `sessionId=null` 跳过 `ownedBy` 与 upsert，而 SDK 仍以 `String.valueOf` 消费（`12345` → `"12345"`、`null` → `"null"`），`SessionKeyResolver` 据此反查 `session_user` 命中受害者行，整轮以受害者身份运行（跨用户 KV 文件 / OpenViking 记忆 / 沙箱）。
+- **会话键命名空间裁决（issue #558，2026-11-25 起）**：`session_user.session_id` 与业务用户身份共用字符串空间，客户端可控的 `sessionId` 可占用用户身份/网关运行时命名空间，使「按 userId 反查会话」的链路指向攻击者抢注行。三类键由 `SessionKeyNamespace` 单一定义：① 用户身份 = `u-` 前缀（网关注入 `X-User-Id: u-{uid}`）与匿名 `debug-user`；② 网关运行时 = `gw-` 前缀（Channel 链路的 `gw-{12 hex}` 派生键）；③ 业务会话 = 其余值。
+  - **写入口（认领裁决）**：`SessionAccessGuard.ownedBy` 对保留命名空间一律拒绝（覆盖 `/threads/chat`、`/agui/runs`、`/threads/{sid}/*`、`/confirm*`、A2A 全部按 sid 操作的端点，统一 404 / `-32001`），客户端不得以受害者 userId 或网关 hash 认领会话；存量此类行随之失效（不可访问、不可再被认领）。
+  - **读入口（反查裁决）**：`SessionKeyResolver` 只在 Channel 链路（`ctx.sessionId` 为 `gw-{12 hex}`）把 `ctx.userId` 当 peer（=前端 sid）反查真实用户；A2A / invoke 链路 `ctx.userId` 是入口已裁决的真实用户，**禁止作为 `session_user.session_id` 反查目标**；网关 hash 本身永不反查。`VikingSessionCommitStateStore`（OV 归档账户）、`McpUserContextMiddleware`（下游 MCP 身份）、`SessionModelMiddleware`（会话模型绑定）、`RedisSandboxExecutionGuard`（沙箱 USER 键）同源采用该裁决（用户身份形态的值一律不反查）。
+  - **A2A 形态对齐**：`message.metadata.sessionId` 在入口 `PathSafe.sanitize` 归一（与 `session_user` 落表键、归属校验键同一形态），消除「落表 `team_s1` / SDK `ctx.sessionId=team:s1`」脱节导致的 `lookup(sid)` 落空与 userId 回退。
+  - **攻击链与影响**：攻击者发一次 `sessionId=u-{victim}`（无映射行即被旧 `ownedBy` 放行并 upsert）→ 受害者后续正常 A2A 会话在 `VikingSessionCommitStateStore.appendBatch` 先按 userId 反查命中攻击者行，全部对话被静默归档进攻击者 OpenViking 账户；含 `:`/`..`/空白/超长的 `sessionId` 因落表 sanitize 与 SDK 原值不一致，`SessionKeyResolver` 先查 sid 落空后回退 `lookup(ctx.userId)` 命中同一抢注行，整轮以攻击者身份执行（记忆投毒 / KV 文件 / 沙箱）。
 
 #### 5.4.2 文件命名空间候选裁决（issue #473，2026-11-24 起）
 
 §5.4.1 身份裁决在文件访问面的延伸：非沙箱 `present_file` 从 KV（agent_fs）工作区读文件时，命名空间键**单一可信键裁决**——`SessionKeyResolver.realUserId(ctx)`（session_user 反查的真实用户；入口 ownedBy 前置校验 + 认领语义保证反查结果恒为请求者本人），仅当解析器缺失（直调/测试桩形态）或反查 null（DB fail-soft）时回退入口已裁决的 userId（头 > body > `debug-user`）。
 
-- **RuntimeContext 原值禁止作为命名空间候选**：Channel 链路 `ctx.userId` 是网关 peer = 客户端可控的前端 `sessionId`（设为他人 userId 格式串即被 ownedBy 无映射放行 + upsert 认领，工具侧原值即他人命名空间）；A2A 链路 `ctx.sessionId` 是请求体原值。#473 之前的「原值 + 反查」候选集逐个尝试读取 = 跨用户读取通道，候选集语义已删除（#408 修复 #435 的遗留缺口）；
+- **RuntimeContext 原值禁止作为命名空间候选**：Channel 链路 `ctx.userId` 是网关 peer = 客户端可控的前端 `sessionId`（设为他人 userId 格式串即被 ownedBy 无映射放行 + upsert 认领，工具侧原值即他人命名空间）；A2A 链路 `ctx.sessionId` 是入口归一后的规范 sid（`PathSafe.sanitize`，issue #558），但同样不作为命名空间候选。#473 之前的「原值 + 反查」候选集逐个尝试读取 = 跨用户读取通道，候选集语义已删除（#408 修复 #435 的遗留缺口）；
 - 写入侧天然对齐：`write_file`→KV 同步用入口裁决 userId（Channel peer 不参与），读取键与写入键同为反查后的规范用户，写读命名空间一致；
 - 沙箱档不受此规则影响：沙箱归属校验沿用 `resolveUserKey` 单值链（与 `SandboxUserKeyMiddleware` 同源，issue #52），沙箱绑定键与 KV 命名空间不同源。
 

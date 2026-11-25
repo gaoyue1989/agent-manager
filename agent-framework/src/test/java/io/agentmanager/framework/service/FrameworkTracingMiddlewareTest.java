@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -242,8 +243,8 @@ class FrameworkTracingMiddlewareTest extends TracingTestBase {
             span.end();
         }
 
-        // 4 个事件 + 2 个 hook，DB 反查仍只发生 2 次（每个候选各一次），后续全走 memo
-        verify(store, times(1)).findUserIdBySession("gw-3f20f08c5499");
+        // 4 个事件 + 2 个 hook，DB 反查仍只发生 1 次（Channel 链路只按 peer 反查），后续全走 memo
+        verify(store, never()).findUserIdBySession("gw-3f20f08c5499");
         verify(store, times(1)).findUserIdBySession("peer-sid-2");
     }
 }

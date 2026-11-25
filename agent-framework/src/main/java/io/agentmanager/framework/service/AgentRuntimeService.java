@@ -1,10 +1,6 @@
 package io.agentmanager.framework.service;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -751,7 +747,7 @@ public class AgentRuntimeService {
         RuntimeContext ctx;
         if (confirmCtx.runtimeSessionId() != null && confirmCtx.runtimeUserId() != null) {
             var runtimeSessionId = confirmCtx.runtimeSessionId();
-            if (LEGACY_SHARED_GW_SESSION_ID.equals(runtimeSessionId)) {
+            if (SessionKeyNamespace.LEGACY_SHARED_GW_SESSION_ID.equals(runtimeSessionId)) {
                 runtimeSessionId = channelGatewaySessionId(confirmCtx.runtimeUserId());
             }
             ctx = RuntimeContext.builder()
@@ -851,7 +847,7 @@ public class AgentRuntimeService {
      * peerId 须与 ChatStreamController 传入 ChatUiRequest.withPeer 的值一致（PathSafe 后）。
      */
     String channelGatewaySessionId(String peerId) {
-        return gatewaySessionId("chatui|r:" + peerId + "|x:agentId=main");
+        return SessionKeyNamespace.channelGatewaySessionId(peerId);
     }
 
     /**
@@ -862,21 +858,6 @@ public class AgentRuntimeService {
      */
     public String channelSlotKey(String peerId) {
         return SessionMessageArchiveStateStore.slotKey(peerId, channelGatewaySessionId(peerId));
-    }
-
-    /** 4db16ba~#87 修复前的 MAIN 形态共享网关会话 id（canonicalKey = "chatui|x:agentId=main"）：
-     *  仅用于识别存量 confirm_context 行的 runtime_session_id（buildResumeContext 兼容翻译）。 */
-    private static final String LEGACY_SHARED_GW_SESSION_ID = gatewaySessionId("chatui|x:agentId=main");
-
-    /** "gw-" + SHA-256(canonicalKey) 前 6 字节 hex（12 字符），与 HarnessGateway 派生一致 */
-    private static String gatewaySessionId(String canonicalKey) {
-        try {
-            var digest = MessageDigest.getInstance("SHA-256")
-                .digest(canonicalKey.getBytes(StandardCharsets.UTF_8));
-            return "gw-" + HexFormat.of().formatHex(digest, 0, 6);
-        } catch (NoSuchAlgorithmException ex) {
-            throw new IllegalStateException("SHA-256 unavailable", ex);
-        }
     }
 
     /** 缓存待确认上下文（forwardEvent 收到 RequireUserConfirmEvent 时调用；A2A/普通流程，无网关路由信息） */

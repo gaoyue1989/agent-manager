@@ -24,11 +24,17 @@ import io.agentscope.core.agent.RuntimeContext;
  * <table border="1">
  *   <tr><th>链路</th><th>ctx.sessionId</th><th>ctx.userId</th><th>解析结果</th></tr>
  *   <tr><td>Channel（/threads/chat）</td><td>gw-hash（共享）</td><td>peer = 前端 sid</td>
- *       <td>sid = 前端 sid；user = 该 sid 登记行的 user_id</td></tr>
- *   <tr><td>A2A</td><td>调用方 sid（规范）</td><td>真实用户</td><td>sid 原值；user 原值</td></tr>
+ *       <td>sid = 前端 sid；user = 该 sid 登记行的 user_id（未登记回落 peer）</td></tr>
+ *   <tr><td>A2A</td><td>调用方 sid（规范）</td><td>真实用户</td>
+ *       <td>sid 原值；user = 该 sid 登记行的 user_id（未登记回落真实用户）</td></tr>
  *   <tr><td>direct invoke</td><td>{tenant}__{tid}</td><td>vendorKey</td>
  *       <td>未登记 → 原值（读取侧靠 LLMLogger 前缀归一回退命中）</td></tr>
  * </table>
+ *
+ * <p><b>命名空间裁决（issue #558）</b>：ctx.userId 只有在 Channel 链路（ctx.sessionId 为网关
+ * gw-hash）才是会话键（peer）；其余链路 ctx.userId 是入口已裁决的真实用户，禁止作为
+ * session_user.session_id 反查目标——否则攻击者抢注 {@code session_id=受害者 userId} 后，
+ * 受害者整轮执行身份被解析为攻击者。网关 hash 永不作为 session 键反查（内部运行时键）。
  *
  * <p><b>每 turn 至多一次解析</b>：结果 memo 进 RuntimeContext（网关每次 run/runStream 新建 ctx，
  * 即 memo 生命周期 = 一个 turn），下游多个中间件共用同一份，不会在事件级热路径上反复查库。
@@ -75,19 +81,16 @@ public class SessionKeyResolver {
             // 无 sessionId 的形态：userId 已是业务键，保持与旧实现一致
             return new Resolved(uid, uid);
         }
-        // 先 sessionId 后 userId（与 SessionModelMiddleware.candidateKeys 同序）：
-        // A2A 链路 sessionId 权威，Channel 链路 sessionId 是共享 gw-hash 必然落空再取 peer
+        // Channel 链路（网关 gw-hash）：ctx.userId 是 peer（=前端 sid，即规范 session_id），
+        // 真实用户按 peer 反查；网关 hash 本身是内部运行时键，永不作为 session_user 键反查
+        if (SessionKeyNamespace.isGatewaySessionId(sid)) {
+            var real = uid != null ? lookup(uid) : null;
+            return new Resolved(uid != null ? uid : sid, real != null ? real : uid);
+        }
+        // A2A / direct invoke 链路：sid 是规范会话键；ctx.userId 是入口裁决后的真实用户，
+        // 禁止作为 session 键反查（否则攻击者抢注 session_id=受害者 userId 即可劫持身份）
         var sidUser = lookup(sid);
-        if (sidUser != null) {
-            return new Resolved(sid, sidUser);
-        }
-        if (uid != null) {
-            var peerUser = lookup(uid);
-            if (peerUser != null) {
-                return new Resolved(uid, peerUser);
-            }
-        }
-        return new Resolved(sid, uid);
+        return new Resolved(sid, sidUser != null ? sidUser : uid);
     }
 
     /** session_user 命中返回该会话的 user_id；未登记/查库失败返回 null（按"未登记"处理） */

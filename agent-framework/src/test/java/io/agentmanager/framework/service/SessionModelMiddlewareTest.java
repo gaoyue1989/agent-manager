@@ -55,13 +55,25 @@ class SessionModelMiddlewareTest {
     @Test
     void shouldFallBackToUserIdKeyForChannelPath() {
         var target = mock(Model.class);
-        when(store.findModelBySession("peer:gw-abc")).thenReturn("");
+        when(store.findModelBySession("gw-3f20f08c5499")).thenReturn("");
         when(store.findModelBySession("peer")).thenReturn("m2");
         when(catalog.resolve("m2")).thenReturn(Optional.of(target));
 
-        var used = invoke(ctx("peer:gw-abc", "peer"));
+        var used = invoke(ctx("gw-3f20f08c5499", "peer"));
 
         assertSame(target, used);
+    }
+
+    /** A2A 链路：userId 是真实用户，不得作为会话模型键（命名空间碰撞，issue #558） */
+    @Test
+    void a2aMustNotRouteByUserIdKey() {
+        when(store.findModelBySession("sess-1")).thenReturn("");
+        when(store.findModelBySession("u-1001")).thenReturn("m2");
+
+        var used = invoke(ctx("sess-1", "u-1001"));
+
+        assertSame(defaultModel, used);
+        verify(store, never()).findModelBySession("u-1001");
     }
 
     @Test

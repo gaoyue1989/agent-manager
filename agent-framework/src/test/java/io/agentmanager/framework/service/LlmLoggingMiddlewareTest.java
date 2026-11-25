@@ -230,12 +230,11 @@ class LlmLoggingMiddlewareTest {
         assertEquals(1, logger.getCalls("acme-test-agent__thread-1").size());
     }
 
-    /** 反查抛异常（DB 抖动）时 fail-soft 回落 sessionId，不得因记录可观测性丢一次模型调用 */
+    /** 反查抛异常（DB 抖动）时 fail-soft 回落 Channel 规范键（peer），不得丢一次模型调用 */
     @Test
     void shouldNotBreakWhenLookupThrows() {
         var logger = new LLMLogger();
         var store = mock(SessionUserStore.class);
-        when(store.findUserIdBySession("gw-3f20f08c5499")).thenThrow(new RuntimeException("db down"));
         when(store.findUserIdBySession("debug-user_sid-2")).thenThrow(new RuntimeException("db down"));
         var middleware = new LlmLoggingMiddleware(logger, new SessionKeyResolver(store));
 
@@ -251,6 +250,7 @@ class LlmLoggingMiddlewareTest {
             (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 2, 3, 0.1))))
             .blockLast();
 
-        assertEquals(1, logger.getCalls("gw-3f20f08c5499").size());
+        assertEquals(1, logger.getCalls("debug-user_sid-2").size());
+        assertEquals(0, logger.getCalls("gw-3f20f08c5499").size());
     }
 }

@@ -113,12 +113,12 @@ class OpenSandboxTest {
         var osb = mockOsb(mockExecution(0, "ok", ""));
         var spec = new OpenSandboxFilesystemSpec();
         var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
-        when(store.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
         when(store.findUserIdBySession("front-sid")).thenReturn("alice");
         spec.setSessionKeyResolver(new io.agentmanager.framework.service.SessionKeyResolver(store));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null, spec);
 
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("front-sid").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("front-sid").build();
         sandbox.exec(ctx, "echo hi", 30);
 
         assertEquals("alice", sandbox.getUserKey());

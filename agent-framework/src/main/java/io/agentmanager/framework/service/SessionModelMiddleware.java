@@ -25,9 +25,10 @@ import reactor.core.publisher.Flux;
  * 各自持有 Model 实例、直调 {@code model.stream()}（不经本链，见 TracingModelWrapper 注释），
  * 固定使用系统模型——所以"会话切换只作用于对话"无需额外防护。
  *
- * <p><b>会话 key 两级回退</b>：Channel 链路（/threads/chat）前端 sessionId 实为
- * RuntimeContext.userId（网关 peer，见 McpUserContextMiddleware 先例）；
- * A2A 链路则 sessionId 直接匹配。两个候选依次尝试（先 sessionId 再 userId）。
+ * <p><b>会话 key 裁决</b>：Channel 链路（/threads/chat）前端 sessionId 实为
+ * RuntimeContext.userId（网关 peer，见 McpUserContextMiddleware 先例），按 userId 查；
+ * A2A 链路按 sessionId 查。userId 在非 Channel 链路是真实用户，禁止作为会话键
+ * （命名空间碰撞，issue #558）。
  *
  * <p><b>一致性</b>：每次模型调用实时查 session_user.model（PK 查询，无进程内缓存），
  * 多副本下 PATCH/chat 落库即生效；未设置/未知/已禁用 → 使用全局默认对话模型
@@ -118,14 +119,13 @@ public class SessionModelMiddleware implements MiddlewareBase {
         return null;
     }
 
-    /** 会话 key 候选（去重去空）：A2A 用 sessionId；Channel 链路用 userId（= 前端 peer） */
+    /** 会话 key：A2A 用 sessionId；Channel 链路（网关 gw-hash）用 userId（= 前端 peer） */
     private Set<String> candidateKeys(RuntimeContext ctx) {
+        var sessionId = ctx.getSessionId();
+        var key = SessionKeyNamespace.isGatewaySessionId(sessionId) ? ctx.getUserId() : sessionId;
         var keys = new LinkedHashSet<String>();
-        if (ctx.getSessionId() != null && !ctx.getSessionId().isBlank()) {
-            keys.add(ctx.getSessionId());
-        }
-        if (ctx.getUserId() != null && !ctx.getUserId().isBlank()) {
-            keys.add(ctx.getUserId());
+        if (key != null && !key.isBlank()) {
+            keys.add(key);
         }
         return keys;
     }
