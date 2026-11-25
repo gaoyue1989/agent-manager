@@ -1257,24 +1257,35 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	if err != nil {
 		return nil, nil, err
 	}
-	// 平台默认仅缺省补位（issue #478）：用户显式自定义（plain 或 secret 份）零影响，
-	// 否则 buildPublishEnv 预填的共享默认会覆盖用户值，且 Republish 出口 applyIsolationEnv
-	// 见值等于平台默认把 checkpoint 再派生——服务静默切库；表单管辖键照常覆盖，其余 sticky
-	for k, v := range c.platformDefaultEnv(form) {
-		_, inPlain := oldPlain[k]
-		_, inSecret := oldSecret[k]
-		if !inPlain && !inSecret {
-			oldPlain[k] = v
+	_, hasOldSbxURL := oldSecret["OPENSANDBOX_SERVER_URL"]
+	wasSandboxOn := oldPlain["SANDBOX_ENABLED"] == "true" || oldPlain["OPENSANDBOX_SERVER_URL"] != "" || hasOldSbxURL
+	if !wasSandboxOn && form.Sandbox.sandboxOn() {
+		sbxKeys := platformconfig.GroupKeys("sandbox")
+		for k, v := range c.platformDefaultEnv(form) {
+			if !sbxKeys[k] {
+				continue
+			}
+			_, inPlain := oldPlain[k]
+			_, inSecret := oldSecret[k]
+			if !inPlain && !inSecret {
+				oldPlain[k] = v
+			}
 		}
 	}
 	for k, v := range formEnv {
 		oldPlain[k] = v
 	}
-	if form.Sandbox != nil && form.Sandbox.Enabled != nil && !*form.Sandbox.Enabled {
-		for k := range platformconfig.GroupKeys("sandbox") {
-			delete(oldPlain, k)
-			if _, inSecret := oldSecret[k]; inSecret {
-				oldPlain[k] = ""
+	if form.Sandbox != nil && form.Sandbox.Enabled != nil {
+		delete(oldPlain, "SANDBOX_ENABLED")
+		if _, inSecret := oldSecret["SANDBOX_ENABLED"]; inSecret {
+			oldPlain["SANDBOX_ENABLED"] = ""
+		}
+		if !*form.Sandbox.Enabled {
+			for k := range platformconfig.GroupKeys("sandbox") {
+				delete(oldPlain, k)
+				if _, inSecret := oldSecret[k]; inSecret {
+					oldPlain[k] = ""
+				}
 			}
 		}
 	}
