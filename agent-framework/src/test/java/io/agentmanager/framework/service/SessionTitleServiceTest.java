@@ -12,7 +12,6 @@ import io.agentscope.core.model.Model;
 import reactor.core.publisher.Flux;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -84,9 +83,20 @@ class SessionTitleServiceTest {
     }
 
     @Test
-    void generateTitleShouldReturnNullWhenModelReturnsEmpty() {
+    void generateAsyncShouldFallbackToFirstMessageWhenModelFails() {
+        when(sessionUserStore.findRemark("sid-5")).thenReturn("");
+        when(model.stream(any(), any(), any()))
+            .thenReturn(Flux.error(new IllegalStateException("Timeout on blocking read")));
+
+        service.generateAsync("sid-5", "帮我查一下今天的部署记录", "alice");
+
+        verify(sessionUserStore).updateRemark("sid-5", "帮我查一下今天的部署记录");
+    }
+
+    @Test
+    void generateTitleShouldReturnBlankWhenModelReturnsNoText() {
         when(model.stream(any(), any(), any())).thenReturn(Flux.empty());
-        assertNull(service.generateTitle("hello"));
+        assertTrue(service.generateTitle("hello").isBlank());
     }
 
     @Test
