@@ -133,6 +133,13 @@ public class ChatStreamController {
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
 
     /**
+     * 历史归档配置：入口侧用户提问前置归档与 turn 末 write-through 共用同一开关
+     * （AGENT_HISTORY_ARCHIVE_ENABLED）。字段注入同 sessionMessageStore；null = 按默认开启。
+     */
+    @Autowired(required = false)
+    private io.agentmanager.framework.config.HistoryConfig historyConfig;
+
+    /**
      * 排队 turn 意图存储（字段注入，同 sessionMessageStore：避免改动全部构造调用点）。
      * 排队期间把本轮 turn id 提前暴露给 /status，使「排队中刷新」仍能续传。
      */
@@ -686,6 +693,16 @@ public class ChatStreamController {
                     .content(blocks).build();
                 messages = new ArrayList<>();
                 messages.add(msg);
+
+                // 用户提问前置归档：沙箱 acquire 在 middleware 链之外（HarnessAgent 的
+                // Flux.using 资源构造），建失败时 TurnInputArchiveMiddleware 不会执行——
+                // 此处先落库，history 才不至于只剩失败留痕。同 Msg id 幂等，不产生重复。
+                if (sessionMessageStore != null
+                        && (historyConfig == null || historyConfig.archiveEnabled())) {
+                    io.agentmanager.framework.service.SessionMessageArchiveStateStore
+                        .archiveUserInput(sessionMessageStore,
+                            runtimeService.channelSlotKey(finalSessionId), messages);
+                }
 
                 // ===== 5. 先订阅 EventBus =====
                 eventBus.subscribe(finalSessionId, 0, replyId)

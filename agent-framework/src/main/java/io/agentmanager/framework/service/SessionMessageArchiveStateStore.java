@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.state.State;
@@ -162,6 +163,50 @@ public class SessionMessageArchiveStateStore implements AgentStateStore {
             log.warn("SessionMessageArchiveStateStore: archive failed (user={}, session={}): {}",
                 userId, sessionId, e.getMessage());
         }
+    }
+
+    /**
+     * 入口侧用户输入前置归档：在 agent 执行（含沙箱 acquire）之前把本轮真实用户输入写入消息轨。
+     *
+     * <p>沙箱 acquire 位于 middleware 链之外（HarnessAgent 的 Flux.using 资源构造），建失败时
+     * {@link TurnInputArchiveMiddleware} 不执行——聊天/AG-UI 入口在 dispatch 前调用本方法补齐，
+     * history 才不至于只剩失败留痕。与 turn 末 write-through 共用同一 Msg id，按
+     * (session_id, msg_id) 幂等合并，不产生重复。{@code slotKey} 须与 agent_state.session_id 同值。
+     * 全程 fail-soft，异常只告警。
+     */
+    public static void archiveUserInput(SessionMessageStore store, String slotKey, List<Msg> msgs) {
+        if (store == null || slotKey == null || slotKey.isBlank() || msgs == null || msgs.isEmpty()) {
+            return;
+        }
+        try {
+            var records = new ArrayList<SessionMessageStore.MessageRecord>(msgs.size());
+            for (var msg : msgs) {
+                if (!isRealUserInput(msg)) {
+                    continue;
+                }
+                var record = toRecord(msg);
+                if (record != null) {
+                    records.add(record);
+                }
+            }
+            if (!records.isEmpty()) {
+                store.archiveBatch(slotKey, records);
+            }
+        } catch (Exception e) {
+            log.warn("SessionMessageArchiveStateStore: user input archive failed ({}): {}",
+                slotKey, e.getMessage());
+        }
+    }
+
+    private static boolean isRealUserInput(Msg msg) {
+        if (msg == null || msg.getRole() != MsgRole.USER) {
+            return false;
+        }
+        if (msg.getId() == null || msg.getId().isBlank()) {
+            return false;
+        }
+        var metadata = msg.getMetadata();
+        return metadata == null || !metadata.containsKey(Msg.METADATA_CONFIRM_RESULTS);
     }
 
     /** Msg → 归档记录；无 msg_id 或序列化失败返回 null（跳过，见 archive 注释） */

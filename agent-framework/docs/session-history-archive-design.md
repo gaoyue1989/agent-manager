@@ -401,3 +401,20 @@ user 消息开启新轮 + ASKING assistant（metadata `agentscope_confirm_reques
 锚点由写入侧提供：`/threads/chat` 与 AG-UI 的 user 消息 metadata 打 `agent_turn_reply_id`
 （`StateDataParser.METADATA_TURN_REPLY_ID`），Redis 索引过期时仍可正确归属；未知/存量会话
 仍回落到 Redis 顺序，行为零回归。compaction 分隔条不属于任何轮次，不消耗 reply id。
+
+### 15.2 追加修正：入口侧用户提问前置归档（2026-11-24）
+
+**缺陷**：沙箱创建失败（`Lifecycle acquire failed`）时 `history` 看不到本轮用户提问，只剩
+`__turn_error__` 失败留痕（上传卡片也因此挂不上）。
+
+**根因**：归档中间件 `TurnInputArchiveMiddleware.onAgent` 位于 SDK middleware 链内，而沙箱
+acquire 发生在 `HarnessAgent.wrappedStream/wrappedCall` 的 `Flux.using(acquireForCall, …)`
+资源构造阶段——**早于** middleware 链。acquire 抛错时整条链不执行，提问从未落库。
+
+**修正（最小改动，复用既有幂等）**：归档核心抽出为
+`SessionMessageArchiveStateStore.archiveUserInput(store, slotKey, msgs)`（真实用户输入过滤 +
+fail-soft，与中间件共用同一实现）；`/threads/chat` 与 `/agui/runs` 在 `dispatchStream` 前用
+`AgentRuntimeService.channelSlotKey(peer)`（= `slotKey(peer, channelGatewaySessionId(peer))`，
+与网关 RuntimeContext 同源）先归档一次。同一 `Msg.id` 走 `(session_id, msg_id)` upsert，
+turn 末 write-through 按 `mergeMsgJson` 合并，不产生重复消息；开关仍由
+`AGENT_HISTORY_ARCHIVE_ENABLED` 统一门控（控制器字段注入 `HistoryConfig`，null = 默认开启）。

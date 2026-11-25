@@ -854,6 +854,16 @@ public class AgentRuntimeService {
         return gatewaySessionId("chatui|r:" + peerId + "|x:agentId=main");
     }
 
+    /**
+     * Channel 链路的会话 slot 键（agent_state / session_message 的复合键形态）：
+     * {@code peer + ":" + channelGatewaySessionId(peer)}，即网关 RuntimeContext
+     * （userId=peer、sessionId=gw-hash）经 {@link SessionMessageArchiveStateStore#slotKey}
+     * 归一后的结果。入口侧用户提问前置归档据此定位 turn 末 write-through 的同一行。
+     */
+    public String channelSlotKey(String peerId) {
+        return SessionMessageArchiveStateStore.slotKey(peerId, channelGatewaySessionId(peerId));
+    }
+
     /** 4db16ba~#87 修复前的 MAIN 形态共享网关会话 id（canonicalKey = "chatui|x:agentId=main"）：
      *  仅用于识别存量 confirm_context 行的 runtime_session_id（buildResumeContext 兼容翻译）。 */
     private static final String LEGACY_SHARED_GW_SESSION_ID = gatewaySessionId("chatui|x:agentId=main");

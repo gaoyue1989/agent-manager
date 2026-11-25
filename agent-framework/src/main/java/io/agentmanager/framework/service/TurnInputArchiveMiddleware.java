@@ -1,16 +1,10 @@
 package io.agentmanager.framework.service;
 
-import java.util.ArrayList;
 import java.util.function.Function;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
-import io.agentscope.core.message.Msg;
-import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.middleware.MiddlewareBase;
 import reactor.core.publisher.Flux;
@@ -28,17 +22,18 @@ import reactor.core.publisher.Flux;
  * <p><b>键一致（不产生重复）</b>：slot key = {@code normalizeUser(ctx.userId) + ":" +
  * ctx.getSessionId()}，与 SDK 落库 agent_state / {@link SessionMessageArchiveStateStore}
  * 完全同构（Channel 链路 {@code ctx.userId} 是 peer=前端 sid、{@code ctx.sessionId} 是
- * 网关 gw-hash）。{@link Msg} 的 id 由 SDK {@code Msg.Builder()} 生成且 turn 全程稳定，
- * 归档 upsert 键 {@code (session_id, msg_id)} 幂等——turn 结束 write-through 落同一 id，
- * 按 {@link SessionMessageStore#mergeMsgJson} 合并，不产生重复消息。
+ * 网关 gw-hash）。{@link io.agentscope.core.message.Msg} 的 id 由 SDK {@code Msg.Builder()}
+ * 生成且 turn 全程稳定，归档 upsert 键 {@code (session_id, msg_id)} 幂等——turn 结束
+ * write-through 落同一 id，按 {@link SessionMessageStore#mergeMsgJson} 合并，不产生重复消息。
  *
- * <p><b>过滤</b>：仅归档 USER 角色的真实输入；HITL 确认恢复等控制消息（携带
- * {@link Msg#METADATA_CONFIRM_RESULTS}）不落库。全程 fail-soft，异常只告警，绝不影响
- * 对话主链路。
+ * <p><b>边界</b>：沙箱 acquire 在 middleware 链之外（HarnessAgent.wrappedStream 的
+ * Flux.using 资源构造），建失败时本中间件不会执行——聊天/AG-UI 入口在 dispatch 前已用
+ * {@link SessionMessageArchiveStateStore#archiveUserInput} 前置归档兜住该路径。
+ *
+ * <p>归档逻辑与入口侧前置归档同源（同一 helper），全程 fail-soft，异常只告警，绝不影响
+ * 对话主链路；归档关闭（AGENT_HISTORY_ARCHIVE_ENABLED=false）时本中间件不装配。
  */
 public class TurnInputArchiveMiddleware implements MiddlewareBase {
-
-    private static final Logger log = LoggerFactory.getLogger(TurnInputArchiveMiddleware.class);
 
     private final SessionMessageStore sessionMessageStore;
 
@@ -55,49 +50,14 @@ public class TurnInputArchiveMiddleware implements MiddlewareBase {
     @Override
     public Flux<AgentEvent> onAgent(Agent agent, RuntimeContext ctx, AgentInput input,
                                     Function<AgentInput, Flux<AgentEvent>> next) {
-        archiveUserInput(ctx, input);
+        if (ctx != null && input != null && input.msgs() != null) {
+            var sessionId = ctx.getSessionId();
+            if (sessionId != null && !sessionId.isBlank()) {
+                SessionMessageArchiveStateStore.archiveUserInput(sessionMessageStore,
+                    SessionMessageArchiveStateStore.slotKey(ctx.getUserId(), sessionId),
+                    input.msgs());
+            }
+        }
         return next.apply(input);
-    }
-
-    private void archiveUserInput(RuntimeContext ctx, AgentInput input) {
-        if (sessionMessageStore == null || ctx == null || input == null
-                || input.msgs() == null || input.msgs().isEmpty()) {
-            return;
-        }
-        var sessionId = ctx.getSessionId();
-        if (sessionId == null || sessionId.isBlank()) {
-            return;
-        }
-        try {
-            var records = new ArrayList<SessionMessageStore.MessageRecord>();
-            for (var msg : input.msgs()) {
-                if (!isRealUserInput(msg)) {
-                    continue;
-                }
-                var record = SessionMessageArchiveStateStore.toRecord(msg);
-                if (record != null) {
-                    records.add(record);
-                }
-            }
-            if (!records.isEmpty()) {
-                sessionMessageStore.archiveBatch(
-                    SessionMessageArchiveStateStore.slotKey(ctx.getUserId(), sessionId), records);
-            }
-        } catch (Exception e) {
-            log.warn("TurnInputArchiveMiddleware: archive failed (sid={}): {}",
-                sessionId, e.getMessage());
-        }
-    }
-
-    /** 真实用户输入：USER 角色、有稳定 id，且非 HITL 确认/外部执行结果等控制消息 */
-    private static boolean isRealUserInput(Msg msg) {
-        if (msg == null || msg.getRole() != MsgRole.USER) {
-            return false;
-        }
-        if (msg.getId() == null || msg.getId().isBlank()) {
-            return false;
-        }
-        var metadata = msg.getMetadata();
-        return metadata == null || !metadata.containsKey(Msg.METADATA_CONFIRM_RESULTS);
     }
 }
