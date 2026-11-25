@@ -19,7 +19,7 @@ export type ToolCallInfo = {
 };
 
 export type ChatMsg = {
-  role: "user" | "assistant" | "tool" | "system";
+  role: "user" | "assistant" | "tool" | "system" | "context";
   content: string;
   pending?: boolean;   // 工具行执行中 / 助手流式输出中
   toolCallId?: string;
@@ -33,4 +33,5 @@ export type ChatMsg = {
   /** 配额满错误卡载荷（§6.3：chat 预检 409 / SSE error 帧 code=user_quota_exhausted 两入口） */
   quota?: import("@/lib/sandbox-quota").QuotaPayload;
   files?: FileCard[];  // file_ready 渲染的下载卡片
+  context?: { key: string; title: string; createdAt: string; updatedAt: string };
 };

@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { buildHistoryAssistantMessage, completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
 import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import { isQuotaError, makeQuotaError, parseQuota409, quotaFromSseError, stopThreadUrl } from "@/lib/sandbox-quota";
+import { contextMessagesFromHistory, isWelcomeState } from "@/lib/session-context";
 import MessageItem from "./MessageItem";
 import PermissionCard from "./PermissionCard";
 import QuotaErrorCard from "./QuotaErrorCard";
@@ -106,7 +107,7 @@ export default function ChatPane({
   const awaitingConfirm = messages.some((m) => m.confirm && (m.confirm.status === "pending" || m.confirm.status === "unknown"));
   const sessionLocked = busy || historyLoading || uploading;
   // 欢迎态：只有系统提示、没有实际对话内容时展示 Hero + 快捷建议
-  const welcome = !historyLoading && messages.every((m) => m.role === "system");
+  const welcome = !historyLoading && isWelcomeState(messages);
 
   const loadThreads = useCallback(async () => {
     try {
@@ -159,6 +160,7 @@ export default function ChatPane({
         return msgs;
       }
       const data = await resp.json();
+      msgs.push(...contextMessagesFromHistory(data));
       for (const m of (data.messages ?? [])) {
         if (m.role === "user") {
           msgs.push({ role: "user", content: m.content ?? "" });
@@ -669,7 +671,7 @@ export default function ChatPane({
   };
 
   // 欢迎态下除问候语外的系统提示（新会话/上传失败等）仍需展示，避免信息丢失
-  const welcomeNotices = messages.filter((m) => m.role === "system" && m.content !== GREETING);
+  const welcomeNotices = messages.filter((m) => m.role === "context" || (m.role === "system" && m.content !== GREETING));
 
   // 底部输入卡：毛玻璃圆角卡 + 左附件/右发送（发送键随状态变形：箭头 ⇄ 转圈）
   const inputCard = (
