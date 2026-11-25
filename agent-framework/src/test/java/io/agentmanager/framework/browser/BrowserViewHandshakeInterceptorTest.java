@@ -138,4 +138,17 @@ class BrowserViewHandshakeInterceptorTest {
 
         assertFalse(handshake(vncUri(SESSION, TICKET), null, new HashMap<>()));
     }
+
+    @Test
+    void crossOriginHandshakeShouldBeRejectedBeforeConsumingTicket() {
+        var req = mock(org.springframework.http.server.ServerHttpRequest.class);
+        var resp = mock(org.springframework.http.server.ServerHttpResponse.class);
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setOrigin("https://evil.example");
+        when(req.getURI()).thenReturn(java.net.URI.create("http://127.0.0.1:8911/threads/" + SESSION + "/browser/vnc?ticket=" + TICKET));
+        when(req.getHeaders()).thenReturn(headers);
+
+        assertFalse(interceptor.beforeHandshake(req, resp, mock(org.springframework.web.socket.WebSocketHandler.class), new HashMap<>()));
+        org.mockito.Mockito.verify(ticketStore, org.mockito.Mockito.never()).consume(org.mockito.ArgumentMatchers.any());
+    }
 }

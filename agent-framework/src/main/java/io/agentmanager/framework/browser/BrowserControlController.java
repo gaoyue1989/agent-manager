@@ -115,9 +115,17 @@ public class BrowserControlController {
         var firstFrame = new java.util.concurrent.atomic.AtomicBoolean(true);
         return stream
             .doOnNext(sse -> {
-                if (firstFrame.compareAndSet(true, false) && sse != null) {
-                    var data = sse.data();
-                    if ("error".equals(sse.event()) || (data != null && data.contains("turn_in_progress"))) {
+                if (sse == null) {
+                    return;
+                }
+                var data = sse.data();
+                if (data != null && data.contains("\"type\":\"waiting\"")) {
+                    return;
+                }
+                if (firstFrame.compareAndSet(true, false)) {
+                    if ("error".equals(sse.event())
+                            || (data != null && (data.contains("\"type\":\"error\"")
+                                || data.contains("turn_in_progress")))) {
                         control.restore(sid, prev);
                     }
                 }
