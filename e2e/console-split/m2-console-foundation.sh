@@ -120,4 +120,26 @@ else
   skip "统一入口数据面身份（mock 运行时或缺业务服务）"
 fi
 
+# ---- 会话上下文注入经统一入口：以注入是否 201 分岔——404 = 业务镜像尚无该接口（合并发布镜像前）才允许 skip ----
+if runtime_is_real && [ -n "$DEF_SVC" ] && [ "$DEF_SVC" != "None" ]; then
+  GW="${GATEWAY_BASE:-http://localhost:30080}"
+  CSID="m2-ctx-$TS"
+  CTX_MARK="m2-ctx-mark-$TS"
+  CINJ=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$GW/agent/$DEF_SVC/threads/$CSID/context" \
+    -H "Cookie: oaf_session=$CK" -H 'Content-Type: application/json' \
+    -d "{\"key\":\"headline\",\"title\":\"M2 头条\",\"content\":\"$CTX_MARK\"}")
+  if [ "$CINJ" = "404" ]; then
+    skip "会话上下文注入经统一入口（业务镜像尚无该接口，合并发布镜像后生效）"
+  else
+    assert_eq "统一入口 注入会话上下文 201" "$CINJ" "201"
+    CHIST=$(curl -s -m 15 "$GW/agent/$DEF_SVC/threads/$CSID/history" -H "Cookie: oaf_session=$CK")
+    assert_contains "history 平级 context 含注入正文" "$CHIST" "$CTX_MARK"
+    assert_contains "history context 含资料名 headline" "$CHIST" '"key":"headline"'
+    assert_eq "统一入口 删除带上下文的会话 200" \
+      "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -X DELETE "$GW/agent/$DEF_SVC/threads/$CSID" -H "Cookie: oaf_session=$CK")" "200"
+  fi
+else
+  skip "会话上下文注入经统一入口（mock 运行时或缺业务服务）"
+fi
+
 finish "M2-console-foundation"
