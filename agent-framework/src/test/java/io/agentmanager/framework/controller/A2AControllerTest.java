@@ -805,4 +805,177 @@ class A2AControllerTest {
 
         verify(sessionUserStore).upsert("a2a-ph-sess", "alice");
     }
+
+    // ---------- 保留键类型裁决（issue #557） ----------
+
+    private java.util.Map<String, Object> forwardedMetadata() throws Exception {
+        var req = capturedForwardedBody();
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        return (java.util.Map<String, Object>) message.get("metadata");
+    }
+
+    @Test
+    void messageSendShouldApplyOwnershipCheckToNonStringMetadataSessionIdVariants() throws Exception {
+        var variants = java.util.List.of(
+            new String[]{"12345", "12345"},
+            new String[]{"1.5", "1.5"},
+            new String[]{"true", "true"},
+            new String[]{"[1, 2]", "[1, 2]"},
+            new String[]{String.valueOf(java.util.Map.of("a", 1)), "{\"a\": 1}"});
+        mockWrapper();
+        for (var variant : variants) {
+            when(sessionUserStore.findUserIdBySession(variant[0])).thenReturn("alice");
+            mockMvc.perform(post("/")
+                    .header("X-User-Id", "mallory")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("""
+                        {"jsonrpc":"2.0","id":"60","method":"message/send",
+                         "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+                           "metadata":{"sessionId":%s}}}}
+                        """.formatted(variant[1])))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.error.code").value(-32001));
+        }
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageStreamShouldRejectNonStringMetadataSessionIdOfForeignOwner() throws Exception {
+        when(sessionUserStore.findUserIdBySession("12345")).thenReturn("alice");
+        mockWrapper();
+
+        var initial = mockMvc.perform(post("/")
+                .header("X-User-Id", "mallory")
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .content("""
+                    {"jsonrpc":"2.0","id":"61","method":"message/stream",
+                     "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+                       "metadata":{"sessionId":12345}}}}
+                    """))
+            .andReturn();
+        var result = initial.getRequest().isAsyncStarted()
+            ? mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .asyncDispatch(initial)).andReturn()
+            : initial;
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getResponse().getContentAsString().contains("-32001"),
+            "非字符串 sessionId 的 stream 拒绝帧必须携带 -32001");
+
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendShouldCanonicalizeNonStringMetadataSessionIdToSdkStringForm() throws Exception {
+        when(sessionUserStore.findUserIdBySession("12345")).thenReturn("alice");
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"62","method":"message/send",
+                     "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+                       "metadata":{"sessionId":12345}}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        var meta = forwardedMetadata();
+        org.junit.jupiter.api.Assertions.assertEquals("12345", meta.get("sessionId"),
+            "非字符串 sessionId 归一为 SDK String.valueOf 形态");
+        org.junit.jupiter.api.Assertions.assertTrue(meta.get("sessionId") instanceof String);
+        verify(sessionUserStore).upsert("12345", "alice");
+    }
+
+    @Test
+    void messageSendWithoutHeaderShouldCanonicalizeNonStringBodyUserId() throws Exception {
+        when(sessionUserStore.findUserIdBySession("a2a-uid-num")).thenReturn(null);
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"63","method":"message/send",
+                     "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+                       "metadata":{"sessionId":"a2a-uid-num","userId":12345}}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        var meta = forwardedMetadata();
+        org.junit.jupiter.api.Assertions.assertEquals("12345", meta.get("userId"),
+            "无头模式非字符串 userId 归一为 SDK String.valueOf 形态");
+        org.junit.jupiter.api.Assertions.assertTrue(meta.get("userId") instanceof String);
+        verify(sessionUserStore).upsert("a2a-uid-num", "12345");
+    }
+
+    @Test
+    void messageSendShouldTreatNullMetadataSessionIdAsAbsent() throws Exception {
+        when(sessionUserStore.findUserIdBySession("null")).thenReturn("alice");
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "mallory")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"64","method":"message/send",
+                     "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+                       "metadata":{"sessionId":null}}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        var meta = forwardedMetadata();
+        org.junit.jupiter.api.Assertions.assertFalse(meta.containsKey("sessionId"),
+            "JSON null 视为未传，不得以字面量 \"null\" 作为会话 id 透传 SDK");
+        verify(wrapper).handleRequest(anyString(), anyMap(), any());
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+    }
+
+    @Test
+    void messageSendShouldForceHeaderOverNonStringMetadataUserId() throws Exception {
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"65","method":"message/send",
+                     "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+                       "metadata":{"sessionId":"a2a-hdr-num","userId":999}}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        org.junit.jupiter.api.Assertions.assertEquals("alice", forwardedMetadata().get("userId"),
+            "网关头覆盖优先于请求体非字符串 userId");
+        verify(sessionUserStore).upsert("a2a-hdr-num", "alice");
+    }
+
+    @Test
+    void messageSendShouldCheckOwnershipOfTopLevelNumericSessionId() throws Exception {
+        when(sessionUserStore.findUserIdBySession("12345")).thenReturn("alice");
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "mallory")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"66","method":"message/send",
+                     "params":{"sessionId":12345,
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error.code").value(-32001));
+
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
 }
