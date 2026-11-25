@@ -82,6 +82,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* ---------- 渲染期校验（fail 早于装出 CrashLoop） ---------- */}}
 
 {{- define "oaf.validate" -}}
+{{- if gt (int .Values.backend.replicas) 1 -}}
+{{- fail "backend.replicas 不能大于 1（控制面单副本约束，见 AGENTS.md 架构原则一）" -}}
+{{- end -}}
 {{- if not .Values.images.business -}}
 {{- fail "images.business 必填（至少一项，渲染 AVAILABLE_IMAGES；tag 须与内网仓库实际可拉取一致）" -}}
 {{- end -}}

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/k8s/k8sfake"
 	"agent-manager/backend/internal/store"
 )
@@ -503,7 +508,6 @@ func waitForVikingTerminal(t *testing.T, c *Core, id uint) store.ServiceEntity {
 	}
 }
 
-
 // UpdateEnv 全量覆盖回显含保留键不再死锁（真机验证发现的实现缺陷）：剥离后 provider
 // 切换成功、派生键重建；平台未启用时显式设置注入键仍被拒绝（恶意值进不来）。
 func TestUpdateEnvSwitchProviderWithReservedEcho(t *testing.T) {
@@ -919,23 +923,23 @@ func TestMemoryBrowseRejectsPathTraversal(t *testing.T) {
 	waitForVikingTerminal(t, core, svc.ID)
 
 	for _, uri := range []string{
-		"viking://~/../u-9999/memories",                       // 前缀改写后的越权形态（他人空间）
-		"viking://~/../../resources/acme/secret.md",           // 越出本人空间根
-		"viking://user/u-1001/../u-9999/memories",             // 自有展开形态夹带穿越段
-		"viking://~/memories/%2e%2e/u-9999/secrets.md",        // 百分号编码穿越段
-		"viking://~/memories/%2E%2E/plan.md",                  // 大小写变体
-		"viking://~/.%2e/u-9999/memories",                     // 混合点编码
-		"viking://~/%2e./u-9999/memories/secret.md",           // 混合点编码（反序）
-		"viking://user/u-1001/.%2e/u-9999/memories",           // 自有前缀改写产物夹带混合编码
+		"viking://~/../u-9999/memories",                             // 前缀改写后的越权形态（他人空间）
+		"viking://~/../../resources/acme/secret.md",                 // 越出本人空间根
+		"viking://user/u-1001/../u-9999/memories",                   // 自有展开形态夹带穿越段
+		"viking://~/memories/%2e%2e/u-9999/secrets.md",              // 百分号编码穿越段
+		"viking://~/memories/%2E%2E/plan.md",                        // 大小写变体
+		"viking://~/.%2e/u-9999/memories",                           // 混合点编码
+		"viking://~/%2e./u-9999/memories/secret.md",                 // 混合点编码（反序）
+		"viking://user/u-1001/.%2e/u-9999/memories",                 // 自有前缀改写产物夹带混合编码
 		"viking://~/memories%2f..%2f..%2fu-9999/memories/secret.md", // 编码斜杠拼接穿越段
-		"viking://~/memories%2F..%2F..%2Fu-9999/memories",     // 编码斜杠大写变体
-		"viking://~/..%2fu-9999/memories",                     // 编码斜杠尾随穿越段
-		"viking://~/..\\u-9999\\memories\\secret.md",          // 反斜杠分隔符
-		"viking://~/..?foo=bar",                               // query 切分出穿越 path
-		"viking://~/..#frag",                                  // fragment 切分出穿越 path
-		"viking://~/%252e%252e/u-9999/memories/secret.md",     // 双重编码
-		"viking://~/memories/\x00/u-9999/secrets.md",          // 控制字符（空字节）
-		"viking://~/./u-9999/memories",                        // . 段（歧义规范化形态）
+		"viking://~/memories%2F..%2F..%2Fu-9999/memories",           // 编码斜杠大写变体
+		"viking://~/..%2fu-9999/memories",                           // 编码斜杠尾随穿越段
+		"viking://~/..\\u-9999\\memories\\secret.md",                // 反斜杠分隔符
+		"viking://~/..?foo=bar",                                     // query 切分出穿越 path
+		"viking://~/..#frag",                                        // fragment 切分出穿越 path
+		"viking://~/%252e%252e/u-9999/memories/secret.md",           // 双重编码
+		"viking://~/memories/\x00/u-9999/secrets.md",                // 控制字符（空字节）
+		"viking://~/./u-9999/memories",                              // . 段（歧义规范化形态）
 	} {
 		fake.resetBrowse()
 		if _, err := core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", uri); err == nil {
@@ -1322,5 +1326,150 @@ func TestRollbackPublishPlaceholderChecksRowsAffected(t *testing.T) {
 	}
 	if pkgRow.RefCount != 1 {
 		t.Fatalf("stale placeholder rollback must not decrement ref_count owned by others, got %d", pkgRow.RefCount)
+	}
+}
+
+func TestUpdateEnvRestartFailureRestoresK8sCMAndSecret(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, fk, _ := newVikingTestCoreWithFake(t, fake.handler())
+	pkg := uploadVikingImportPkg(t, core)
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "dangling-k8s", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+	fk.FailNextRestart(1, fmt.Errorf("k8s restart failure"))
+
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{
+		AgentMemoryProviderEnv: MemoryProviderOpenViking,
+	}, nil); err == nil {
+		t.Fatalf("update env must fail")
+	}
+	if fake.deleteCount() != 1 {
+		t.Fatalf("newly created account must be rolled back, deletes=%d", fake.deleteCount())
+	}
+	cm, err := fk.CS().CoreV1().ConfigMaps(fk.Namespace()).Get(context.Background(), svc.K8sName+"-env", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get cm: %v", err)
+	}
+	if cm.Data[AgentMemoryProviderEnv] != MemoryProviderLocal {
+		t.Fatalf("cm provider must be restored to local, got %q", cm.Data[AgentMemoryProviderEnv])
+	}
+	if cm.Data[OpenVikingAccountEnv] != "" {
+		t.Fatalf("cm must not retain dangling OVK_ACCOUNT=%q", cm.Data[OpenVikingAccountEnv])
+	}
+	sec, err := fk.CS().CoreV1().Secrets(fk.Namespace()).Get(context.Background(), k8s.EnvSecretName(svc.K8sName), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if len(sec.Data[OvkAdminKeyEnv]) > 0 || len(sec.Data[OvkUserSeedEnv]) > 0 {
+		t.Fatalf("secret must not retain dangling OVK credentials after rollback: %+v", sec.Data)
+	}
+}
+
+func TestUpdateEnvDBFailureAfterRestartKeepsVikingAccount(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, _, _ := newVikingTestCoreWithFake(t, fake.handler())
+	pkg := uploadVikingImportPkg(t, core)
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "db-fail-after-restart", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+	if err := core.DB.Callback().Update().Before("gorm:update").Register("test_fail_update_env", func(db *gorm.DB) {
+		_ = db.AddError(fmt.Errorf("simulated db write error"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = core.DB.Callback().Update().Remove("test_fail_update_env") }()
+
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{
+		AgentMemoryProviderEnv: MemoryProviderOpenViking,
+	}, nil); err == nil {
+		t.Fatalf("update env must fail on db error")
+	}
+	if fake.createCount() != 1 {
+		t.Fatalf("account must be created, creates=%d", fake.createCount())
+	}
+	if fake.deleteCount() != 0 {
+		t.Fatalf("account must NOT be deleted after deployment restart succeeded, deletes=%d", fake.deleteCount())
+	}
+}
+
+func TestStartAgainAndUnpublishSerializedWithServiceLock(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, _, _ := newVikingTestCoreWithFake(t, fake.handler())
+	pkg := uploadVikingImportPkg(t, core)
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Name: "lock-cov", Env: map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal}})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+	if _, err := core.Unpublish(svc.ID); err != nil {
+		t.Fatalf("unpublish: %v", err)
+	}
+
+	unlock := core.lockServiceOps(svc.K8sName)
+	doneStart := make(chan error, 1)
+	go func() {
+		_, err := core.StartAgain(svc.ID)
+		doneStart <- err
+	}()
+	select {
+	case err := <-doneStart:
+		unlock()
+		t.Fatalf("StartAgain bypassed service lock while held (err=%v)", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+	unlock()
+	if err := <-doneStart; err != nil {
+		t.Fatalf("StartAgain after unlock: %v", err)
+	}
+
+	unlock2 := core.lockServiceOps(svc.K8sName)
+	doneUnpub := make(chan error, 1)
+	go func() {
+		_, err := core.Unpublish(svc.ID)
+		doneUnpub <- err
+	}()
+	select {
+	case err := <-doneUnpub:
+		unlock2()
+		t.Fatalf("Unpublish bypassed service lock while held (err=%v)", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+	unlock2()
+	if err := <-doneUnpub; err != nil {
+		t.Fatalf("Unpublish after unlock: %v", err)
+	}
+}
+
+func TestImportPackageDirRespectsOverallTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(500 * time.Millisecond):
+			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	core, _ := newVikingTestCore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	core.Viking = NewVikingAdmin(true, srv.URL, "root")
+	pkg := uploadVikingImportPkg(t, core)
+
+	origTimeout := vikingImportTimeout
+	vikingImportTimeout = 120 * time.Millisecond
+	defer func() { vikingImportTimeout = origTimeout }()
+
+	start := time.Now()
+	err := core.importPackageDirWith(map[string]string{OvkAdminKeyEnv: "ak-1"}, pkg, "knowledge", "resources/"+pkg.Slug)
+	if err == nil {
+		t.Fatalf("expected timeout error from importPackageDirWith")
+	}
+	if time.Since(start) > 400*time.Millisecond {
+		t.Fatalf("importPackageDirWith did not abort promptly on overall timeout: %v", time.Since(start))
 	}
 }
