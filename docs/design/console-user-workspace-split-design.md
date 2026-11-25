@@ -194,6 +194,7 @@ AGENT 协作
 - `message/send` / `message/stream` 在兼容归一时，头存在即**强制覆盖**请求体全部 userId 通道（`params.userId` / `message.metadata.userId` / `params.metadata.userId`），SDK 执行身份与 `session_user` 认领只认头值；
 - 分发与落表前对非空 `sessionId` 做归属校验，不符返回 JSON-RPC 错误 `-32001`（语义 = task/session not found，不泄露存在性），拒绝执行与覆写——封堵「伪造请求体 userId 接管他人会话/冒充任意用户」两条攻击链（#411 归属校验在 A2A 面的前置失效点）；
 - 头存在但 body 非 JSON 时 fail-closed 拒绝（身份覆盖无法保证不透传）；无头（host 模式 ingress / `ROUTER_AUTH_MODE=off` 自报 / 直连调试）回落请求体身份，与 §5.4 所列「绕过 frontend 的直连调用仍可行（与今天同等暴露面）」的既有信任边界一致，不为 A2A 单独加严造成行为分叉。
+- **保留键类型裁决（issue #557，2026-11-25 起）**：`message.metadata.sessionId` / `userId` 在入口归一为下游实际消费的形态——SDK `AgentScopeAgentExecutor` 按 `containsKey + String.valueOf` 读取，故非 String JSON 值（数字/小数/布尔/数组/对象）统一 `String.valueOf` 写回（与修复前 SDK 读到的字符串逐一相同，合法数字会话 ID 续接不回归），JSON `null` 移除视为未传（与顶层 `params.sessionId: null` 同语义，杜绝字面量 `"null"` 成为会话 ID）；`recordSessionUser` 的归属校验改用同一读取语义，类型归一先于校验完成，下游不再见未校验值。修复前 `instanceof String` 提取遇非字符串即 `sessionId=null` 跳过 `ownedBy` 与 upsert，而 SDK 仍以 `String.valueOf` 消费（`12345` → `"12345"`、`null` → `"null"`），`SessionKeyResolver` 据此反查 `session_user` 命中受害者行，整轮以受害者身份运行（跨用户 KV 文件 / OpenViking 记忆 / 沙箱）。
 
 #### 5.4.2 文件命名空间候选裁决（issue #473，2026-11-24 起）
 

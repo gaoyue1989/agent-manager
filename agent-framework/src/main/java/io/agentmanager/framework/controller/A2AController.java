@@ -220,6 +220,7 @@ public class A2AController {
                     legacyMeta.put("userId", headerUserId);
                 }
             }
+            canonicalizeReservedMeta(meta);
             message.put("metadata", meta);
 
             return MAPPER.writeValueAsString(req);
@@ -227,6 +228,28 @@ public class A2AController {
             log.warn("normalizeMessageSendBody failed, use original body: {}", e.getMessage());
             return (headerUserId == null || headerUserId.isBlank()) ? body : null;
         }
+    }
+
+    private static void canonicalizeReservedMeta(Map<String, Object> meta) {
+        for (var key : RESERVED_META_KEYS) {
+            if (!meta.containsKey(key)) {
+                continue;
+            }
+            var value = meta.get(key);
+            if (value == null) {
+                meta.remove(key);
+            } else if (!(value instanceof String)) {
+                meta.put(key, String.valueOf(value));
+            }
+        }
+    }
+
+    private static String sdkMetaString(Map<String, Object> map, String key) {
+        return map != null && map.containsKey(key) ? String.valueOf(map.get(key)) : null;
+    }
+
+    private static String nonBlank(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     /**
@@ -374,16 +397,16 @@ public class A2AController {
             if (message == null) return null;
 
             // 从 message.metadata 中提取（normalizeMessageSendBody 已将顶层参数挪入 metadata）
-            String userId = null;
-            String sessionId = null;
             var meta = (Map<String, Object>) message.get("metadata");
-            if (meta != null) {
-                if (meta.get("userId") instanceof String uid && !uid.isBlank()) userId = uid;
-                if (meta.get("sessionId") instanceof String sid && !sid.isBlank()) sessionId = sid;
-            }
+            var userId = nonBlank(sdkMetaString(meta, "userId"));
+            var sessionId = nonBlank(sdkMetaString(meta, "sessionId"));
             // 兜底：顶层参数（兼容未经 normalize 的请求）
-            if (userId == null && params.get("userId") instanceof String uid && !uid.isBlank()) userId = uid;
-            if (sessionId == null && params.get("sessionId") instanceof String sid && !sid.isBlank()) sessionId = sid;
+            if (userId == null) {
+                userId = nonBlank(sdkMetaString(params, "userId"));
+            }
+            if (sessionId == null) {
+                sessionId = nonBlank(sdkMetaString(params, "sessionId"));
+            }
 
             if (sessionId == null) {
                 return null;
