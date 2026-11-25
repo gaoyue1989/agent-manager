@@ -61,14 +61,15 @@ class LLMLoggerTest {
     }
 
     @Test
-    void getCallsShouldMatchPrefixedVariant() {
+    void getCallsShouldRequireExactMatchAndBlockPrefixSuffixForgery() {
         var logger = new LLMLogger();
-        logger.logCall("debug-user:llm-test-001", Map.of("n", 1), Map.of());
+        logger.logCall("webui-alice1", Map.of("n", 1), Map.of());
+        logger.logCall("team_abc", Map.of("n", 2), Map.of());
 
-        // agent_state 中带前缀变体（__anon__ 租户段）也应命中同一会话
-        assertEquals(1, logger.getCalls("__anon__:debug-user:llm-test-001").size());
-        assertEquals(1, logger.getCalls("__anon__:__anon__:debug-user:llm-test-001").size());
-        // 仅会话本体（末段）也应命中
-        assertEquals(1, logger.getCalls("llm-test-001").size());
+        assertEquals(1, logger.getCalls("webui-alice1").size());
+        assertTrue(logger.getCalls("x_webui-alice1").isEmpty());
+        assertTrue(logger.getCalls("x:webui-alice1").isEmpty());
+        assertTrue(logger.getCalls("x_abc").isEmpty());
+        assertTrue(logger.getCalls("abc").isEmpty());
     }
 }
