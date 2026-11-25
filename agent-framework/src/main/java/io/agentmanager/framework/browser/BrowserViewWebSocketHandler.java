@@ -73,12 +73,28 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
         var uri = BrowserViewEndpoints.upstream(endpoint, props.viewPath());
         String apiKey = sandboxConfig.opensandbox() != null ? sandboxConfig.opensandbox().apiKey() : null;
         var pipe = new UpstreamPipe(session);
+        pipes.put(session.getId(), pipe);
+        if (!session.isOpen()) {
+            pipes.remove(session.getId(), pipe);
+            pipe.closeUpstream();
+            return;
+        }
         try {
             var upstream = connector.connect(uri, apiKey, session.getAcceptedProtocol(), pipe);
-            pipe.attach(upstream);
-            pipes.put(session.getId(), pipe);
+            if (!pipe.attach(upstream) || !session.isOpen() || pipes.get(session.getId()) != pipe) {
+                pipes.remove(session.getId(), pipe);
+                pipe.closeUpstream();
+                try {
+                    upstream.sendClose(WebSocket.NORMAL_CLOSURE, "client_closed");
+                } catch (Exception ignored) {
+                }
+                upstream.abort();
+                return;
+            }
             log.info("[browser-view] stream opened (sid={}, upstream={})", sessionId, uri);
         } catch (Exception e) {
+            pipes.remove(session.getId(), pipe);
+            pipe.closeUpstream();
             log.warn("[browser-view] upstream connect failed (sid={}, uri={}): {}",
                 sessionId, uri, e.getMessage());
             closeQuietly(session, CLOSE_UPSTREAM_FAILED, "vnc_upstream_failed");
@@ -142,8 +158,14 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
             this.downstream = downstream;
         }
 
-        void attach(WebSocket upstream) {
-            this.upstream = upstream;
+        boolean attach(WebSocket upstream) {
+            synchronized (UpstreamPipe.this) {
+                if (closed) {
+                    return false;
+                }
+                this.upstream = upstream;
+                return true;
+            }
         }
 
         @Override
@@ -244,20 +266,21 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
         }
 
         void closeUpstream() {
-            var ws = upstream;
-            if (ws == null) {
-                return;
-            }
+            WebSocket ws;
             synchronized (UpstreamPipe.this) {
                 if (closed) {
                     return;
                 }
                 closed = true;
+                ws = this.upstream;
+                this.upstream = null;
+            }
+            if (ws == null) {
+                return;
             }
             try {
                 ws.sendClose(WebSocket.NORMAL_CLOSURE, "client_closed");
             } catch (Exception ignored) {
-                // best effort
             }
             ws.abort();
         }

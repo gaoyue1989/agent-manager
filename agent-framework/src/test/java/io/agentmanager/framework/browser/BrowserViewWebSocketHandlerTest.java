@@ -200,4 +200,23 @@ class BrowserViewWebSocketHandlerTest {
         handler.afterConnectionEstablished(session);
         assertTrue(listener.get() != null, "upstream listener must be installed");
     }
+
+    @Test
+    void closeDuringUpstreamConnectMustAbortUpstreamWithoutLeakingPipe() throws Exception {
+        locateEndpoint(ENDPOINT);
+        var upstream = mock(WebSocket.class);
+        when(connector.connect(any(), any(), any(), any())).thenAnswer(inv -> {
+            handler.afterConnectionClosed(session, CloseStatus.GOING_AWAY);
+            when(session.isOpen()).thenReturn(false);
+            return upstream;
+        });
+
+        handler.afterConnectionEstablished(session);
+
+        verify(upstream).abort();
+        var pipesField = BrowserViewWebSocketHandler.class.getDeclaredField("pipes");
+        pipesField.setAccessible(true);
+        var pipesMap = (java.util.Map<?, ?>) pipesField.get(handler);
+        assertTrue(pipesMap.isEmpty(), "pipes map must not leak after close-during-connect race");
+    }
 }
