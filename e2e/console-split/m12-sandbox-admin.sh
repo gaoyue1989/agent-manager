@@ -114,8 +114,8 @@ assert_contains "summary 聚合可读（pools/warmAvailable/allocated/runningSan
 
 CR=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
 assert_eq "创建池 → 201（预设模板由后端生成）" "$CR" "201"
-CR2=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL2\",\"image\":\"img-x:1\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
-assert_eq "创建池（显式镜像）→ 201" "$CR2" "201"
+CR2=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL2\",\"image\":\"img-x:1\",\"taskExecutorImage\":\"reg.example/te:v9\",\"execdImage\":\"reg.example/execd:v9\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3},\"skillsync\":{\"baseUrl\":\"http://$SVC2-svc.$KNS.svc:9100\",\"interval\":\"30s\",\"storeDir\":\"/skills-store-2\"}}" "" "$TOKEN")
+assert_eq "创建池（显式主镜像 + 两 init 镜像 + skillsync 三键）→ 201" "$CR2" "201"
 BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"m12-pool-$TS\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
 assert_eq "池名不符 {服务k8s名}-pool 契约 → 400（skills-syncd C-1）" "$BAD" "400"
 BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"oaf-m12-ghost-$TS-pool\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
@@ -198,6 +198,27 @@ print(sum(1 for e in c['env'] if e['name'].startswith('SKILLSYNC_')))" 2>/dev/nu
   assert_contains "disableSyncd：args 回落 legacy task-executor 字面" "$PT" "/opt/opensandbox/task-executor -listen-addr"
   assert_not_contains "disableSyncd：args 不含守卫字面" "$PT" "skillsync-launcher.sh"
   assert_eq "disableSyncd：env 不含任何 SKILLSYNC_ 前缀键" "$N" "0"
+
+  # 用例 3 建池入参覆盖：两 init 镜像 + skillsync 三键（POOL2 首次建池即此形态）
+  P2=$(mock_pool_last "$POOL2")
+  P2V=$(echo "$P2" | python3 -c "
+import sys,json
+spec=json.load(sys.stdin)['template']['spec']
+init={c['name']:c['image'] for c in spec['initContainers']}
+main=spec['containers'][0]
+env={e['name']:e['value'] for e in main['env']}
+print(main['image'])
+print(init.get('task-executor-installer',''))
+print(init.get('execd-installer',''))
+print(env.get('SKILLSYNC_BASE_URL',''))
+print(env.get('SKILLSYNC_INTERVAL',''))
+print(env.get('SKILLSYNC_STORE_DIR',''))" 2>/dev/null)
+  assert_eq "覆盖：主镜像保持入参值" "$(echo "$P2V" | sed -n 1p)" "img-x:1"
+  assert_eq "覆盖：task-executor init 镜像取入参" "$(echo "$P2V" | sed -n 2p)" "reg.example/te:v9"
+  assert_eq "覆盖：execd init 镜像取入参" "$(echo "$P2V" | sed -n 3p)" "reg.example/execd:v9"
+  assert_eq "覆盖：SKILLSYNC_BASE_URL 取入参" "$(echo "$P2V" | sed -n 4p)" "http://$SVC2-svc.$KNS.svc:9100"
+  assert_eq "覆盖：SKILLSYNC_INTERVAL 取入参" "$(echo "$P2V" | sed -n 5p)" "30s"
+  assert_eq "覆盖：SKILLSYNC_STORE_DIR 非空即注入" "$(echo "$P2V" | sed -n 6p)" "/skills-store-2"
 else
   skip "skillsync 默认开启链路断言需 kubectl（KUBE_OK=0）"
 fi
