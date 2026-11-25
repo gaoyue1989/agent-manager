@@ -28,7 +28,8 @@ import io.agentscope.core.model.Model;
  *
  * <p>设计要点：
  * <ul>
- *   <li>仅在会话尚无标题时生成一次（已有 remark 直接跳过），失败不重试、不阻断对话</li>
+ *   <li>仅在会话尚无标题时生成一次（已有 remark 直接跳过）；LLM 调用失败/超时/空结果一律回退
+ *       首条消息截断（不重试），保证会话列表始终可读、不阻断对话</li>
  *   <li>异步执行（独立守护线程池），不阻塞 {@code POST /threads/chat} 的 SSE 流</li>
  *   <li>同会话并发首条消息用 in-flight 集合去重，避免重复调用 LLM</li>
  * </ul>
@@ -50,8 +51,8 @@ public class SessionTitleService {
     /** 送入模型的用户消息截断上限，避免长消息浪费 token */
     private static final int MAX_INPUT_LEN = 1000;
 
-    /** 标题生成调用超时 */
-    private static final Duration CALL_TIMEOUT = Duration.ofSeconds(20);
+    /** 标题生成调用超时（推理模型首 token 慢/与主对话并发抢上游时需留足余量） */
+    private static final Duration CALL_TIMEOUT = Duration.ofSeconds(60);
 
     private static final String SYSTEM_PROMPT =
         "你是一个会话标题生成助手。根据用户的第一条消息，生成一个简洁的标题（中文不超过 20 个字），"
@@ -114,20 +115,24 @@ public class SessionTitleService {
         try {
             executor.execute(() -> {
                 try {
-                    var title = generateTitle(message);
-                    if (title == null || title.isBlank()) {
-                        // LLM 未产出可用标题（推理模型截断/空回复）→ 回退首条消息截断，
-                        // 保证会话列表始终有可读名称，而不是退回无意义 ID
+                    String title;
+                    try {
+                        title = generateTitle(message);
+                    } catch (Exception e) {
+                        log.warn("[title] LLM call failed (sid={}): {}", sessionId, e.toString());
+                        title = "";
+                    }
+                    if (title.isBlank()) {
                         title = fallbackTitle(message);
-                        log.warn("[title] LLM returned blank, fallback to first message (sid={}): {}",
-                            sessionId, title);
+                        log.info("[title] fallback to first message (sid={}): {}", sessionId, title);
+                    } else {
+                        log.info("[title] generated for sid={}, userId={}: {}", sessionId, userId, title);
                     }
                     if (!title.isBlank()) {
                         sessionUserStore.updateRemark(sessionId, title);
-                        log.info("[title] generated for sid={}, userId={}: {}", sessionId, userId, title);
                     }
                 } catch (Exception e) {
-                    log.warn("[title] generation failed (sid={}): {}", sessionId, e.getMessage());
+                    log.warn("[title] task failed (sid={}): {}", sessionId, e.toString());
                 } finally {
                     inFlight.remove(sessionId);
                 }
@@ -142,7 +147,7 @@ public class SessionTitleService {
      * 调用 LLM 生成标题并清洗（去除包裹引号/尾部标点、截断超长）。
      *
      * @param message 用户消息
-     * @return 标题；模型未返回文本时返回 null
+     * @return 标题；模型未返回可用文本时返回空串
      */
     String generateTitle(String message) {
         var input = message.length() > MAX_INPUT_LEN ? message.substring(0, MAX_INPUT_LEN) : message;
@@ -156,7 +161,7 @@ public class SessionTitleService {
             .collectList()
             .block(CALL_TIMEOUT);
         if (responses == null || responses.isEmpty()) {
-            return null;
+            return "";
         }
         var sb = new StringBuilder();
         for (var resp : responses) {
