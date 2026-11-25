@@ -1723,6 +1723,23 @@ class ChatStreamControllerTest {
         verify(turnLeaseStore, never()).tryAcquire(anyString());
     }
 
+    /** issue #558：客户端不得以受害者 userId 形态认领会话（Channel 侧抢注入口同样封堵） */
+    @Test
+    void chatShouldRejectSessionIdInUserIdentityNamespace() {
+        when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn(null);
+
+        var frames = controller.chat(
+                new ChatStreamController.ChatRequest("hi", "u-2002", "u-1001", null, null, null, null), null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames);
+        assertEquals(1, frames.size());
+        assertTrue(frames.get(0).data().contains("thread_not_found"),
+            "保留命名空间会话必须拒绝: " + frames.get(0).data());
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(turnLeaseStore, never()).tryAcquire(anyString());
+    }
+
     @Test
     void chatShouldAllowOwnerContinueAndNewSession() {
         var sessionId = "alice-own-session";

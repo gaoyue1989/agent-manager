@@ -195,7 +195,7 @@ class VikingSessionCommitStateStoreTest {
 
     @Test
     void realUserLookupResolvedOncePerBatch() {
-        when(sessionUserStore.findUserIdBySession("u-1")).thenReturn("real-u");
+        when(sessionUserStore.findUserIdBySession("s-1")).thenReturn("real-u");
         var s = store();
         var state = stateWith(List.of(
             msg("m1", MsgRole.USER, "一"),
@@ -203,20 +203,59 @@ class VikingSessionCommitStateStoreTest {
         s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
         verify(client, timeout(2000)).appendSessionMessage("real-u", "u-1:s-1", "user", "一");
         verify(client, timeout(2000)).appendSessionMessage("real-u", "u-1:s-1", "assistant", "二");
-        verify(sessionUserStore, times(1)).findUserIdBySession("u-1");
-        verify(sessionUserStore, after(200).never()).findUserIdBySession("s-1");
+        verify(sessionUserStore, times(1)).findUserIdBySession("s-1");
+        verify(sessionUserStore, after(200).never()).findUserIdBySession("u-1");
         s.close();
     }
 
     @Test
-    void realUserLookupFallsBackWhenFirstMisses() {
+    void realUserLookupFallsBackToUserIdWhenSessionMisses() {
         when(sessionUserStore.findUserIdBySession(anyString())).thenReturn(null);
         var s = store();
         var state = stateWith(List.of(msg("m1", MsgRole.USER, "问")));
         s.save("u-1", "s-1", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
         verify(client, timeout(2000)).appendSessionMessage("u-1", "u-1:s-1", "user", "问");
-        verify(sessionUserStore, times(1)).findUserIdBySession("u-1");
         verify(sessionUserStore, times(1)).findUserIdBySession("s-1");
+        verify(sessionUserStore, after(200).never()).findUserIdBySession("u-1");
+        s.close();
+    }
+
+    @Test
+    void a2aMustNotResolveUserIdAsSessionKey() {
+        when(sessionUserStore.findUserIdBySession("alice-private-sess")).thenReturn(null);
+        when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn("u-2002");
+        var s = store();
+        var state = stateWith(List.of(msg("m1", MsgRole.USER, "受害者私密内容")));
+        s.save("u-1001", "alice-private-sess", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        verify(client, timeout(2000)).appendSessionMessage(
+            "u-1001", "u-1001:alice-private-sess", "user", "受害者私密内容");
+        verify(sessionUserStore, after(200).never()).findUserIdBySession("u-1001");
+        s.close();
+    }
+
+    @Test
+    void a2aSessionIdRowWinsOverPoisonedUserIdRow() {
+        when(sessionUserStore.findUserIdBySession("alice-private-sess")).thenReturn("u-1001");
+        when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn("u-2002");
+        var s = store();
+        var state = stateWith(List.of(msg("m1", MsgRole.USER, "受害者私密内容")));
+        s.save("u-1001", "alice-private-sess", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        verify(client, timeout(2000)).appendSessionMessage(
+            "u-1001", "u-1001:alice-private-sess", "user", "受害者私密内容");
+        verify(sessionUserStore, after(200).never()).findUserIdBySession("u-1001");
+        s.close();
+    }
+
+    @Test
+    void channelMustResolvePeerRowNotGatewayHashRow() {
+        when(sessionUserStore.findUserIdBySession("gw-3f20f08c5499")).thenReturn("u-2002");
+        when(sessionUserStore.findUserIdBySession("front-sid")).thenReturn("u-1001");
+        var s = store();
+        var state = stateWith(List.of(msg("m1", MsgRole.USER, "Channel 内容")));
+        s.save("front-sid", "gw-3f20f08c5499", SessionMessageArchiveStateStore.AGENT_STATE_KEY, state);
+        verify(client, timeout(2000)).appendSessionMessage(
+            "u-1001", "front-sid:gw-3f20f08c5499", "user", "Channel 内容");
+        verify(sessionUserStore, after(200).never()).findUserIdBySession("gw-3f20f08c5499");
         s.close();
     }
 

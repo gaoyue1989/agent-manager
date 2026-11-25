@@ -58,11 +58,11 @@ class SandboxUserKeyMiddlewareTest {
         var spec = new OpenSandboxFilesystemSpec();
         var sandbox = mockSandbox("sbx-1");
         var store = mock(SessionUserStore.class);
-        when(store.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
         when(store.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(store));
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(sandbox).setUserKey("alice");
         // per-user L4 物化与上传注入均按真实用户命名空间执行
@@ -180,11 +180,11 @@ class SandboxUserKeyMiddlewareTest {
         var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
         spec.fileAssetStore(store);
         var sessionStore = mock(SessionUserStore.class);
-        when(sessionStore.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(sessionStore.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
         when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(store).resetInjectedToPending("front-sid");
         verify(sandbox).setSessionId("front-sid");
@@ -209,9 +209,9 @@ class SandboxUserKeyMiddlewareTest {
         when(sessionStore.findUserIdBySession("front-sid-b")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
 
-        run(mw, turnCtx("gw-hash-a", "front-sid-a", sandboxA));
-        run(mw, turnCtx("gw-hash-b", "front-sid-b", sandboxB));
-        run(mw, turnCtx("gw-hash-a", "front-sid-a", sandboxA));
+        run(mw, turnCtx("gw-3f20f08c5498", "front-sid-a", sandboxA));
+        run(mw, turnCtx("gw-3f20f08c5497", "front-sid-b", sandboxB));
+        run(mw, turnCtx("gw-3f20f08c5498", "front-sid-a", sandboxA));
 
         verify(store, times(1)).resetInjectedToPending("front-sid-a");
         verify(store, times(1)).resetInjectedToPending("front-sid-b");
@@ -232,7 +232,7 @@ class SandboxUserKeyMiddlewareTest {
         when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(sandbox).invalidatePendingUploadMemo();
     }
@@ -251,7 +251,7 @@ class SandboxUserKeyMiddlewareTest {
         when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(sandbox, never()).invalidatePendingUploadMemo();
     }
@@ -274,7 +274,7 @@ class SandboxUserKeyMiddlewareTest {
         when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(store, never()).resetInjectedToPending(anyString());
         verify(sandbox, never()).invalidatePendingUploadMemo();
@@ -297,7 +297,7 @@ class SandboxUserKeyMiddlewareTest {
         when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(store).resetInjectedToPending("front-sid");
         verify(shared).mark("front-sid", "sbx-gen-10");
@@ -322,13 +322,13 @@ class SandboxUserKeyMiddlewareTest {
         when(sessionStore.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(sessionStore));
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(store, times(1)).resetInjectedToPending("front-sid");
         verify(shared, never()).mark(anyString(), anyString());
         verify(sandbox, never()).invalidatePendingUploadMemo();
 
-        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
+        run(mw, turnCtx("gw-3f20f08c5499", "front-sid", sandbox));
 
         verify(store, times(2)).resetInjectedToPending("front-sid");
         verify(shared).mark("front-sid", "sbx-gen-11");

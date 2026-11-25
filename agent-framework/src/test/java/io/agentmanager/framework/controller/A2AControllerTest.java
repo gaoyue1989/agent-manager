@@ -978,4 +978,112 @@ class A2AControllerTest {
 
         verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
     }
+
+    // ---------- 会话键命名空间裁决（issue #558） ----------
+
+    @Test
+    void messageSendShouldCanonicalizeSpecialCharSessionIdForSdkAndClaim() throws Exception {
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"70","method":"message/send",
+                     "params":{"sessionId":"team:s1",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk());
+
+        org.junit.jupiter.api.Assertions.assertEquals("team_s1", forwardedMetadata().get("sessionId"),
+            "转发给 SDK 的 sessionId 必须与 session_user 落表键同为规范形态");
+        verify(sessionUserStore).upsert("team_s1", "alice");
+    }
+
+    @Test
+    void messageSendShouldRejectSessionIdInUserIdentityNamespace() throws Exception {
+        when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn(null);
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "u-2002")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"71","method":"message/send",
+                     "params":{"sessionId":"u-1001",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error.code").value(-32001));
+
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageStreamShouldRejectSessionIdInUserIdentityNamespace() throws Exception {
+        when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn(null);
+        mockWrapper();
+
+        var result = mockMvc.perform(post("/")
+                .header("X-User-Id", "u-2002")
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"72","method":"message/stream",
+                     "params":{"sessionId":"u-1001",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getResponse().getContentAsString().contains("-32001"),
+            "SSE 拒绝帧必须携带 -32001（实际: " + result.getResponse().getContentAsString() + "）");
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendShouldRejectSessionIdInGatewayNamespace() throws Exception {
+        when(sessionUserStore.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "u-1001")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"73","method":"message/send",
+                     "params":{"sessionId":"gw-3f20f08c5499",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error.code").value(-32001));
+
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendShouldContinueLegitSessionWithCanonicalId() throws Exception {
+        when(sessionUserStore.findUserIdBySession("team_s1")).thenReturn("alice");
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"74","method":"message/send",
+                     "params":{"sessionId":"team:s1",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error").doesNotExist());
+
+        org.junit.jupiter.api.Assertions.assertEquals("team_s1", forwardedMetadata().get("sessionId"));
+        verify(sessionUserStore).upsert("team_s1", "alice");
+        verify(wrapper).handleRequest(anyString(), anyMap(), any());
+    }
 }

@@ -10,6 +10,7 @@ import io.agentscope.harness.agent.sandbox.SandboxExecutionGuard;
 import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
 import io.agentscope.harness.agent.sandbox.SandboxLease;
 import io.agentmanager.framework.redis.RedisConnectionFacade;
+import io.agentmanager.framework.service.SessionKeyNamespace;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.lettuce.core.RedisException;
 import io.lettuce.core.SetArgs;
@@ -30,7 +31,8 @@ import io.lettuce.core.ScriptOutputType;
  * 会让锁退化为"每会话一把"（实测 sbx:guard:user:{sa2-main}/{sb2-sbx} 两锁并存，同用户
  * 两个会话并行复用同一 slot）。本类在组键前经 {@link SessionKeyResolver#realUserId} 反查
  * session_user 表还原真实用户；反查不可用/未命中时回退原值（A2A / invoke 链路 ctx.userId
- * 本就是真实用户，回退保持其行为不变）。
+ * 本就是真实用户，回退保持其行为不变）。用户身份命名空间的值（{@code u-} 前缀 /
+ * {@code debug-user}）不是会话键，一律不反查（issue #558：防止抢注行把 A2A 用户解析为攻击者）。
  *
  * <p><b>锁粒度跟随 slot 粒度（2026-10-21）</b>：per-session agent 隔离
  * （{@code SANDBOX_SESSION_AGENT_ISOLATION}）落地后，隔离键值本身就是 slot 粒度——
@@ -190,7 +192,7 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
 
     /** USER 范围的键值翻译（包级可见供单测）：反查命中用真实用户，未命中/异常回退原值 */
     String resolveUserLockValue(String raw) {
-        if (raw == null || raw.isBlank()) {
+        if (raw == null || raw.isBlank() || SessionKeyNamespace.isUserIdentity(raw)) {
             return raw;
         }
         long now = System.currentTimeMillis();

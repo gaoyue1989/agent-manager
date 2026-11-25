@@ -520,7 +520,7 @@ class FileToolsTest {
     @Test
     void presentFileNonSandboxResolvesRealUserFromSessionForKvRead() {
         var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
-        when(store.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
         when(store.findUserIdBySession("front-sid")).thenReturn("alice");
         var ws = mock(WorkspaceReader.class);
         when(ws.readWorkspaceFile(eq("alice"), eq("outputs/kv.txt")))
@@ -529,7 +529,7 @@ class FileToolsTest {
         var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws,
             new io.agentmanager.framework.service.SessionKeyResolver(store));
 
-        var channelCtx = RuntimeContext.builder().sessionId("gw-hash").userId("front-sid").build();
+        var channelCtx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("front-sid").build();
         var result = t.presentFile(channelCtx, "outputs/kv.txt", null);
 
         assertTrue(result.contains("\"file_id\""),
@@ -548,7 +548,7 @@ class FileToolsTest {
     @Test
     void presentFileMustNotReadVictimNamespaceViaSpoofedPeerUserId() {
         var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
-        when(store.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
         when(store.findUserIdBySession("u-1001")).thenReturn("u-2002");
         var ws = mock(WorkspaceReader.class);
         when(ws.readWorkspaceFile(eq("u-1001"), eq("outputs/secret.txt")))
@@ -557,7 +557,7 @@ class FileToolsTest {
         var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws,
             new io.agentmanager.framework.service.SessionKeyResolver(store));
 
-        var mallory = RuntimeContext.builder().sessionId("gw-hash").userId("u-1001").build();
+        var mallory = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("u-1001").build();
         var result = t.presentFile(mallory, "outputs/secret.txt", null);
 
         assertTrue(result.contains("not readable"),
@@ -609,6 +609,32 @@ class FileToolsTest {
             "反查命中自认领行后读取键必须是攻击者本人: " + result);
         verify(ws, never()).readWorkspaceFile(eq("u-1001"), anyString());
         verify(ws).readWorkspaceFile(eq("u-2002"), eq("outputs/secret.txt"));
+    }
+
+    /**
+     * issue #558 路径 (a)：A2A 链路 ctx.userId 是网关头裁决后的受害者真实用户，
+     * 攻击者抢注 session_user(session_id='u-1001') 后，旧实现按 userId 反查命中攻击者行
+     * → 受害者文件访问以攻击者身份运行。修复后非 Channel 链路只按 sessionId 反查。
+     */
+    @Test
+    void presentFileA2aMustNotResolveVictimViaPoisonedUserIdRow() {
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession("alice-private-sess")).thenReturn(null);
+        when(store.findUserIdBySession("u-1001")).thenReturn("u-2002");
+        var ws = mock(WorkspaceReader.class);
+        when(ws.readWorkspaceFile(eq("u-1001"), eq("outputs/mine.txt")))
+            .thenReturn("alice-own".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws,
+            new io.agentmanager.framework.service.SessionKeyResolver(store));
+
+        var alice = RuntimeContext.builder().userId("u-1001").sessionId("alice-private-sess").build();
+        var result = t.presentFile(alice, "outputs/mine.txt", null);
+
+        assertTrue(result.contains("\"file_id\""),
+            "A2A 链路必须按受害者本人命名空间读取: " + result);
+        verify(ws).readWorkspaceFile("u-1001", "outputs/mine.txt");
+        verify(ws, never()).readWorkspaceFile(eq("u-2002"), anyString());
     }
 
     // ===== issue #424：返回 JSON 转义 + /workspace// 双斜杠绝对逃逸 =====

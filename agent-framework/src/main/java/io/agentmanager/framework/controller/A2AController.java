@@ -135,6 +135,8 @@ public class A2AController {
      *    （SDK 从 message.metadata 按 msg id 分组读取；取值源链见 5.1/5.2）
      * 6. 兼容旧格式 params.metadata.thread_id/userId → message.metadata.sessionId/userId
      * 7. 网关 X-User-Id 头存在时强制覆盖全部 userId 通道（issue #474：请求体身份永不采信）
+     * 8. sessionId 规范化为 PathSafe.sanitize（与 session_user 落表键同一形态，issue #558：
+     *    校验形态 = SDK 消费形态，消除 session_user 与 RuntimeContext.sessionId 脱节）
      */
     private String normalizeMessageSendBody(String body, String headerUserId) {
         try {
@@ -221,6 +223,10 @@ public class A2AController {
                 }
             }
             canonicalizeReservedMeta(meta);
+            var effectiveSessionId = nonBlank(sdkMetaString(meta, "sessionId"));
+            if (effectiveSessionId != null) {
+                meta.put("sessionId", io.agentmanager.framework.util.PathSafe.sanitize(effectiveSessionId));
+            }
             message.put("metadata", meta);
 
             return MAPPER.writeValueAsString(req);

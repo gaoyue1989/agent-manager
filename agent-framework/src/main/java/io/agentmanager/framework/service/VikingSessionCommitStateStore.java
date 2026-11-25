@@ -54,7 +54,8 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
 
     private final AgentStateStore delegate;
     private final VikingMemoryClient client;
-    /** slot 键 → 真实用户反查（Channel 链路 slot.userId=前端 sessionId=session_user.session_id） */
+    /** slot 键 → 真实用户反查（Channel 链路 slot.userId=前端 sessionId=session_user.session_id；
+     *  A2A 链路 slot.sessionId 才是会话键，userId 是真实用户不得反查——见 SessionKeyResolver） */
     private final SessionUserStore sessionUserStore;
     /** Pod 本地去重集（slotKey → msg ids）；容量护栏超限整体清空（宁可重复不可丢消息）。
      *  实例字段：装饰器每 Pod 单实例，static 会把去重态泄漏到不同装配世代（reload/测试）。 */
@@ -220,10 +221,8 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
     /** 异步 append 一批消息（单 worker 保序；realUser 反查每批一次；任何异常只告警） */
     private void appendBatch(String userId, String sessionId, String slot, List<PendingAppend> batch) {
         try {
-            String realUser = sessionUserStore.findUserIdBySession(userId);
-            if (realUser == null || realUser.isBlank()) {
-                realUser = sessionUserStore.findUserIdBySession(sessionId);
-            }
+            var lookupKey = SessionKeyNamespace.isGatewaySessionId(sessionId) ? userId : sessionId;
+            String realUser = sessionUserStore.findUserIdBySession(lookupKey);
             if (realUser == null || realUser.isBlank()) {
                 realUser = userId;
             }

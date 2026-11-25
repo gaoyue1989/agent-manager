@@ -12,6 +12,8 @@ import org.springframework.stereotype.Component;
  *   <li>请求者身份 = {@code X-User-Id} 头 &gt; 匿名 {@code debug-user}
  *       （与 ChatStreamController.chat 的 userId 解析同口径：无头请求视作匿名调试身份，
  *        只能访问无身份会话，不能触碰真实用户会话——fail-closed）；</li>
+ *   <li>保留命名空间（用户身份 {@code u-} 前缀 / {@code debug-user}、网关运行时 {@code gw-}）
+ *       → 拒绝：这些值不是合法会话键，客户端不得以受害者 userId 认领会话（issue #558）；</li>
  *   <li>session_user 无映射行 → 放行（存量/legacy 会话无归属记录，行为与修复前一致；
  *        正常链路创建的会话必写映射，见 ChatStreamController / A2AController 的 upsert）；</li>
  *   <li>有映射且 owner ≠ 请求者 → 拒绝，端点统一返回 404（不泄露会话存在性）。</li>
@@ -49,6 +51,9 @@ public class SessionAccessGuard {
      * @param headerUserId  X-User-Id 头原值（可空）
      */
     public static boolean ownedBy(SessionUserStore store, String sessionId, String headerUserId) {
+        if (SessionKeyNamespace.isReservedSessionId(sessionId)) {
+            return false;
+        }
         var requester = (headerUserId == null || headerUserId.isBlank()) ? ANONYMOUS_USER : headerUserId;
         var owner = store.findUserIdBySession(sessionId);
         // 无映射行放行（存量会话）；占位行（PATCH 先于首聊经 upsertModel/upsertRemark

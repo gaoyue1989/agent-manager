@@ -4,9 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Function;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import io.agentmanager.framework.service.SessionKeyResolver;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
@@ -29,9 +27,9 @@ import reactor.core.publisher.Flux;
  * </ul>
  *
  * <p>userId 解析：Channel 链路（/threads/chat 经 ChatUiChannel 网关）RuntimeContext.userId
- * 为网关 peer（DmScope.MAIN 下即会话 id，见 AgentRuntimeService 注释实测），按
- * session_user 表反查真实 userId；A2A / invoke 链路的 userId 已是真实用户，反查未命中时
- * 原样使用。反查失败不阻断调用（fallback 原值）。
+ * 为网关 peer（DmScope.MAIN 下即会话 id，见 AgentRuntimeService 注释实测），经
+ * {@link SessionKeyResolver} 按 peer 反查真实 userId；A2A / invoke 链路 userId 已是真实用户，
+ * 解析器原样返回（不把 userId 当 session 键反查，issue #558）。反查失败不阻断调用。
  *
  * <p>透传头来源：入口（ChatStream/Confirm/AGUI）捕获的 {@link ChatRequestHeaders}
  * （typed attribute 随行，turn 级存活不持久化）；无该 attribute 的链路（A2A/invoke/
@@ -39,15 +37,13 @@ import reactor.core.publisher.Flux;
  */
 public class McpUserContextMiddleware implements MiddlewareBase {
 
-    private static final Logger log = LoggerFactory.getLogger(McpUserContextMiddleware.class);
-
     /** McpMeta 中用户 id 的 key（config.yaml userHeaders 映射的目标 key） */
     public static final String KEY_USER_ID = "userId";
 
-    private final SessionUserStore sessionUserStore;
+    private final SessionKeyResolver sessionKeyResolver;
 
     public McpUserContextMiddleware(SessionUserStore sessionUserStore) {
-        this.sessionUserStore = sessionUserStore;
+        this.sessionKeyResolver = sessionUserStore != null ? new SessionKeyResolver(sessionUserStore) : null;
     }
 
     @Override
@@ -76,19 +72,15 @@ public class McpUserContextMiddleware implements MiddlewareBase {
         return next.apply(input);
     }
 
-    /** 解析生效 userId：优先 session→user 反查（Channel 链路），未命中用 RuntimeContext 原值 */
+    /** 解析生效 userId：经 {@link SessionKeyResolver}（Channel 反查真实用户；A2A 原值） */
     private String resolveUserId(RuntimeContext ctx) {
         var raw = ctx.getUserId();
-        if (raw == null || raw.isBlank() || sessionUserStore == null) {
+        if (raw == null || raw.isBlank() || sessionKeyResolver == null) {
             return raw;
         }
-        try {
-            var mapped = sessionUserStore.findUserIdBySession(raw);
-            if (mapped != null && !mapped.isBlank()) {
-                return mapped;
-            }
-        } catch (Exception e) {
-            log.warn("[mcp-user] session->user lookup failed for '{}': {}", raw, e.getMessage());
+        var mapped = sessionKeyResolver.realUserId(ctx);
+        if (mapped != null && !mapped.isBlank()) {
+            return mapped;
         }
         return raw;
     }

@@ -42,7 +42,7 @@ class RemoteUserIdMiddlewareTest {
     @Test
     void pureSpawnRoundShouldRewriteDuringExecutionAndRestoreAfter() {
         var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("sess-abc").build();
         var seenDuringExecution = new AtomicReference<String>();
         var nextCalled = new AtomicBoolean(false);
 
@@ -59,14 +59,14 @@ class RemoteUserIdMiddlewareTest {
         assertEquals("u-canonical-42", seenDuringExecution.get(),
             "agent_spawn 执行期 ctx.userId 应为规范用户（F10）");
         assertEquals("sess-abc", ctx.getUserId(), "轮次终止后应恢复原值（HITL 键一致性）");
-        assertEquals("gw-hash", ctx.getSessionId(), "只写 userId 不写 sessionId（设计 §5.6）");
+        assertEquals("gw-3f20f08c5499", ctx.getSessionId(), "只写 userId 不写 sessionId（设计 §5.6）");
     }
 
     /** HITL ask 轮次（非 spawn 工具）：完全不触碰 ctx——挂起/恢复路径身份不被改写 */
     @Test
     void nonSpawnRoundMustNotTouchContext() {
         var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("sess-abc").build();
 
         mw.onActing(null, ctx,
                 new ActingInput(List.of(call("echo_query"))),
@@ -80,7 +80,7 @@ class RemoteUserIdMiddlewareTest {
     @Test
     void mixedRoundShouldBeSkipped() {
         var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("sess-abc").build();
 
         mw.onActing(null, ctx,
                 new ActingInput(List.of(call("agent_spawn"), call("echo_query"))),
@@ -111,7 +111,7 @@ class RemoteUserIdMiddlewareTest {
     void unregisteredSessionShouldFallBackToRawValue() {
         var store = mock(SessionUserStore.class);
         var mw = middleware(store);
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("peer-unknown").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("peer-unknown").build();
         var nextCalled = new AtomicBoolean(false);
 
         mw.onActing(null, ctx,
@@ -132,7 +132,7 @@ class RemoteUserIdMiddlewareTest {
         var store = mock(SessionUserStore.class);
         when(store.findUserIdBySession("sess-abc")).thenThrow(new RuntimeException("db down"));
         var mw = middleware(store);
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("sess-abc").build();
         var nextCalled = new AtomicBoolean(false);
 
         mw.onActing(null, ctx,
@@ -166,7 +166,7 @@ class RemoteUserIdMiddlewareTest {
     @Test
     void blankUserIdShouldPassThrough() {
         var mw = middleware(storeMapping("sess-abc", "u-42"));
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("").build();
 
         mw.onActing(null, ctx,
                 new ActingInput(List.of(call("agent_spawn"))),
@@ -180,7 +180,7 @@ class RemoteUserIdMiddlewareTest {
     @Test
     void emptyToolCallsShouldPassThrough() {
         var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
-        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+        var ctx = RuntimeContext.builder().sessionId("gw-3f20f08c5499").userId("sess-abc").build();
 
         mw.onActing(null, ctx, new ActingInput(List.of()), input -> Flux.empty()).blockLast();
 
