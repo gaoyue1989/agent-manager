@@ -13,7 +13,7 @@ public final class PathSafe {
 
     /** Windows 非法字符 + 反斜杠 + 控制字符的正则，编译一次复用 */
     private static final java.util.regex.Pattern UNSAFE =
-        java.util.regex.Pattern.compile("[:*?\"<>|\\\\\\p{Cntrl}]");
+        java.util.regex.Pattern.compile("[:*?\"<>|%\\\\\\p{Cntrl}]");
 
     /**
      * 将字符串安全化为路径段。
