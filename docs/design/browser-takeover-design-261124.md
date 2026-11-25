@@ -48,10 +48,12 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/threads/{sid}/browser` | `{control:{owner,reason,by,trigger,since,expires_in_seconds}, sandbox:{ready,sandbox_id}, vnc_path}`；沙箱就绪为只读探测（不连接不占位） |
+| GET | `/threads/{sid}/browser` | `{control:{owner,reason,by,trigger,since,expires_in_seconds}, sandbox:{ready,sandbox_id}, vnc_path}`；沙箱就绪为只读探测（不连接不占位）；`sandbox_id` 仅下发给已建立归属的会话所有者 |
 | POST | `/threads/{sid}/browser/takeover` | body `{reason?}` → `{control, stop_outcome}` |
 | POST | `/threads/{sid}/browser/release` | SSE；非 HUMAN 持有时返回 `not_taken_over` 错误帧 |
 | GET | `/threads/{sid}/browser/vnc` | WebSocket；握手校验会话归属（`X-User-Id` 头 > `?userId=` > 匿名），上游=沙箱固定端口（缺省 6080）+ server 代理 |
+
+四个端点统一走 `SessionAccessGuard.establishedOwner`（fail-closed）：`session_user` 必须存在明确归属且归属者 = 请求者；无映射行 / 占位行 `unknown` / 保留命名空间（`u-*`、`debug-user`、`gw-*`）一律 404（不泄露会话存在性）。沙箱解析走 `SandboxLocator.locateOwned` / `sandboxIdOwned`，要求绑定行 `sandbox_binding.user_key` = 会话归属者（`user_key` 恒为沙箱创建时的真实用户，是区分「会话键」与「用户身份」的唯一可靠判据）；无绑定簿记（`SANDBOX_LIFECYCLE_ENABLED=false`）或归属不符 → 视为无沙箱（WS 4404 / `ready=false`），禁止把 `sessionId` 当 `USER(sessionId)` 跨用户寻址（issue #559）。
 
 总开关 `AGENT_BROWSER_ENABLED`（默认 false）：关闭时零装配（无端点/无中间件/无工具，存量服务零影响）。
 
@@ -68,5 +70,6 @@
 - 9222（CDP）不对外：仅沙箱内回环；Agent 依赖沙箱内 CLI；server 代理连不到该端口（实测 502）。
 - 沙箱内 Xtigervnc 以 `-SecurityTypes None` 启动：6080/5901 只在 server 代理之后可达，画面鉴权由业务面的 WS 代理（会话归属校验 + API key 注入）承担，VNC 层不再叠加密码。
 - noVNC 画面必须经归属校验的代理；上游 API key 只在业务进程侧注入。
+- **接管授权规则（issue #559，P0）**：会话归属 fail-closed（见 §4）；沙箱归属以 `sandbox_binding.user_key` = 会话归属者为证明，跨用户/无簿记一律拒绝。攻击面：`session_user` 无行时旧 `ownedBy` 放行 + `SandboxLocator` 把 `sessionId` 当 `USER(sessionId)` 候选，使任意已认证用户以受害者 `userId` 作 sid 即可读到受害者 `sandbox_id` 并经 noVNC 全权操控。`SandboxLocator.locate` / `sandboxId`（无归属证明）仅供 env-update 等非实时控制链路复用，浏览器接管不得回退到这两个方法。
 - `viewOnly` 是前端约束：接管期间 Agent 不动浏览器由服务端闸门保证；反向（人工不在 Agent 控制时误触）不做服务端强制，后续可在 WS 代理层做 RFB 输入帧过滤。
 - 后续：宿主机 nginx(:8911) `/agent/` 需补 WebSocket 升级头（属系统配置，未在本次改动内）；多实例 noVNC 输入审计；WebRTC 高帧率方案。

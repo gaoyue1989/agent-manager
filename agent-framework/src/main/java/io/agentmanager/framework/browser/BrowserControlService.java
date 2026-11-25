@@ -86,7 +86,7 @@ public class BrowserControlService implements SandboxHoldSignal {
         return released;
     }
 
-    public Map<String, Object> state(String userId, String sessionId) {
+    public Map<String, Object> state(String ownerUserId, String sessionId) {
         var control = control(sessionId);
         var controlView = new LinkedHashMap<String, Object>();
         controlView.put("owner", control.owner());
@@ -98,7 +98,7 @@ public class BrowserControlService implements SandboxHoldSignal {
 
         var sandbox = new LinkedHashMap<String, Object>();
         if (sandboxRuntime.enabled()) {
-            String sandboxId = sandboxLocator.sandboxId(userId, sessionId, IsolationScope.USER);
+            String sandboxId = sandboxLocator.sandboxIdOwned(ownerUserId, sessionId, IsolationScope.USER);
             sandbox.put("ready", sandboxId != null);
             sandbox.put("sandbox_id", sandboxId);
         } else {

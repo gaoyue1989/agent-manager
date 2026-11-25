@@ -55,9 +55,9 @@ public class BrowserControlController {
             @PathVariable String sessionId,
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
         String sid = PathSafe.sanitize(sessionId);
-        assertOwned(sid, headerUserId);
+        String owner = assertOwned(sid, headerUserId);
         try {
-            return ResponseEntity.ok(control.state(requester(headerUserId), sid));
+            return ResponseEntity.ok(control.state(owner, sid));
         } catch (BrowserControlUnavailableException e) {
             return unavailable(e);
         }
@@ -69,9 +69,9 @@ public class BrowserControlController {
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestBody(required = false) TakeoverRequest body) {
         String sid = PathSafe.sanitize(sessionId);
-        assertOwned(sid, headerUserId);
+        String owner = assertOwned(sid, headerUserId);
         try {
-            var result = control.takeover(sid, requester(headerUserId),
+            var result = control.takeover(sid, owner,
                 body != null ? body.reason() : null, BrowserControlService.TRIGGER_USER);
             var out = new LinkedHashMap<String, Object>();
             out.put("control", result.control());
@@ -90,7 +90,7 @@ public class BrowserControlController {
             @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader,
             @RequestHeader(required = false) HttpHeaders requestHeaders) {
         String sid = PathSafe.sanitize(sessionId);
-        assertOwned(sid, headerUserId);
+        String owner = assertOwned(sid, headerUserId);
         try {
             if (!control.release(sid)) {
                 return Flux.just(errorFrame("not_taken_over: browser control is not held by the human"));
@@ -98,22 +98,19 @@ public class BrowserControlController {
         } catch (BrowserControlUnavailableException e) {
             return Flux.just(errorFrame("control_store_unavailable: " + e.getMessage()));
         }
-        var request = new ChatStreamController.ChatRequest(RESUME_MESSAGE, requester(headerUserId),
+        var request = new ChatStreamController.ChatRequest(RESUME_MESSAGE, owner,
             sid, null, null, null, null);
         log.info("[browser-control] release accepted, resuming agent turn (sid={})", sid);
-        return chatStreamController.chat(request, headerUserId, forwardedPrefixHeader, requestHeaders);
+        return chatStreamController.chat(request, owner, forwardedPrefixHeader, requestHeaders);
     }
 
-    private void assertOwned(String sessionId, String headerUserId) {
-        if (!SessionAccessGuard.ownedBy(sessionUserStore, sessionId, headerUserId)) {
+    private String assertOwned(String sessionId, String headerUserId) {
+        var owner = SessionAccessGuard.establishedOwner(sessionUserStore, sessionId, headerUserId);
+        if (owner == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                 "Session '" + sessionId + "' not found");
         }
-    }
-
-    private static String requester(String headerUserId) {
-        return (headerUserId == null || headerUserId.isBlank())
-            ? SessionAccessGuard.ANONYMOUS_USER : headerUserId;
+        return owner;
     }
 
     private static ResponseEntity<Map<String, Object>> unavailable(BrowserControlUnavailableException e) {

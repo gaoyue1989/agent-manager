@@ -73,4 +73,20 @@ class BrowserViewHandshakeInterceptorTest {
             request("https://entry/threads/" + SESSION + "/other", USER),
             mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
     }
+
+    @Test
+    void unclaimedSessionShouldBeRejected() {
+        when(store.findUserIdBySession(SESSION)).thenReturn(null);
+        assertFalse(interceptor.beforeHandshake(
+            request("https://entry/threads/" + SESSION + "/browser/vnc", "someone-else"),
+            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+    }
+
+    @Test
+    void placeholderSessionShouldBeRejected() {
+        when(store.findUserIdBySession(SESSION)).thenReturn(SessionUserStore.PLACEHOLDER_USER);
+        assertFalse(interceptor.beforeHandshake(
+            request("https://entry/threads/" + SESSION + "/browser/vnc", "someone-else"),
+            mock(ServerHttpResponse.class), mock(WebSocketHandler.class), new HashMap<>()));
+    }
 }
