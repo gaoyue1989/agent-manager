@@ -8,7 +8,7 @@
 // UI：deer-flow 风格——工具事件渲染为时间线状态步骤、历史回放同构展示、欢迎态 Hero + 错峰建议；
 //     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
 import { useCallback, useEffect, useRef, useState } from "react";
-import { completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
+import { buildHistoryAssistantMessage, completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
 import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import { isQuotaError, makeQuotaError, parseQuota409, quotaFromSseError, stopThreadUrl } from "@/lib/sandbox-quota";
 import MessageItem from "./MessageItem";
@@ -181,22 +181,9 @@ export default function ChatPane({
               } : {}),
             });
           }
-          if (m.content) {
-            msgs.push({ role: "assistant", content: m.content });
-          } else if (Array.isArray(m.blocks) && m.blocks.some((b: any) => b?.type === "image")) {
-            // 直返图片块（issue #492）：直返收尾消息正文为空、真实内容在 blocks.image，
-            // 与实时流 TOOL_RESULT_DATA_DELTA 的 inline 卡片同构渲染，刷新后不再消失
-            const inline: FileCard[] = m.blocks
-              .filter((b: any) => b?.type === "image")
-              .map((b: any, i: number) => {
-                const mime = b.media_type ?? "image/png";
-                return {
-                  file_id: `inline-direct-${m.msg_id ?? i}`, file_name: "inline-image",
-                  mime_type: mime, size: 0,
-                  download_url: b.url ?? `data:${mime};base64,${b.data}`,
-                };
-              });
-            msgs.push({ role: "assistant", content: "", files: inline });
+          const assistantMsg = buildHistoryAssistantMessage(m);
+          if (assistantMsg) {
+            msgs.push(assistantMsg);
           }
         }
       }
