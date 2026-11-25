@@ -108,6 +108,21 @@ class BrowserViewWebSocketHandlerTest {
     }
 
     @Test
+    void handshakeShouldRestorePortDroppedByFrontingProxy() throws Exception {
+        locateEndpoint("server/v1/sandboxes/sb-1/proxy/6080");
+        when(session.getAcceptedProtocol()).thenReturn("binary");
+        var upstream = mock(WebSocket.class);
+        when(connector.connect(any(), anyString(), anyString(), any())).thenReturn(upstream);
+
+        handler.afterConnectionEstablished(session);
+
+        var uri = ArgumentCaptor.forClass(URI.class);
+        verify(connector).connect(uri.capture(), anyString(), anyString(), any());
+        assertEquals("ws://server:8090/v1/sandboxes/sb-1/proxy/6080/websockify",
+            uri.getValue().toString(), "endpoint 丢端口须按配置的 server 地址校正");
+    }
+
+    @Test
     void upstreamConnectFailureShouldCloseWithUpstreamFailed() throws Exception {
         locateEndpoint(ENDPOINT);
         when(connector.connect(any(), any(), any(), any()))

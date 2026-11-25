@@ -151,11 +151,11 @@ public class SandboxLocator {
                 continue;
             }
             try {
-                Sandbox sandbox = Sandbox.connector()
+                Sandbox sandbox = OpenSandboxEndpoints.withPortFidelity(Sandbox.connector()
                     .sandboxId(sandboxId)
                     .connectionConfig(connectionConfig())
                     .skipHealthCheck(true)
-                    .connect();
+                    .connect(), sandboxConfig.opensandbox().serverUrl()).sandbox();
                 // 归属校验+占位（§4.2 两道防线第 2 条，终审 d1/cold-R1-1）：env-update 链路与
                 // P3 resume 同规则——connect 仅建句柄，句柄交付前条件写占位；affected=0（无行/
                 // 已改绑/漂移）→ close + 视同候选失败（尝试下一候选 / 最终 404）
