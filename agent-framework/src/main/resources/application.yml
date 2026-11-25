@@ -1,5 +1,6 @@
 server:
   port: ${SERVER_PORT:8100}
+  forward-headers-strategy: native
 
 # 日志配置
 logging:

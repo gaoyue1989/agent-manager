@@ -59,7 +59,7 @@ public class GlobalExceptionHandler {
         body.put("error", "conflict");
         body.put("message", e.getMessage() != null && !e.getMessage().isBlank()
             ? e.getMessage() : "操作状态冲突，请稍后重试");
-        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+        return ResponseEntity.status(HttpStatus.CONFLICT).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 
     /**
@@ -74,7 +74,7 @@ public class GlobalExceptionHandler {
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "request_rejected");
         body.put("message", e.getReason() != null ? e.getReason() : e.getStatusCode().toString());
-        return ResponseEntity.status(e.getStatusCode()).body(body);
+        return ResponseEntity.status(e.getStatusCode()).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 
     /**

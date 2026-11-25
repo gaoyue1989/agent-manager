@@ -101,7 +101,7 @@ data:
         rewrite ^/agent/[a-z0-9-]+/?(.*)$ /$1 break;    # 剥前缀：nginx 原生能力，替代 ingress 注解
         proxy_pass http://oaf-$short-svc.agent-platform.svc.cluster.local:8100;
         proxy_set_header X-User-Id       $auth_uid;      # off 无结果=自报兜底 / off 有结果+report+enforce=鉴权结果覆盖
-        proxy_set_header Host              $host;
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-Proto $fwd_proto_fwd;
         proxy_set_header X-Forwarded-Host  $fwd_host;
         proxy_set_header X-Forwarded-Prefix /agent/$short;   # agent-framework 前缀感知的输入契约

@@ -1,5 +1,6 @@
 package io.agentmanager.framework.browser;
 
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -9,6 +10,7 @@ import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
 import org.springframework.web.socket.WebSocketHandler;
 import org.springframework.web.socket.server.HandshakeInterceptor;
+import org.springframework.web.socket.server.support.OriginHandshakeInterceptor;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import io.agentmanager.framework.service.SessionAccessGuard;
@@ -26,11 +28,22 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
 
     private final SessionUserStore sessionUserStore;
     private final BrowserViewTicketStore ticketStore;
+    private final OriginHandshakeInterceptor originInterceptor;
 
     public BrowserViewHandshakeInterceptor(SessionUserStore sessionUserStore,
                                            BrowserViewTicketStore ticketStore) {
+        this(sessionUserStore, ticketStore, List.of());
+    }
+
+    public BrowserViewHandshakeInterceptor(SessionUserStore sessionUserStore,
+                                           BrowserViewTicketStore ticketStore,
+                                           List<String> allowedOriginPatterns) {
         this.sessionUserStore = sessionUserStore;
         this.ticketStore = ticketStore;
+        this.originInterceptor = new OriginHandshakeInterceptor();
+        if (allowedOriginPatterns != null && !allowedOriginPatterns.isEmpty()) {
+            this.originInterceptor.setAllowedOriginPatterns(allowedOriginPatterns);
+        }
     }
 
     @Override
@@ -40,6 +53,15 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
         var matcher = VIEW_PATH.matcher(path);
         if (!matcher.matches()) {
             log.warn("[browser-view] handshake rejected: unexpected path {}", path);
+            return false;
+        }
+        try {
+            if (!originInterceptor.beforeHandshake(request, response, wsHandler, attributes)) {
+                log.info("[browser-view] handshake rejected: origin not allowed (path={})", path);
+                return false;
+            }
+        } catch (Exception e) {
+            log.warn("[browser-view] handshake rejected: origin check error ({})", e.getMessage());
             return false;
         }
         String sessionId = PathSafe.sanitize(matcher.group(1));
