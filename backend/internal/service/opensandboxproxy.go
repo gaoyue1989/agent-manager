@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -25,6 +26,8 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"agent-manager/backend/internal/k8s"
@@ -166,6 +169,45 @@ type CreateSandboxPoolInput struct {
 	DisableSyncd      bool                  `json:"disableSyncd,omitempty"`
 }
 
+// template 取创建入参的模板字段（供统一解析/落库/比较）。
+func (in CreateSandboxPoolInput) template() SandboxPoolTemplate {
+	return SandboxPoolTemplate{
+		Image: in.Image, TaskExecutorImage: in.TaskExecutorImage, ExecdImage: in.ExecdImage,
+		ExtraEnv: in.ExtraEnv, Skillsync: in.Skillsync, DisableSyncd: in.DisableSyncd,
+	}
+}
+
+// SandboxPoolTemplate 池模板参数（创建/编辑共用）。编辑为全量替换语义；镜像字段留空时
+// 由 resolveSandboxPoolTemplate 回落平台 SANDBOX_IMAGE / 内置 installer 缺省。
+type SandboxPoolTemplate struct {
+	Image             string                `json:"image,omitempty"`
+	TaskExecutorImage string                `json:"taskExecutorImage,omitempty"`
+	ExecdImage        string                `json:"execdImage,omitempty"`
+	ExtraEnv          []SandboxPoolExtraEnv `json:"extraEnv,omitempty"`
+	Skillsync         *SandboxPoolSkillsync `json:"skillsync,omitempty"`
+	DisableSyncd      bool                  `json:"disableSyncd,omitempty"`
+}
+
+// UpdateSandboxPoolInput PUT /pools/:name 入参：Template 缺省 = 仅容量（上游
+// UpdatePoolRequest 只收 capacitySpec）；Template 存在且与平台记录不同 = 删除重建。
+type UpdateSandboxPoolInput struct {
+	CapacitySpec SandboxCapacitySpec  `json:"capacitySpec"`
+	Template     *SandboxPoolTemplate `json:"template,omitempty"`
+}
+
+// SandboxPoolConfigView 平台侧池模板参数视图（随列表/详情附加，供编辑回显）。
+type SandboxPoolConfigView struct {
+	Image             string                `json:"image"`
+	TaskExecutorImage string                `json:"taskExecutorImage"`
+	ExecdImage        string                `json:"execdImage"`
+	Skillsync         *SandboxPoolSkillsync `json:"skillsync,omitempty"`
+	ExtraEnv          []SandboxPoolExtraEnv `json:"extraEnv,omitempty"`
+	DisableSyncd      bool                  `json:"disableSyncd"`
+}
+
+// autoSandboxPoolCapacity 创建/编辑 agent 自动建池的缺省容量（创建页表单同值默认）。
+var autoSandboxPoolCapacity = SandboxCapacitySpec{PoolMin: 1, BufferMin: 1, BufferMax: 2, PoolMax: 3}
+
 // validateSandboxExtraEnv 受控 extraEnv 校验：键白名单 + 非空 value + 重复键 + 数量上限；
 // 违规一律 ErrInvalidForm（handler 400）。
 func validateSandboxExtraEnv(extraEnv []SandboxPoolExtraEnv) error {
@@ -207,32 +249,36 @@ func (c *Core) validateSandboxPoolBinding(name string) (string, error) {
 	return k8sName, nil
 }
 
-// guardBoundSandboxPool 删除服务前的绑定池复核（issue #359）：{k8sName}-pool 仍在上游运行
-// → ErrConflict 提示先删池（池与服务一一对应：先删服务会留下空耗 warm Pod 的孤儿池，
-// 同名新服务还会静默接管旧池）。上游 404（无绑定池）、501（非 kubernetes runtime 无池
-// API，不可能有池）、管理面未配置（ErrSandboxNotConfigured，平台未接 OpenSandbox）放行；
-// 其余状态（不可达/5xx/限流）fail-closed 拒绝——池状态未知即不动。
-func (c *Core) guardBoundSandboxPool(k8sName string) error {
+// releaseBoundSandboxPool 删除服务前回收绑定池（{k8sName}-pool，池与服务一一对应）：
+// 上游 200/204/404（无池）与 501（非 kubernetes runtime 无池 API）放行并清理平台配置行；
+// 管理面未配置（预置 ErrSandboxNotConfigured）同样放行（平台未接 OpenSandbox）；
+// 其余状态（不可达/5xx/限流）fail-closed 拒绝——池状态未知即不动，防孤儿池。
+// 调用方须持有 lockServiceOps(k8sName)。
+func (c *Core) releaseBoundSandboxPool(k8sName string) error {
+	poolName := k8sName + sandboxPoolServiceSuffix
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
 		if errors.Is(err, ErrSandboxNotConfigured) {
 			return nil
 		}
-		return fmt.Errorf("服务 %s 删除前绑定池探测失败（读管理面配置异常），已拒绝: %w", k8sName, err)
+		return fmt.Errorf("服务 %s 删除前绑定池清理失败（读管理面配置异常），已拒绝: %w", k8sName, err)
 	}
-	status, _, err := cfg.do(http.MethodGet, "/v1/pools/"+k8sName+sandboxPoolServiceSuffix, nil, sandboxGetTimeout)
+	status, body, err := cfg.do(http.MethodDelete, "/v1/pools/"+poolName, nil, sandboxOpTimeout)
 	if err != nil {
-		return fmt.Errorf("服务 %s 删除前绑定池探测失败（opensandbox 管理面不可达），已拒绝：恢复管理面或先删池后重试: %w", k8sName, err)
+		return fmt.Errorf("服务 %s 删除前绑定池 %s 清理失败（opensandbox 管理面不可达），已拒绝：恢复管理面或先手动删池后重试: %w", k8sName, poolName, err)
 	}
 	switch status {
-	case http.StatusOK:
-		poolName := k8sName + sandboxPoolServiceSuffix
-		return fmt.Errorf("%w: 绑定池 %s 仍在运行，先删池（DELETE /api/v1/admin/sandboxes/pools/%s）再删除服务——池与服务一一对应，不得留下孤儿池",
-			ErrConflict, poolName, poolName)
-	case http.StatusNotFound, http.StatusNotImplemented:
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound, http.StatusNotImplemented:
+		if err := c.pruneSandboxPoolConfig(poolName); err != nil {
+			return err
+		}
+		if status == http.StatusOK || status == http.StatusNoContent {
+			c.recordAudit("sandbox.pool.delete", poolName, 0, map[string]interface{}{"via": "service_delete"})
+		}
 		return nil
 	default:
-		return fmt.Errorf("服务 %s 删除前绑定池探测返回异常状态 HTTP %d，已拒绝：确认无绑定池（或先删池）后重试", k8sName, status)
+		return fmt.Errorf("服务 %s 删除前绑定池 %s 清理返回异常状态 HTTP %d，已拒绝：恢复管理面后重试（%s）",
+			k8sName, poolName, status, truncateBytes(body, 200))
 	}
 }
 
@@ -337,7 +383,8 @@ const (
 
 // ---- admin 端点业务层（§5.2 契约）----
 
-// AdminSandboxPools GET /api/v1/admin/sandboxes/pools → GET /v1/pools（原样透传）。
+// AdminSandboxPools GET /api/v1/admin/sandboxes/pools → GET /v1/pools，并把平台侧池模板
+// 参数以 config 字段附加（上游字段原样保留；外部创建的池无 config）。
 func (c *Core) AdminSandboxPools() (json.RawMessage, error) {
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
@@ -347,7 +394,46 @@ func (c *Core) AdminSandboxPools() (json.RawMessage, error) {
 	if err := mapSandboxUpstream(status, body, err); err != nil {
 		return nil, err
 	}
-	return json.RawMessage(body), nil
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("parse pools response: %w", err)
+	}
+	items, _ := payload["items"].([]interface{})
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		if m, ok := it.(map[string]interface{}); ok {
+			if name, _ := m["name"].(string); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return json.RawMessage(body), nil
+	}
+	var rows []store.SandboxPoolConfigEntity
+	if err := c.DB.Where("name IN ?", names).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	byName := make(map[string]store.SandboxPoolConfigEntity, len(rows))
+	for _, r := range rows {
+		byName[r.Name] = r
+	}
+	for _, it := range items {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := m["name"].(string); name != "" {
+			if row, ok := byName[name]; ok {
+				m["config"] = sandboxPoolConfigView(row)
+			}
+		}
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(out), nil
 }
 
 // AdminGetSandboxPool GET /api/v1/admin/sandboxes/pools/:name → GET /v1/pools/{name}。
@@ -366,14 +452,18 @@ func (c *Core) AdminGetSandboxPool(name string) (json.RawMessage, error) {
 	return json.RawMessage(body), nil
 }
 
-// AdminCreateSandboxPool POST /api/v1/admin/sandboxes/pools → POST /v1/pools
-// （Pod 模板由后端预设常量生成；image 缺省取平台默认 SANDBOX_IMAGE；两个 initContainer
-// 镜像缺省取内置 installer 版本；skillsync 三键与 extraEnv 合并后走同一注入通道）。
-// 技能同步缺省开启（skills-syncd §11）：DisableSyncd=false → 注入缺省两键 +
-// commandWrapper（D-1 内联守卫，模板/镜像偏斜退化无守护旧行为）。DisableSyncd=true =
-// 显式关闭（灰度/排障/回滚 runbook「池模板参数摘除」的替代），与 extraEnv/skillsync
-// 互斥（关同步又携同步 env 是矛盾语义）。
+// AdminCreateSandboxPool POST /api/v1/admin/sandboxes/pools → POST /v1/pools。
+// 加服务锁（与发布/删除链路互斥）；创建成功即落平台配置行（供编辑回显/重建）。
 func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (json.RawMessage, error) {
+	unlock := c.lockPoolServiceOps(in.Name)
+	defer unlock()
+	return c.createSandboxPoolLocked(in, actor)
+}
+
+// createSandboxPoolLocked 创建池（模板由后端预设生成；镜像/技能同步/容量按入参解析）。
+// 调用方须持有 lockServiceOps（或其等价串行化）。上游成功但配置行落库失败 → best-effort
+// 回滚刚创建的池，不留无主池。
+func (c *Core) createSandboxPoolLocked(in CreateSandboxPoolInput, actor uint) (json.RawMessage, error) {
 	if err := validateSandboxName(in.Name); err != nil {
 		return nil, err
 	}
@@ -383,41 +473,17 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 	if err := validateRecycleStrategy(in.RecycleStrategy); err != nil {
 		return nil, err
 	}
-	skillsyncEnv, err := in.Skillsync.envEntries()
-	if err != nil {
-		return nil, err
-	}
-	manualEnv := append(append([]SandboxPoolExtraEnv{}, in.ExtraEnv...), skillsyncEnv...)
-	if err := validateSandboxExtraEnv(manualEnv); err != nil {
-		return nil, err
-	}
-	if in.DisableSyncd && len(manualEnv) > 0 {
-		return nil, fmt.Errorf("%w: disableSyncd 与 extraEnv/skillsync 互斥（显式关闭 = 完全旧行为）", ErrInvalidForm)
-	}
 	k8sName, err := c.validateSandboxPoolBinding(in.Name)
 	if err != nil {
 		return nil, err
 	}
-	image := strings.TrimSpace(in.Image)
-	if image == "" {
-		image = sandboxPresetImageFallback
-		if defaults, err := c.GetPlatformDefaults(); err == nil {
-			if v := strings.TrimSpace(defaults["SANDBOX_IMAGE"]); v != "" {
-				image = v
-			}
-		}
+	resolved, manualEnv, err := c.resolveSandboxPoolTemplate(in.template())
+	if err != nil {
+		return nil, err
 	}
-	taskExecutorImage := strings.TrimSpace(in.TaskExecutorImage)
-	if taskExecutorImage == "" {
-		taskExecutorImage = sandboxPresetTaskExecutorImage
-	}
-	execdImage := strings.TrimSpace(in.ExecdImage)
-	if execdImage == "" {
-		execdImage = sandboxPresetExecdImage
-	}
-	extraEnv, wrapper, syncdMode := manualEnv, false, "disabled"
-	if !in.DisableSyncd {
-		extraEnv, wrapper, syncdMode = withSkillsyncDefaults(k8sName, c.Cfg.Namespace, manualEnv), true, "default"
+	extraEnv, wrapper := manualEnv, false
+	if !resolved.DisableSyncd {
+		extraEnv, wrapper = withSkillsyncDefaults(k8sName, c.Cfg.Namespace, manualEnv), true
 	}
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
@@ -426,7 +492,7 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 	payload, err := json.Marshal(map[string]interface{}{
 		"name": in.Name,
 		"template": sandboxPresetPodTemplate(sandboxPresetImages{
-			main: image, taskExecutor: taskExecutorImage, execd: execdImage,
+			main: resolved.Image, taskExecutor: resolved.TaskExecutorImage, execd: resolved.ExecdImage,
 		}, extraEnv, wrapper),
 		"capacitySpec": in.CapacitySpec,
 	})
@@ -437,13 +503,172 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 	if err := mapSandboxUpstream(status, body, err); err != nil {
 		return nil, err
 	}
-	// 管理操作审计（PlatformConfigEvent 同款先例：只记动作与对象，不记值；§10）；
-	// syncd 记缺省注入两态（default/disabled）
+	if err := c.upsertSandboxPoolConfig(in.Name, resolved, in.CapacitySpec, actor); err != nil {
+		if st, _, derr := cfg.do(http.MethodDelete, "/v1/pools/"+in.Name, nil, sandboxOpTimeout); derr != nil ||
+			(st != http.StatusOK && st != http.StatusNoContent && st != http.StatusNotFound) {
+			log.Printf("[sandbox] rollback pool %s after config persist failure (manual cleanup needed): status=%d err=%v", in.Name, st, derr)
+		}
+		return nil, fmt.Errorf("池已创建但平台配置记录失败（已尝试回滚）: %w", err)
+	}
+	syncdMode := "default"
+	if resolved.DisableSyncd {
+		syncdMode = "disabled"
+	}
 	c.recordAudit("sandbox.pool.create", in.Name, actor, map[string]interface{}{
-		"capacitySpec": in.CapacitySpec, "image": image,
-		"taskExecutorImage": taskExecutorImage, "execdImage": execdImage, "syncd": syncdMode,
+		"capacitySpec": in.CapacitySpec, "image": resolved.Image,
+		"taskExecutorImage": resolved.TaskExecutorImage, "execdImage": resolved.ExecdImage, "syncd": syncdMode,
 	})
 	return json.RawMessage(body), nil
+}
+
+// resolveSandboxPoolTemplate 校验并解析模板参数：镜像回落（入参 → 平台 SANDBOX_IMAGE →
+// 内置 fallback）、skillsync 三键校验、extraEnv 白名单/重复键、disableSyncd 互斥。
+// 返回生效模板（镜像为实际值、skillsync 归一化后的显式覆盖项）与合并后的 manual env。
+func (c *Core) resolveSandboxPoolTemplate(t SandboxPoolTemplate) (SandboxPoolTemplate, []SandboxPoolExtraEnv, error) {
+	skillsync := normalizeSkillsync(t.Skillsync)
+	skillsyncEnv, err := skillsync.envEntries()
+	if err != nil {
+		return SandboxPoolTemplate{}, nil, err
+	}
+	manualEnv := append(append([]SandboxPoolExtraEnv{}, t.ExtraEnv...), skillsyncEnv...)
+	if err := validateSandboxExtraEnv(manualEnv); err != nil {
+		return SandboxPoolTemplate{}, nil, err
+	}
+	if t.DisableSyncd && len(manualEnv) > 0 {
+		return SandboxPoolTemplate{}, nil, fmt.Errorf("%w: disableSyncd 与 extraEnv/skillsync 互斥（显式关闭 = 完全旧行为）", ErrInvalidForm)
+	}
+	image := strings.TrimSpace(t.Image)
+	if image == "" {
+		image = sandboxPresetImageFallback
+		if defaults, err := c.GetPlatformDefaults(); err == nil {
+			if v := strings.TrimSpace(defaults["SANDBOX_IMAGE"]); v != "" {
+				image = v
+			}
+		}
+	}
+	taskExecutorImage := strings.TrimSpace(t.TaskExecutorImage)
+	if taskExecutorImage == "" {
+		taskExecutorImage = sandboxPresetTaskExecutorImage
+	}
+	execdImage := strings.TrimSpace(t.ExecdImage)
+	if execdImage == "" {
+		execdImage = sandboxPresetExecdImage
+	}
+	resolved := SandboxPoolTemplate{
+		Image: image, TaskExecutorImage: taskExecutorImage, ExecdImage: execdImage,
+		ExtraEnv:  append([]SandboxPoolExtraEnv{}, t.ExtraEnv...),
+		Skillsync: skillsync, DisableSyncd: t.DisableSyncd,
+	}
+	return resolved, manualEnv, nil
+}
+
+// normalizeSkillsync 归一化三键（trim；全空 = nil）。
+func normalizeSkillsync(s *SandboxPoolSkillsync) *SandboxPoolSkillsync {
+	if s == nil {
+		return nil
+	}
+	out := SandboxPoolSkillsync{
+		BaseURL: strings.TrimSpace(s.BaseURL), Interval: strings.TrimSpace(s.Interval), StoreDir: strings.TrimSpace(s.StoreDir),
+	}
+	if out == (SandboxPoolSkillsync{}) {
+		return nil
+	}
+	return &out
+}
+
+// upsertSandboxPoolConfig 池配置行写入（同名覆盖；池名全局唯一）。
+func (c *Core) upsertSandboxPoolConfig(name string, t SandboxPoolTemplate, capacity SandboxCapacitySpec, actor uint) error {
+	// MySQL JSON 列不接受空串：缺省写 null / []（SQLite 单测同形）
+	skillsyncJSON := "null"
+	if t.Skillsync != nil {
+		b, err := json.Marshal(t.Skillsync)
+		if err != nil {
+			return err
+		}
+		skillsyncJSON = string(b)
+	}
+	extraEnvJSON := "[]"
+	if len(t.ExtraEnv) > 0 {
+		b, err := json.Marshal(t.ExtraEnv)
+		if err != nil {
+			return err
+		}
+		extraEnvJSON = string(b)
+	}
+	entity := store.SandboxPoolConfigEntity{
+		Name: name, Image: t.Image, TaskExecutorImage: t.TaskExecutorImage, ExecdImage: t.ExecdImage,
+		SkillsyncJSON: skillsyncJSON, ExtraEnvJSON: extraEnvJSON, DisableSyncd: t.DisableSyncd,
+		PoolMin: capacity.PoolMin, BufferMin: capacity.BufferMin, BufferMax: capacity.BufferMax, PoolMax: capacity.PoolMax,
+		CreatedBy: actor,
+	}
+	return c.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "name"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"image", "task_executor_image", "execd_image", "skillsync_json", "extra_env_json", "disable_syncd",
+			"pool_min", "buffer_min", "buffer_max", "pool_max", "updated_at",
+		}),
+	}).Create(&entity).Error
+}
+
+func (c *Core) pruneSandboxPoolConfig(name string) error {
+	return c.DB.Where("name = ?", name).Delete(&store.SandboxPoolConfigEntity{}).Error
+}
+
+// sandboxPoolConfigView 配置行 → 视图（JSON 列解析失败按缺省处理，不阻断列表）。
+func sandboxPoolConfigView(e store.SandboxPoolConfigEntity) SandboxPoolConfigView {
+	t := sandboxPoolConfigTemplate(e)
+	return SandboxPoolConfigView{
+		Image: t.Image, TaskExecutorImage: t.TaskExecutorImage, ExecdImage: t.ExecdImage,
+		Skillsync: t.Skillsync, ExtraEnv: t.ExtraEnv, DisableSyncd: t.DisableSyncd,
+	}
+}
+
+// sandboxPoolConfigTemplate 配置行 → 模板参数（用于编辑比较与重建）。
+func sandboxPoolConfigTemplate(e store.SandboxPoolConfigEntity) SandboxPoolTemplate {
+	t := SandboxPoolTemplate{
+		Image: e.Image, TaskExecutorImage: e.TaskExecutorImage, ExecdImage: e.ExecdImage, DisableSyncd: e.DisableSyncd,
+	}
+	if strings.TrimSpace(e.SkillsyncJSON) != "" {
+		var s SandboxPoolSkillsync
+		if json.Unmarshal([]byte(e.SkillsyncJSON), &s) == nil {
+			t.Skillsync = normalizeSkillsync(&s)
+		}
+	}
+	if strings.TrimSpace(e.ExtraEnvJSON) != "" {
+		var xs []SandboxPoolExtraEnv
+		if json.Unmarshal([]byte(e.ExtraEnvJSON), &xs) == nil && len(xs) > 0 {
+			t.ExtraEnv = xs
+		}
+	}
+	return t
+}
+
+// sandboxPoolTemplatesEqual 模板比较（extraEnv 按名字集合等价；镜像/技能同步/开关逐字段）。
+// 用于判定编辑是否需要删除重建。
+func sandboxPoolTemplatesEqual(a, b SandboxPoolTemplate) bool {
+	if a.Image != b.Image || a.TaskExecutorImage != b.TaskExecutorImage || a.ExecdImage != b.ExecdImage ||
+		a.DisableSyncd != b.DisableSyncd {
+		return false
+	}
+	if (a.Skillsync == nil) != (b.Skillsync == nil) {
+		return false
+	}
+	if a.Skillsync != nil && *a.Skillsync != *b.Skillsync {
+		return false
+	}
+	if len(a.ExtraEnv) != len(b.ExtraEnv) {
+		return false
+	}
+	envA := make(map[string]string, len(a.ExtraEnv))
+	for _, e := range a.ExtraEnv {
+		envA[e.Name] = e.Value
+	}
+	for _, e := range b.ExtraEnv {
+		if v, ok := envA[e.Name]; !ok || v != e.Value {
+			return false
+		}
+	}
+	return true
 }
 
 // withSkillsyncDefaults 技能同步缺省两键与手动 extraEnv 的键级合并（skills-syncd
@@ -471,19 +696,68 @@ func withSkillsyncDefaults(k8sName, namespace string, manual []SandboxPoolExtraE
 	return merged
 }
 
-// AdminUpdateSandboxPool PUT /api/v1/admin/sandboxes/pools/:name → PUT /v1/pools/{name}
-// （仅容量：上游 UpdatePoolRequest 只收 capacitySpec，改模板须删除重建）。
-func (c *Core) AdminUpdateSandboxPool(name string, spec SandboxCapacitySpec, actor uint) (json.RawMessage, error) {
+// AdminUpdateSandboxPool PUT /api/v1/admin/sandboxes/pools/:name
+// 容量更新（上游只收 capacitySpec）与模板编辑（模板变更 = 删除重建）统一入口；
+// Template 缺省保持旧契约（仅容量），m12/存量调用零影响。
+func (c *Core) AdminUpdateSandboxPool(name string, in UpdateSandboxPoolInput, actor uint) (json.RawMessage, error) {
 	if err := validateSandboxName(name); err != nil {
 		return nil, err
 	}
-	if err := spec.validate(); err != nil {
+	if err := in.CapacitySpec.validate(); err != nil {
 		return nil, err
 	}
+	unlock := c.lockPoolServiceOps(name)
+	defer unlock()
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
 		return nil, err
 	}
+	if in.Template == nil {
+		return c.updateSandboxPoolCapacity(cfg, name, in.CapacitySpec, actor)
+	}
+	resolved, _, err := c.resolveSandboxPoolTemplate(*in.Template)
+	if err != nil {
+		return nil, err
+	}
+	var stored store.SandboxPoolConfigEntity
+	storedErr := c.DB.Where("name = ?", name).First(&stored).Error
+	if storedErr != nil && !errors.Is(storedErr, gorm.ErrRecordNotFound) {
+		return nil, storedErr
+	}
+	if storedErr == nil && sandboxPoolTemplatesEqual(sandboxPoolConfigTemplate(stored), resolved) {
+		return c.updateSandboxPoolCapacity(cfg, name, in.CapacitySpec, actor)
+	}
+	// 模板变更（或无平台配置行的外部池）= 删除重建：上游 PUT 只收容量，模板不可原地改。
+	if _, err := c.validateSandboxPoolBinding(name); err != nil {
+		return nil, err
+	}
+	status, body, err := cfg.do(http.MethodDelete, "/v1/pools/"+name, nil, sandboxOpTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("删除旧池失败（池保持原状）: %w", err)
+	}
+	switch status {
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+	default:
+		return nil, fmt.Errorf("删除旧池失败（池保持原状）: %w", mapSandboxUpstream(status, body, nil))
+	}
+	if status != http.StatusNotFound {
+		c.recordAudit("sandbox.pool.delete", name, actor, map[string]interface{}{"via": "recreate"})
+	}
+	if err := c.pruneSandboxPoolConfig(name); err != nil {
+		return nil, err
+	}
+	out, err := c.createSandboxPoolLocked(CreateSandboxPoolInput{
+		Name: name, Image: resolved.Image, TaskExecutorImage: resolved.TaskExecutorImage, ExecdImage: resolved.ExecdImage,
+		CapacitySpec: in.CapacitySpec, ExtraEnv: resolved.ExtraEnv, Skillsync: resolved.Skillsync, DisableSyncd: resolved.DisableSyncd,
+	}, actor)
+	if err != nil {
+		return nil, fmt.Errorf("旧池已删除，新池创建失败（可重试编辑保存重建）: %w", err)
+	}
+	return out, nil
+}
+
+// updateSandboxPoolCapacity 上游 PUT 仅容量 + 同步平台配置行容量（外部池无行则零影响）。
+func (c *Core) updateSandboxPoolCapacity(cfg sandboxConfig, name string, spec SandboxCapacitySpec, actor uint) (json.RawMessage, error) {
 	payload, err := json.Marshal(map[string]interface{}{"capacitySpec": spec})
 	if err != nil {
 		return nil, err
@@ -492,26 +766,108 @@ func (c *Core) AdminUpdateSandboxPool(name string, spec SandboxCapacitySpec, act
 	if err := mapSandboxUpstream(status, body, err); err != nil {
 		return nil, err
 	}
+	if err := c.DB.Model(&store.SandboxPoolConfigEntity{}).Where("name = ?", name).Updates(map[string]interface{}{
+		"pool_min": spec.PoolMin, "buffer_min": spec.BufferMin, "buffer_max": spec.BufferMax, "pool_max": spec.PoolMax,
+	}).Error; err != nil {
+		return nil, err
+	}
 	c.recordAudit("sandbox.pool.update", name, actor, map[string]interface{}{"capacitySpec": spec})
 	return json.RawMessage(body), nil
 }
 
 // AdminDeleteSandboxPool DELETE /api/v1/admin/sandboxes/pools/:name → DELETE /v1/pools/{name}
 // （上游 204；池管理的 warm Pod 由 controller 终止——前端删除确认提示据此）。
+// 404 视为已不存在（幂等），并清理平台配置行。
 func (c *Core) AdminDeleteSandboxPool(name string, actor uint) error {
 	if err := validateSandboxName(name); err != nil {
 		return err
 	}
+	unlock := c.lockPoolServiceOps(name)
+	defer unlock()
 	cfg, err := c.sandboxProxyConfig()
 	if err != nil {
 		return err
 	}
 	status, body, err := cfg.do(http.MethodDelete, "/v1/pools/"+name, nil, sandboxOpTimeout)
-	if err := mapSandboxUpstream(status, body, err); err != nil {
-		return err
+	if err != nil {
+		return mapSandboxUpstream(0, nil, err)
 	}
-	c.recordAudit("sandbox.pool.delete", name, actor, map[string]interface{}{})
-	return nil
+	switch status {
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+		if err := c.pruneSandboxPoolConfig(name); err != nil {
+			return err
+		}
+		c.recordAudit("sandbox.pool.delete", name, actor, map[string]interface{}{})
+		return nil
+	default:
+		return mapSandboxUpstream(status, body, nil)
+	}
+}
+
+// lockPoolServiceOps 池名 → 服务锁（池名必须 {k8sName}-pool；非法名不加锁，交由校验拒绝）。
+func (c *Core) lockPoolServiceOps(name string) func() {
+	if k8sName, ok := strings.CutSuffix(name, sandboxPoolServiceSuffix); ok && k8sName != "" {
+		return c.lockServiceOps(k8sName)
+	}
+	return func() {}
+}
+
+// ensureServiceSandboxPool 自动确保 {k8sName}-pool（创建/编辑 agent 链路）：
+// 平台未配置 OpenSandbox → skip（poolName 空，不注入 poolRef，不阻断发布）；
+// 已存在 → 复用；不存在 → 创建（镜像取服务 SANDBOX_IMAGE，skillsync 缺省开启，落配置行）；
+// 501/异常 → fail-fast。调用方须持有 lockServiceOps(k8sName)。
+func (c *Core) ensureServiceSandboxPool(k8sName, sandboxImage string, capacity SandboxCapacitySpec, actor uint) (created bool, poolName string, err error) {
+	poolName = k8sName + sandboxPoolServiceSuffix
+	cfg, err := c.sandboxProxyConfig()
+	if err != nil {
+		if errors.Is(err, ErrSandboxNotConfigured) {
+			return false, "", nil
+		}
+		return false, poolName, fmt.Errorf("自动建池前置失败（读 OpenSandbox 配置）: %w", err)
+	}
+	status, body, err := cfg.do(http.MethodGet, "/v1/pools/"+poolName, nil, sandboxGetTimeout)
+	if err != nil {
+		return false, poolName, fmt.Errorf("自动建池探测失败（%s，opensandbox 不可达）: %w", poolName, err)
+	}
+	switch status {
+	case http.StatusOK:
+		return false, poolName, nil
+	case http.StatusNotFound:
+	case http.StatusNotImplemented:
+		return false, poolName, fmt.Errorf("自动建池需要 opensandbox 以 kubernetes runtime 部署: %w", mapSandboxUpstream(status, body, nil))
+	default:
+		return false, poolName, fmt.Errorf("自动建池探测异常（%s）: %w", poolName, mapSandboxUpstream(status, body, nil))
+	}
+	if _, err := c.createSandboxPoolLocked(CreateSandboxPoolInput{
+		Name: poolName, Image: sandboxImage, CapacitySpec: capacity,
+	}, actor); err != nil {
+		var ue *SandboxUpstreamError
+		if errors.As(err, &ue) && ue.Status == http.StatusConflict {
+			return false, poolName, nil
+		}
+		return false, poolName, err
+	}
+	return true, poolName, nil
+}
+
+// rollbackServiceSandboxPool 发布失败补偿：仅删本次自动创建的池（best-effort）。
+func (c *Core) rollbackServiceSandboxPool(poolName string, created bool) {
+	if !created || poolName == "" {
+		return
+	}
+	cfg, err := c.sandboxProxyConfig()
+	if err != nil {
+		log.Printf("[sandbox] rollback pool %s skipped (read config: %v)", poolName, err)
+		return
+	}
+	status, _, err := cfg.do(http.MethodDelete, "/v1/pools/"+poolName, nil, sandboxOpTimeout)
+	if err != nil || (status != http.StatusOK && status != http.StatusNoContent && status != http.StatusNotFound) {
+		log.Printf("[sandbox] rollback pool %s failed (manual cleanup needed): status=%d err=%v", poolName, status, err)
+		return
+	}
+	if err := c.pruneSandboxPoolConfig(poolName); err != nil {
+		log.Printf("[sandbox] rollback pool %s config row failed: %v", poolName, err)
+	}
 }
 
 // AdminListSandboxes GET /api/v1/admin/sandboxes?state=&page=&pageSize= → GET /v1/sandboxes

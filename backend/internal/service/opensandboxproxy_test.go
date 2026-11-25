@@ -226,7 +226,9 @@ func TestSandboxProxySevenEndpoints(t *testing.T) {
 		t.Fatalf("create pool: %v", err)
 	}
 	// PUT /v1/pools/{name}（仅 capacitySpec）
-	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", SandboxCapacitySpec{BufferMin: 2, BufferMax: 3, PoolMin: 2, PoolMax: 4}, 7); err != nil {
+	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", UpdateSandboxPoolInput{
+		CapacitySpec: SandboxCapacitySpec{BufferMin: 2, BufferMax: 3, PoolMin: 2, PoolMax: 4},
+	}, 7); err != nil {
 		t.Fatalf("update pool: %v", err)
 	}
 	// DELETE /v1/pools/{name}
@@ -520,6 +522,381 @@ func TestSandboxProxyPoolSkillsyncOverrides(t *testing.T) {
 	}
 }
 
+// publishWithProvision 发布并等待进入 register_failed（供自动建池用例复用）。
+func publishWithProvision(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgID uint,
+	env map[string]string, provision bool, capacity *SandboxCapacitySpec) *store.ServiceEntity {
+	t.Helper()
+	svc, err := core.Publish(PublishRequest{PackageID: pkgID, Image: "agent-framework:latest", Env: env,
+		ProvisionSandboxPool: provision, SandboxPoolCapacity: capacity})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("cluster_url", "http://127.0.0.1:1")
+	_ = fk.SetReady("test", svc.K8sName, 1)
+	got := waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
+	return &got
+}
+
+// TestSandboxPoolConfigPersistAndList 建池成功即落平台配置行；列表附带 config；容量 PUT
+// 同步容量；删除清理配置行。
+func TestSandboxPoolConfigPersistAndList(t *testing.T) {
+	core, _, h, done := newProxyCore(t, nil)
+	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/pools":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"items":[{"name":"oaf-demo-pool","capacitySpec":{"bufferMin":1,"bufferMax":2,"poolMin":1,"poolMax":4},"status":{"total":2,"allocated":0,"available":2}}]}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/pools/oaf-demo-pool":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/pools/oaf-demo-pool":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	capSpec := SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 4}
+	in := CreateSandboxPoolInput{
+		Name: "oaf-demo-pool", Image: "sbx:1", TaskExecutorImage: "te:9", ExecdImage: "ex:9",
+		CapacitySpec: capSpec,
+		Skillsync:    &SandboxPoolSkillsync{Interval: "30s"},
+		ExtraEnv:     []SandboxPoolExtraEnv{{Name: "SKILLSYNC_TIMEOUT", Value: "30s"}},
+	}
+	if _, err := core.AdminCreateSandboxPool(in, 7); err != nil {
+		t.Fatal(err)
+	}
+	var row store.SandboxPoolConfigEntity
+	if err := core.DB.Where("name = ?", "oaf-demo-pool").First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Image != "sbx:1" || row.TaskExecutorImage != "te:9" || row.ExecdImage != "ex:9" ||
+		row.PoolMin != 1 || row.BufferMin != 1 || row.BufferMax != 2 || row.PoolMax != 4 || row.CreatedBy != 7 {
+		t.Fatalf("config row = %+v", row)
+	}
+	if !strings.Contains(row.SkillsyncJSON, `"interval":"30s"`) || !strings.Contains(row.ExtraEnvJSON, "SKILLSYNC_TIMEOUT") {
+		t.Fatalf("config json columns = %q / %q", row.SkillsyncJSON, row.ExtraEnvJSON)
+	}
+
+	raw, err := core.AdminSandboxPools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []struct {
+			Name   string                 `json:"name"`
+			Config *SandboxPoolConfigView `json:"config"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Config == nil || list.Items[0].Config.Image != "sbx:1" ||
+		list.Items[0].Config.Skillsync == nil || list.Items[0].Config.Skillsync.Interval != "30s" {
+		t.Fatalf("list config = %+v", list.Items)
+	}
+
+	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", UpdateSandboxPoolInput{
+		CapacitySpec: SandboxCapacitySpec{BufferMin: 2, BufferMax: 3, PoolMin: 1, PoolMax: 4},
+	}, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.DB.Where("name = ?", "oaf-demo-pool").First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.BufferMin != 2 || row.BufferMax != 3 {
+		t.Fatalf("capacity not synced to config row: %+v", row)
+	}
+
+	if err := core.AdminDeleteSandboxPool("oaf-demo-pool", 7); err != nil {
+		t.Fatal(err)
+	}
+	var cnt int64
+	if err := core.DB.Model(&store.SandboxPoolConfigEntity{}).Where("name = ?", "oaf-demo-pool").Count(&cnt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("config row must be pruned on delete, got %d", cnt)
+	}
+}
+
+// TestSandboxPoolUpdateTemplateRecreate 模板编辑：与平台记录一致 = 仅容量 PUT；不同 =
+// DELETE + 重新 POST（上游 PUT 只收容量）。
+func TestSandboxPoolUpdateTemplateRecreate(t *testing.T) {
+	core, _, h, done := newProxyCore(t, nil)
+	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
+	postCount := 0
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
+			postCount++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/pools/oaf-demo-pool":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/pools/oaf-demo-pool":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	capSpec := SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3}
+	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
+		Name: "oaf-demo-pool", Image: "sbx:1", CapacitySpec: capSpec,
+	}, 7); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模板一致（镜像仍 sbx:1）+ 容量变化 → 仅 PUT
+	sameTemplate := &SandboxPoolTemplate{Image: "sbx:1"}
+	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", UpdateSandboxPoolInput{
+		CapacitySpec: SandboxCapacitySpec{BufferMin: 2, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+		Template:     sameTemplate,
+	}, 7); err != nil {
+		t.Fatal(err)
+	}
+	if postCount != 1 {
+		t.Fatalf("identical template must not recreate, POST count = %d", postCount)
+	}
+
+	// 模板变更 → DELETE + POST，配置行镜像更新
+	h.mu.Lock()
+	before := len(h.Reqs)
+	h.mu.Unlock()
+	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", UpdateSandboxPoolInput{
+		CapacitySpec: capSpec,
+		Template:     &SandboxPoolTemplate{Image: "sbx:2", TaskExecutorImage: "te:2", ExecdImage: "ex:2"},
+	}, 7); err != nil {
+		t.Fatal(err)
+	}
+	if postCount != 2 {
+		t.Fatalf("template change must recreate, POST count = %d", postCount)
+	}
+	h.mu.Lock()
+	reqs := append([]recReq{}, h.Reqs[before:]...)
+	h.mu.Unlock()
+	sawDelete := false
+	for _, req := range reqs {
+		if req.Method == http.MethodDelete && req.Path == "/v1/pools/oaf-demo-pool" {
+			sawDelete = true
+		}
+		if req.Method == http.MethodPost {
+			tpl := parsePresetTemplate(t, req.Body)
+			if tpl.Main.Image != "sbx:2" {
+				t.Fatalf("recreated pool image = %q, want sbx:2", tpl.Main.Image)
+			}
+		}
+	}
+	if !sawDelete {
+		t.Fatal("template change must DELETE old pool before recreate")
+	}
+	var row store.SandboxPoolConfigEntity
+	if err := core.DB.Where("name = ?", "oaf-demo-pool").First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Image != "sbx:2" || row.TaskExecutorImage != "te:2" || row.ExecdImage != "ex:2" {
+		t.Fatalf("config row after recreate = %+v", row)
+	}
+}
+
+// TestSandboxPoolUpdateRecreateCreateFailure 删除旧池成功但新池创建失败 → 配置行清理、
+// 错误提示可重试。
+func TestSandboxPoolUpdateRecreateCreateFailure(t *testing.T) {
+	core, _, h, done := newProxyCore(t, nil)
+	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
+	postCount := 0
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
+			postCount++
+			if postCount == 1 {
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/pools/oaf-demo-pool":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	capSpec := SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3}
+	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
+		Name: "oaf-demo-pool", Image: "sbx:1", CapacitySpec: capSpec,
+	}, 7); err != nil {
+		t.Fatal(err)
+	}
+	_, err := core.AdminUpdateSandboxPool("oaf-demo-pool", UpdateSandboxPoolInput{
+		CapacitySpec: capSpec,
+		Template:     &SandboxPoolTemplate{Image: "sbx:2"},
+	}, 7)
+	if err == nil || !strings.Contains(err.Error(), "旧池已删除") {
+		t.Fatalf("recreate failure message = %v", err)
+	}
+	var cnt int64
+	if err := core.DB.Model(&store.SandboxPoolConfigEntity{}).Where("name = ?", "oaf-demo-pool").Count(&cnt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("stale config row must be pruned after old pool deleted, got %d", cnt)
+	}
+}
+
+// TestPublishAutoProvisionsSandboxPool 创建 agent（显式开启沙箱）自动确保 {k8sName}-pool，
+// 注入 SANDBOX_POOL_REF，池镜像取服务 SANDBOX_IMAGE，skillsync 缺省开启。
+func TestPublishAutoProvisionsSandboxPool(t *testing.T) {
+	core, fk, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	probePath := ""
+	postBody := ""
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/pools/"):
+			probePath = r.URL.Path
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"not found"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
+			postBody = got.Body
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"name":"oaf-acme-demo-pool"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	capSpec := SandboxCapacitySpec{BufferMin: 2, BufferMax: 2, PoolMin: 2, PoolMax: 4}
+	svc := publishWithProvision(t, core, fk, pkg.ID, map[string]string{"SANDBOX_IMAGE": "sbx:auto"}, true, &capSpec)
+	if probePath != "/v1/pools/oaf-acme-demo-pool" {
+		t.Fatalf("auto provision probe path = %q", probePath)
+	}
+	if !strings.Contains(svc.EnvJSON, `"SANDBOX_POOL_REF":"oaf-acme-demo-pool"`) {
+		t.Fatalf("env must carry SANDBOX_POOL_REF: %s", svc.EnvJSON)
+	}
+	if postBody == "" {
+		t.Fatal("auto provision must POST /v1/pools")
+	}
+	tpl := parsePresetTemplate(t, postBody)
+	if tpl.Main.Image != "sbx:auto" {
+		t.Fatalf("pool image = %q, want sbx:auto", tpl.Main.Image)
+	}
+	envValues := map[string]string{}
+	for _, e := range tpl.Main.Env {
+		envValues[e.Name] = e.Value
+	}
+	if envValues["SKILLSYNC_BASE_URL"] != "http://oaf-acme-demo-svc.test.svc:8100" {
+		t.Fatalf("skillsync base url = %q", envValues["SKILLSYNC_BASE_URL"])
+	}
+	var row store.SandboxPoolConfigEntity
+	if err := core.DB.Where("name = ?", "oaf-acme-demo-pool").First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.PoolMax != 4 || row.Image != "sbx:auto" {
+		t.Fatalf("auto pool config row = %+v", row)
+	}
+}
+
+// TestPublishAutoPoolUnconfiguredSkips 平台未配置 OpenSandbox → 跳过自动建池，发布照常。
+func TestPublishAutoPoolUnconfiguredSkips(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithProvision(t, core, fk, pkg.ID, map[string]string{"SANDBOX_IMAGE": "sbx:auto"}, true, nil)
+	if strings.Contains(svc.EnvJSON, "SANDBOX_POOL_REF") {
+		t.Fatalf("unconfigured sandbox must skip pool ref injection: %s", svc.EnvJSON)
+	}
+}
+
+// TestPublishAutoPoolExplicitRefSkips 显式自定义 poolRef → 不自动建池，env 原样。
+func TestPublishAutoPoolExplicitRefSkips(t *testing.T) {
+	core, fk, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithProvision(t, core, fk, pkg.ID,
+		map[string]string{"SANDBOX_POOL_REF": "shared-pool"}, true, nil)
+	if !strings.Contains(svc.EnvJSON, `"SANDBOX_POOL_REF":"shared-pool"`) {
+		t.Fatalf("explicit pool ref must be preserved: %s", svc.EnvJSON)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, req := range h.Reqs {
+		if strings.HasPrefix(req.Path, "/v1/pools") {
+			t.Fatalf("explicit pool ref must not trigger pool API calls: %s %s", req.Method, req.Path)
+		}
+	}
+}
+
+// TestPublishAutoPoolFailureRollsBack 自动建池失败 → 发布失败并回滚占位行（无服务残留）。
+func TestPublishAutoPoolFailureRollsBack(t *testing.T) {
+	core, _, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/pools/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	_, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+		Env: map[string]string{"SANDBOX_IMAGE": "sbx:auto"}, ProvisionSandboxPool: true})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("auto pool failure must fail publish, got %v", err)
+	}
+	var cnt int64
+	if err := core.DB.Model(&store.ServiceEntity{}).Count(&cnt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("publish placeholder must be rolled back, services = %d", cnt)
+	}
+}
+
+// TestRepublishEnsuresSandboxPool 编辑保存（显式开启沙箱）→ Republish 自动补池并注入 poolRef。
+func TestRepublishEnsuresSandboxPool(t *testing.T) {
+	core, fk, h, done := newProxyCore(t, nil)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"SANDBOX_IMAGE": "sbx:auto"}, nil)
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/pools/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"name":"oaf-acme-demo-pool"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	updated, err := core.Republish(svc.ID, RepublishOptions{ProvisionSandboxPool: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(updated.EnvJSON, `"SANDBOX_POOL_REF":"oaf-acme-demo-pool"`) {
+		t.Fatalf("republish must inject pool ref: %s", updated.EnvJSON)
+	}
+	var cnt int64
+	if err := core.DB.Model(&store.SandboxPoolConfigEntity{}).Where("name = ?", "oaf-acme-demo-pool").Count(&cnt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 1 {
+		t.Fatalf("republish must persist pool config row, got %d", cnt)
+	}
+}
+
 // TestSandboxProxyPresetExtraEnvOverride C-2 手动通道（skills-syncd §5.2）：手动 extraEnv
 // 键级覆盖缺省派生值（同名后者胜）、其余键按入参顺序追加。
 func TestSandboxProxyPresetExtraEnvOverride(t *testing.T) {
@@ -624,7 +1001,9 @@ func TestSandboxProxyValidation(t *testing.T) {
 		}
 	}
 	// 容量更新同链
-	if _, err := core.AdminUpdateSandboxPool("p", SandboxCapacitySpec{BufferMin: 5, BufferMax: 2, PoolMin: 1, PoolMax: 3}, 0); err == nil {
+	if _, err := core.AdminUpdateSandboxPool("p", UpdateSandboxPoolInput{
+		CapacitySpec: SandboxCapacitySpec{BufferMin: 5, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+	}, 0); err == nil {
 		t.Fatal("update pool: chain violation must 400")
 	}
 	// 沙箱 id / 池名路径注入拒绝
@@ -831,6 +1210,9 @@ func TestSandboxAdminAuditTrail(t *testing.T) {
 	seedWsService(t, core, 1, "oaf-demo")
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		switch r.Method {
+		case http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
 		case http.MethodPost:
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{}`))
@@ -846,7 +1228,9 @@ func TestSandboxAdminAuditTrail(t *testing.T) {
 	}, 42); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", SandboxCapacitySpec{BufferMin: 2, BufferMax: 2, PoolMin: 1, PoolMax: 3}, 42); err != nil {
+	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", UpdateSandboxPoolInput{
+		CapacitySpec: SandboxCapacitySpec{BufferMin: 2, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+	}, 42); err != nil {
 		t.Fatal(err)
 	}
 	if err := core.AdminDeleteSandboxPool("oaf-demo-pool", 42); err != nil {
@@ -884,44 +1268,48 @@ func publishForDeleteGuard(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgID 
 	return publishWithEnv(t, core, fk, pkgID, map[string]string{"LOG_LEVEL": "info"}, nil)
 }
 
-// TestDeleteServiceRefusedWhileBoundPoolExists（issue #359）：绑定池 {k8sName}-pool 仍在上游
-// 运行时删除服务被拒（ErrConflict → handler 409），K8s 对象原样未动——池与服务一一对应，
-// 先删服务会留下空耗 warm Pod 的孤儿池，同名新服务还会静默接管旧池。
-func TestDeleteServiceRefusedWhileBoundPoolExists(t *testing.T) {
+// TestDeleteServiceReleasesBoundPool 删除服务自动回收绑定池（池与服务一一对应）：
+// 上游 DELETE 成功 → 继续删 K8s 对象，并清理平台池配置行。
+func TestDeleteServiceReleasesBoundPool(t *testing.T) {
 	core, fk, h, done := newProxyCore(t, nil)
 	defer done()
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishForDeleteGuard(t, core, fk, pkg.ID)
+	poolName := svc.K8sName + "-pool"
+	if err := core.DB.Create(&store.SandboxPoolConfigEntity{Name: poolName, Image: "sbx:1"}).Error; err != nil {
+		t.Fatal(err)
+	}
 
-	poolPath := "/v1/pools/" + svc.K8sName + "-pool"
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		statusWithBody(map[string]func() (int, string){
-			poolPath: func() (int, string) { return 200, `{"name":"pool","replicas":{"current":1}}` },
+			"/v1/pools/" + poolName: func() (int, string) { return 204, `` },
 		})(w, r)
 	})
-	err := core.Delete(svc.ID)
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("delete must be refused with ErrConflict, got %v", err)
+	if err := core.Delete(svc.ID); err != nil {
+		t.Fatalf("delete must release bound pool and proceed: %v", err)
 	}
-	if !strings.Contains(err.Error(), svc.K8sName+"-pool") {
-		t.Fatalf("refusal must name the bound pool, got %s", err.Error())
-	}
-	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err != nil {
-		t.Fatalf("refused delete must leave deployment intact: %v", err)
+	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err == nil {
+		t.Fatal("deployment must be deleted after successful Delete")
 	}
 	found := false
 	for _, req := range h.Reqs {
-		if req.Method == http.MethodGet && req.Path == poolPath {
+		if req.Method == http.MethodDelete && req.Path == "/v1/pools/"+poolName {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("delete must probe GET /v1/pools/{k8sName}-pool before deleting")
+		t.Fatal("delete must call DELETE /v1/pools/{k8sName}-pool")
+	}
+	var cnt int64
+	if err := core.DB.Model(&store.SandboxPoolConfigEntity{}).Where("name = ?", poolName).Count(&cnt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("pool config row must be pruned, got %d", cnt)
 	}
 }
 
-// TestDeleteServiceProceedsWhenPoolAbsent（issue #359）：上游 404（无绑定池）→ 正常删除，
-// K8s 对象清理。
+// TestDeleteServiceProceedsWhenPoolAbsent：上游 404（无绑定池）→ 正常删除，K8s 对象清理。
 func TestDeleteServiceProceedsWhenPoolAbsent(t *testing.T) {
 	core, fk, h, done := newProxyCore(t, nil)
 	defer done()
@@ -939,8 +1327,8 @@ func TestDeleteServiceProceedsWhenPoolAbsent(t *testing.T) {
 	}
 }
 
-// TestDeleteServiceRefusedWhenUpstreamUnreachable（issue #359）：探测传输失败 fail-closed——
-// 池状态未知即不动，拒绝删除并提示恢复上游或先删池。
+// TestDeleteServiceRefusedWhenUpstreamUnreachable：上游不可达 fail-closed——池状态未知即
+// 不动，拒绝删除并提示恢复上游或先手动删池。
 func TestDeleteServiceRefusedWhenUpstreamUnreachable(t *testing.T) {
 	core, fk, _, done := newProxyCore(t, nil)
 	defer done()
@@ -952,8 +1340,8 @@ func TestDeleteServiceRefusedWhenUpstreamUnreachable(t *testing.T) {
 	}
 	if err := core.Delete(svc.ID); err == nil {
 		t.Fatal("delete with unreachable upstream must be refused (pool state unknown)")
-	} else if !strings.Contains(err.Error(), "探测") {
-		t.Fatalf("refusal must explain probe failure, got %s", err.Error())
+	} else if !strings.Contains(err.Error(), "清理失败") {
+		t.Fatalf("refusal must explain cleanup failure, got %s", err.Error())
 	}
 	if _, err := core.K8s.GetDeployment("test", svc.K8sName); err != nil {
 		t.Fatalf("refused delete must leave deployment intact: %v", err)

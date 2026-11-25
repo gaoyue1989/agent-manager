@@ -302,14 +302,12 @@ func registerAdminSandboxes(ad *gin.RouterGroup, core *service.Core) {
 			OK(c, out)
 		})
 		sb.PUT("/pools/:name", func(c *gin.Context) {
-			var body struct {
-				CapacitySpec service.SandboxCapacitySpec `json:"capacitySpec"`
-			}
+			var body service.UpdateSandboxPoolInput
 			if err := c.ShouldBindJSON(&body); err != nil {
 				Fail(c, http.StatusBadRequest, err.Error())
 				return
 			}
-			out, err := core.AdminUpdateSandboxPool(c.Param("name"), body.CapacitySpec, c.GetUint("uid"))
+			out, err := core.AdminUpdateSandboxPool(c.Param("name"), body, c.GetUint("uid"))
 			if err != nil {
 				mapSandboxError(c, err)
 				return

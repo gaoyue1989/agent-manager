@@ -26,7 +26,8 @@ func newTestCore(t *testing.T) (*Core, *k8sfake.FakeK8s, func()) {
 		// 导出三表（issue #235：storeBackfill 走 Backfill 全步骤，对齐 store.Open 的表清单；
 		// Backfill 第 7 步（marker 回填，issue #234）查 export_orders，governance 测试经
 		// store.Backfill 间接触发）
-		&store.ExportOrderEntity{}, &store.ExportPackageMarkEntity{}, &store.WorkspaceRuntimeDefaultEntity{}); err != nil {
+		&store.ExportOrderEntity{}, &store.ExportPackageMarkEntity{}, &store.WorkspaceRuntimeDefaultEntity{},
+		&store.SandboxPoolConfigEntity{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, _ := db.DB()
