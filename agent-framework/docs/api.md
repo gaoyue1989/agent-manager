@@ -401,6 +401,11 @@ Thread 历史消息 + pendingConfirm。
 > 按合成标记 + `name=system` 双判据将其剔除，不再以 `role=user` 冒充用户提问上屏。
 > 压缩摘要（`name=__compaction_summary__`）不在此列，照常转 `role=compaction`。
 
+> **已注入的会话上下文**：响应顶层 `context[]` 与 `messages` 平级，按注入顺序列出该会话经
+> `POST /threads/{sid}/context` 注入的参考资料（`key` / `title` / `content` / `content_chars` /
+> `created_at` / `updated_at`）。它是展示用的派生视图，真相源是 `session_context` 表；读取失败时
+> 省略该字段，消息照常返回。
+
 > **turn 执行中即可见用户输入（2026-10-12）**：SDK 只在整轮结束后才落库 agent_state/归档，
 > 此前「发送消息后立即刷新、从历史列表进入会话」详情恒空。现由回合起始中间件
 > （`TurnInputArchiveMiddleware`）在输入确定、尚未执行时把本回合真实用户输入直接归档进
@@ -516,7 +521,7 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 
 ### GET /threads/{sessionId}
 
-会话详情：`session_id` / `user_id` / `model` / `updated_at` / `pendingConfirm` / `files` / `messages`。
+会话详情：`session_id` / `user_id` / `model` / `updated_at` / `pendingConfirm` / `files` / `messages` / `context`。
 结构与 `GET /threads/{sessionId}/history` 基本一致，额外带 `user_id`、`model`、`updated_at`；
 messages 固定为归档合并视图首页（翻页走 history 的 `beforeId`）。
 
@@ -578,6 +583,73 @@ history/PATCH/DELETE 同键），由 `SessionKeyResolver` 从 RuntimeContext 反
 共享 `gw-3f20f08c5499`，存量行由 Flyway V9 重键），**不是任何会话的规范 key**，前端 sid 落在
 `RuntimeContext.userId`；若直接用 `ctx.getSessionId()` 落记录，会话记录落在 gw-hash 桶、
 按 sid 查询恒为空（issue #44）。
+
+---
+
+### POST /threads/{sessionId}/context
+
+向会话注入参考资料（公告、头条等）。**不调用模型**，对下一轮生效。
+
+```bash
+curl -X POST "http://localhost:8100/threads/webui-abc/context" \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"headline","title":"今日头条","content":"1. ……\n2. ……"}'
+```
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `key` | String | ✓ | 资料名，`[A-Za-z0-9._-]{1,64}`，区分大小写；会话内唯一，重复提交即覆盖 |
+| `title` | String | | ≤ 255 字符，必须单行；缺省取 `key` |
+| `content` | String | ✓ | 非空白纯文本 |
+
+**响应：** 新建 `201`、覆盖 `200`，body 同构
+
+```json
+{"sessionId":"webui-abc","key":"headline","title":"今日头条","contentChars":4820,"totalChars":4820,"maxTotalChars":30000,"created":true,"effectiveFrom":"next_turn"}
+```
+
+| 状态 | 场景 |
+|------|------|
+| 400 | `bad_request`：`key` / `title` / `content` 不合法 |
+| 404 | `thread_not_found`：会话归属他人，或 `sessionId` 落在保留命名空间（`u-*`、`debug-user`、`gw-*`，大小写不敏感） |
+| 413 | `context_budget_exceeded`：会话合计超过 `AGENT_SESSION_CONTEXT_MAX_TOTAL_CHARS`（默认 30000），body 附 `contentChars` / `totalChars` / `maxTotalChars` |
+| 503 | `storage_unavailable`：存储不可用，可重试 |
+
+- **认领**：会话尚无归属时由首次注入的请求者认领（与 chat 的首聊 upsert 同语义），随后出现在 `GET /threads` 列表。
+- **会话活跃**：注入会刷新会话的保留时钟（不改归属）——持续被推送资料的会话不会因为用户几天没对话而被清理；会话列表按最近活动排序时，被注入的会话会前移。
+- **生效时机**：每轮组装系统提示词时读取；在途 turn 不受影响，HITL 挂起期间同样可以注入。
+- **隔离**：上下文不进 `agent_state`，不被上下文压缩，不进记忆 flush 与 OpenViking 会话归档。
+- **生命周期**：与会话同寿命——删除会话级联清理，每日清理删除已无会话映射的条目。
+
+设计与选型与否决记录：[../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)。
+
+---
+
+### GET /threads/{sessionId}/context
+
+列出会话已注入的上下文。默认不带正文，`?includeContent=true` 时附带 `content`。
+
+```bash
+curl "http://localhost:8100/threads/webui-abc/context?includeContent=true"
+```
+
+**响应：** `{"sessionId":"webui-abc","totalChars":4820,"maxTotalChars":30000,"entries":[{"key":"headline","title":"今日头条","contentChars":4820,"createdAt":"2026-11-25T09:00:12.345","updatedAt":"2026-11-25T11:00:40.12","content":"……"}]}`
+
+他人会话返回 404 `thread_not_found`；归属读取失败（存储不可用）返回 503，不放行。
+
+---
+
+### DELETE /threads/{sessionId}/context/{key}
+
+移除指定资料名的上下文，下一轮起不再注入。
+
+```bash
+curl -X DELETE "http://localhost:8100/threads/webui-abc/context/headline"
+```
+
+**响应：** `{"sessionId":"webui-abc","key":"headline","deleted":true}`；未知 key 返回 404 `{"error":"context_not_found","message":"..."}`；他人会话返回 404 `thread_not_found`（归属在事务内持锁裁决）。
 
 ---
 

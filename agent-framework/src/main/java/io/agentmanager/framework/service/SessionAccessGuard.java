@@ -60,12 +60,6 @@ public class SessionAccessGuard {
         return isOwner(store.findUserIdBySession(sessionId), requester);
     }
 
-    /**
-     * 归属判定：true = 放行。
-     *
-     * @param owner      session_user 中该会话的归属用户（可空）
-     * @param requester  请求者身份
-     */
     public static boolean isOwner(String owner, String requester) {
         // 无映射行放行（存量会话）；占位行（PATCH 先于首聊经 upsertModel/upsertRemark
         // 补建，user_id='unknown'，MOD6 场景）不构成归属主张，同样放行——首个真实身份
