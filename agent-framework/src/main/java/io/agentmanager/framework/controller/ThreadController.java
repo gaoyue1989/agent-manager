@@ -24,6 +24,7 @@ import io.agentmanager.framework.service.AgentStateReader;
 import io.agentmanager.framework.service.ConfirmContextStore;
 import io.agentmanager.framework.service.LLMLogger;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionContextStore;
 import io.agentmanager.framework.service.SessionUserStore;
 
 /**
@@ -80,6 +81,9 @@ public class ThreadController {
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private io.agentmanager.framework.config.TurnStopSettings turnStopSettings;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private SessionContextStore sessionContextStore;
 
     /** 测试用简化构造：不注入 state 读取器配置（用默认截断上限，不启用归档合并） */
     public ThreadController(DataSource dataSource,
@@ -378,6 +382,10 @@ public class ThreadController {
             totalDeleted += sessionMessageStore.deleteBySession(sessionId);
         }
 
+        if (sessionContextStore != null) {
+            totalDeleted += sessionContextStore.deleteBySession(sessionId);
+        }
+
         // 2. session_event（SSE 事件历史）——已迁 Redis，走 store 删两个 key，
         //    不能再走 deleteBySessionId（那张表还在但已不再写入）
         var eventKeys = sessionEventStore.deleteSession(sessionId);
@@ -667,7 +675,34 @@ public class ThreadController {
             result.put("nextBeforeId", null);
         }
         attachUploadedFiles(messages);
+        var context = sessionContextPayload(sessionId);
+        if (context != null) {
+            result.put("context", context);
+        }
         result.put("messages", messages);
+    }
+
+    private List<Map<String, Object>> sessionContextPayload(String sessionId) {
+        if (sessionContextStore == null) {
+            return List.of();
+        }
+        try {
+            var context = new ArrayList<Map<String, Object>>();
+            for (var entry : sessionContextStore.findBySession(sessionId)) {
+                var item = new LinkedHashMap<String, Object>();
+                item.put("key", entry.key());
+                item.put("title", entry.title());
+                item.put("content", entry.content());
+                item.put("content_chars", entry.contentChars());
+                item.put("created_at", entry.createdAt().toString());
+                item.put("updated_at", entry.updatedAt().toString());
+                context.add(item);
+            }
+            return context;
+        } catch (RuntimeException e) {
+            log.warn("session context load failed for {}: {}", sessionId, e.getMessage());
+            return null;
+        }
     }
 
     /**

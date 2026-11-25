@@ -5,7 +5,7 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import { BASE, REPLICA_A, REPLICA_B, sessionIdFor } from '../lib/env.js';
-import { chat, status, subscribe, history, confirmSync, stop } from '../lib/client.js';
+import { chat, status, subscribe, history, confirmSync, stop, injectContext, llmReset, llmStats } from '../lib/client.js';
 import { waitTerminal, textOf, pollUntil } from '../lib/matchers.js';
 import { seqMonotonic, type Frame } from '../lib/sse.js';
 import { createApprovalApp } from '../lib/client.js';
@@ -103,6 +103,26 @@ test('R6 跨副本事件完整性对账', async () => {
   // 观察者（B）观测到终态完成（done）。注：tailer 追赶存在交付缺口（见 D2），
   // 早期事件（AGENT_START 等）在竞态下可能不送达观察者，不在此断言。
   expect(observer.frames.some(f => f.type === 'AGENT_END' || f.type === 'done')).toBe(true);
+});
+
+test('R7 跨副本会话上下文：A 副本注入 → B 副本对话的系统提示词可见 → LB 回放平级返回', async () => {
+  const sid = sessionIdFor(`r7-${uniq()}`);
+  const mark = `CTX-XREPLICA-${uniq()}`;
+  await llmReset();
+
+  const injected = await injectContext(sid, { key: 'headline', content: mark }, REPLICA_A, U());
+  expect(injected.status, JSON.stringify(injected.body)).toBe(201);
+
+  const stream = chat({ message: `[E2E:plain]`, userId: U(), sessionId: sid, base: REPLICA_B });
+  await waitTerminal(stream);
+  const call = (await llmStats()).calls.filter(c => c.scenario === 'plain').pop();
+  expect(call, 'B 副本未产生模型调用').toBeTruthy();
+  expect(String(call!.systemContent)).toContain(mark);
+
+  const replay = await history(sid, BASE, U());
+  const context = replay.context as Array<Record<string, unknown>>;
+  expect(context.length).toBe(1);
+  expect(context[0].content).toBe(mark);
 });
 
 // ---------- STP2：停止请求跨副本投递（turn-stop-design §9 建议 1，PR #203） ----------

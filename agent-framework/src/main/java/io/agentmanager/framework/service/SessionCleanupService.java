@@ -63,6 +63,9 @@ public class SessionCleanupService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore sandboxBindingStore;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private SessionContextStore sessionContextStore;
+
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
                                  TurnLeaseStore turnLeaseStore,
@@ -117,6 +120,7 @@ public class SessionCleanupService {
         int fsCleaned = deleteBefore("agent_fs", cutoff);
         int messageCleaned = deleteBefore("session_message", cutoff);
         int userMappingCleaned = sessionUserStore.deleteBefore(cutoff);
+        cleanupOrphanSessionContext();
 
         // 4. 清理过期上传文件（file-upload-download-plan §15-7）：
         //    超保留期（默认 7 天）的 upload 行（含 pending——上传后从未发送的文件也占额，
@@ -133,6 +137,20 @@ public class SessionCleanupService {
 
         log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}, session_message={}, session_user={}",
             memCleaned, stateCleaned, fsCleaned, messageCleaned, userMappingCleaned);
+    }
+
+    private void cleanupOrphanSessionContext() {
+        if (sessionContextStore == null) {
+            return;
+        }
+        try {
+            int orphans = sessionContextStore.deleteOrphans();
+            if (orphans > 0) {
+                log.info("cleanup: session_context orphans={}", orphans);
+            }
+        } catch (Exception e) {
+            log.warn("cleanup: session context orphan cleanup failed: {}", e.getMessage());
+        }
     }
 
     /** 沙箱绑定/锚表定时清理（§4.1.2；lifecycle 未装配为 no-op；失败不阻断主流程） */

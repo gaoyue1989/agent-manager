@@ -683,6 +683,13 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.service.ToolAuditStore(dataSource, retention);
     }
 
+    @Bean
+    public io.agentmanager.framework.service.SessionContextStore sessionContextStore(DataSource dataSource,
+            io.agentmanager.framework.config.SessionContextConfig sessionContextConfig) {
+        return new io.agentmanager.framework.service.SessionContextStore(dataSource,
+            sessionContextConfig.maxTotalChars());
+    }
+
     /**
      * session_event 的 Redis Streams 存储层（只有它需要真 Redis）。
      * 惰性连接：这里不建连，所以 Redis 不可达不会影响启动。

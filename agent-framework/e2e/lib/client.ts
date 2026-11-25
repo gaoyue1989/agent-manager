@@ -63,6 +63,29 @@ export async function history(sessionId: string, base = BASE, userId?: string): 
   return res.json() as Promise<Record<string, unknown>>;
 }
 
+export async function injectContext(sessionId: string, body: Record<string, unknown>, base = BASE, userId?: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/context`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...userHeaders(userId) },
+    body: JSON.stringify(body),
+  });
+  let parsed: Record<string, unknown> = {};
+  try { parsed = await res.json(); } catch { /* 空体 */ }
+  return { status: res.status, body: parsed };
+}
+
+export async function sessionContext(sessionId: string, base = BASE, userId?: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/context?includeContent=true`, { headers: userHeaders(userId) });
+  let parsed: Record<string, unknown> = {};
+  try { parsed = await res.json(); } catch { /* 空体 */ }
+  return { status: res.status, body: parsed };
+}
+
+export async function removeContext(sessionId: string, key: string, base = BASE, userId?: string): Promise<number> {
+  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/context/${encodeURIComponent(key)}`,
+    { method: 'DELETE', headers: userHeaders(userId) });
+  return res.status;
+}
+
 export interface ConfirmResult { tool_call_id: string; confirmed: boolean }
 
 /** 流式确认（HITL 恢复：新执行段重新 acquire 租约） */

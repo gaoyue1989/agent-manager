@@ -64,6 +64,8 @@ agent-framework/
 │   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: ReconnectableMcpClientWrapper (可换芯连接句柄, issue #348 断联恢复) / UserScopedMcpClientWrapper (per-call header/参数注入 + reqHeader:* 出站剥离) / McpUserContextMiddleware (userId+reqHeader→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule (headers+arguments 双通道) / ChatRequestHeaders (chat 请求透传头捕获) / DirectReturnMcpTool (direct_return 工具装饰器: 打开 SDK returnDirect, 执行与权限判定委托 McpTool)
 │   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
 │   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
+│   │   │   │   ├── SessionContextStore.java       # session_context 表 (会话注入上下文唯一写入口: 认领/归属/预算裁决单事务, 按资料名覆盖)
+│   │   │   │   ├── SessionContextInjectionMiddleware.java # 每轮 onSystemPrompt 追加会话注入上下文 (order=0 落提示词尾部)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
@@ -103,6 +105,7 @@ agent-framework/
 │   │   │       ├── AgentEventSseSerializer.java # SSE 序列化共用工具 (ChatStreamController + SessionEventBus)
 │   │   │       ├── McpProxyController.java      # MCP Apps: GET /mcp/{server}/resources/ui 等 (前端资源代理)
 │   │   │       ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7 静默更新)
+│   │   │       ├── SessionContextController.java    # POST/GET /threads/{sid}/context、DELETE /threads/{sid}/context/{key} (会话上下文注入)
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
@@ -172,6 +175,10 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - **卡片锚点（重要）**: 卡片必须挂 `r.contentEl`，不可挂 textEl —— `TEXT_BLOCK_DELTA` 会对 textEl `innerHTML` 整体重写，工具调用发生在文本输出之后时卡片会被误清
 - **4.7 ui_context**: `POST /mcp/ui-context` 写 `ui_context` 表（sessionId 维度覆盖写）→ 前端在用户消息 `metadata` 写入会话 key（`UiContextStore.METADATA_SESSION_KEY`）→ `UiContextInjectionHook` 在 PreCallEvent 阶段按会话查库 `appendSystemContent` 注入（HarnessAgent 拒绝 inputMessages 中 SYSTEM 消息，只能经 setSystemMessage/appendSystemContent）
 
+### 3.6 会话上下文注入链路
+
+`POST /threads/{sid}/context` 把公告、头条等参考资料按会话持久化到 `session_context`（`SessionContextStore`，按资料名覆盖），每轮由 `SessionContextInjectionMiddleware` 在系统提示词组装期追加——它是 `onSystemPrompt` 管线的最后一个转换器，但 Harness 在管线之后还会追加静态块，所以注入段并不在最终提示词的绝对末尾。注入不调用模型，对下一轮生效，并刷新会话的保留时钟；上下文不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档。三个端点的归属裁决都在 `SessionContextStore` 内完成（写入与移除在事务内持锁，查询读取失败即 503），不走吞异常的 `SessionAccessGuard.ownedBy`。history 与会话详情以与 `messages` 平级的 `context[]` 返回，供控制台在会话顶部展示。设计与选型与否决记录见 [../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)。
+
 ### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 
 - `POST /` 全量透传给 AgentScopeA2aServer（SDK）处理：`message/send`、`message/stream`、`tasks/get`、`tasks/cancel`、`tasks/resubscribe` 等所有标准 A2A 方法
@@ -179,7 +186,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - 实现参考官方 `agentscope-a2a-spring-boot-starter` 的 `A2aJsonRpcController`
 - 兼容转换：message/send 与 message/stream 自动补全 SDK 反序列化必需字段（`kind:"message"`、`messageId`、parts `kind:"text"`、`blocking:true`），顶层 `userId`/`sessionId` → `message.metadata`
 - **身份信任模型（issue #474，2026-11-24）**：`X-User-Id` 头是唯一可信身份源，头存在时兼容归一**强制覆盖**请求体全部 userId 通道（`params.userId` / `message.metadata.userId` / `params.metadata.userId`），SDK 执行身份与 `session_user` 认领只认头值；分发与落表前对非空 `sessionId` 经 `SessionAccessGuard.ownedBy` 归属校验，不符返回 JSON-RPC 错误 `-32001`（不泄露存在性）拒绝执行与覆写；保留键 `sessionId`/`userId` 的 JSON 类型在入口裁决（非 String 归一为 SDK `String.valueOf` 消费形态、`null` 视为未传），归属校验与 SDK 消费同形态（issue #557）；头存在但 body 非 JSON fail-closed 拒绝；无头回落请求体身份（与 `/threads/chat`「头 > body > debug-user」同口径，host 模式/off 模式信任边界见 [../docs/design/console-user-workspace-split-design.md](../docs/design/console-user-workspace-split-design.md) §5.4.1）
-- **会话键命名空间裁决（issue #558，2026-11-25）**：`session_user.session_id` 与用户身份共用字符串空间——`SessionKeyNamespace` 单一定义三类键（用户身份 `u-` 前缀 / `debug-user`、网关运行时 `gw-` 前缀、业务会话其余）。认领侧 `SessionAccessGuard.ownedBy` 拒绝保留命名空间（所有按 sid 操作的端点统一 404 / `-32001`）；反查侧 `SessionKeyResolver` 仅在 Channel 链路（`ctx.sessionId` 为 `gw-{12 hex}`）把 `ctx.userId` 当 peer 反查，A2A/invoke 的 `ctx.userId` 是真实用户、禁止作为 session 键，网关 hash 永不反查；Viking 归档 / MCP 身份 / 会话模型 / 沙箱 USER 键同源。A2A `message.metadata.sessionId` 入口 `PathSafe.sanitize` 归一（与落表键同形态）。细则见上述设计文档 §5.4.1
+- **会话键命名空间裁决（issue #558，2026-11-25）**：`session_user.session_id` 与用户身份共用字符串空间——`SessionKeyNamespace` 单一定义三类键（用户身份 `u-` 前缀 / `debug-user`、网关运行时 `gw-` 前缀、业务会话其余）。认领侧 `SessionAccessGuard.ownedBy` 拒绝保留命名空间（所有按 sid 操作的端点统一 404 / `-32001`）；反查侧 `SessionKeyResolver` 仅在 Channel 链路（`ctx.sessionId` 为 `gw-{12 hex}`）把 `ctx.userId` 当 peer 反查，A2A/invoke 的 `ctx.userId` 是真实用户、禁止作为 session 键，网关 hash 永不反查；Viking 归档 / MCP 身份 / 会话模型 / 沙箱 USER 键同源。A2A `message.metadata.sessionId` 入口 `PathSafe.sanitize` 归一（与落表键同形态）。保留判定**大小写不敏感**（2026-11-25 修正）：`session_user.session_id` 的排序规则不区分大小写，`U-{uid}`、`DEBUG-USER` 这类变体在数据库比较上与用户身份等价，区分大小写的判定会被绕过（真机实测可被认领）。细则见上述设计文档 §5.4.1
 - `MySqlTaskStore` 注入 SDK：tasks/get 从 agent_state 表读取构造 A2A Task（save no-op，消息已由 AgentScope 自动持久化）
 - 多租户：SDK 从 `message.metadata.userId` / `message.metadata.sessionId` 读取（AgentScopeAgentExecutor）
 
@@ -407,6 +414,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_HISTORY_ARCHIVE_ENABLED` | `true` | | 会话消息轨归档开关：AgentState 落库时把 context 消息 write-through 归档到 session_message，history 返回双源合并视图（压缩后历史可查）；false 完全回退现状（见 docs/session-history-archive-design.md） |
+| `AGENT_SESSION_CONTEXT_MAX_TOTAL_CHARS` | `30000` | | 会话注入上下文的会话合计字符上限（单会话全部资料名之和，超限 413 `context_budget_exceeded`）。系统提示词的增长不计入压缩触发条件，模型窗口较小的服务应同步下调。没有启用开关：调用 `POST /threads/{sid}/context` 即对该会话生效，未注入的会话行为不变 |
 | `AGENT_TURN_STOP_ENABLED` | `true` | | 单轮停止总开关（`POST /threads/{sid}/stop`，docs/turn-stop-design.md）：false = 端点 503、属主不轮询，行为回退「只能断流」 |
 | `AGENT_TURN_STOP_POLL_MS` | `1000` | | 属主副本停止派发轮询周期（ms，下限 100）：所有活跃 turn 共用一次 `turn_stop` 查询，成本与并发 turn 数解耦 |
 | `AGENT_TURN_STOP_GRACE_MS` | `15000` | | 协作式停止告警阈值（ms）：超时仍无终态只打 WARN（通常是阻塞中的工具调用，SDK 检查点在步骤之间），不做破坏性收尾 |
@@ -522,8 +530,11 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/monitor` | **运营监控独立页**（从调试页独立出来的只读页面，仅挂载 Monitor 模块，不暴露 Chat/Config/Database 等调试功能；`/monitor/` 入口由 MonitorPageController 托管，静态资源复用 `/debug` 的样式与 vendor） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
-| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐；顶层 `files[]` 与 SSE `file_ready` 同构：`type/file_id/file_name/mime_type/size/download_url` + 挂载键 `reply_id`，`download_url` 同口径带 `X-Forwarded-Prefix`；用户上传卡片另带 `origin=upload`）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
+| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐；顶层 `files[]` 与 SSE `file_ready` 同构：`type/file_id/file_name/mime_type/size/download_url` + 挂载键 `reply_id`，`download_url` 同口径带 `X-Forwarded-Prefix`；用户上传卡片另带 `origin=upload`）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId；顶层 `context[]` 为与 `messages` 平级的已注入会话上下文（控制台展示用，见下「会话上下文注入」） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录（记录键 = 规范 sid，由 `SessionKeyResolver` 从 RuntimeContext 反查——Channel 链路的 ctx.sessionId 是全进程共享的网关 gw-hash，见 issue #44） |
+| POST | `/threads/{sid}/context` | **会话上下文注入**（[../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)）：body `{key, title?, content}`，按资料名 `key` 覆盖（新建 201 / 覆盖 200）；**不调用模型**，对下一轮生效——每轮组装系统提示词时追加，不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档；全新会话由首次注入认领，注入刷新会话的保留时钟（视为会话活跃）；他人会话 404、会话合计超限 413 `context_budget_exceeded`、存储不可用 503 `storage_unavailable`；`title` 必须单行 |
+| GET | `/threads/{sid}/context` | 列出会话已注入的上下文（默认不带正文，`?includeContent=true` 附带）；他人会话 404，归属读取失败 503 不放行 |
+| DELETE | `/threads/{sid}/context/{key}` | 移除指定资料名的上下文（未知 key 404 `context_not_found`）；归属在事务内持锁裁决 |
 | GET | `/threads/{sid}/subscribe` | SSE 断连续传：`afterSeq` 回放 + 按需拉取实时追赶（`Flux.generate`），支持 `replyId`（turn 信封 id）过滤；终态补 `done`、被抢占补 `interrupted`；排队 turn 由 `turn_intent` 暴露 turn id；索引丢失时单次重建 ZSET |
 | GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END / error / cancelled）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | POST | `/threads/{sid}/stop` | **单轮停止**（协作式中断，[docs/turn-stop-design.md](docs/turn-stop-design.md)）：写 `turn_stop`（reply_id 栅栏）→ 属主副本 1s 轮询 → `agent.interrupt(effectiveUserId, effectiveSessionId)`；202 已受理 / 404 无运行中 turn / 409 HITL 挂起或尚无事件（retryable）/ 503 关闭或存储不可用。终态帧 `cancelled`（排在 AGENT_END 前），history 标注 `stopped`；不撤销工具副作用、不强杀阻塞中的工具 |
@@ -646,8 +657,8 @@ mvn -o test  # 离线模式 (离线开发镜像内；2026-11-03 实跑同为 175
 
 | job | 内容 |
 |-----|------|
-| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / DR 结果直返 / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI（必需检查） |
-| e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账）+ U9（必需检查） |
+| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / DR 结果直返 / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI + CX 会话上下文注入（必需检查） |
+| e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账/跨副本会话上下文 R7）+ U9（必需检查） |
 | e2e-sandbox | X 组沙箱（api-sandbox，mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流）（必需检查） |
 | e2e-protocol-multi | P 组协议多副本（api-protocol-multi：lead×2 + member×2 共享 MySQL/Redis，委派链路跨副本正确性 + EventBus 跨副本对账 + A2A Job 同键收敛）（必需检查） |
 | e2e-agui | AG 组 AG-UI 协议面（api-agui，单实例 `AGENT_AGUI_ENABLED=true`：帧序/跨面可见/HITL interrupt+resume/断联续传；非必需） |

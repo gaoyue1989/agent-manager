@@ -28,6 +28,9 @@ OAF 发布平台前端（React 19 + Next.js 16 + Tailwind 3，容器化 standalo
 - **对话单次流解析**（assistant/page.tsx consumeStream）：fetch ReadableStream 手解 SSE `data:` 帧；TEXT_BLOCK_DELTA 增量必须落到「最后一条 assistant 气泡」（工具状态行固定插在其前：步骤在上、答案在下）；permission_ask 渲染确认卡片 → POST confirm-stream
 - **HTTP 非安全上下文无 crypto.randomUUID**——sessionId 用时间戳+随机串兜底（persistSessionId 做 localStorage + cookie `oaf-assistant-sid` 双写：localStorage 供页面刷新恢复，cookie 供 proxy 采集模式注入 `x-eval-session`）
 - 列表/详情均 5s 轮询实时状态；操作后手动 load() 全刷
+- **会话上下文卡片**（`src/lib/session-context.ts`）：history 的平级 `context[]` 映射为会话顶部的 `role=context` 卡片
+  （标题 + 更新时间 + 正文，默认展开、可折叠）。正文按纯文本渲染——第三方资料里的图片/链接不变成用户浏览器的真实请求；
+  欢迎态判定把上下文视为非对话内容，「先注入后对话」的会话仍显示欢迎页
 
 ## 构建与部署
 

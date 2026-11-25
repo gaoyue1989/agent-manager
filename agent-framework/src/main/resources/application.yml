@@ -75,6 +75,8 @@ agent:
     enabled: ${AGENT_TURN_STOP_ENABLED:true}
     poll-interval-ms: ${AGENT_TURN_STOP_POLL_MS:1000}
     grace-ms: ${AGENT_TURN_STOP_GRACE_MS:15000}
+  session-context:
+    max-total-chars: ${AGENT_SESSION_CONTEXT_MAX_TOTAL_CHARS:30000}
   # 宿主 .skills-cache 过期 scope 目录 GC（SDK 只回收当前 scope 内孤儿，跨 scope 目录需按龄清扫；
   # 工作区为 Pod 本地缓存，可安全回收、下轮重新 stage）。其余 cleanup.* 键缺省见 CleanupConfig 的 @DefaultValue
   cleanup:
