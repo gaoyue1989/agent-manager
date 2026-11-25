@@ -304,7 +304,10 @@ skills/market?source=` 按源过滤条目，`POST skills/market/:source/:key/ins
 存储复用：zip 技能包落共享 PVC（`skills/{skillID}/{version}/`，与 `packages/{id}` 同盘、
 同 `MaxZipSize 20MB / MaxEntries 2000 / MaxExtracted 100MB` 护栏）；zip 布局支持三种并**归一化为** `skills/<name>/SKILL.md` 存储——A) `skills/<name>/SKILL.md`
 （OAF 包内技能目录风格）；B) 根目录 `SKILL.md`（标准技能包，如 Claude/AgentCore 技能包，
-可带 `_meta.json`）；C) 单层目录 `<dir>/SKILL.md`（压缩整个技能文件夹）。技能名优先级：
+可带 `_meta.json`）；C) `<dir>/SKILL.md`（压缩整个技能文件夹）。布局识别会剔除压缩工具
+元数据（`__MACOSX/`、`._*`、`.DS_Store`、`Thumbs.db`）并逐层剥离包装目录——技能文件夹被再
+套任意层（`wrapper/<dir>/SKILL.md`、`pkg/skills/<name>/SKILL.md`）同样归一；`skills/` 下含多个
+技能目录时按表单 name 选定，否则 400 并列出候选。技能名优先级：
 表单 name > 布局目录名 > SKILL.md frontmatter name > zip 文件名净化（2026-10-20 部署实测修订：
 原实现只认 A，用户上传标准技能包报 `zip must contain skills/<name>/SKILL.md`）；上传即跑
 `checkSkillDirs` 合规检查
@@ -474,7 +477,7 @@ GET  /api/v1/admin/audit-logs              审计（一期仅 service_events + p
     - **Skill 广场**（对标 AgentCore Skill 广场，**多源市场预留**）：顶部市场源切换（一期仅「平台精选」内置源；`skills/market/sources` 返回，registry 外部源远期开放——目录协议/认证/zip 校验待接入真实市场时单独评审，导入安装语义与源解耦）；市场技能卡片（名称/描述/标签/下载量/**来源徽标**）+「详情 / 导入」——导入 = 一键复制为本空间技能资产（v1.0.0 published，`POST skills/market/:source/:key/install`），导入后出现在「我的 Skill」可勾选；
     - **Agent 使用情况**（2026-10-19 新增第三 Tab）：工作空间内**全部 Agent 的技能使用总览**，数据源 = 每个 Agent **最后生成的 OAF 包**（services.package_id 当前指向版本）——包内 skills/ 目录扫描（事实来源）+ frontmatter `skills` 声明（意图/版本），与沙箱配置页同构（请求期解析、无新表无后台任务）；表格列：Agent（名称+运行状态徽标）/ 当前包版本 / 技能数 / 技能清单（`name · version` 标签流，声明与目录扫描差异条目带「仅声明/仅目录」角标）/ 包生成时间 / 行操作「查看详情」；筛选：仅看有技能引用 / 关键字（Agent 名、技能名）；行「查看详情」→ 单 Agent 抽屉（`skill-usages/:agentId`）：包版本链信息（当前版本/派生自/生成时间）+ 该包技能完整清单表（技能名/包内路径/SKILL.md 描述/声明状态/匹配的技能资产与版本/合规 issues——与 SpaceSkills issues 同口径）+「换绑技能版本」入口（跳编辑页资产配置区）；存量/导入包（无技能资产对应）正常列出，matchedSkillId 为空显示「包内自带」；
   - **创建 Skill（抽屉，两种方式对标 AgentCore 创建页）**：
-    - **上传技能包**：zip 文件（布局三种均支持并归一化存储：根 `SKILL.md`（标准技能包 + 可选 `_meta.json`）/ 单层目录 `<dir>/SKILL.md` / `skills/<name>/SKILL.md`；可选 `scripts/`、`references/`、`assets/`；≤20MB / ≤2000 条目，与 OAF 包上传同护栏）；上传即跑 `checkSkillDirs` 合规检查，warnings 明细回显（宽松不阻断）；解析 SKILL.md frontmatter 自动回填 name/description（可改）+ 标签；
+    - **上传技能包**：zip 文件（布局三种均支持并归一化存储：根 `SKILL.md`（标准技能包 + 可选 `_meta.json`）/ `<dir>/SKILL.md` / `skills/<name>/SKILL.md`；包装目录任意层剥离、压缩元数据不落盘；可选 `scripts/`、`references/`、`assets/`；≤20MB / ≤2000 条目，与 OAF 包上传同护栏）；上传即跑 `checkSkillDirs` 合规检查，warnings 明细回显（宽松不阻断）；解析 SKILL.md frontmatter 自动回填 name/description（可改）+ 标签；
     - **通过 Markdown 定义**：技能名（`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`、≤64 字符）+ 描述（≤1000）+ Markdown 正文（SKILL.md 内容，frontmatter name/description 自动生成）+ 标签；
     - 两种方式都落 v1.0.0 工作区草稿 →「保存并发布」直接 published（一期不接安全护栏审核，状态机预留 review 槽位，见 §6.3）；
   - **详情抽屉（版本管理）**：基本信息区（名称/描述/标签/启用开关/来源/创建时间）+ **版本列表**（版本号/状态徽标 draft·published·offline/变更说明/创建时间/操作：发布·下线·下载 zip·基于此版本创建新版本）+ **引用 Agent 列表**（每个 Agent 的名称/状态/锁定的版本——按 Agent 查询技能使用的入口）+「下载」按钮（当前发布版 zip 导出）；

@@ -254,59 +254,22 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 		}
 		raw[p] = data
 	}
-	// 布局归一（2026-10-20）：真实技能包有多种形态，统一归一为包内 skills/<name>/ 结构：
+	// 布局归一（2026-10-20 / 2026-11-25）：真实技能包有多种形态，统一归一为包内 skills/<name>/ 结构：
 	//   A) skills/<name>/SKILL.md（OAF 包内技能目录风格）
 	//   B) 根目录 SKILL.md（标准技能包，如 Claude/AgentCore 技能包 + _meta.json）
-	//   C) 单层目录 <dir>/SKILL.md（压缩整个技能文件夹）
+	//   C) <dir>/SKILL.md（压缩整个技能文件夹，可能被压缩工具再套任意层包装目录）
+	// 压缩工具元数据（__MACOSX/、._*、.DS_Store）不参与布局识别、也不落盘。
 	// 名称优先级：表单 name > 布局目录名（A/C）> SKILL.md frontmatter name > zip 文件名
-	prefix, layoutName := "", ""
-	underSkills := true
-	skillDirs := map[string]bool{}
-	for p := range raw {
-		if !strings.HasPrefix(p, "skills/") {
-			underSkills = false
-			break
-		}
-		rest := strings.TrimPrefix(p, "skills/")
-		if rest == "" {
-			underSkills = false
-			break
-		}
-		skillDirs[strings.SplitN(rest, "/", 2)[0]] = true
-	}
-	switch {
-	case underSkills && len(skillDirs) == 1:
-		for d := range skillDirs {
-			layoutName = d
-		}
-		prefix = "skills/" + layoutName + "/"
-	case raw["SKILL.md"] != nil:
-		prefix = ""
-	default:
-		// C：仅一个顶层目录且其下有 SKILL.md
-		top := map[string]bool{}
-		for p := range raw {
-			if i := strings.Index(p, "/"); i > 0 {
-				top[p[:i]] = true
-			}
-		}
-		if len(top) == 1 {
-			var d string
-			for x := range top {
-				d = x
-			}
-			if raw[d+"/SKILL.md"] != nil {
-				prefix = d + "/"
-				layoutName = d
-			}
-		}
-	}
-	if prefix == "" && layoutName == "" && raw["SKILL.md"] == nil {
-		return nil, nil, fmt.Errorf("%w: zip must contain SKILL.md at root, <dir>/SKILL.md, or skills/<name>/SKILL.md", ErrInvalidForm)
+	prefix, layoutName, err := resolveSkillZipLayout(raw, name)
+	if err != nil {
+		return nil, nil, err
 	}
 	// 相对技能根的文件集合（不含布局前缀）
 	rel := map[string][]byte{}
 	for p, data := range raw {
+		if skillZipJunk(p) {
+			continue
+		}
 		if prefix != "" {
 			if !strings.HasPrefix(p, prefix) {
 				continue // 布局根之外的杂项条目忽略（如 __MACOSX）
@@ -404,6 +367,96 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 	c.DB.Model(&store.SkillVersion{}).Where("id = ?", created.LatestVersionID).
 		Update("files_json", mustJSON(filesInfo))
 	return created, warnings, nil
+}
+
+// skillZipJunk 压缩工具元数据条目（macOS 资源分叉 / Finder 元数据、Windows 缩略图缓存）：
+// 布局识别与落盘前剔除，否则一个 __MACOSX/ 目录就会让「唯一顶层目录」判定失效。
+func skillZipJunk(p string) bool {
+	if strings.HasPrefix(p, "__MACOSX/") {
+		return true
+	}
+	base := p[strings.LastIndex(p, "/")+1:]
+	return base == ".DS_Store" || base == "Thumbs.db" || base == "desktop.ini" || strings.HasPrefix(base, "._")
+}
+
+// resolveSkillZipLayout 识别技能包布局，返回技能根前缀（包内相对路径、含尾部 /）与布局目录名。
+// 循环剥离包装目录：全部条目在 skills/ 下 → 取技能目录（多个时按 wantName 选定，否则报错）；
+// 当前根有 SKILL.md → 命中；否则唯一顶层目录则下钻一层，直到命中或无法下钻。
+func resolveSkillZipLayout(raw map[string][]byte, wantName string) (prefix, layoutName string, err error) {
+	cur := make(map[string][]byte, len(raw))
+	for p, data := range raw {
+		if !skillZipJunk(p) {
+			cur[p] = data
+		}
+	}
+	for {
+		if dirs, ok := skillDirsUnderSkills(cur); ok {
+			name := dirs[0]
+			if len(dirs) > 1 {
+				name = ""
+				for _, d := range dirs {
+					if d == wantName {
+						name = d
+					}
+				}
+				if name == "" {
+					return "", "", fmt.Errorf("%w: zip contains multiple skill directories under skills/ (%s); pick one by name or upload a single-skill zip", ErrInvalidForm, strings.Join(dirs, ", "))
+				}
+			}
+			return prefix + "skills/" + name + "/", name, nil
+		}
+		if _, ok := cur["SKILL.md"]; ok {
+			return prefix, layoutName, nil
+		}
+		top, ok := skillZipSingleTopDir(cur)
+		if !ok {
+			return "", "", fmt.Errorf("%w: zip must contain SKILL.md at root, <dir>/SKILL.md, or skills/<name>/SKILL.md", ErrInvalidForm)
+		}
+		prefix += top + "/"
+		layoutName = top
+		next := make(map[string][]byte, len(cur))
+		for p, data := range cur {
+			if rest, ok := strings.CutPrefix(p, top+"/"); ok {
+				next[rest] = data
+			}
+		}
+		cur = next
+	}
+}
+
+// skillDirsUnderSkills 全部条目都在 skills/ 下时返回其一级目录名（升序）。
+func skillDirsUnderSkills(cur map[string][]byte) ([]string, bool) {
+	set := map[string]bool{}
+	for p := range cur {
+		rest, ok := strings.CutPrefix(p, "skills/")
+		if !ok || rest == "" {
+			return nil, false
+		}
+		set[strings.SplitN(rest, "/", 2)[0]] = true
+	}
+	dirs := make([]string, 0, len(set))
+	for d := range set {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	return dirs, len(dirs) > 0
+}
+
+// skillZipSingleTopDir 当前根只有一个顶层目录时返回其名（根级散文件忽略）。
+func skillZipSingleTopDir(cur map[string][]byte) (string, bool) {
+	top := ""
+	for p := range cur {
+		i := strings.Index(p, "/")
+		if i <= 0 {
+			continue
+		}
+		if top == "" {
+			top = p[:i]
+		} else if top != p[:i] {
+			return "", false
+		}
+	}
+	return top, top != ""
 }
 
 // sanitizeSkillName zip 文件名 → 合法技能名（小写、非 [a-z0-9-] 转 -、压缩连字符、≤64）。

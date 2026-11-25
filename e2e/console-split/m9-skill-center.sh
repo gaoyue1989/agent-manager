@@ -17,14 +17,15 @@ resolve_llm_env
 
 SKILL="m9-skill-$TS"
 SKILL_ZIP="m9-zip-$TS"
+SKILL_WRAP="m9-wrap-$TS"
 CONTENT="# $SKILL
 
 M9 skill body v1."
-SID=""; ZID=""; MKT_ID=""; SVC=""; SVC_DRAFT=""
+SID=""; ZID=""; WID=""; MKT_ID=""; SVC=""; SVC_DRAFT=""
 cleanup_m9() {
   [ -n "$SVC" ] && code DELETE /console/workspaces/$WS/agents/$SVC "" "$TOKEN" >/dev/null 2>&1
   [ -n "$SVC_DRAFT" ] && code DELETE /console/workspaces/$WS/agents/$SVC_DRAFT "" "$TOKEN" >/dev/null 2>&1
-  for id in $SID $ZID $MKT_ID; do
+  for id in $SID $ZID $WID $MKT_ID; do
     [ -n "$id" ] && code DELETE /console/workspaces/$WS/skill-center/$id "" "$TOKEN" >/dev/null 2>&1
   done
 }
@@ -120,6 +121,32 @@ ZFILE=$(python3 -c "
 import zipfile
 print('\n'.join(zipfile.ZipFile('/tmp/m9-zip-dl-$TS.zip').namelist()))")
 assert_contains "zip 下载保留 skills/<name>/SKILL.md" "$ZFILE" "skills/$SKILL_ZIP/SKILL.md"
+
+# ---- zip 上传：包装目录 + macOS 元数据（2026-11-25 布局归一：任意层包装 / 元数据不落盘）----
+python3 - <<PY
+import zipfile
+with zipfile.ZipFile("/tmp/m9-wrap-$TS.zip", "w") as z:
+    z.writestr("wrapper/$SKILL_WRAP/SKILL.md", "---\nname: $SKILL_WRAP\ndescription: wrapped skill\n---\nwrapped body")
+    z.writestr("wrapper/$SKILL_WRAP/scripts/run.sh", "#!/bin/sh\n")
+    z.writestr("__MACOSX/wrapper/$SKILL_WRAP/._SKILL.md", "junk")
+    z.writestr(".DS_Store", "junk")
+PY
+WUP=$(curl -s -X POST "$BASE/console/workspaces/$WS/skill-center/upload" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@/tmp/m9-wrap-$TS.zip" \
+  -F "publishNow=false")
+WID=$(echo "$WUP" | jqr "['data']['skill']['id']")
+assert_eq "包装层 zip 上传返回 skill" "$([ -n "$WID" ] && [ "$WID" != "None" ] && echo yes || echo no)" "yes"
+assert_eq "包装层 zip 技能名取内层目录" "$(echo "$WUP" | jqr "['data']['skill']['name']")" "$SKILL_WRAP"
+WV1=$(req GET /console/workspaces/$WS/skill-center/$WID/versions "" "$TOKEN" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'][0]['id'])")
+WDL=$(curl -s "$BASE/console/workspaces/$WS/skill-center/$WID/versions/$WV1/download" \
+  -H "Authorization: Bearer $TOKEN" -o /tmp/m9-wrap-dl-$TS.zip -w '%{http_code}')
+assert_eq "包装层 zip 版本下载 200" "$WDL" "200"
+WFILE=$(python3 -c "
+import zipfile
+print('\n'.join(zipfile.ZipFile('/tmp/m9-wrap-dl-$TS.zip').namelist()))")
+assert_contains "包装层 zip 归一为 skills/<name>/" "$WFILE" "skills/$SKILL_WRAP/SKILL.md"
+assert_not_contains "包装层 zip 剔除元数据" "$WFILE" "__MACOSX"
 
 # ---- 市场：源/条目/安装（条目由 CI seed 提供；无条目时跳过安装成功断言）----
 SRC=$(req GET /console/workspaces/$WS/skill-market/sources "" "$TOKEN")
