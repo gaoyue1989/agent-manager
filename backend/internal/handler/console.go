@@ -832,12 +832,30 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 			mapError(c, err)
 			return
 		}
-		var opt service.RepublishOptions
+		var req struct {
+			PackageID      *uint             `json:"packageId"`
+			Image          *string           `json:"image"`
+			Replicas       *int32            `json:"replicas"`
+			Env            map[string]string `json:"env"`
+			SecretKeys     []string          `json:"secretKeys"`
+			Spec           *string           `json:"spec"`
+			PublicEndpoint *bool             `json:"publicEndpoint"`
+		}
 		if c.Request.ContentLength > 0 {
-			if err := c.ShouldBindJSON(&opt); err != nil {
+			if err := c.ShouldBindJSON(&req); err != nil {
 				Fail(c, http.StatusBadRequest, err.Error())
 				return
 			}
+		}
+		opt := service.RepublishOptions{
+			PackageID:      req.PackageID,
+			Image:          req.Image,
+			Replicas:       req.Replicas,
+			Env:            req.Env,
+			SecretKeys:     req.SecretKeys,
+			Spec:           req.Spec,
+			PublicEndpoint: req.PublicEndpoint,
+			Actor:          c.GetUint("uid"),
 		}
 		out, err := core.Republish(id, opt)
 		if err != nil {
@@ -894,11 +912,23 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 			return
 		}
 		pkgID := parseUint(c.Param("pkgId"))
-		if _, err := core.ConsoleAgentVersions(wsID, id); err != nil { // 版本归属校验
+		versions, err := core.ConsoleAgentVersions(wsID, id)
+		if err != nil {
 			mapError(c, err)
 			return
 		}
-		out, err := core.Republish(id, service.RepublishOptions{PackageID: &pkgID})
+		found := false
+		for _, v := range versions {
+			if v.ID == pkgID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			mapError(c, service.ErrNotFound)
+			return
+		}
+		out, err := core.Republish(id, service.RepublishOptions{PackageID: &pkgID, Actor: c.GetUint("uid")})
 		if err != nil {
 			mapError(c, err)
 			return
