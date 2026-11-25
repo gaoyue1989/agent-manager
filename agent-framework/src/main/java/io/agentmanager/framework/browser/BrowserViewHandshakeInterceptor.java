@@ -45,13 +45,13 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
             headerUserId = UriComponentsBuilder.fromUri(request.getURI()).build()
                 .getQueryParams().getFirst("userId");
         }
-        if (!SessionAccessGuard.ownedBy(sessionUserStore, sessionId, headerUserId)) {
-            log.info("[browser-view] handshake rejected: session not owned (sid={})", sessionId);
+        var owner = SessionAccessGuard.establishedOwner(sessionUserStore, sessionId, headerUserId);
+        if (owner == null) {
+            log.info("[browser-view] handshake rejected: session ownership not established (sid={})", sessionId);
             return false;
         }
         attributes.put(ATTR_SESSION_ID, sessionId);
-        attributes.put(ATTR_USER_ID, (headerUserId == null || headerUserId.isBlank())
-            ? SessionAccessGuard.ANONYMOUS_USER : headerUserId);
+        attributes.put(ATTR_USER_ID, owner);
         return true;
     }
 

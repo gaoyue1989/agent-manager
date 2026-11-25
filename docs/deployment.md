@@ -169,6 +169,15 @@ release-1.1.0（base CRD/RBAC + controller + ingress-gateway + server；workload
 等联调常见故障同样返回 502）；**503 + "kubernetes runtime"** = 上游 runtime 非
 kubernetes（脚本部署形态不会出现）；**429/5xx** = 上游原样透传。
 
+**前置反向代理与非标端口（issue #514）**：agent-framework 以 `useServerProxy` 模式经 server 代理
+访问 execd，endpoint 由 server 按请求 Host 反射生成。前置 nginx 必须透传带端口的 Host
+（`proxy_set_header Host $http_host;`；`$host` 不含端口），否则 endpoint 变成
+`host/v1/sandboxes/{id}/proxy/44772`（无端口），SDK 全部 execd 请求落到 80 端口 → nginx 默认站点
+HTML 404。等价修法是在 server 配置显式声明外部地址：`[server] eip = "http://<host>:<port>"`。
+客户端侧两道防护：proxy endpoint 缺端口时按 `OPENSANDBOX_SERVER_URL` 的 authority 校正（仅同 host
+的 server-proxy 路径；直连 endpoint / 显式端口 / 外部 eip 不改），且 HTML 或非 JSON 的 404 不再判为
+「路径缺失」——回落真 exec 并把故障暴露给调用方，不再静默回答「文件不存在」。
+
 ### 2. 创建首个池
 
 页面路径：运维侧 → **沙箱管理**（/admin/sandboxes）→ 创建池。Pod 模板由平台预设（官方 sample

@@ -1248,6 +1248,67 @@ class OpenSandboxTest {
         verify(osb.commands()).run(FIND_PROBE_L);
     }
 
+    // ---------- issue #514：server proxy 前置 nginx 的 HTML 404 不是路径缺失 ----------
+
+    private static SandboxApiException nginxHtml404() {
+        String body = "<!DOCTYPE html>\n<html><head><title>404 Not Found</title></head><body>"
+            + "<h1>Not Found</h1><p>Test Page for the HTTP Server on Anolis OS</p></body></html>";
+        return new SandboxApiException("HTTP 404 Not Found", null, 404,
+            new SandboxError("UNEXPECTED_RESPONSE", body), null, body, false);
+    }
+
+    @Test
+    void readProbeWithNginxHtml404ShouldFallBackToRealExec() throws Exception {
+        var osb = mockOsb(mockExecution(0, "real content", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(nginxHtml404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("real content", result.stdout(), "HTML 404 是上游代理故障，不得吞成文件缺失");
+        verify(osb.commands()).run(READ_PROBE);
+    }
+
+    @Test
+    void lsProbeWithNginxHtml404ShouldFallBackToRealExec() throws Exception {
+        var osb = mockOsb(mockExecution(0, "DIR:/workspace/docs\t0", ""));
+        when(osb.files().listDirectory("docs")).thenThrow(nginxHtml404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), LS_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("DIR:/workspace/docs\t0", result.stdout(), "HTML 404 是上游代理故障，不得吞成目录不存在");
+        verify(osb.commands()).run(LS_PROBE);
+    }
+
+    @Test
+    void testEProbeWithNginxHtml404ShouldFallBackToRealExec() throws Exception {
+        var osb = mockOsb(mockExecution(0, "yes", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(nginxHtml404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), TEST_E_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("yes", result.stdout(), "HTML 404 是上游代理故障，不得吞成路径不存在");
+        verify(osb.commands()).run(TEST_E_PROBE);
+    }
+
+    @Test
+    void globProbeWithNginxHtml404ShouldFallBackToRealFind() throws Exception {
+        var osb = mockOsb(mockExecution(0, "tree/x.md\t3\t0", ""));
+        when(osb.files().listDirectory("tree")).thenThrow(nginxHtml404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), FIND_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("tree/x.md\t3\t0", result.stdout(), "HTML 404 是上游代理故障，不得吞成空目录");
+        verify(osb.commands()).run(FIND_PROBE_L);
+    }
+
     // ---------- exec→execd 翻译器（P0-12，issue #290 收窄回归） ----------
 
     @Test

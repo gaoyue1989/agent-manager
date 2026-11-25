@@ -73,12 +73,13 @@ class BrowserViewWebSocketHandlerTest {
         var sandboxEndpoint = mock(SandboxEndpoint.class);
         when(sandboxEndpoint.getEndpoint()).thenReturn(endpoint);
         when(sandbox.getEndpoint(anyInt())).thenReturn(sandboxEndpoint);
-        when(locator.locate(USER, SESSION, IsolationScope.USER)).thenReturn(new LocatedSandbox("sb-1", sandbox));
+        when(locator.locateOwned(USER, SESSION, IsolationScope.USER))
+            .thenReturn(new LocatedSandbox("sb-1", sandbox));
     }
 
     @Test
     void missingSandboxShouldCloseWithNotFound() throws Exception {
-        when(locator.locate(anyString(), anyString(), any()))
+        when(locator.locateOwned(anyString(), anyString(), any()))
             .thenThrow(new SandboxEnvException("sandbox_not_found", 404, "nope"));
 
         handler.afterConnectionEstablished(session);
@@ -104,6 +105,21 @@ class BrowserViewWebSocketHandlerTest {
         assertEquals("ws://" + ENDPOINT + "/websockify", uri.getValue().toString());
         assertEquals("api-key", key.getValue());
         assertEquals("binary", subprotocol.getValue());
+    }
+
+    @Test
+    void handshakeShouldRestorePortDroppedByFrontingProxy() throws Exception {
+        locateEndpoint("server/v1/sandboxes/sb-1/proxy/6080");
+        when(session.getAcceptedProtocol()).thenReturn("binary");
+        var upstream = mock(WebSocket.class);
+        when(connector.connect(any(), anyString(), anyString(), any())).thenReturn(upstream);
+
+        handler.afterConnectionEstablished(session);
+
+        var uri = ArgumentCaptor.forClass(URI.class);
+        verify(connector).connect(uri.capture(), anyString(), anyString(), any());
+        assertEquals("ws://server:8090/v1/sandboxes/sb-1/proxy/6080/websockify",
+            uri.getValue().toString(), "endpoint 丢端口须按配置的 server 地址校正");
     }
 
     @Test

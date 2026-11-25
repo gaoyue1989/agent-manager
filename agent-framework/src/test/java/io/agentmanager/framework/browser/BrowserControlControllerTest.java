@@ -64,6 +64,48 @@ class BrowserControlControllerTest {
     }
 
     @Test
+    void unclaimedSessionShouldGetNotFound() {
+        when(sessionUserStore.findUserIdBySession("unclaimed")).thenReturn(null);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.state("unclaimed", "someone-else"));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).state(anyString(), anyString());
+    }
+
+    @Test
+    void placeholderSessionShouldGetNotFound() {
+        when(sessionUserStore.findUserIdBySession("placeholder"))
+            .thenReturn(SessionUserStore.PLACEHOLDER_USER);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.state("placeholder", "someone-else"));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).state(anyString(), anyString());
+    }
+
+    @Test
+    void unclaimedSessionShouldNotBeTakeoverAble() {
+        when(sessionUserStore.findUserIdBySession("unclaimed")).thenReturn(null);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.takeover("unclaimed", "someone-else", null));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).takeover(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void unclaimedSessionShouldNotBeReleasable() {
+        when(sessionUserStore.findUserIdBySession("unclaimed")).thenReturn(null);
+
+        var e = assertThrows(ResponseStatusException.class,
+            () -> controller.release("unclaimed", "someone-else", null, new HttpHeaders()));
+        assertEquals(HttpStatus.NOT_FOUND, e.getStatusCode());
+        verify(control, never()).release(anyString());
+        verify(chatStreamController, never()).chat(any(), any(), any(), any());
+    }
+
+    @Test
     void takeoverShouldReturnControlAndStopOutcome() {
         when(control.takeover(SESSION, USER, "need login", BrowserControlService.TRIGGER_USER))
             .thenReturn(new BrowserControlService.TakeoverResult(
