@@ -1232,7 +1232,7 @@ test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同�
     try {
       const [hist] = await conn.query('SELECT version, success FROM flyway_schema_history ORDER BY installed_rank');
       const rows = hist as { version: string; success: number }[];
-      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18']);
+      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19']);
       expect(rows.every(x => x.success === 1), '迁移历史必须全 success').toBe(true);
     } finally { await conn.end(); }
   });
@@ -1690,13 +1690,13 @@ test('CX1 注入零模型调用；下一轮系统提示词带注入正文；hist
   const sid = sessionIdFor(`cx1-${uniq()}`);
   const mark = `CTX-MARK-${uniq()}`;
   const content = `1. ${mark}\n2. 第二条`;
-  const injected = await injectContext(sid, { key: 'headline', title: '今日头条', content });
+  const injected = await injectContext(sid, { key: 'headline', title: '今日头条', content }, BASE, U);
   expect(injected.status).toBe(201);
   expect(injected.body.created).toBe(true);
   expect(injected.body.effectiveFrom).toBe('next_turn');
   expect(injected.body.contentChars).toBe(content.length);
   expect(injected.body.totalChars).toBe(content.length);
-  expect((await llmStats()).count).toBe(0);
+  expect((await llmStats()).calls.filter(c => c.scenario !== 'background-synth')).toEqual([]);
 
   await pollUntil(async () => threads(BASE, U), list => JSON.stringify(list).includes(sid), 15_000);
 
@@ -1742,8 +1742,8 @@ test('CX3 同名覆盖只留最新；移除后下一轮不再注入、history �
   const sid = sessionIdFor(`cx3-${uniq()}`);
   const oldMark = `CTX-OLD-${uniq()}`;
   const newMark = `CTX-NEW-${uniq()}`;
-  expect((await injectContext(sid, { key: 'headline', content: oldMark })).status).toBe(201);
-  const replaced = await injectContext(sid, { key: 'headline', title: '今日头条', content: newMark });
+  expect((await injectContext(sid, { key: 'headline', content: oldMark }, BASE, U)).status).toBe(201);
+  const replaced = await injectContext(sid, { key: 'headline', title: '今日头条', content: newMark }, BASE, U);
   expect(replaced.status).toBe(200);
   expect(replaced.body.created).toBe(false);
 
@@ -1758,8 +1758,8 @@ test('CX3 同名覆盖只留最新；移除后下一轮不再注入、history �
   expect(context[0].content).toBe(newMark);
   expect(await contextRowCount(sid)).toBe(1);
 
-  expect(await removeContext(sid, 'headline')).toBe(200);
-  expect(await removeContext(sid, 'headline')).toBe(404);
+  expect(await removeContext(sid, 'headline', BASE, U)).toBe(200);
+  expect(await removeContext(sid, 'headline', BASE, U)).toBe(404);
   expect(((await history(sid, BASE, U)).context as unknown[]).length).toBe(0);
   expect(await contextRowCount(sid)).toBe(0);
 
@@ -1772,7 +1772,7 @@ test('CX3 同名覆盖只留最新；移除后下一轮不再注入、history �
 
 test('CX4 合计超限 413 并带数值；非法入参 400；两者都不留下条目', async () => {
   const sid = sessionIdFor(`cx4-${uniq()}`);
-  const rejected = await injectContext(sid, { key: 'headline', content: 'x'.repeat(30_001) });
+  const rejected = await injectContext(sid, { key: 'headline', content: 'x'.repeat(30_001) }, BASE, U);
   expect(rejected.status).toBe(413);
   expect(rejected.body.error).toBe('context_budget_exceeded');
   expect(rejected.body.contentChars).toBe(30_001);
@@ -1780,8 +1780,8 @@ test('CX4 合计超限 413 并带数值；非法入参 400；两者都不留下�
   expect(rejected.body.maxTotalChars).toBe(30_000);
   expect(await contextRowCount(sid)).toBe(0);
 
-  expect((await injectContext(sid, { key: 'bad key!', content: 'a' })).status).toBe(400);
-  expect((await injectContext(sid, { key: 'ok', content: '   ' })).status).toBe(400);
+  expect((await injectContext(sid, { key: 'bad key!', content: 'a' }, BASE, U)).status).toBe(400);
+  expect((await injectContext(sid, { key: 'ok', content: '   ' }, BASE, U)).status).toBe(400);
   expect(await contextRowCount(sid)).toBe(0);
 });
 
@@ -1794,7 +1794,7 @@ test('CX5 HITL 挂起期间注入：批准后的恢复轮带上下文', async ()
   expect(ask.terminal?.type).toBe('permission_ask');
   const tcid = ((ask.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
 
-  expect((await injectContext(sid, { key: 'headline', content: mark })).status).toBe(201);
+  expect((await injectContext(sid, { key: 'headline', content: mark }, BASE, U)).status).toBe(201);
   expect((await status(sid, BASE, U)).state).toBe('waiting_confirm');
 
   await new Promise(r => setTimeout(r, 800));
@@ -1812,8 +1812,8 @@ test('CX5 HITL 挂起期间注入：批准后的恢复轮带上下文', async ()
 
 test('CX6 删除会话级联清理上下文行，不留孤儿', async () => {
   const sid = sessionIdFor(`cx6-${uniq()}`);
-  expect((await injectContext(sid, { key: 'headline', content: 'a' })).status).toBe(201);
-  expect((await injectContext(sid, { key: 'notice', content: 'b' })).status).toBe(201);
+  expect((await injectContext(sid, { key: 'headline', content: 'a' }, BASE, U)).status).toBe(201);
+  expect((await injectContext(sid, { key: 'notice', content: 'b' }, BASE, U)).status).toBe(201);
   expect(await contextRowCount(sid)).toBe(2);
 
   expect(await deleteThread(sid, BASE, U)).toBe(200);
