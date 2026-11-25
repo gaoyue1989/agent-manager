@@ -228,6 +228,20 @@ func (c *Core) Introspect(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"code":403,"message":"key scope mismatch"}`, http.StatusForbidden)
 			return
 		}
+		if key.UserID > 0 {
+			var u store.User
+			if err := c.DB.First(&u, key.UserID).Error; err != nil || u.Status == "disabled" {
+				http.Error(w, `{"code":403,"message":"user is disabled"}`, http.StatusForbidden)
+				return
+			}
+		}
+		if key.WorkspaceID > 0 {
+			var ws store.Workspace
+			if err := c.DB.First(&ws, key.WorkspaceID).Error; err != nil || ws.Status == "disabled" {
+				http.Error(w, `{"code":403,"message":"workspace is disabled"}`, http.StatusForbidden)
+				return
+			}
+		}
 		c.touchApiKey(key.ID)
 		setHeader(key.UserID)
 		writeIntrospectOK(w, key.WorkspaceID, key.AgentID)

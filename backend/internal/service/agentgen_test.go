@@ -539,8 +539,8 @@ func TestUpdateAgentKeepsUserExplicitEnv(t *testing.T) {
 	if plain["LLM_MODEL"] != "qwen-plus" {
 		t.Fatalf("表单管辖键必须照常覆盖：%q", plain["LLM_MODEL"])
 	}
-	if plain["AGENT_REDIS_COMMAND_TIMEOUT_MS"] != "2000" {
-		t.Fatalf("平台默认应对缺失键补位：%q", plain["AGENT_REDIS_COMMAND_TIMEOUT_MS"])
+	if plain["AGENT_REDIS_COMMAND_TIMEOUT_MS"] != "" {
+		t.Fatalf("issue #564：UpdateAgent 不得向存量服务静默注入缺失/后增平台默认键：%q", plain["AGENT_REDIS_COMMAND_TIMEOUT_MS"])
 	}
 }
 
@@ -1490,5 +1490,44 @@ func TestCreateAgentSandboxOffIgnoresSandboxResourceFields(t *testing.T) {
 	_ = json.Unmarshal([]byte(svcNil.EnvJSON), &envNil)
 	if envNil["SANDBOX_IMAGE"] != "my-sbx:v2" {
 		t.Fatalf("sandbox.enabled=nil should preserve explicit SANDBOX_IMAGE, got %q", envNil["SANDBOX_IMAGE"])
+	}
+}
+
+func TestUpdateAgentSandboxOffClearsExplicitSandboxEnabledEnv(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := seedWs(t, c, "ws-563", "ws563")
+	if err := c.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: 1, Role: "owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-563", "qwen-plus", "https://llm.example/v1")
+	on, off := true, false
+	svc, _, err := c.CreateAgent(ws.ID, 1, &AgentForm{
+		Name: "sbx563", Description: "d", Prompt: "hi", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &on},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	c.DB.Model(svc).Updates(map[string]any{
+		"status":   store.StatusRunning,
+		"env_json": `{"SANDBOX_ENABLED":"true","OPENSANDBOX_SERVER_URL":"http://sbx:8080"}`,
+	})
+	updated, _, err := c.UpdateAgent(ws.ID, 1, svc.ID, &AgentForm{
+		Name: "sbx563", Description: "d", Prompt: "hi updated", Replicas: 1,
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		Sandbox:          &SandboxForm{Enabled: &off},
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	plain := map[string]string{}
+	_ = jsonUnmarshalStrict(updated.EnvJSON, &plain)
+	if _, exists := plain["SANDBOX_ENABLED"]; exists {
+		t.Fatalf("expected SANDBOX_ENABLED removed on sandbox off, got %q", plain["SANDBOX_ENABLED"])
+	}
+	if _, exists := plain["OPENSANDBOX_SERVER_URL"]; exists {
+		t.Fatalf("expected OPENSANDBOX_SERVER_URL removed on sandbox off, got %q", plain["OPENSANDBOX_SERVER_URL"])
 	}
 }
