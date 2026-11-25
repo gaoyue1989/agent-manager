@@ -394,6 +394,33 @@ public final class SkillZipSupport {
         return sanitized.isBlank() ? null : sanitized;
     }
 
+    /**
+     * 技能目录清单的规范名索引（issue #504，#513 寻址歧义的统一裁决）：隐藏目录（. 开头）
+     * 不参与；候选按目录名字典序排序，frontmatter 规范名（{@link #canonicalSkillName}）
+     * 首次出现者保留、冲突目录打 WARN 跳过。bundle 打包与 resolveSkillDir 索引寻址共用
+     * 本规则：「规范名 → 目录内容」映射唯一且跨节点确定——bundle 同输入字节一致
+     * （X-Bundle-Sha256 跨副本稳定），寻址命中的目录与 bundle 收录的内容恒为同一份。
+     */
+    public static java.util.SortedMap<String, Path> canonicalDirIndex(Iterable<Path> dirs) {
+        var sorted = new java.util.ArrayList<Path>();
+        for (var dir : dirs) {
+            if (!dir.getFileName().toString().startsWith(".")) {
+                sorted.add(dir);
+            }
+        }
+        sorted.sort(Comparator.comparing(p -> p.getFileName().toString()));
+        java.util.SortedMap<String, Path> index = new java.util.TreeMap<>();
+        for (var dir : sorted) {
+            var canonical = canonicalSkillName(dir);
+            var winner = index.putIfAbsent(canonical, dir);
+            if (winner != null) {
+                log.warn("Duplicate canonical skill name '{}': '{}' kept by dir-name order, '{}' skipped",
+                    canonical, winner.getFileName(), dir.getFileName());
+            }
+        }
+        return java.util.Collections.unmodifiableSortedMap(index);
+    }
+
     /** 去掉文件扩展名；空/无扩展名回退 unnamed-skill */
     public static String stripExtension(String fileName, String ext) {
         if (fileName == null) {

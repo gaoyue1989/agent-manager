@@ -150,7 +150,10 @@ frontmatter 缺失/无 name/非白名单（issue #501：仅字母/数字/下划�
 （规范名与历史目录名均可寻址），`.skill-states.json` 读写按规范名键、读取时对历史目录名
 条目按现存目录归一化，`getDisabledSet()` 输出与 SDK `skill.getName()` 同键——目录合并视图
 （SkillCatalogService）、SDK SkillFilter、沙箱投放禁用判定（SkillsFarm/ManagedSkillDisabledChecker）
-三方一致。
+三方一致。多个目录映射到同一规范名时按 `SkillZipSupport.canonicalDirIndex` 统一裁决
+（issue #504）：候选按目录名字典序排序、首个保留、冲突目录 WARN 跳过——bundle 打包与
+`resolveSkillDir` 寻址共用该规则，tar 无重复条目、fileCount 不失真、同 version 跨副本
+字节一致（X-Bundle-Sha256 稳定），寻址命中的目录与 bundle 收录内容恒为同一份。
 
 一服务一包：每个 agent-framework 服务实例只承载一个 OAF 包（服务即包身份的单一真相源），
 端点无需 package 参数——`BASE_URL` 已标识请求的是哪个服务/包。
