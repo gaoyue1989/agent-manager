@@ -1,6 +1,5 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
-import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -47,6 +46,7 @@ final class SkillsFarm {
     private final Supplier<String> userKey;
     /** 沙箱代 id（gate 键与记账代际分量） */
     private final Supplier<String> sandboxId;
+    private final SkillBundlePusher pusher;
 
     SkillsFarm(OpenSandboxClientOptions options,
                Sandbox osbSandbox,
@@ -54,19 +54,25 @@ final class SkillsFarm {
                OpenSandboxFilesystemSpec filesystemSpec,
                Supplier<String> userKey,
                Supplier<String> sandboxId) {
+        this(options, osbSandbox, workspaceReader, filesystemSpec, userKey, sandboxId, new SkillBundlePusher());
+    }
+
+    SkillsFarm(OpenSandboxClientOptions options,
+               Sandbox osbSandbox,
+               WorkspaceReader workspaceReader,
+               OpenSandboxFilesystemSpec filesystemSpec,
+               Supplier<String> userKey,
+               Supplier<String> sandboxId,
+               SkillBundlePusher pusher) {
         this.options = options;
         this.osbSandbox = osbSandbox;
         this.workspaceReader = workspaceReader;
         this.filesystemSpec = filesystemSpec;
         this.userKey = userKey;
         this.sandboxId = sandboxId;
+        this.pusher = pusher;
     }
 
-    /**
-     * 农场投放入口：启用且本会话判定为 farm 时完成软链收敛并返回 true；未启用/无 gate/
-     * 判定降级返回 false（PR-4b 后调用方不再回落 tar——本会话无包技能投放）。收敛 exec
-     * 失败原样上抛（上层 CAS 复位，下次触发重试），判定不变。
-     */
     boolean tryHydrate(String scope) throws Exception {
         if (!enabled()) {
             return false;
@@ -74,10 +80,21 @@ final class SkillsFarm {
         var uid = sessionUserKey();
         var gate = filesystemSpec != null
             ? filesystemSpec.skillSyncGate(uid, sandboxId.get()) : null;
-        if (gate == null || !acquireMode(gate, uid)) {
+        if (gate == null) {
             return false;
         }
-        hydrate(scope, gate, uid);
+        var acquired = acquireState(gate, uid);
+        var state = acquired == null ? null : acquired.state();
+        if (state == null || !state.active()) {
+            return false;
+        }
+        String activeStore = state.storeDir() != null && !state.storeDir().isBlank()
+            ? state.storeDir()
+            : options.getSkillsSharedStore().trim();
+        String hydrateMode = state.mode() == SkillSyncGate.FarmMode.PUSH
+            ? OpenSandboxFilesystemSpec.HYDRATE_MODE_PUSH
+            : OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM;
+        hydrate(scope, gate, uid, state.mode(), activeStore, hydrateMode, acquired.justSyncedVersion());
         return true;
     }
 
@@ -96,58 +113,119 @@ final class SkillsFarm {
         return filesystemSpec != null ? filesystemSpec.peekPendingUserKey() : null;
     }
 
-    /**
-     * 会话级二值判定（B-1，§6.2/§7.2）：CAS 首触点执行一次——readlink store/CURRENT 可解析
-     * 且与端点指纹（D-4 短 TTL）目录名字符串相等 → 本会话软链模式；任一失败（store 缺失 /
-     * 端点不可达 / 版本不一致）→ 本会话整体无包技能投放。判定按会话键记忆于 gate：
-     * 降级会话不中途翻转，新会话（新 sandboxId 换新 gate）重新判定。
-     */
-    private boolean acquireMode(SkillSyncGate gate, String uid) {
+    private record AcquireResult(SkillSyncGate.SkillFarmState state, String justSyncedVersion) {}
+
+    private AcquireResult acquireState(SkillSyncGate gate, String uid) {
         var remembered = gate.skillFarmState();
         if (remembered != null) {
-            return remembered.farm();
+            return new AcquireResult(remembered, null);
         }
         var decision = decideMode(uid);
-        gate.setSkillFarmState(new SkillSyncGate.SkillFarmState(decision.farm(), decision.l4Names()));
+        var state = new SkillSyncGate.SkillFarmState(decision.mode(), decision.storeDir(), decision.l4Names());
+        gate.setSkillFarmState(state);
         recordDecision(decision.result());
-        return decision.farm();
+        return new AcquireResult(state, decision.syncedVersion());
     }
 
-    private record FarmDecision(boolean farm, String result, Set<String> l4Names) {}
+    private record FarmDecision(SkillSyncGate.FarmMode mode, String storeDir, String result,
+                                Set<String> l4Names, String syncedVersion) {
+        FarmDecision(SkillSyncGate.FarmMode mode, String storeDir, String result, Set<String> l4Names) {
+            this(mode, storeDir, result, l4Names, null);
+        }
+    }
 
     private FarmDecision decideMode(String uid) {
-        String endpointVersion = null;
+        SkillBundleService svc = options.getSkillBundleService();
+        SkillBundleService.SkillVersion snapshot;
         try {
-            var svc = options.getSkillBundleService();
-            endpointVersion = svc == null ? null : svc.currentVersion().version();
-            if (endpointVersion == null
-                    || endpointVersion.startsWith(SkillBundleService.ERROR_VERSION_PREFIX)) {
+            snapshot = svc == null ? null : svc.currentVersion();
+            if (snapshot == null
+                    || snapshot.version() == null
+                    || snapshot.version().startsWith(SkillBundleService.ERROR_VERSION_PREFIX)) {
                 throw new IllegalStateException("skill bundle endpoint unavailable (version="
-                    + endpointVersion + ")");
+                    + (snapshot == null ? null : snapshot.version()) + ")");
             }
         } catch (Exception e) {
             log.warn("[sandbox-open] skills farm endpoint version unavailable: {}", e.getMessage());
-            return new FarmDecision(false, "degraded_endpoint_down", Set.of());
+            return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_endpoint_down", Set.of());
         }
-        var store = probeStore(options.getSkillsSharedStore().trim());
-        if (store.version() == null) {
-            // store 无 CURRENT 二分：store 目录由守护启动时创建——目录存在 = 守护活着但同步
-            // 失败，第一根因即守护→端点链路不可达（egress 断网），归 degraded_endpoint_down
-            // （runbook 信号直指端点链路）；目录缺失 = 守护
-            // 未装/未跑（或 store 卷未挂），归 degraded_store_missing。exec 探测异常按目录
-            // 缺失保守处理（fail-open 同桶）。
-            if (store.dirPresent()) {
-                return new FarmDecision(false, "degraded_endpoint_down", Set.of());
-            }
-            return new FarmDecision(false, "degraded_store_missing", Set.of());
+        String endpointVersion = snapshot.version();
+        String primaryStore = options.getSkillsSharedStore().trim();
+        var store = probeStore(primaryStore);
+        if ((STORE_VERSION_DIR_PREFIX + endpointVersion).equals(store.version())) {
+            return new FarmDecision(SkillSyncGate.FarmMode.FARM, primaryStore, "farm", captureL4SkillNames(uid));
         }
-        if (!(STORE_VERSION_DIR_PREFIX + endpointVersion).equals(store.version())) {
+        String originReason;
+        if (store.version() != null) {
             log.error("[sandbox-open] skills farm version hard-check failed (store={}, endpoint={}): "
-                + "store treated as unusable, session has no package skills this session",
+                + "store treated as unusable",
                 store.version(), endpointVersion);
-            return new FarmDecision(false, "degraded_version_mismatch", Set.of());
+            originReason = "degraded_version_mismatch";
+        } else if (store.dirPresent()) {
+            originReason = "degraded_endpoint_down";
+        } else {
+            originReason = "degraded_store_missing";
         }
-        return new FarmDecision(true, "farm", captureL4SkillNames(uid));
+        if (!canFallbackPush(originReason)) {
+            return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, originReason, Set.of());
+        }
+        String fallbackStore = options.getSkillsFallbackStoreDir() == null
+            ? "" : options.getSkillsFallbackStoreDir().trim();
+        if (snapshot.skills() != null && snapshot.skills().isEmpty()) {
+            if (!OpenSandboxClientOptions.isValidFallbackStoreDir(fallbackStore)) {
+                return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_failed", Set.of());
+            }
+            return new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_hit",
+                captureL4SkillNames(uid));
+        }
+        var outcome = pusher.ensureSynced(
+            osbSandbox,
+            svc,
+            endpointVersion,
+            fallbackStore,
+            options.getSkillsFallbackMaxBytes(),
+            options.getSkillsFallbackSemaphore(),
+            options.getSkillsFallbackAcquireTimeoutMs()
+        );
+        return switch (outcome.status()) {
+            case HIT -> {
+                log.info("[sandbox-open] skills fallback push store hit (origin={}, version={}, store={}, sandbox={})",
+                    originReason, endpointVersion, fallbackStore, sandboxId.get());
+                yield new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_hit",
+                    captureL4SkillNames(uid), endpointVersion);
+            }
+            case SYNCED -> {
+                log.warn("[sandbox-open] skills fallback push synced (origin={}, version={}, bytes={}, costMs={}, store={}, sandbox={})",
+                    originReason, endpointVersion, outcome.bytes(), outcome.costMs(), fallbackStore, sandboxId.get());
+                yield new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_synced",
+                    captureL4SkillNames(uid), endpointVersion);
+            }
+            case TOO_LARGE -> {
+                log.warn("[sandbox-open] skills fallback push skipped, too large (origin={}, version={}, bytes={}, detail={})",
+                    originReason, endpointVersion, outcome.bytes(), outcome.detail());
+                yield new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_too_large", Set.of());
+            }
+            case THROTTLED -> {
+                log.warn("[sandbox-open] skills fallback push throttled (origin={}, version={}, detail={})",
+                    originReason, endpointVersion, outcome.detail());
+                yield new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_throttled", Set.of());
+            }
+            case FAILED -> {
+                log.warn("[sandbox-open] skills fallback push failed (origin={}, version={}, detail={})",
+                    originReason, endpointVersion, outcome.detail());
+                yield new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_failed", Set.of());
+            }
+        };
+    }
+
+    private boolean canFallbackPush(String originReason) {
+        if (!OpenSandboxClientOptions.skillsFallbackPushEnabled(options.getSkillsFallbackMode())) {
+            return false;
+        }
+        if ("degraded_version_mismatch".equals(originReason) && !options.isSkillsFallbackOnVersionMismatch()) {
+            return false;
+        }
+        return true;
     }
 
     /** store 探测结果：CURRENT 版本目录名（null = 无 CURRENT/readlink 未命中）+ 目录存在性 */
@@ -211,7 +289,7 @@ final class SkillsFarm {
         if (registry != null) {
             registry.counter(DECISION_METRIC, "result", result).increment();
         }
-        if (!"farm".equals(result)) {
+        if (!"farm".equals(result) && !"fallback_push_hit".equals(result) && !"fallback_push_synced".equals(result)) {
             log.warn("[sandbox-open] skills farm decision degraded (result={})", result);
         }
     }
@@ -219,13 +297,6 @@ final class SkillsFarm {
     /** 包技能在 .skills-cache 两层布局中的固定 ns 层（FileSystemSkillRepository 注册 source，HarnessAgentFactory） */
     private static final String SKILL_NS = "oaf-package";
 
-    /**
-     * 农场链候选（相对 scope 的 ns/name，排序稳定；端点 manifest 制）：候选名单来自端点
-     * version 响应 {@code skills}（与 bundle 打包同源枚举——包技能移除/新增经版本变化传导）。
-     * 禁用名（{@link #disabledSkillNames} 同源）与 L4 同名（规则 1 真实文件保护）不建链；
-     * 非白名单（{@link #isShellSafeRelPath}，issue #501）的相对路径跳过并 WARN 留痕——tar
-     * 物化已退役，farm 侧静默缺失即会话内真实缺失，必须留痕可观测。
-     */
     private List<String> linkCandidates(List<String> endpointSkills, Set<String> disabledNames,
                                         Set<String> l4Names) {
         var candidates = new java.util.TreeSet<String>();
@@ -243,32 +314,12 @@ final class SkillsFarm {
         return List.copyOf(candidates);
     }
 
-    /**
-     * 软链农场投放（规则 1-5，单条 exec 幂等收敛）：对 manifest 内的包技能路径有全权——
-     * 目标态为软链 {@code <store>/CURRENT/<skill>}（B-4 间接寻址不钉版本目录），路径现存任何物
-     * （缺失 / 悬空 / 降级会话残留真实文件）统一 rm 后重建（D-2）。禁用判定复用
-     * {@link #disabledSkillNames}：禁用名不建链且随 exec 清理既有软链（B-2，会话中途禁用生效——
-     * 用户级禁用经 L4 revision bump 进指纹；全局禁用进端点版本，版本变化触发重收敛主动清理）；
-     * prune 与禁用清理复用容器内清理语义。exec 失败上抛（CAS 复位，下次触发重试），判定不变。
-     *
-     * <p><b>稳态短路（D-10，设计修订否决原 H2「每次触发收敛」口径）</b>：稳态指纹 =
-     * 端点版本 + L4 revision（PR-4b 拆分后包内容身份唯一 SSOT 在
-     * 端点侧）+ sandboxId 代际记账（复用 scoped 指纹表，Pod 级 miss 经跨副本共享层兜底），记账带
-     * farm 模式分量（D-11：本代降级会话的记账不满足 farm 稳态——降级↔farm 翻转后代际必须重收敛，
-     * 把降级残留真实文件副本替换为软链，D-2/§6.2-4）。指纹未变且本沙箱代已收敛过当前 scope →
-     * 容器链接即最新（B-4 间接寻址，版本切换经 CURRENT 即见）→ 跳过收敛 exec。收敛触发面 = 新
-     * 沙箱代（记账随新 sandboxId 清零）/ 模式翻转 / 指纹变化 / exec 失败不记账。会话中途容器重启
-     * （同 sandboxId resume）软链不重建为已接受盲点——与投影指纹缓存 §3.3 系统性盲点同姿态；
-     * per-call 容器侧标记兜底被否决（观测容器态本身即 1 次 exec RTT）。
-     */
-    private void hydrate(String scope, SkillSyncGate gate, String uid) throws Exception {
-        // 端点状态单次快照（issue #416）：指纹 / 候选名单 / 禁用判定同源同一 SkillVersion——
-        // 多次读取在 D-4 TTL 边界会分裂（首次健康 V、缓存过期重算失败 ERR+空清单），健康指纹
-        // + 空候选的孤儿差集会删光 scope 内有效软链且记账稳态锁死。快照为 null（svc 缺失/异常）
-        // 或 ERR- 版本统一视为指纹未知：不建链、不清链（孤儿差集跳过，issue #355）、不记账
+    private void hydrate(String scope, SkillSyncGate gate, String uid,
+                         SkillSyncGate.FarmMode mode, String storeDir, String hydrateMode,
+                         String justSyncedVersion) throws Exception {
         SkillBundleService.SkillVersion snapshot;
+        SkillBundleService svc = options != null ? options.getSkillBundleService() : null;
         try {
-            var svc = options != null ? options.getSkillBundleService() : null;
             if (svc == null) {
                 throw new IllegalStateException("skill bundle service unwired");
             }
@@ -279,13 +330,10 @@ final class SkillsFarm {
             snapshot = null;
         }
         boolean endpointHealthy = snapshot != null
+            && snapshot.version() != null
             && !snapshot.version().startsWith(SkillBundleService.ERROR_VERSION_PREFIX);
         String fingerprint;
         if (endpointHealthy) {
-            // uid 整链路传递（issue #399）：tryHydrate 已解析的会话身份（userKey 缺失回退
-            // pendingUserKey），不得绕回原始 userKey.get()——延迟投放场景（downloadFile/
-            // statWorkspaceFile/doExec(null)）userKey 未绑定，null 会丢 L4 revision 分量、
-            // 用户级禁用判定恒 false
             String revision = "";
             if (workspaceReader != null && uid != null && !uid.isBlank()) {
                 var rev = workspaceReader.readUserSkillRevision(uid);
@@ -296,25 +344,38 @@ final class SkillsFarm {
             fingerprint = null;
         }
         String id = sandboxId.get();
-        // 稳态判定（D-10 + 模式分量）：指纹未变 且 本沙箱代以 farm 模式收敛过当前 scope → 容器链接即最新
-        String podFp = filesystemSpec.scopedSkillCacheFingerprint(id, scope,
-            OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM);
+        String podFp = filesystemSpec.scopedSkillCacheFingerprint(id, scope, hydrateMode);
         boolean steady = fingerprint != null && podFp != null && podFp.equals(fingerprint)
             && scope.equals(filesystemSpec.hydratedScopedScope(id));
         if (steady) {
-            log.debug("[sandbox-open] skills farm fingerprint unchanged ({}), skipping converge", scope);
+            log.debug("[sandbox-open] skills farm fingerprint unchanged ({}, mode={}), skipping converge",
+                scope, hydrateMode);
             return;
+        }
+        if (mode == SkillSyncGate.FarmMode.PUSH && endpointHealthy
+                && snapshot.skills() != null && !snapshot.skills().isEmpty()
+                && !snapshot.version().equals(justSyncedVersion)) {
+            var outcome = pusher.ensureSynced(
+                osbSandbox,
+                svc,
+                snapshot.version(),
+                storeDir,
+                options.getSkillsFallbackMaxBytes(),
+                options.getSkillsFallbackSemaphore(),
+                options.getSkillsFallbackAcquireTimeoutMs()
+            );
+            if (!outcome.ready()) {
+                throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
+                    "hydrateSkillsFarmPush", "skills fallback push failed: " + outcome.status()
+                    + " (" + outcome.detail() + ")", null);
+            }
         }
         var manifest = endpointHealthy ? snapshot.skills() : List.<String>of();
         var disabledNames = disabledSkillNames(
             options.getSkillDisabledChecker(), uid, manifest);
-        // l4Names 快照刷新（issue #399）：非稳态（指纹变化含 L4 revision bump / 模式翻转 /
-        // 新沙箱代）到达此处即需重收敛——仍用首判定冻结的快照会让「删除同名 L4 覆盖」后的
-        // 包技能永不建链。重新 capture 并回写 gate（farm 分量保持 true）；稳态短路路径不经过
-        // 此处，零开销、零 KV 枚举语义不变
         Set<String> l4Names = captureL4SkillNames(uid);
         if (gate != null) {
-            gate.setSkillFarmState(new SkillSyncGate.SkillFarmState(true, l4Names));
+            gate.setSkillFarmState(new SkillSyncGate.SkillFarmState(mode, storeDir, l4Names));
         }
         var linkCmd = new StringBuilder();
         var candidates = linkCandidates(manifest, disabledNames, l4Names);
@@ -324,7 +385,7 @@ final class SkillsFarm {
             }
             String containerPath = options.getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR + "/" + scope + "/" + rel;
             String parentDir = containerPath.substring(0, containerPath.lastIndexOf('/'));
-            String target = options.getSkillsSharedStore().trim() + "/CURRENT/" + OpenSandbox.leaf(rel);
+            String target = storeDir + "/CURRENT/" + OpenSandbox.leaf(rel);
             linkCmd.append("mkdir -p '").append(parentDir).append("'")
                 .append(" && rm -rf '").append(containerPath).append("'")
                 .append(" && ln -s '").append(target).append("' '").append(containerPath).append("'");
@@ -332,10 +393,6 @@ final class SkillsFarm {
         String pruneCmd = "find " + options.getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR
             + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
         String rmCmd = disabledRmCmd(scope, disabledNames, options.getWorkspaceRoot());
-        // 孤儿差集仅在指纹可信时执行（issue #355）：fingerprint==null（ERR-/端点不可达）
-        // 时候选来自空清单——差集空候选形态（case '|'）会把 scope 内全部有效软链当孤儿删光
-        // 且 exit 0 记账旧指纹、稳态短路吞掉恢复收敛，同沙箱代内技能执行面全废。指纹未知 =
-        // 保留现状等恢复（prune/禁用清理语义独立于指纹，照常执行）
         String orphanCmd = fingerprint == null
             ? ""
             : orphanDiffCmd(scope, candidates, options.getWorkspaceRoot());
@@ -352,30 +409,13 @@ final class SkillsFarm {
             throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
                 "hydrateSkillsFarm", "skills farm converge failed with exit " + execution.getExitCode(), null);
         }
-        // 收敛成功才记账（失败不记账：下次触发重收敛），带 farm 模式分量；指纹未知（端点瞬时
-        // 不可达）时 record 对 null 指纹 no-op，且不得 mark 现役 scope（issue #416）：本代记账
-        // 与现役 scope 记录会与 prune 后的容器实态脱钩——端点恢复后稳态判定恒 true，软链缺失
-        // 被锁死；不 mark 则恢复后必触发重收敛
-        filesystemSpec.recordScopedSkillCacheFingerprint(id, scope,
-            OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, fingerprint);
+        filesystemSpec.recordScopedSkillCacheFingerprint(id, scope, hydrateMode, fingerprint);
         if (fingerprint != null) {
             filesystemSpec.markHydratedScopedScope(id, scope);
         }
-        // prune 已删除非现役 scope 目录（issue #416）：其记账必须同步清除，否则切回时稳态
-        // 判定（记账==指纹 && 现役==scope）恒 true，软链缺失被稳态短路锁死
         filesystemSpec.pruneScopedSkillCacheFingerprintsExcept(id, scope);
     }
 
-    /**
-     * 孤儿软链差集清理（§6.2-3：manifest 已禁用/移除的既有软链删除）：容器内当前 scope 的
-     * 软链不在本次候选集内即为孤儿（包技能移除/改名后的残留），悬空滞留会让 load 撞已删内容
-     * ——随收敛 exec 在 shell 内枚举+差集删除（不增加 exec 数，D-10 稳态 0 exec 不受影响）。
-     * 禁用目录由 {@link #disabledRmCmd} 负责（B-2 同语义，候选集外差集与其自然重合、双删无害）。
-     * 真实场景实测（kind 三路径验收）揪出 PR-4a 起的缺口：包技能移除后守护 GC 正确、容器孤儿链
-     * 永久滞留。候选名已过 {@link #isShellSafeRelPath} 白名单——候选名不含 {@code |}，
-     * {@code |} 分隔字面集的 case 边界无歧义（issue #501），`${__rel}` 展开在 case 模式的
-     * 带引号段内按字面匹配。
-     */
     private String orphanDiffCmd(String scope, List<String> candidates, String workspaceRoot) {
         String scopeAll = workspaceRoot + "/" + SkillCacheScope.CACHE_DIR + "/" + scope;
         var pipeList = new StringBuilder("|");
@@ -387,18 +427,6 @@ final class SkillsFarm {
             + " case '" + pipeList + "' in *\"|$__rel|\"*) ;; *) rm -rf \"$__f\" ;; esac; done; true";
     }
 
-    /**
-     * 农场稳态指纹（D-10，PR-4b 拆分后口径）：{@code 端点版本 + "|" + L4 revision}。包内容
-     * 身份（含全局禁用 overlay）唯一 SSOT 在端点侧（{@link SkillBundleService} computeVersion
-     * = {@code PackageSourceFingerprint.digest(skillsDir, disabled overlay)}），本侧不再直接
-     * stat 包目录——「包指纹逻辑整体移交端点侧」；L4 revision 覆盖用户维度（用户级禁用/
-     * 同名变化经 revision bump 进指纹）。端点版本经 D-4 singleflight+TTL 缓存且 decideMode
-     * 已在取，稳态短路零额外开销。异常上抛由 {@link #hydrate} 归为「指纹未知」→ 收敛不记账。
-    /**
-     * 禁用技能名解析（oa-1110-repro-fixes-design §2.1a；端点 manifest 制后按名单逐名判定）：
-     * 包级禁用名 + 用户级禁用，返回禁用名集。checker 缺失返回空集；用户级判定异常按
-     * 未禁用处理（fail-soft，不中断投放）。
-     */
     private static Set<String> disabledSkillNames(SkillDisabledChecker checker, String uid,
                                                   List<String> endpointSkills) {
         if (checker == null) {
@@ -427,10 +455,6 @@ final class SkillsFarm {
         return disabled;
     }
 
-    /**
-     * 容器内禁用技能目录的清理命令段（当前 scope 内；空集返回空串）。路径单引号包裹，
-     * 非白名单（{@link #isShellSafeRelPath}）的相对路径直接跳过（防御性：技能名来自端点清单）。
-     */
     private static String disabledRmCmd(String scope, Set<String> disabledNames, String workspaceRoot) {
         if (disabledNames.isEmpty()) {
             return "";
@@ -450,7 +474,6 @@ final class SkillsFarm {
         return sb.toString();
     }
 
-    /** 相对路径是否可安全内插 shell 单引号段：按段过 {@link SkillZipSupport#isShellSafeSegment} 白名单（issue #501） */
     private static boolean isShellSafeRelPath(String path) {
         if (path == null || path.isBlank()) {
             return false;

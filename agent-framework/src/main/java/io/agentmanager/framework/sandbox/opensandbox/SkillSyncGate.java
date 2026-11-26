@@ -23,6 +23,12 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class SkillSyncGate {
 
+    public enum FarmMode {
+        FARM,
+        PUSH,
+        NONE
+    }
+
     /** 最近一次物化时的 KV revision 值；null = 尚未记录 */
     private volatile String revision;
     /** 本沙箱代是否至少完整物化过一次（revision 门控的前提：没有基线就没有跳过的资格） */
@@ -59,7 +65,18 @@ public final class SkillSyncGate {
     }
 
     /** 农场判定记忆（判定结果 + 同名 L4 优先判定源，均为会话级快照） */
-    public record SkillFarmState(boolean farm, java.util.Set<String> l4Names) {
+    public record SkillFarmState(FarmMode mode, String storeDir, Set<String> l4Names) {
+        public SkillFarmState(boolean farm, Set<String> l4Names) {
+            this(farm ? FarmMode.FARM : FarmMode.NONE, null, l4Names);
+        }
+
+        public boolean farm() {
+            return mode == FarmMode.FARM;
+        }
+
+        public boolean active() {
+            return mode == FarmMode.FARM || mode == FarmMode.PUSH;
+        }
     }
 
     public String revision() {

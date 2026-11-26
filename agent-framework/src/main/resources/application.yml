@@ -127,6 +127,12 @@ agent:
     # 平台表单可送达（平台 env 写路径空串=删除，置空送不出）；空串 = 直改 CM/Deployment
     # 场景。经池 extraEnv 覆盖 SKILLSYNC_STORE_DIR 时必须同值改本键
     skills-shared-store: ${SANDBOX_SKILLS_SHARED_STORE:/skills-store}
+    skills-fallback-mode: ${SANDBOX_SKILLS_FALLBACK_MODE:push}
+    skills-fallback-store-dir: ${SANDBOX_SKILLS_FALLBACK_STORE_DIR:/tmp/.skills-store}
+    skills-fallback-max-bytes: ${SANDBOX_SKILLS_FALLBACK_MAX_BYTES:67108864}
+    skills-fallback-max-concurrency: ${SANDBOX_SKILLS_FALLBACK_MAX_CONCURRENCY:4}
+    skills-fallback-acquire-timeout-ms: ${SANDBOX_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS:5000}
+    skills-fallback-on-version-mismatch: ${SANDBOX_SKILLS_FALLBACK_ON_VERSION_MISMATCH:true}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}
