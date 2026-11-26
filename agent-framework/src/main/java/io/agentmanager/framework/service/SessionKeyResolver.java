@@ -45,9 +45,15 @@ import io.agentscope.core.agent.RuntimeContext;
 public class SessionKeyResolver {
 
     private final SessionUserStore sessionUserStore;
+    private final String tenantPrefix;
 
     public SessionKeyResolver(SessionUserStore sessionUserStore) {
+        this(sessionUserStore, null);
+    }
+
+    public SessionKeyResolver(SessionUserStore sessionUserStore, String tenantPrefix) {
         this.sessionUserStore = sessionUserStore;
+        this.tenantPrefix = trimToNull(tenantPrefix);
     }
 
     /** 规范会话 id（= session_user.session_id）；无 store 时退化为 RuntimeContext 原值，无法解析时 null */
@@ -105,10 +111,13 @@ public class SessionKeyResolver {
         }
     }
 
-    private static String stripTenantPrefix(String sid) {
-        int sep = sid.indexOf("__");
-        if (sep > 0 && sep + 2 < sid.length()) {
-            return sid.substring(sep + 2);
+    private String stripTenantPrefix(String sid) {
+        if (tenantPrefix == null) {
+            return sid;
+        }
+        String prefix = tenantPrefix + "__";
+        if (sid.startsWith(prefix) && sid.length() > prefix.length()) {
+            return sid.substring(prefix.length());
         }
         return sid;
     }

@@ -18,8 +18,15 @@ public class BrowserTakeoverTools implements CustomTool {
     private final SessionKeyResolver sessionKeyResolver;
 
     public BrowserTakeoverTools(BrowserControlService control, SessionUserStore sessionUserStore) {
+        this(control, sessionUserStore, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public BrowserTakeoverTools(BrowserControlService control, SessionUserStore sessionUserStore,
+                                io.agentmanager.framework.model.OafConfig oafConfig) {
         this.control = control;
-        this.sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
+        this.sessionKeyResolver = new SessionKeyResolver(
+            sessionUserStore, oafConfig != null ? oafConfig.slug() : null);
     }
 
     @Tool(

@@ -226,6 +226,7 @@ export default function ChatPane({
     let pendingDelta = "";
     const directReturnTracker = createDirectReturnOrderTracker();
     let directReturnLocked = false;
+    let inlineImageSeq = 0;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const flushDelta = () => {
       flushTimer = null;
@@ -262,8 +263,12 @@ export default function ChatPane({
           pendingDelta += ev.delta ?? "";
           scheduleFlush();
           break;
+        case "MODEL_CALL_START":
+          directReturnTracker.reset();
+          directReturnLocked = false;
+          break;
         case "TOOL_RESULT_TEXT_DELTA":
-          directReturnTracker.onTextDelta(ev.toolCallId, ev.delta);
+          directReturnTracker.onTextDelta(ev.toolCallId ?? ev.tool_call_id, ev.delta);
           break;
         case "THINKING_BLOCK_DELTA":
           break; // 思考过程不上屏
@@ -337,21 +342,19 @@ export default function ChatPane({
             if (downloadUrl) {
               if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
               flushDelta();
-              updateLastAssistant((m) => {
-                const file = {
-                  file_id: `inline-${m.content.length}-${(m.files ?? []).length}`,
-                  file_name: "inline-image",
-                  mime_type: ev.media_type,
-                  size: 0,
-                  download_url: downloadUrl,
-                };
-                directReturnTracker.onImageDelta(ev.toolCallId, file);
-                return {
-                  ...m,
-                  files: [...(m.files ?? []), file],
-                  blocks: appendAssistantImageBlock(m.blocks, m.content, file),
-                };
-              });
+              const file = {
+                file_id: `inline-${inlineImageSeq++}`,
+                file_name: "inline-image",
+                mime_type: ev.media_type,
+                size: 0,
+                download_url: downloadUrl,
+              };
+              directReturnTracker.onImageDelta(ev.toolCallId ?? ev.tool_call_id, file);
+              updateLastAssistant((m) => ({
+                ...m,
+                files: [...(m.files ?? []), file],
+                blocks: appendAssistantImageBlock(m.blocks, m.content, file),
+              }));
             }
           }
           break;
