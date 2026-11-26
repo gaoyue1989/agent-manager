@@ -166,12 +166,15 @@ public class SandboxRenewalRegistry implements AutoCloseable {
      */
     public void acquireRef(String sandboxId, String sessionId, long ttlSeconds, SandboxRenewer renewer) {
         entries.compute(sandboxId, (k, existing) -> {
-            if (existing != null) {
+            if (existing != null && java.util.Objects.equals(sessionId, existing.sessionId)) {
                 existing.renewer = renewer;
+                existing.callRefs.incrementAndGet();
                 return existing;
             }
-            return new Entry(sandboxId, sessionId, ttlSeconds, renewer, clock.instant());
-        }).callRefs.incrementAndGet();
+            Entry fresh = new Entry(sandboxId, sessionId, ttlSeconds, renewer, clock.instant());
+            fresh.callRefs.set(1);
+            return fresh;
+        });
     }
 
     /**

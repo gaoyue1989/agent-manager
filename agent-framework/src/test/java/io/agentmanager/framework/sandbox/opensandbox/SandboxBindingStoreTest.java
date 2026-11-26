@@ -469,4 +469,57 @@ class SandboxBindingStoreTest {
 
         assertEquals(1, new SandboxBindingStore(dataSource).lazyDeleteExpired("u1"));
     }
+
+    @Test
+    void rebindDuplicateKeyReturnsFalseWithoutThrowing() throws Exception {
+        when(ps.executeUpdate()).thenThrow(
+            new SQLException("Duplicate entry 'new-sid' for key 'uk_session'", "23000", 1062));
+
+        assertFalse(new SandboxBindingStore(dataSource)
+            .rebind(3L, "old-sid", "new-sid", "2026-11-08 00:00:00.123"));
+    }
+
+    @Test
+    void callRowDeleteLocksAnchorBeforeDeletingBinding() throws Exception {
+        when(rs.next()).thenReturn(true, true);
+        when(rs.getString(1)).thenReturn("u1");
+
+        assertTrue(new SandboxBindingStore(dataSource)
+            .deleteByIdGuarded(9L, "s1", "2026-11-08 00:00:00.000"));
+        assertEquals(4, sqls.size());
+        assertTrue(sqls.get(0).startsWith("SELECT user_key FROM sandbox_binding WHERE "));
+        assertEquals("SELECT binding_count FROM sandbox_user WHERE user_key = ? FOR UPDATE", sqls.get(1));
+        assertTrue(sqls.get(2).startsWith("DELETE FROM sandbox_binding WHERE "));
+        assertTrue(sqls.get(3).startsWith("UPDATE sandbox_user SET binding_count = binding_count - 1"));
+    }
+
+    @Test
+    void callRowDeleteReturnsFalseImmediatelyWhenRowMissing() throws Exception {
+        when(rs.next()).thenReturn(false);
+
+        assertFalse(new SandboxBindingStore(dataSource)
+            .deleteByIdGuarded(9L, "s1", "2026-11-08 00:00:00.000"));
+        assertEquals(1, sqls.size());
+        assertTrue(sqls.get(0).startsWith("SELECT user_key FROM sandbox_binding WHERE "));
+        verify(conn).commit();
+    }
+
+    @Test
+    void cleanupExpiredAndEmptyAnchorsFormatCutoffInUtc() throws Exception {
+        var prev = java.util.TimeZone.getDefault();
+        java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Asia/Shanghai"));
+        try {
+            mockEmptySelect();
+            var cutoff = Instant.parse("2026-11-01T00:00:00Z");
+            new SandboxBindingStore(dataSource).cleanupExpired(cutoff);
+            new SandboxBindingStore(dataSource).cleanupEmptyAnchors(cutoff);
+
+            var cap = ArgumentCaptor.forClass(String.class);
+            verify(ps, org.mockito.Mockito.times(2)).setString(eq(1), cap.capture());
+            assertEquals(List.of("2026-11-01 00:00:00.000", "2026-11-01 00:00:00.000"), cap.getAllValues());
+        } finally {
+            java.util.TimeZone.setDefault(prev);
+        }
+    }
+
 }
