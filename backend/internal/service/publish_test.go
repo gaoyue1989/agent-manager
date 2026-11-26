@@ -922,3 +922,48 @@ func TestRepublishOptionsJSONIgnoresInternalFields(t *testing.T) {
 		t.Fatalf("Actor must not be bindable from JSON, got %d", opt.Actor)
 	}
 }
+
+func TestMaxEnvKeysConsistentAcrossPlatformKeysDeleteAndPool630(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+
+	env64 := make(map[string]string, MaxEnvKeys)
+	for i := 0; i < MaxEnvKeys-1; i++ {
+		env64[fmt.Sprintf("USER_K_%02d", i)] = "v"
+	}
+	env64["LLM_API_KEY"] = "secret-v1"
+	svc, err := core.Publish(PublishRequest{
+		Name: "max64-svc", PackageID: pkg.ID, Image: "agent-framework:latest",
+		Env: env64, ProvisionSandboxPool: true,
+	})
+	if err != nil {
+		t.Fatalf("64-key publish without OpenSandbox config must succeed, got %v", err)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusDeployFailed)
+
+	updateEnv := make(map[string]string, MaxEnvKeys+1)
+	for i := 0; i < MaxEnvKeys-1; i++ {
+		updateEnv[fmt.Sprintf("USER_K_%02d", i)] = "v"
+	}
+	updateEnv["LLM_API_KEY"] = ""
+	updateEnv["NEW_PLAIN_KEY"] = "added"
+	if _, err := core.UpdateEnv(svc.ID, updateEnv, nil); err != nil {
+		t.Fatalf("64-key delete secret + add plain must succeed, got %v", err)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusDeployFailed)
+
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("env_secret_json", `{"OVK_ADMIN_KEY":"adm","OVK_USER_SEED":"seed"}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	same64 := make(map[string]string, MaxEnvKeys)
+	for i := 0; i < MaxEnvKeys-1; i++ {
+		same64[fmt.Sprintf("USER_K_%02d", i)] = "v"
+	}
+	same64["NEW_PLAIN_KEY"] = "added"
+	if _, err := core.UpdateEnv(svc.ID, same64, nil); err != nil {
+		t.Fatalf("UpdateEnv with 64 user keys + 2 platform injected secret keys must succeed, got %v", err)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusDeployFailed)
+}

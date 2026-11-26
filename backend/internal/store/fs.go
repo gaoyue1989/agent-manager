@@ -152,6 +152,11 @@ func validateEntry(zf *zip.File) error {
 	if len(name) > 512 || zf.Mode()&os.ModeSymlink != 0 {
 		return ErrZipSlip
 	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == ".." {
+			return ErrZipSlip
+		}
+	}
 	clean := filepath.Clean(name)
 	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") ||
 		strings.Contains(name, "\\") || strings.Contains(clean, "../") {
