@@ -14,6 +14,8 @@ public class SessionContextStore {
 
     private static final Pattern KEY_PATTERN = Pattern.compile("[A-Za-z0-9._-]{1,64}");
     private static final int MAX_TITLE_CHARS = 255;
+    public static final int DEFAULT_MAX_ENTRIES = 50;
+    private static final int ENTRY_RENDER_OVERHEAD = 8;
     private static final String STORAGE_ERROR = "session context store unavailable";
     static final int ORPHAN_BATCH_SIZE = 1000;
     static final int ORPHAN_MAX_BATCHES = 20;
@@ -37,7 +39,7 @@ public class SessionContextStore {
         """;
 
     private static final String LOCK_ENTRIES_SQL = """
-        SELECT context_key, content_chars FROM session_context WHERE session_id = ? FOR UPDATE
+        SELECT context_key, content_chars, title FROM session_context WHERE session_id = ? FOR UPDATE
         """;
 
     private static final String WRITE_SQL = """
@@ -121,7 +123,7 @@ public class SessionContextStore {
         T run(Connection conn) throws SQLException;
     }
 
-    private record LockedEntries(int otherChars, boolean keyExists) {
+    private record LockedEntries(int otherChars, int otherRenderedChars, int otherCount, boolean keyExists) {
     }
 
     public int maxTotalChars() {
@@ -154,9 +156,16 @@ public class SessionContextStore {
             }
             var locked = lockEntries(conn, sessionId, key);
             var totalChars = locked.otherChars() + content.length();
+            int renderedEntryChars = key.length() + effectiveTitle.length() + content.length() + ENTRY_RENDER_OVERHEAD;
+            int totalRenderedChars = locked.otherRenderedChars() + renderedEntryChars;
+            int nextCount = locked.otherCount() + 1;
             if (totalChars > maxTotalChars) {
                 conn.rollback();
                 return new UpsertOutcome.BudgetExceeded(content.length(), totalChars, maxTotalChars);
+            }
+            if (nextCount > DEFAULT_MAX_ENTRIES || totalRenderedChars > maxTotalChars) {
+                conn.rollback();
+                return new UpsertOutcome.BudgetExceeded(content.length(), totalRenderedChars, maxTotalChars);
             }
             try (var write = conn.prepareStatement(WRITE_SQL)) {
                 write.setString(1, sessionId);
@@ -312,20 +321,29 @@ public class SessionContextStore {
 
     private static LockedEntries lockEntries(Connection conn, String sessionId, String key) throws SQLException {
         int otherChars = 0;
+        int otherRenderedChars = 0;
+        int otherCount = 0;
         boolean keyExists = false;
         try (var lock = conn.prepareStatement(LOCK_ENTRIES_SQL)) {
             lock.setString(1, sessionId);
             try (var rows = lock.executeQuery()) {
                 while (rows.next()) {
-                    if (key.equals(rows.getString(1))) {
+                    var rowKey = rows.getString(1);
+                    if (key.equals(rowKey)) {
                         keyExists = true;
                     } else {
-                        otherChars += rows.getInt(2);
+                        int c = rows.getInt(2);
+                        var rowTitle = rows.getString(3);
+                        otherChars += c;
+                        otherRenderedChars += (rowKey != null ? rowKey.length() : 0)
+                            + (rowTitle != null ? rowTitle.length() : 0)
+                            + c + ENTRY_RENDER_OVERHEAD;
+                        otherCount++;
                     }
                 }
             }
         }
-        return new LockedEntries(otherChars, keyExists);
+        return new LockedEntries(otherChars, otherRenderedChars, otherCount, keyExists);
     }
 
     private static void validate(String sessionId, String requester, String key, String title, String content) {

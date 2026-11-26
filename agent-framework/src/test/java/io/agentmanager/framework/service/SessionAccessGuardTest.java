@@ -63,4 +63,12 @@ class SessionAccessGuardTest {
         assertNull(SessionAccessGuard.establishedOwner(store, "debug-user", "debug-user"));
         verifyNoInteractions(store);
     }
+
+    @Test
+    void ownedByAndEstablishedOwnerShouldSanitizeHeaderUserId633() {
+        var store = org.mockito.Mockito.mock(SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("sess-1")).thenReturn("auth0_user_12345");
+        assertTrue(SessionAccessGuard.ownedBy(store, "sess-1", "auth0|user:12345"));
+        assertEquals("auth0_user_12345", SessionAccessGuard.establishedOwner(store, "sess-1", "auth0|user:12345"));
+    }
 }

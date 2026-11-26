@@ -1028,6 +1028,11 @@ public class OpenSandbox extends AbstractBaseSandbox
      *         有效链 yes/no），回落原 test -e 真 exec（issue #394）
      */
     private Boolean translateExists(String relPath) throws Exception {
+        for (String seg : relPath.split("/")) {
+            if (".".equals(seg) || "..".equals(seg)) {
+                return null;
+            }
+        }
         var rawNormalized = normalizeRel(relPath);
         boolean trailingSlash = rawNormalized.length() > 1 && rawNormalized.endsWith("/");
         var normalized = stripTrailingSlashes(rawNormalized);
