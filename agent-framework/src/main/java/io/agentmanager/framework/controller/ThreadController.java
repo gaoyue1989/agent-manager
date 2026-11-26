@@ -166,6 +166,7 @@ public class ThreadController {
         var result = new ArrayList<Map<String, Object>>();
         try (var conn = dataSource.getConnection()) {
             if (userId != null && !userId.isBlank()) {
+                userId = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(userId);
                 // 指定 userId：session_user 过滤，agent_state 只取 updated_at（双形态匹配见 AGENT_STATE_JOIN）
                 // 排序/展示时间取 su.updated_at（每次 chat/confirm/A2A 消息都会刷新）与 agent_state
                 // 更新时间中的较大者：会话续聊后立即靠前；A2A 槽位为 "{tenant}__{sid}"（无冒号），

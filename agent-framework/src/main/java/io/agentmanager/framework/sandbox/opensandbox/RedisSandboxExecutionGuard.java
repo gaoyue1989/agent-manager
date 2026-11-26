@@ -161,7 +161,8 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
             return;
         }
         try {
-            if (key.getScope() != io.agentscope.harness.agent.IsolationScope.USER) {
+            if (key.getScope() != io.agentscope.harness.agent.IsolationScope.USER
+                    && key.getScope() != io.agentscope.harness.agent.IsolationScope.SESSION) {
                 return;
             }
             String value = key.getValue();
@@ -203,6 +204,9 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
         }
         String real = null;
         try {
+            if (sessionUserStore.existsAsUserId(raw)) {
+                return raw;
+            }
             real = sessionUserStore.findUserIdBySession(raw);
         } catch (Exception e) {
             // SessionUserStore 内部已 fail-soft，此处兜底防御

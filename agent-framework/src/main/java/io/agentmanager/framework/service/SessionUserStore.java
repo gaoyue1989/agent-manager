@@ -238,4 +238,19 @@ public class SessionUserStore {
             return 0;
         }
     }
+
+    public boolean existsAsUserId(String userId) {
+        if (userId == null || userId.isBlank() || PLACEHOLDER_USER.equals(userId)) {
+            return false;
+        }
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement("SELECT 1 FROM session_user WHERE user_id = ? LIMIT 1")) {
+            ps.setString(1, userId);
+            try (var rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (Exception e) {
+            return false;
+        }
+    }
 }
