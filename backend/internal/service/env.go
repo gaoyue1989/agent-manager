@@ -34,3 +34,46 @@ func ValidateEnv(env map[string]string) error {
 	}
 	return nil
 }
+
+func validateEnvForMerge(env map[string]string) error {
+	if len(env) > 2*MaxEnvKeys {
+		return fmt.Errorf("too many env keys: %d (max %d)", len(env), MaxEnvKeys)
+	}
+	for k, v := range env {
+		if !envKeyRe.MatchString(k) {
+			return fmt.Errorf("illegal env key %q", k)
+		}
+		for rk := range reservedKeys {
+			if k == rk {
+				return fmt.Errorf("env key %q is reserved by platform", k)
+			}
+		}
+		if len(v) > MaxEnvValueBytes {
+			return fmt.Errorf("env value of %q exceeds %d bytes", k, MaxEnvValueBytes)
+		}
+	}
+	return nil
+}
+
+func countUserEnvKeys(plain, secret map[string]string) int {
+	isPlatform := func(k string) bool {
+		for _, pk := range platformInjectedEnvKeys {
+			if k == pk {
+				return true
+			}
+		}
+		return false
+	}
+	n := 0
+	for k := range plain {
+		if !isPlatform(k) {
+			n++
+		}
+	}
+	for k := range secret {
+		if !isPlatform(k) {
+			n++
+		}
+	}
+	return n
+}
