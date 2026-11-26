@@ -1253,62 +1253,67 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	if err != nil {
 		return nil, nil, err
 	}
-	oldPlain, oldSecret, err := c.partitionServiceEnv(svc)
-	if err != nil {
-		return nil, nil, err
-	}
-	wasSandboxOn := false
-	if v, ok := oldPlain["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
-		wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
-	} else if v, ok := oldSecret["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
-		wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
-	} else if rawMD, ok := baseFiles["AGENTS.md"]; ok {
-		if oldCfg, parseErr := parseOAFConfig(string(rawMD)); parseErr == nil && oldCfg.Config != nil && oldCfg.Config.Sandbox != nil {
-			wasSandboxOn = oldCfg.Config.Sandbox.Enabled
-		}
-	}
-	if !wasSandboxOn && form.Sandbox.sandboxOn() {
-		sbxKeys := platformconfig.GroupKeys("sandbox")
-		for k, v := range c.platformDefaultEnv(form) {
-			if !sbxKeys[k] {
-				continue
-			}
-			_, inPlain := oldPlain[k]
-			_, inSecret := oldSecret[k]
-			if !inPlain && !inSecret {
-				oldPlain[k] = v
-			}
-		}
-	}
-	for k, v := range formEnv {
-		oldPlain[k] = v
-	}
-	if form.Sandbox != nil && form.Sandbox.Enabled != nil {
-		delete(oldPlain, "SANDBOX_ENABLED")
-		if _, inSecret := oldSecret["SANDBOX_ENABLED"]; inSecret {
-			oldPlain["SANDBOX_ENABLED"] = ""
-		}
-		if !*form.Sandbox.Enabled {
-			for k := range platformconfig.GroupKeys("sandbox") {
-				delete(oldPlain, k)
-				if _, inSecret := oldSecret[k]; inSecret {
-					oldPlain[k] = ""
-				}
-			}
-		}
-	}
-	if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {
-		for _, k := range clearKeys { // 表单显式默认/关：清除既有显式键（切回平台派生）
-			delete(oldPlain, k)
-		}
-	}
 	public := form.PublicEndpoint == nil || *form.PublicEndpoint
 	newPkgID := newPkg.ID
 	opt := RepublishOptions{
-		PackageID: &newPkgID,
-		Replicas:  intPtr(form.Replicas), Env: oldPlain, SecretKeys: secretKeys,
-		Spec: &form.Spec, PublicEndpoint: &public,
-		ProvisionSandboxPool: form.Sandbox.sandboxOn(), Actor: userID,
+		PackageID:            &newPkgID,
+		Replicas:             intPtr(form.Replicas),
+		Spec:                 &form.Spec,
+		PublicEndpoint:       &public,
+		ProvisionSandboxPool: form.Sandbox.sandboxOn(),
+		Actor:                userID,
+		EnvTransform: func(oldPlain, oldSecret map[string]string) (map[string]string, []string) {
+			merged := make(map[string]string, len(oldPlain)+len(formEnv))
+			for k, v := range oldPlain {
+				merged[k] = v
+			}
+			wasSandboxOn := false
+			if v, ok := merged["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
+				wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
+			} else if v, ok := oldSecret["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
+				wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
+			} else if rawMD, ok := baseFiles["AGENTS.md"]; ok {
+				if oldCfg, parseErr := parseOAFConfig(string(rawMD)); parseErr == nil && oldCfg.Config != nil && oldCfg.Config.Sandbox != nil {
+					wasSandboxOn = oldCfg.Config.Sandbox.Enabled
+				}
+			}
+			if !wasSandboxOn && form.Sandbox.sandboxOn() {
+				sbxKeys := platformconfig.GroupKeys("sandbox")
+				for k, v := range c.platformDefaultEnv(form) {
+					if !sbxKeys[k] {
+						continue
+					}
+					_, inPlain := merged[k]
+					_, inSecret := oldSecret[k]
+					if !inPlain && !inSecret {
+						merged[k] = v
+					}
+				}
+			}
+			for k, v := range formEnv {
+				merged[k] = v
+			}
+			if form.Sandbox != nil && form.Sandbox.Enabled != nil {
+				delete(merged, "SANDBOX_ENABLED")
+				if _, inSecret := oldSecret["SANDBOX_ENABLED"]; inSecret {
+					merged["SANDBOX_ENABLED"] = ""
+				}
+				if !*form.Sandbox.Enabled {
+					for k := range platformconfig.GroupKeys("sandbox") {
+						delete(merged, k)
+						if _, inSecret := oldSecret[k]; inSecret {
+							merged[k] = ""
+						}
+					}
+				}
+			}
+			if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {
+				for _, k := range clearKeys {
+					delete(merged, k)
+				}
+			}
+			return merged, secretKeys
+		},
 	}
 	if form.Image != "" {
 		opt.Image = &form.Image // 空 = 沿用现镜像（UpdateEnv/Republish 语义）

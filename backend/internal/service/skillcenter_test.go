@@ -3,6 +3,7 @@
 package service
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"strings"
@@ -100,22 +101,23 @@ func TestCreateSkillFromZip(t *testing.T) {
 	if _, _, err := c.CreateSkillFromZip(7, 1, "b.zip", bytes.NewReader(bad), "", "", "", nil, false); err == nil {
 		t.Fatal("expected zip without skills/ rejected")
 	}
-	// 不合规 SKILL.md → warnings 不阻断
-	badSkill, _ := buildZipBytes(map[string][]byte{
+	// 无 SKILL.md → 400 拒绝（#626）
+	noMdSkill, _ := buildZipBytes(map[string][]byte{
 		"skills/broken/README.md": []byte("no SKILL.md"),
 	})
-	_, warnings, err = c.CreateSkillFromZip(7, 1, "b2.zip", bytes.NewReader(badSkill), "", "", "desc", nil, false)
+	if _, _, err := c.CreateSkillFromZip(7, 1, "b2.zip", bytes.NewReader(noMdSkill), "", "", "desc", nil, false); err == nil {
+		t.Fatal("expected zip without SKILL.md rejected")
+	}
+	// 不合规 SKILL.md（有文件但缺 frontmatter）→ warnings 不阻断
+	badMdSkill, _ := buildZipBytes(map[string][]byte{
+		"skills/broken/SKILL.md": []byte("# no frontmatter"),
+	})
+	_, warnings, err = c.CreateSkillFromZip(7, 1, "b3.zip", bytes.NewReader(badMdSkill), "", "", "desc", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, w := range warnings {
-		if strings.Contains(w, "missing skills/broken/SKILL.md") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected compliance warning, got %v", warnings)
+	if len(warnings) == 0 {
+		t.Fatalf("expected compliance warning for non-compliant SKILL.md")
 	}
 }
 
@@ -541,5 +543,82 @@ func TestCreateSkillFromZipWrappedLayouts(t *testing.T) {
 		if !strings.HasPrefix(p, "skills/beta/") {
 			t.Fatalf("unexpected stored file %q", p)
 		}
+	}
+}
+
+func TestCreateSkillFromZipHardening626_627_628(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-zip-hardening", "zip硬化")
+	makeZipBytes := func(t *testing.T, entries map[string]string) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		for k, v := range entries {
+			w, err := zw.Create(k)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Write([]byte(v)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	skillMD := "---\nname: demo-skill\ndescription: test skill\n---\n# Demo\n"
+
+	dotSlashZip := makeZipBytes(t, map[string]string{
+		"./SKILL.md":       skillMD,
+		"./scripts/run.sh": "echo hi",
+	})
+	sk1, _, err := c.CreateSkillFromZip(ws.ID, 1, "my-skill.zip", bytes.NewReader(dotSlashZip), "", "", "", nil, true)
+	if err != nil {
+		t.Fatalf("#628 ./ prefix zip failed: %v", err)
+	}
+	if sk1.Name != "demo-skill" {
+		t.Fatalf("expected demo-skill, got %q", sk1.Name)
+	}
+
+	nestedMacZip := makeZipBytes(t, map[string]string{
+		"outer/nested-skill/SKILL.md":     "---\nname: nested-skill\ndescription: nested\n---\n# N\n",
+		"outer/__MACOSX/meta.txt":         "junk",
+		"outer/nested-skill/scripts/a.sh": "echo ok",
+	})
+	sk2, _, err := c.CreateSkillFromZip(ws.ID, 1, "nested.zip", bytes.NewReader(nestedMacZip), "", "", "", nil, true)
+	if err != nil {
+		t.Fatalf("#628 nested __MACOSX zip failed: %v", err)
+	}
+	if sk2.Name != "nested-skill" {
+		t.Fatalf("expected nested-skill, got %q", sk2.Name)
+	}
+
+	traversalZip := makeZipBytes(t, map[string]string{
+		"wrapper/SKILL.md":                       "---\nname: legit\ndescription: d\n---\n# ok\n",
+		"wrapper/sub/../../evil-sibling/pwn.txt": "pwn",
+	})
+	if _, _, err := c.CreateSkillFromZip(ws.ID, 1, "trav.zip", bytes.NewReader(traversalZip), "legit", "", "", nil, true); err == nil {
+		t.Fatalf("#627 expected zip with .. segment to be rejected")
+	}
+
+	noMdZip := makeZipBytes(t, map[string]string{
+		"skills/no-md-skill/notes.txt": "hello",
+	})
+	if _, _, err := c.CreateSkillFromZip(ws.ID, 1, "nomd.zip", bytes.NewReader(noMdZip), "", "desc", "", nil, true); err == nil {
+		t.Fatalf("#626 expected skills/ zip without SKILL.md to be rejected")
+	}
+
+	skillsDirZip := makeZipBytes(t, map[string]string{
+		"skills/SKILL.md":       "---\nname: skills\ndescription: d\n---\n# ok\n",
+		"skills/scripts/run.sh": "echo ok",
+	})
+	sk3, _, err := c.CreateSkillFromZip(ws.ID, 1, "skills.zip", bytes.NewReader(skillsDirZip), "", "", "", nil, true)
+	if err != nil {
+		t.Fatalf("#626 C-layout skills/ zip failed: %v", err)
+	}
+	if sk3.Name != "skills" {
+		t.Fatalf("expected skills, got %q", sk3.Name)
 	}
 }
