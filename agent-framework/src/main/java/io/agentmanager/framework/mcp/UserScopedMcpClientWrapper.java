@@ -2,8 +2,10 @@ package io.agentmanager.framework.mcp;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,6 +44,11 @@ import reactor.core.publisher.Mono;
     /** 本次调用 header 集在 McpTransportContext 中的载体 key（进程内约定，随调用链传递） */
     public static final String HEADER_KEY = "io.agentmanager/mcpUserHeaders";
 
+    private static final String REDACTED = "[REDACTED]";
+
+    private record InjectedArguments(Map<String, Object> outbound, Set<String> injectedKeys) {
+    }
+
     private final McpClientWrapper delegate;
     private final UserHeaderRule rule;
 
@@ -76,12 +83,14 @@ import reactor.core.publisher.Mono;
         } catch (McpUserHeaderException e) {
             return Mono.error(e);
         }
-        var outboundArguments = injectArguments(toolName, arguments, meta);
+        var injected = injectArguments(toolName, arguments, meta);
+        var outboundArguments = injected.outbound();
+        var tracedArguments = redactForTracing(outboundArguments, injected.injectedKeys());
         var outboundMeta = stripForwardKeys(meta);
         // MCP 出站调用追踪（chat-trace-observability-design §1）：本方法已是最内层装饰器、
         // 唯一同时知道 server 名/最终出站参数/注入头清单的地方，span 在此创建（execute_tool
         // 之下的 mcp.call_tool 子 span；OTel 关闭或父 span 无效时零开销放行）
-        return McpCallTracing.callTool(getName(), toolName, outboundArguments, outboundMeta,
+        return McpCallTracing.callTool(getName(), toolName, tracedArguments, outboundMeta,
             resolved.keySet(), () -> {
                 if (resolved.isEmpty()) {
                     // 全部 passthrough 跳过：静态 header 生效
@@ -91,6 +100,20 @@ import reactor.core.publisher.Mono;
                 return delegate.callTool(toolName, outboundArguments, outboundMeta)
                         .contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext));
             });
+    }
+
+    private static Map<String, Object> redactForTracing(Map<String, Object> outboundArguments,
+                                                        Set<String> injectedKeys) {
+        if (outboundArguments == null || injectedKeys.isEmpty()) {
+            return outboundArguments;
+        }
+        var redacted = new LinkedHashMap<String, Object>(outboundArguments);
+        for (var key : injectedKeys) {
+            if (redacted.containsKey(key)) {
+                redacted.put(key, REDACTED);
+            }
+        }
+        return redacted;
     }
 
     /**
@@ -204,12 +227,13 @@ import reactor.core.publisher.Mono;
      * @return 注入后的入参（防御性拷贝，入参可能不可变）；无可注入项时原引用返回
      *         （零拷贝热路径）
      */
-    private Map<String, Object> injectArguments(String toolName, Map<String, Object> arguments,
-                                                Map<String, Object> meta) {
+    private InjectedArguments injectArguments(String toolName, Map<String, Object> arguments,
+                                              Map<String, Object> meta) {
         if (rule.arguments().isEmpty()) {
-            return arguments;
+            return new InjectedArguments(arguments, Set.of());
         }
         Map<String, Object> merged = null;
+        Set<String> injectedKeys = null;
         for (var entry : rule.arguments().entrySet()) {
             var argName = entry.getKey();
             var value = meta != null ? meta.get(entry.getValue()) : null;
@@ -233,10 +257,14 @@ import reactor.core.publisher.Mono;
             }
             if (merged == null) {
                 merged = arguments != null ? new LinkedHashMap<>(arguments) : new LinkedHashMap<>();
+                injectedKeys = new LinkedHashSet<>();
             }
             merged.put(argName, text);
+            injectedKeys.add(argName);
         }
-        return merged != null ? merged : arguments;
+        return new InjectedArguments(
+            merged != null ? merged : arguments,
+            injectedKeys != null ? injectedKeys : Set.of());
     }
 
     /**

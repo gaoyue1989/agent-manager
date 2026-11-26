@@ -87,6 +87,68 @@ class McpCallTracingTest extends TracingTestBase {
     }
 
     @Test
+    void wrapperRedactsInjectedArgumentsInSpanWhileSendingRawOutbound() {
+        var seenOutbound = new java.util.concurrent.atomic.AtomicReference<Map<String, Object>>();
+        var delegate = new io.agentscope.core.tool.mcp.McpClientWrapper("secret-srv") {
+            @Override
+            public Mono<Void> initialize() {
+                return Mono.empty();
+            }
+
+            @Override
+            public Mono<java.util.List<McpSchema.Tool>> listTools() {
+                return Mono.just(java.util.List.of());
+            }
+
+            @Override
+            public Mono<McpSchema.CallToolResult> callTool(String toolName, Map<String, Object> arguments) {
+                return callTool(toolName, arguments, null);
+            }
+
+            @Override
+            public Mono<McpSchema.CallToolResult> callTool(
+                    String toolName, Map<String, Object> arguments, Map<String, Object> meta) {
+                seenOutbound.set(arguments);
+                return Mono.just(OK_RESULT);
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        var rule = new UserHeaderRule(
+            Map.of(),
+            Map.of("apiKey", "reqHeader:x-api-key", "explicitArg", "reqHeader:x-explicit"),
+            false);
+        var scoped = new UserScopedMcpClientWrapper(delegate, rule);
+
+        var tracer = GlobalOpenTelemetry.getTracer("test");
+        Span parent = tracer.spanBuilder("execute_tool").startSpan();
+        try (var scope = parent.makeCurrent()) {
+            scoped.callTool(
+                "query_orders",
+                Map.of("query", "hello", "explicitArg", "model-val"),
+                Map.of("reqHeader:x-api-key", "secret-token-xyz", "reqHeader:x-explicit", "header-val")
+            ).block();
+        } finally {
+            parent.end();
+        }
+
+        assertEquals("secret-token-xyz", seenOutbound.get().get("apiKey"));
+        assertEquals("model-val", seenOutbound.get().get("explicitArg"));
+        assertEquals("hello", seenOutbound.get().get("query"));
+
+        var spans = findSpans("mcp.call_tool");
+        assertEquals(1, spans.size());
+        String recordedArgs = String.valueOf(spans.get(0).getAttributes().get(
+            io.opentelemetry.api.common.AttributeKey.stringKey("mcp.call.arguments")));
+        assertFalse(recordedArgs.contains("secret-token-xyz"), recordedArgs);
+        assertTrue(recordedArgs.contains("\"apiKey\":\"[REDACTED]\""), recordedArgs);
+        assertTrue(recordedArgs.contains("\"query\":\"hello\""), recordedArgs);
+        assertTrue(recordedArgs.contains("\"explicitArg\":\"model-val\""), recordedArgs);
+    }
+
+    @Test
     void noParentSpanPassesThroughWithoutCreatingOrphans() {
         // 父 span 无效（context 断链）：不建 span 直接放行——绝不产生孤儿 trace（§1.3）
         var result = McpCallTracing.callTool("weather", "get_weather", Map.of(), null, Set.of(),

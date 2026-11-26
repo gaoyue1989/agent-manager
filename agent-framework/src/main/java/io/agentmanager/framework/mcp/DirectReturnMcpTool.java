@@ -6,6 +6,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.agentmanager.framework.service.ActingDenials;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
@@ -44,19 +45,28 @@ public final class DirectReturnMcpTool extends ToolBase {
 
     @Override
     public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+        var ctx = param != null ? param.getRuntimeContext() : null;
+        boolean suppressDirectReturn = ctx != null
+            && Boolean.TRUE.equals(ctx.get(ActingDenials.SUPPRESS_DIRECT_RETURN_KEY));
         return delegate.callAsync(param).map(result -> {
             boolean failed = result.isSuspended() || FAILED_STATES.contains(result.getState());
             boolean presentable = result.getOutput() != null && result.getOutput().stream()
                 .anyMatch(block -> !(block instanceof TextBlock text)
                     || (text.getText() != null && !text.getText().isBlank()));
-            if (failed || presentable) {
+            if (failed) {
                 return result;
             }
-            log.warn("[MCP] direct_return tool '{}' returned empty content, "
-                + "short-circuit skipped so the model handles it", getName());
-            return ToolResultBlock.error("MCP tool '" + getName()
-                + "' is configured as direct_return but returned empty content; "
-                + "nothing was presented to the user");
+            if (!presentable) {
+                log.warn("[MCP] direct_return tool '{}' returned empty content, "
+                    + "short-circuit skipped so the model handles it", getName());
+                return ToolResultBlock.error("MCP tool '" + getName()
+                    + "' is configured as direct_return but returned empty content; "
+                    + "nothing was presented to the user");
+            }
+            if (suppressDirectReturn) {
+                return result.withState(ToolResultState.ERROR);
+            }
+            return result;
         });
     }
 
