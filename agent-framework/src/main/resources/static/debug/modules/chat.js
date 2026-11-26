@@ -854,10 +854,43 @@ function addAssistantHistory(content, toolCalls, blocks) {
         group = null;
       }
     };
+    const resolveImageSrc = (b) => {
+      if (typeof b.url === 'string' && b.url.trim()) {
+        const u = b.url.trim();
+        const l = u.toLowerCase();
+        if (l.startsWith('https://') || l.startsWith('http://') || l.startsWith('data:image/') || u.startsWith('/files/')) {
+          return u;
+        }
+        return null;
+      }
+      if (typeof b.data === 'string' && b.data.trim()) {
+        const mime = b.media_type && b.media_type.startsWith('image/') ? b.media_type : 'image/png';
+        return 'data:' + mime + ';base64,' + b.data.trim();
+      }
+      return null;
+    };
+    const appendImage = (src, mime) => {
+      const bubbleEl = document.createElement('div');
+      bubbleEl.className = 'msg-bubble';
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = mime || 'image';
+      img.style.maxWidth = '100%';
+      img.style.maxHeight = '240px';
+      img.style.borderRadius = '8px';
+      bubbleEl.appendChild(img);
+      msg.appendChild(bubbleEl);
+    };
     for (const b of blocks) {
       if (b && b.type === 'text' && b.text) {
         flushGroup();
         appendBubble(b.text);
+      } else if (b && b.type === 'image') {
+        const imgSrc = resolveImageSrc(b);
+        if (imgSrc) {
+          flushGroup();
+          appendImage(imgSrc, b.media_type);
+        }
       } else if (b && b.type === 'tool') {
         const tc = (toolCalls || []).find((c) => b.id && c.id === b.id) || {};
         group = group || [];

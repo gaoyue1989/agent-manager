@@ -140,6 +140,19 @@ test("buildHistoryAssistantMessage keeps both text and inline images for mixed d
         download_url: "data:image/png;base64,iVBORw0KGgo=",
       },
     ],
+    blocks: [
+      { type: "text", text: "Order chart summary" },
+      {
+        type: "image",
+        file: {
+          file_id: "inline-direct-m-1-0",
+          file_name: "inline-image",
+          mime_type: "image/png",
+          size: 0,
+          download_url: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+    ],
   });
 
   const imgOnly = buildHistoryAssistantMessage({
@@ -154,4 +167,50 @@ test("buildHistoryAssistantMessage keeps both text and inline images for mixed d
   assert.deepEqual(textOnly, { role: "assistant", content: "hello" });
 
   assert.equal(buildHistoryAssistantMessage({ content: "", blocks: [] }), null);
+});
+
+test("buildHistoryAssistantMessage preserves interleaved block order and drops empty or unsafe images", async () => {
+  const { buildHistoryAssistantMessage, isSafeInlineImageUrl, normalizeStoredSessionId, appendAssistantTextBlock, appendAssistantImageBlock } = await import("./assistant-events.ts");
+  const ordered = buildHistoryAssistantMessage({
+    msg_id: "m-3",
+    content: "first\nsecond",
+    blocks: [
+      { type: "image", media_type: "image/png", data: "AAA=" },
+      { type: "text", text: "first" },
+      { type: "image", media_type: "image/webp", url: "https://example.com/2.webp" },
+      { type: "image", media_type: "image/png" },
+      { type: "image", media_type: "image/png", url: "javascript:alert(1)" },
+      { type: "text", text: "second" },
+    ],
+  });
+  assert.equal(ordered?.blocks?.length, 4);
+  assert.equal(ordered?.blocks?.[0].type, "image");
+  assert.equal(ordered?.blocks?.[1].type, "text");
+  assert.equal(ordered?.blocks?.[2].type, "image");
+  assert.equal(ordered?.blocks?.[3].type, "text");
+  assert.equal(ordered?.files?.length, 2);
+  assert.equal(ordered?.files?.[1].download_url, "https://example.com/2.webp");
+
+  assert.equal(buildHistoryAssistantMessage({ content: "", blocks: [{ type: "image", media_type: "image/png" }] }), null);
+  assert.equal(isSafeInlineImageUrl("https://example.com/a.png"), true);
+  assert.equal(isSafeInlineImageUrl("/files/a.png"), true);
+  assert.equal(isSafeInlineImageUrl("data:image/png;base64,AAA="), true);
+  assert.equal(isSafeInlineImageUrl("javascript:alert(1)"), false);
+
+  assert.equal(normalizeStoredSessionId("u-1001-mk12ab-3f4c5d", () => "webui-new"), "webui-new");
+  assert.equal(normalizeStoredSessionId("gw-3f20f08c5499", () => "webui-new"), "webui-new");
+  assert.equal(normalizeStoredSessionId("debug-user", () => "webui-new"), "webui-new");
+  assert.equal(normalizeStoredSessionId("webui-existing", () => "webui-new"), "webui-existing");
+
+  let blocks = appendAssistantTextBlock(undefined, "", "hello ");
+  blocks = appendAssistantTextBlock(blocks, "hello ", "world");
+  blocks = appendAssistantImageBlock(blocks, "hello world", {
+    file_id: "img-1",
+    file_name: "inline-image",
+    mime_type: "image/png",
+    size: 0,
+    download_url: "https://example.com/a.png",
+  });
+  blocks = appendAssistantTextBlock(blocks, "hello world", "after");
+  assert.deepEqual(blocks.map((b) => b.type), ["text", "image", "text"]);
 });
