@@ -1147,13 +1147,14 @@ curl http://localhost:8100/actuator/health
 
 ## 数据库表（无状态单次流架构）
 
-自建 14 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V15，启动自动执行，
-存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context` / `turn_lease` /
-`tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user` /
-`session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）/
-`turn_intent`（V10，排队 turn 意图）/ `turn_stop`（V13，单轮停止请求）/
-`sandbox_user`（V15，单用户沙箱配额计数锚，binding_count 与绑定行数不变量）/
-`sandbox_binding`（V15，沙箱借出簿记：uk_sandbox/uk_session 唯一键 + PENDING 占额行；见 sandbox-pool-opensandbox-design §4.1）。
+自建 14 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V19，启动自动执行，
+存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context`（V16 补 `skills` 列）/
+`turn_lease` / `tool_audit_log`（V17 补 `result_state` 列）/ `ui_context` / `file_asset` /
+`model_config` / `session_user` / `session_message`（V5，消息轨归档；V14 补 `trace_id`）/
+`remote_task_registry`（V8，远程子任务在途登记）/ `turn_intent`（V10，排队 turn 意图）/
+`turn_stop`（V13，单轮停止请求）/ `sandbox_user`（V15，单用户沙箱配额计数锚，binding_count 与绑定行数不变量）/
+`sandbox_binding`（V15，沙箱借出簿记：uk_sandbox/uk_session 唯一键 + PENDING 占额行；见 sandbox-pool-opensandbox-design §4.1）/
+`session_context`（V19，会话注入上下文持久化）；历史 `kv_sync_key` 表已于 V18 删除。
 设计与规范见 [db-migration-flyway-design.md](../../docs/design/db-migration-flyway-design.md)。
 
 事件流（`session_event`）已整体迁至 Redis Streams，见本节末。SDK 侧的
@@ -1289,7 +1290,7 @@ MCP Apps 静默上下文（卡片与 LLM 共享的中间态，见 [mcp-apps-exte
 
 ---
 
-### kv_sync_key
+### kv_sync_key（已于 V18 删除）
 
 KV 同步去重键（沙箱 `WorkspaceSyncService` 回写时避免重复写，见 [opensandbox-integration-plan.md](opensandbox-integration-plan.md)）。
 
