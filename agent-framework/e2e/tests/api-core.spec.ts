@@ -1739,7 +1739,7 @@ test('CX2 归属：他人会话的注入/查询/移除全部 404，归属用户�
   expect(JSON.stringify(own.body)).not.toContain('B 的篡改');
   expect(JSON.stringify(await threads(BASE, userB))).not.toContain(sid);
 
-  expect((await injectContext(`u-${uniq()}`, { key: 'k', content: 'a' }, BASE, userA)).status).toBe(404);
+  expect((await injectContext(`u-${Date.now()}`, { key: 'k', content: 'a' }, BASE, userA)).status).toBe(404);
   expect((await injectContext('debug-user', { key: 'k', content: 'a' }, BASE, userA)).status).toBe(404);
 });
 
