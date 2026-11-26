@@ -43,7 +43,7 @@ public record BrowserProperties(
         }
         int colon = hostPort.indexOf(':');
         String host = colon >= 0 ? hostPort.substring(0, colon) : hostPort;
-        return host.isEmpty() || "*".equals(host);
+        return host.isEmpty() || host.replace("*", "").replace(".", "").isEmpty();
     }
 
     public long takeoverTtlSeconds() {

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"io"
 	"path/filepath"
 	"regexp"
@@ -370,7 +371,11 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 	c.DB.Model(&store.SkillVersion{}).Where("id = ?", created.LatestVersionID).
 		Updates(map[string]interface{}{"storage_dir": ver.StorageDir, "checksum": ver.Checksum})
 	// 文件清单落 FilesJSON（含 sha256，供下载校验）
-	filesInfo, _ := c.skillVersionFiles(created.ID, ver.Version)
+	filesInfo, ferr := c.skillVersionFiles(created.ID, ver.Version)
+	if ferr != nil {
+		slog.Warn("skillcenter: failed to collect version files", "skillId", created.ID, "version", ver.Version, "err", ferr)
+		filesInfo = []SkillFileInfo{}
+	}
 	c.DB.Model(&store.SkillVersion{}).Where("id = ?", created.LatestVersionID).
 		Update("files_json", mustJSON(filesInfo))
 	return created, warnings, nil

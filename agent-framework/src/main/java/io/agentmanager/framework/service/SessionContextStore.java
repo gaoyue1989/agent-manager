@@ -96,6 +96,9 @@ public class SessionContextStore {
 
         record BudgetExceeded(int contentChars, int totalChars, int maxTotalChars) implements UpsertOutcome {
         }
+
+        record EntryLimitExceeded(int count, int maxEntries) implements UpsertOutcome {
+        }
     }
 
     public sealed interface RemoveOutcome {
@@ -163,7 +166,11 @@ public class SessionContextStore {
                 conn.rollback();
                 return new UpsertOutcome.BudgetExceeded(content.length(), totalChars, maxTotalChars);
             }
-            if (nextCount > DEFAULT_MAX_ENTRIES || totalRenderedChars > maxTotalChars) {
+            if (nextCount > DEFAULT_MAX_ENTRIES) {
+                conn.rollback();
+                return new UpsertOutcome.EntryLimitExceeded(nextCount, DEFAULT_MAX_ENTRIES);
+            }
+            if (totalRenderedChars > maxTotalChars) {
                 conn.rollback();
                 return new UpsertOutcome.BudgetExceeded(content.length(), totalRenderedChars, maxTotalChars);
             }

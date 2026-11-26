@@ -316,8 +316,13 @@ func CleanSubPath(sub string) (string, error) {
 	if sub == "" {
 		return "", fmt.Errorf("%w: empty", ErrZipSlip)
 	}
-	if len(sub) > 512 || strings.Contains(sub, "\\") || strings.Contains(sub, "..") {
+	if len(sub) > 512 || strings.Contains(sub, "\\") {
 		return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+	}
+	for _, seg := range strings.Split(sub, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+		}
 	}
 	clean := strings.TrimPrefix(filepath.Clean("/"+sub), "/")
 	if clean == "" || clean == "." {
