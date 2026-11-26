@@ -266,46 +266,32 @@ public class McpToolRegistrar {
                 mcp.server(), e.getMessage());
             return null;
         }
-        var prev = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
-        if (prev != null) {
+        for (int attempt = 0; attempt < 4; attempt++) {
+            var prev = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
+            if (prev == null) {
+                break;
+            }
             if (prev instanceof ReconnectableMcpClientWrapper dead && dead.isClosed()) {
-                // closed 终态句柄不可换芯（swap 拒绝 closed，issue #490）：新建健康连接
-                // 顶替驱逐，注册走新建句柄；replace 竞态失败时复用 prev（注册即验证，
-                // closed 句柄由注册失败路径清除）
                 if (sharedWrappers.replace(mcp.server(), prev, wrapper)) {
                     log.info("[MCP] synthetic server '{}' closed shared handle replaced with fresh build",
                         mcp.server());
-                } else {
-                    var current = sharedWrappers.get(mcp.server());
-                    if (current != null && !(current instanceof ReconnectableMcpClientWrapper c && c.isClosed())) {
-                        closeQuietly(wrapper);
-                        wrapper = current;
-                    } else {
-                        var raced = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
-                        if (raced != null && raced != wrapper) {
-                            closeQuietly(wrapper);
-                            wrapper = raced;
-                        }
-                    }
+                    break;
                 }
-            } else if (prev instanceof ReconnectableMcpClientWrapper reconnectable && reconnectable.poisoned()) {
-                // 毒化句柄换芯（issue #417，issue #493 与 rebuildSharedWrapper 语义对称化）：
-                // 统一走 rebuildSharedWrapper 的 per-server 单飞 + initialize 握手（注册表
-                // 工厂同源，本方法已登记）——本会话未握手直连 swap 会在看门狗在途/刚完成的
-                // 健康换芯上覆盖死连接；本地构建的连接从未入缓存即刻关闭
+                continue;
+            }
+            if (prev instanceof ReconnectableMcpClientWrapper reconnectable && reconnectable.poisoned()) {
                 closeQuietly(wrapper);
                 if (rebuildSharedWrapper(mcp.server(), mcp)) {
                     log.info("[MCP] synthetic server '{}' poisoned shared handle rebuilt in place", mcp.server());
                 }
                 wrapper = prev;
-            } else {
-                // 缓存已有句柄：被拒 wrapper 从未入缓存即无任何持有者，即刻关闭
-                // （sharedClient 竞态败者 closeQuietly 同款先例），注册走既有句柄
-                log.info("[MCP] synthetic server '{}' already has a shared handle, reusing (rejected wrapper closed)",
-                    mcp.server());
-                closeQuietly(wrapper);
-                wrapper = prev;
+                break;
             }
+            log.info("[MCP] synthetic server '{}' already has a shared handle, reusing (rejected wrapper closed)",
+                mcp.server());
+            closeQuietly(wrapper);
+            wrapper = prev;
+            break;
         }
         // 毒化比对基准快照（issue #493）：注册期间看门狗换芯后，旧连接的迟到失败不得毒化新 delegate
         var poisonTarget = wrapper instanceof ReconnectableMcpClientWrapper r ? r.delegate() : null;
