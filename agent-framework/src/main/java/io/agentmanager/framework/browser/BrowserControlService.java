@@ -3,6 +3,8 @@ package io.agentmanager.framework.browser;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +29,7 @@ public class BrowserControlService implements SandboxHoldSignal {
     private final BrowserControlStore store;
     private final TurnStopService turnStopService;
     private final SandboxRuntime sandboxRuntime;
+    private final Map<String, Set<String>> heldSessionsByUser = new ConcurrentHashMap<>();
     private final SandboxLocator sandboxLocator;
 
     public BrowserControlService(BrowserControlStore store,
@@ -66,6 +69,9 @@ public class BrowserControlService implements SandboxHoldSignal {
 
     public TakeoverResult takeover(String sessionId, String userId, String reason, String trigger) {
         store.takeover(sessionId, reason, userId, trigger);
+        if (userId != null && !userId.isBlank()) {
+            heldSessionsByUser.computeIfAbsent(userId, k -> ConcurrentHashMap.newKeySet()).add(sessionId);
+        }
         String stop = null;
         if (TRIGGER_USER.equals(trigger)) {
             try {
@@ -82,6 +88,7 @@ public class BrowserControlService implements SandboxHoldSignal {
 
     public boolean release(String sessionId) {
         boolean released = store.release(sessionId);
+        heldSessionsByUser.values().forEach(s -> s.remove(sessionId));
         log.info("[browser-control] release: sid={}, changed={}", sessionId, released);
         return released;
     }
@@ -92,6 +99,9 @@ public class BrowserControlService implements SandboxHoldSignal {
         }
         try {
             store.takeover(sessionId, prev.reason(), prev.by(), prev.trigger());
+            if (prev.by() != null && !prev.by().isBlank()) {
+                heldSessionsByUser.computeIfAbsent(prev.by(), k -> ConcurrentHashMap.newKeySet()).add(sessionId);
+            }
         } catch (Exception e) {
             log.warn("[browser-control] restore control lock failed (sid={}): {}", sessionId, e.getMessage());
         }
@@ -126,6 +136,24 @@ public class BrowserControlService implements SandboxHoldSignal {
 
     @Override
     public boolean isHeld(String sessionId) {
-        return isHumanControlled(sessionId);
+        if (isHumanControlled(sessionId)) {
+            return true;
+        }
+        if (sessionId == null || sessionId.isBlank()) {
+            return false;
+        }
+        var sessions = heldSessionsByUser.get(sessionId);
+        if (sessions == null || sessions.isEmpty()) {
+            return false;
+        }
+        boolean anyHeld = false;
+        for (var sid : sessions) {
+            if (isHumanControlled(sid)) {
+                anyHeld = true;
+            } else {
+                sessions.remove(sid);
+            }
+        }
+        return anyHeld;
     }
 }

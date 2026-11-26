@@ -15,6 +15,37 @@ public record BrowserProperties(
     @DefaultValue List<String> allowedOriginPatterns
 ) {
 
+    public BrowserProperties {
+        if (allowedOriginPatterns != null) {
+            for (var raw : allowedOriginPatterns) {
+                if (raw == null) {
+                    continue;
+                }
+                var trimmed = raw.trim();
+                if (!trimmed.isEmpty() && isUnconstrainedWildcard(trimmed)) {
+                    throw new IllegalArgumentException(
+                        "Wildcard browser origin pattern without host constraint is not allowed: " + trimmed);
+                }
+            }
+        }
+    }
+
+    public static boolean isUnconstrainedWildcard(String pattern) {
+        String s = pattern.trim();
+        if ("*".equals(s)) {
+            return true;
+        }
+        int schemeSep = s.indexOf("://");
+        String hostPort = schemeSep >= 0 ? s.substring(schemeSep + 3) : s;
+        int slash = hostPort.indexOf('/');
+        if (slash >= 0) {
+            hostPort = hostPort.substring(0, slash);
+        }
+        int colon = hostPort.indexOf(':');
+        String host = colon >= 0 ? hostPort.substring(0, colon) : hostPort;
+        return host.isEmpty() || "*".equals(host);
+    }
+
     public long takeoverTtlSeconds() {
         return takeoverTtlMinutes * 60L;
     }

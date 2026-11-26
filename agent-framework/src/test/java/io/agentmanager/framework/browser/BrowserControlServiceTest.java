@@ -136,4 +136,15 @@ class BrowserControlServiceTest {
         assertTrue(service.isHumanControlled(SESSION));
         verify(store, org.mockito.Mockito.times(2)).isHumanControlled(eq(SESSION));
     }
+
+    @Test
+    void isHeldShouldMatchA2AUserKeyWhenSessionIsUnderTakeover637() {
+        when(store.isHumanControlled("a2a-sess-1")).thenReturn(true);
+        when(store.isHumanControlled("u-alice")).thenReturn(false);
+        service.takeover("a2a-sess-1", "u-alice", "login", "agent");
+        assertTrue(service.isHeld("u-alice"), "A2A userKey must report held while session is under takeover");
+        when(store.release("a2a-sess-1")).thenReturn(true);
+        service.release("a2a-sess-1");
+        assertFalse(service.isHeld("u-alice"), "A2A userKey must clear after release");
+    }
 }
