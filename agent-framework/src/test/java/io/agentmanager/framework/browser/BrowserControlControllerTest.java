@@ -315,4 +315,27 @@ class BrowserControlControllerTest {
             .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
                 .contentTypeCompatibleWith(org.springframework.http.MediaType.APPLICATION_JSON));
     }
+
+    @Test
+    void releaseShouldIgnoreHeartbeatCommentsAndRestoreLockOnErrorOrEmptyCompletion() {
+        var prev = new BrowserControlService.ControlView("HUMAN", "login", USER, "user", "2026-11-25T00:00:00Z", 600);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenReturn(Flux.just(
+                ServerSentEvent.<String>builder().comment("hb").build(),
+                ServerSentEvent.<String>builder().data("{\"type\":\"error\",\"code\":\"sandbox_create_failed\"}").build()));
+
+        controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        verify(control).restore(SESSION, prev);
+
+        org.mockito.Mockito.reset(control, chatStreamController);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenReturn(Flux.just(ServerSentEvent.<String>builder().comment("hb").build()));
+
+        controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        verify(control).restore(SESSION, prev);
+    }
 }

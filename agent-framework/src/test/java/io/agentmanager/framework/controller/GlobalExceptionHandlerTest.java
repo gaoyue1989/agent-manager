@@ -97,4 +97,34 @@ class GlobalExceptionHandlerTest {
             .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
                 .value("user_quota_exhausted"));
     }
+
+    @org.springframework.web.bind.annotation.RestController
+    static class ErrorThrowingController {
+        @org.springframework.web.bind.annotation.PostMapping("/bad")
+        public reactor.core.publisher.Flux<org.springframework.http.codec.ServerSentEvent<String>> bad() {
+            throw new IllegalArgumentException("bad input");
+        }
+
+        @org.springframework.web.bind.annotation.PostMapping("/boom")
+        public reactor.core.publisher.Flux<org.springframework.http.codec.ServerSentEvent<String>> boom() {
+            throw new RuntimeException("boom");
+        }
+    }
+
+    @Test
+    void badRequestAndUnhandledSurviveTextEventStreamAccept() throws Exception {
+        var mvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
+            .standaloneSetup(new ErrorThrowingController(), new GlobalExceptionHandler()).build();
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/bad").accept(org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isBadRequest())
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
+                .contentTypeCompatibleWith(org.springframework.http.MediaType.APPLICATION_JSON));
+
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/boom").accept(org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isInternalServerError())
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
+                .contentTypeCompatibleWith(org.springframework.http.MediaType.APPLICATION_JSON));
+    }
 }

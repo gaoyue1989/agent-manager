@@ -21,6 +21,7 @@ public class BrowserControlStore {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public static final String KEY_PREFIX = "brw:ctrl:";
+    public static final String USER_INDEX_PREFIX = "brw:ctrl:user:";
 
     private final RedisConnectionFacade facade;
     private final BrowserProperties props;
@@ -46,14 +47,50 @@ public class BrowserControlStore {
         try {
             facade.sync().set(key(sessionId), MAPPER.writeValueAsString(payload),
                 SetArgs.Builder.ex(props.takeoverTtlSeconds()));
+            if (by != null && !by.isBlank()) {
+                var uKey = userKey(by);
+                facade.sync().sadd(uKey, sessionId);
+                facade.sync().expire(uKey, props.takeoverTtlSeconds());
+            }
         } catch (Exception e) {
             throw unavailable("takeover", sessionId, e);
         }
     }
 
+    public String userKey(String userId) {
+        return facade.key(USER_INDEX_PREFIX + userId);
+    }
+
+    public java.util.Set<String> heldSessionsForUser(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return java.util.Set.of();
+        }
+        try {
+            var members = facade.sync().smembers(userKey(userId));
+            return members == null ? java.util.Set.of() : members;
+        } catch (Exception e) {
+            throw unavailable("user_members", userId, e);
+        }
+    }
+
+    public void removeUserHeldSession(String userId, String sessionId) {
+        if (userId == null || userId.isBlank() || sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        try {
+            facade.sync().srem(userKey(userId), sessionId);
+        } catch (Exception e) {
+            log.debug("[browser-control] redis srem skipped (uid={}, sid={}): {}", userId, sessionId, e.getMessage());
+        }
+    }
+
     public boolean release(String sessionId) {
         try {
+            var prev = find(sessionId);
             Long removed = facade.sync().del(key(sessionId));
+            if (prev != null && prev.by() != null && !prev.by().isBlank()) {
+                removeUserHeldSession(prev.by(), sessionId);
+            }
             return removed != null && removed > 0;
         } catch (Exception e) {
             throw unavailable("release", sessionId, e);

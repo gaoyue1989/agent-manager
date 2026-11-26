@@ -107,10 +107,8 @@ public class FileController {
             return err(HttpStatus.PAYLOAD_TOO_LARGE, "file_too_large",
                 "file exceeds " + cfg.uploadMaxMb() + "MB limit");
         }
-        var key = resolveUserKey(userId, headerUserId);
-        // userKey sanitize 对齐 chat 的 finalUserId 命名空间（ChatStreamController 同款 PathSafe），
-        // 保证注入侧 listPending 的 user_key 双条件与 file_asset.user_key 可精确匹配
-        key = io.agentmanager.framework.util.PathSafe.sanitize(key);
+        var key = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(
+            resolveUserKey(userId, headerUserId));
 
         // 会话归属校验 + 归一（issue #411）：向他人会话投递文件 = 沙箱注入面越权，upload 侧
         // 必须前置拦截。① 已映射会话（session_user 有行且 owner ≠ 请求者）→ 404，对齐

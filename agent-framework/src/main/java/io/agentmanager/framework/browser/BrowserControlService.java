@@ -29,7 +29,6 @@ public class BrowserControlService implements SandboxHoldSignal {
     private final BrowserControlStore store;
     private final TurnStopService turnStopService;
     private final SandboxRuntime sandboxRuntime;
-    private final Map<String, Set<String>> heldSessionsByUser = new ConcurrentHashMap<>();
     private final SandboxLocator sandboxLocator;
 
     public BrowserControlService(BrowserControlStore store,
@@ -69,9 +68,6 @@ public class BrowserControlService implements SandboxHoldSignal {
 
     public TakeoverResult takeover(String sessionId, String userId, String reason, String trigger) {
         store.takeover(sessionId, reason, userId, trigger);
-        if (userId != null && !userId.isBlank()) {
-            heldSessionsByUser.computeIfAbsent(userId, k -> ConcurrentHashMap.newKeySet()).add(sessionId);
-        }
         String stop = null;
         if (TRIGGER_USER.equals(trigger)) {
             try {
@@ -88,7 +84,6 @@ public class BrowserControlService implements SandboxHoldSignal {
 
     public boolean release(String sessionId) {
         boolean released = store.release(sessionId);
-        heldSessionsByUser.values().forEach(s -> s.remove(sessionId));
         log.info("[browser-control] release: sid={}, changed={}", sessionId, released);
         return released;
     }
@@ -99,9 +94,6 @@ public class BrowserControlService implements SandboxHoldSignal {
         }
         try {
             store.takeover(sessionId, prev.reason(), prev.by(), prev.trigger());
-            if (prev.by() != null && !prev.by().isBlank()) {
-                heldSessionsByUser.computeIfAbsent(prev.by(), k -> ConcurrentHashMap.newKeySet()).add(sessionId);
-            }
         } catch (Exception e) {
             log.warn("[browser-control] restore control lock failed (sid={}): {}", sessionId, e.getMessage());
         }
@@ -142,16 +134,28 @@ public class BrowserControlService implements SandboxHoldSignal {
         if (sessionId == null || sessionId.isBlank()) {
             return false;
         }
-        var sessions = heldSessionsByUser.get(sessionId);
+        java.util.Set<String> sessions;
+        try {
+            sessions = store.heldSessionsForUser(sessionId);
+        } catch (BrowserControlUnavailableException e) {
+            log.warn("[browser-control] user hold probe failed, gate fails open (uid={}): {}",
+                sessionId, e.getMessage());
+            return false;
+        }
         if (sessions == null || sessions.isEmpty()) {
             return false;
         }
         boolean anyHeld = false;
         for (var sid : sessions) {
-            if (isHumanControlled(sid)) {
-                anyHeld = true;
-            } else {
-                sessions.remove(sid);
+            try {
+                if (store.isHumanControlled(sid)) {
+                    anyHeld = true;
+                } else {
+                    store.removeUserHeldSession(sessionId, sid);
+                }
+            } catch (BrowserControlUnavailableException e) {
+                log.warn("[browser-control] transient hold probe error, keeping entry (uid={}, sid={}): {}",
+                    sessionId, sid, e.getMessage());
             }
         }
         return anyHeld;
