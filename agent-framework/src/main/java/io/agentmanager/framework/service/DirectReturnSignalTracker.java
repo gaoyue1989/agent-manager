@@ -57,8 +57,8 @@ public final class DirectReturnSignalTracker {
             }
         } else if (event instanceof AgentResultEvent res) {
             var msg = res.getResult();
-            if (msg != null && msg.getGenerateReason() == GenerateReason.TOOL_RETURN_DIRECT) {
-                shortCircuitCandidate = true;
+            if (msg != null) {
+                shortCircuitCandidate = (msg.getGenerateReason() == GenerateReason.TOOL_RETURN_DIRECT);
             }
         } else if (event instanceof AgentEndEvent && shortCircuitCandidate && !sdkSignalSeen) {
             emitSynthetic.accept("TEXT_BLOCK_DELTA", SIGNAL_PAYLOAD);
