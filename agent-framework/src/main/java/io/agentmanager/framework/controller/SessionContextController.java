@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.SessionAccessGuard;
+import io.agentmanager.framework.service.SessionKeyNamespace;
 import io.agentmanager.framework.service.SessionContextStore;
 import io.agentmanager.framework.service.SessionContextStore.RemoveOutcome;
 import io.agentmanager.framework.service.SessionContextStore.UpsertOutcome;
@@ -87,7 +88,8 @@ public class SessionContextController {
             @RequestParam(value = "includeContent", required = false, defaultValue = "false") boolean includeContent) {
         var sid = PathSafe.sanitize(sessionId);
         var requester = requester(headerUserId);
-        if (!SessionAccessGuard.isOwner(sessionContextStore.ownerOf(sid), requester)) {
+        if (SessionKeyNamespace.isReservedSessionId(sid)
+                || !SessionAccessGuard.isOwner(sessionContextStore.ownerOf(sid), requester)) {
             return threadNotFound(sid);
         }
         var entries = new ArrayList<Map<String, Object>>();

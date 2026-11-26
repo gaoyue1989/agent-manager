@@ -77,7 +77,8 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
             return false;
         }
         String headerUserId = request.getHeaders().getFirst("X-User-Id");
-        if (headerUserId != null && !headerUserId.isBlank() && !headerUserId.equals(claim.userId())) {
+        if (headerUserId != null && !headerUserId.isBlank()
+                && !SessionAccessGuard.normalizeRequester(headerUserId).equals(claim.userId())) {
             log.warn("[browser-view] handshake rejected: header identity conflicts with view ticket (sid={})",
                 sessionId);
             return false;
