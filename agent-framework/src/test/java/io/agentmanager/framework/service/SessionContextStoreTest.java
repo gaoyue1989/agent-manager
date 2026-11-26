@@ -65,7 +65,7 @@ class SessionContextStoreTest {
         when(conn.prepareStatement(argThat(sql -> sql != null && sql.contains("FROM session_user")
             && sql.contains("FOR UPDATE")))).thenReturn(lockOwner);
         when(conn.prepareStatement(argThat(contains("UPDATE session_user")))).thenReturn(takeOwnership);
-        when(conn.prepareStatement(argThat(contains("content_chars FROM session_context"))))
+        when(conn.prepareStatement(argThat(contains("FROM session_context WHERE session_id = ? FOR UPDATE"))))
             .thenReturn(lockEntries);
         when(conn.prepareStatement(argThat(contains("INSERT INTO session_context")))).thenReturn(write);
         when(conn.prepareStatement(argThat(endingWith("AND context_key = ?")))).thenReturn(deleteByKey);
@@ -247,7 +247,7 @@ class SessionContextStoreTest {
         var sqls = executedSql();
         assertTrue(sqls.stream().anyMatch(sql -> sql.contains("SELECT user_id FROM session_user")
             && sql.endsWith("FOR UPDATE")));
-        assertTrue(sqls.stream().anyMatch(sql -> sql.contains("content_chars FROM session_context")
+        assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM session_context WHERE session_id = ? FOR UPDATE")
             && sql.endsWith("FOR UPDATE")));
         assertTrue(sqls.stream().anyMatch(sql -> sql.contains("INSERT INTO session_context")
             && sql.contains("ON DUPLICATE KEY UPDATE")));

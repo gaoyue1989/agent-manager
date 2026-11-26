@@ -298,4 +298,12 @@ class SessionContextControllerTest {
 
         verify(store, never()).remove(anyString(), eq("u:1"), anyString());
     }
+
+    @Test
+    void listShouldRejectReservedNamespacesWith404_632() throws Exception {
+        for (String sid : List.of("u-1001", "U-1001", "debug-user", "gw-0123456789ab")) {
+            mockMvc.perform(get("/threads/" + sid + "/context").header("X-User-Id", "u-2002"))
+                .andExpect(status().isNotFound());
+        }
+    }
 }
