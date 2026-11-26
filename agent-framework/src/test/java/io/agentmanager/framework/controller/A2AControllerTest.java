@@ -960,7 +960,8 @@ class A2AControllerTest {
         org.junit.jupiter.api.Assertions.assertFalse(meta.containsKey("sessionId"),
             "JSON null 视为未传，不得以字面量 \"null\" 作为会话 id 透传 SDK");
         verify(wrapper).handleRequest(anyString(), anyMap(), any());
-        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(sessionUserStore, never()).upsert(org.mockito.ArgumentMatchers.eq("null"), anyString());
+        verify(sessionUserStore).upsert("a2a-user:mallory", "mallory");
     }
 
     @Test

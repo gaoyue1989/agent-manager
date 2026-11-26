@@ -67,6 +67,9 @@ public class SessionAccessGuard {
             return false;
         }
         var requester = normalizeRequester(headerUserId);
+        if (!sessionId.equals(requester) && store.existsAsUserId(sessionId)) {
+            return false;
+        }
         return isOwner(store.findUserIdBySession(sessionId), requester);
     }
 
@@ -92,6 +95,9 @@ public class SessionAccessGuard {
             return null;
         }
         var requester = normalizeRequester(headerUserId);
+        if (!sessionId.equals(requester) && store.existsAsUserId(sessionId)) {
+            return null;
+        }
         var owner = store.findUserIdBySession(sessionId);
         if (owner == null || SessionUserStore.PLACEHOLDER_USER.equals(owner) || !owner.equals(requester)) {
             return null;
