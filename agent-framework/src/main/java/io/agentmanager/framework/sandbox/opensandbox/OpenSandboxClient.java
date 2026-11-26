@@ -291,19 +291,21 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
     private static final boolean PROBE_EXECD_PING = !"false".equals(
         System.getenv("SANDBOX_PROBE_EXECD_PING"));
 
-    private SandboxLifecycleManager.ProbeResult probeAlive(String sandboxId) {
+    SandboxLifecycleManager.ProbeResult probeAlive(String sandboxId) {
+        com.alibaba.opensandbox.sandbox.Sandbox connected = null;
+        boolean alive = false;
         try {
-            var connected = OpenSandboxEndpoints.withPortFidelity(
-                com.alibaba.opensandbox.sandbox.Sandbox.connector()
-                    .sandboxId(sandboxId)
-                    .connectionConfig(connectionConfig)
-                    .skipHealthCheck(true)
-                    .connect(),
-                options.getServerUrl()).sandbox();
-            connected.getInfo();   // getInfo 200 = 控制面活（HTTP 404/410 在此抛 SandboxApiException）
+            connected = com.alibaba.opensandbox.sandbox.Sandbox.connector()
+                .sandboxId(sandboxId)
+                .connectionConfig(connectionConfig)
+                .skipHealthCheck(true)
+                .connect();
+            connected = OpenSandboxEndpoints.withPortFidelity(connected, options.getServerUrl()).sandbox();
+            connected.getInfo();
             if (PROBE_EXECD_PING && !execdPingAlive(connected)) {
                 return SandboxLifecycleManager.ProbeResult.dead();
             }
+            alive = true;
             return SandboxLifecycleManager.ProbeResult.alive(connected);
         } catch (com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException api) {
             int status = api.getStatusCode() != null ? api.getStatusCode() : 0;
@@ -313,6 +315,13 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             return SandboxLifecycleManager.ProbeResult.unknown();
         } catch (Exception e) {
             return SandboxLifecycleManager.ProbeResult.unknown();
+        } finally {
+            if (!alive && connected != null) {
+                try {
+                    connected.close();
+                } catch (Exception ignored) {
+                }
+            }
         }
     }
 

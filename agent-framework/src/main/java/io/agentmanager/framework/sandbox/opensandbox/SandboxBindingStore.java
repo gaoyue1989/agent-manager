@@ -371,6 +371,9 @@ public class SandboxBindingStore {
             ps.setString(4, expectedUpdatedAt);
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
+            if (isDuplicateKey(e)) {
+                return false;
+            }
             throw new DataAccessException("rebind failed: " + e.getMessage(), e);
         }
     }
@@ -467,7 +470,7 @@ public class SandboxBindingStore {
      * @return 删除的绑定行数
      */
     public int cleanupExpired(Instant cutoff) {
-        String cutoffStr = SQL_DT.format(LocalDateTime.ofInstant(cutoff, java.time.ZoneId.systemDefault()));
+        String cutoffStr = SQL_DT.format(LocalDateTime.ofInstant(cutoff, java.time.ZoneOffset.UTC));
         try {
             List<String> affectedUsers = new ArrayList<>();
             try (Connection conn = dataSource.getConnection();
@@ -532,7 +535,7 @@ public class SandboxBindingStore {
 
     /** 锚表防膨胀：清理后已无绑定行且 updated_at 超保留窗口的 sandbox_user 行删除 */
     public int cleanupEmptyAnchors(Instant cutoff) {
-        String cutoffStr = SQL_DT.format(LocalDateTime.ofInstant(cutoff, java.time.ZoneId.systemDefault()));
+        String cutoffStr = SQL_DT.format(LocalDateTime.ofInstant(cutoff, java.time.ZoneOffset.UTC));
         String sql = "DELETE FROM sandbox_user WHERE updated_at < ? "
             + "AND NOT EXISTS (SELECT 1 FROM sandbox_binding b WHERE b.user_key = sandbox_user.user_key)";
         try (Connection conn = dataSource.getConnection();
@@ -592,21 +595,30 @@ public class SandboxBindingStore {
                         userKey = rs.next() ? rs.getString(1) : null;
                     }
                 }
+                if (userKey == null) {
+                    conn.commit();
+                    return null;
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT binding_count FROM sandbox_user WHERE user_key = ? FOR UPDATE")) {
+                    ps.setString(1, userKey);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        rs.next();
+                    }
+                }
                 try (PreparedStatement ps = conn.prepareStatement(
                         "DELETE FROM sandbox_binding WHERE " + whereCond)) {
                     binder.accept(ps);
                     if (ps.executeUpdate() == 0) {
                         conn.commit();
-                        return null;   // 守卫不命中：已被他副本改绑/删除，跳过
+                        return null;
                     }
                 }
-                if (userKey != null) {
-                    try (PreparedStatement ps = conn.prepareStatement(
-                            "UPDATE sandbox_user SET binding_count = binding_count - 1 "
-                                + "WHERE user_key = ? AND binding_count > 0")) {
-                        ps.setString(1, userKey);
-                        ps.executeUpdate();
-                    }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE sandbox_user SET binding_count = binding_count - 1 "
+                            + "WHERE user_key = ? AND binding_count > 0")) {
+                    ps.setString(1, userKey);
+                    ps.executeUpdate();
                 }
                 conn.commit();
                 return userKey;

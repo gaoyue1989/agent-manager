@@ -624,4 +624,117 @@ class SandboxLifecycleManagerTest {
         org.mockito.Mockito.verify(createDelegate, org.mockito.Mockito.times(1)).create();
         verify(store, org.mockito.Mockito.times(1)).compensatePending("pending:u1", USER);
     }
+
+    @Test
+    void quotaFullRebindLostWithExistingSessionBindingFallsBackToReuse() throws Exception {
+        var existingForSid = row(SID, "sbx-existing", "2026-11-08T00:30:00.000", "2026-11-07T23:00:00.000", false);
+        var victim = row("other-sid", "sbx-old", "2026-11-08T00:10:00.000", "2026-11-07T20:00:00.000", false);
+        var victimHandle = mock(Sandbox.class);
+        var reusedHandle = mock(Sandbox.class);
+
+        when(store.findBySessionId(SID))
+            .thenReturn(Optional.empty())
+            .thenReturn(Optional.of(existingForSid))
+            .thenReturn(Optional.of(existingForSid));
+        when(store.occupyQuota(USER, SID, 5))
+            .thenReturn(new SandboxBindingStore.OccupyResult(SandboxBindingStore.OccupyStatus.QUOTA_FULL, null));
+        when(store.recycleStalePending(USER)).thenReturn(0);
+        when(store.lazyDeleteExpired(USER)).thenReturn(0);
+        when(store.recomputeCount(USER)).thenReturn(5);
+        when(store.listLive(eq(USER), anyInt())).thenReturn(List.of(victim));
+        when(connector.probe("sbx-old")).thenReturn(SandboxLifecycleManager.ProbeResult.alive(victimHandle));
+        when(connector.probe("sbx-existing")).thenReturn(SandboxLifecycleManager.ProbeResult.alive(reusedHandle));
+        when(store.rebind(victim.id(), "other-sid", SID, victim.updatedAt())).thenReturn(false);
+        when(store.touchOnReuse(existingForSid.id(), SID)).thenReturn(true);
+
+        manager.acquire(SID, USER, connector, createDelegate, reuseWrapper);
+
+        verify(victimHandle).close();
+        verify(reuseWrapper).wrap(reusedHandle, "sbx-existing");
+        org.mockito.Mockito.verifyNoInteractions(createDelegate);
+    }
+
+    @Test
+    void quotaFullClosesNonVictimHandlesAndKeepsVictimOpen() throws Exception {
+        quotaFullSetup();
+        var victim = row("other-1", "sbx-old", "2026-11-08T00:10:00.000", "2026-11-07T20:00:00.000", false);
+        var newer = row("other-2", "sbx-new", "2026-11-08T00:25:00.000", "2026-11-07T20:00:00.000", false);
+        var victimHandle = mock(Sandbox.class);
+        var newerHandle = mock(Sandbox.class);
+        when(store.listLive(eq(USER), anyInt())).thenReturn(List.of(victim, newer));
+        when(connector.probe("sbx-old")).thenReturn(SandboxLifecycleManager.ProbeResult.alive(victimHandle));
+        when(connector.probe("sbx-new")).thenReturn(SandboxLifecycleManager.ProbeResult.alive(newerHandle));
+        when(store.rebind(victim.id(), "other-1", SID, victim.updatedAt())).thenReturn(true);
+        var renewResp = mock(com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse.class);
+        when(renewResp.getExpiresAt()).thenReturn(java.time.OffsetDateTime.parse("2026-11-08T01:30:00Z"));
+        when(victimHandle.renew(Duration.ofSeconds(1800))).thenReturn(renewResp);
+
+        manager.acquire(SID, USER, connector, createDelegate, reuseWrapper);
+
+        verify(newerHandle).close();
+        verify(victimHandle, never()).close();
+    }
+
+    @Test
+    void quotaFullClosesAllCandidateHandlesWhenWrapThrows() throws Exception {
+        quotaFullSetup();
+        var victim = row("other-1", "sbx-old", "2026-11-08T00:10:00.000", "2026-11-07T20:00:00.000", false);
+        var newer = row("other-2", "sbx-new", "2026-11-08T00:25:00.000", "2026-11-07T20:00:00.000", false);
+        var victimHandle = mock(Sandbox.class);
+        var newerHandle = mock(Sandbox.class);
+        when(store.listLive(eq(USER), anyInt())).thenReturn(List.of(victim, newer));
+        when(connector.probe("sbx-old")).thenReturn(SandboxLifecycleManager.ProbeResult.alive(victimHandle));
+        when(connector.probe("sbx-new")).thenReturn(SandboxLifecycleManager.ProbeResult.alive(newerHandle));
+        when(store.rebind(victim.id(), "other-1", SID, victim.updatedAt())).thenReturn(true);
+        when(reuseWrapper.wrap(victimHandle, "sbx-old")).thenThrow(new RuntimeException("wrap boom"));
+
+        assertThrows(RuntimeException.class,
+            () -> manager.acquire(SID, USER, connector, createDelegate, reuseWrapper));
+
+        verify(victimHandle).close();
+        verify(newerHandle).close();
+    }
+
+    @Test
+    void quotaFullVictimRenewFailureCallsHeartbeatInsteadOfTouchExpiresAt() throws Exception {
+        quotaFullSetup();
+        var victim = row("other-sid", "sbx-old", "2026-11-08T00:10:00.000", "2026-11-07T20:00:00.000", false);
+        when(store.listLive(eq(USER), anyInt())).thenReturn(List.of(victim));
+        when(connector.probe("sbx-old")).thenReturn(SandboxLifecycleManager.ProbeResult.alive(osbHandle));
+        when(store.rebind(victim.id(), "other-sid", SID, victim.updatedAt())).thenReturn(true);
+        when(osbHandle.renew(Duration.ofSeconds(1800))).thenThrow(new RuntimeException("renew failed"));
+
+        manager.acquire(SID, USER, connector, createDelegate, reuseWrapper);
+
+        verify(store).heartbeat("sbx-old");
+        verify(store, never()).touchExpiresAt(anyString(), anyString());
+        verify(reuseWrapper).wrap(osbHandle, "sbx-old");
+    }
+
+    @Test
+    void acquirePromoteFallbackUsesUtcTimestamp() throws Exception {
+        var prev = java.util.TimeZone.getDefault();
+        java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Asia/Shanghai"));
+        try {
+            when(store.findBySessionId(SID)).thenReturn(Optional.empty());
+            when(store.occupyQuota(USER, SID, 5))
+                .thenReturn(new SandboxBindingStore.OccupyResult(SandboxBindingStore.OccupyStatus.OCCUPIED, "pending:utc"));
+            when(createDelegate.create()).thenReturn(
+                new SandboxLifecycleManager.CreatedSandbox("sbx-utc", null, mock(OpenSandbox.class), osbHandle));
+
+            var before = java.time.Instant.now().plusSeconds(1800).minusSeconds(5);
+            manager.acquire(SID, USER, connector, createDelegate, reuseWrapper);
+            var after = java.time.Instant.now().plusSeconds(1800).plusSeconds(5);
+
+            var cap = org.mockito.ArgumentCaptor.forClass(String.class);
+            verify(store).promotePending(eq("pending:utc"), eq("sbx-utc"), cap.capture());
+            var parsed = java.time.LocalDateTime.parse(cap.getValue(),
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"))
+                .toInstant(java.time.ZoneOffset.UTC);
+            assertTrue(!parsed.isBefore(before) && !parsed.isAfter(after), "parsed=" + parsed);
+        } finally {
+            java.util.TimeZone.setDefault(prev);
+        }
+    }
+
 }
