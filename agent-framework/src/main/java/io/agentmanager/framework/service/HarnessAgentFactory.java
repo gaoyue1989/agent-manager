@@ -214,7 +214,7 @@ public class HarnessAgentFactory {
             // 业务规范键解析（RuntimeContext → 规范会话/用户）：Channel 链路下 ctx.sessionId
             // 是全进程共享的网关 gw-hash、ctx.userId 是 peer，不翻译会让 LLM 记录与 span
             // 属性都记成运行时路由键——前者按 sid 查不到（issue #44），后者按会话过滤失效
-            var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
+            var sessionKeyResolver = new SessionKeyResolver(sessionUserStore, oafConfig.slug());
 
             // 运行期 toolkit 引用（issue #485）：初始为 build 前实例（自定义 + MCP），build()
             // 完成后切换到 agent.getToolkit()（Harness 在 copy 后才注册内置工具，原实例永远
@@ -263,6 +263,7 @@ public class HarnessAgentFactory {
                 // 下游 LLM 记录/span/实际调用看到的都是会话生效模型
                 .middleware(new io.agentmanager.framework.service.SessionModelMiddleware(
                     sessionUserStore, modelCatalog))
+                .middleware(new PresetAnswerMiddleware())
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 模型实际输入/输出补录到 chat span（gen_ai.input/output.messages）
@@ -311,7 +312,7 @@ public class HarnessAgentFactory {
                     () -> activeToolkit.get().getToolNames()))
                 // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
                 // 供 MCP 工具调用走 _meta / userHeaders 双通道（Channel 链路按 session 反查真实 userId）
-                .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))
+                .middleware(io.agentmanager.framework.mcp.McpUserContextMiddleware.withResolver(sessionKeyResolver))
                 // 远程子 agent 身份规范化（F10，travel-fulfillment §8 lead-4）：Channel 链路
                 // ctx.userId 是网关 peer，agent_spawn 组装 RemoteSubmitContext 直取
                 // ctx.getUserId()——仅在纯 spawn 轮次的 acting 作用域内经 session_user
@@ -319,7 +320,7 @@ public class HarnessAgentFactory {
                 // 会破坏 SDK HITL 挂起/恢复的 ctx 键一致性）。只写 userId 不写 sessionId
                 // （设计 §5.6）。置于 McpUserContextMiddleware 之后：后者按 peer 直接反查
                 // 写入 McpMeta 的生产行为保持不变
-                .middleware(new RemoteUserIdMiddleware(sessionUserStore))
+                .middleware(new RemoteUserIdMiddleware(sessionKeyResolver))
                 // 会话级技能过滤（本轮 skills 声明，session-skill-list-design §4）：按最后一条
                 // USER 消息 metadata 的白名单收敛 <available_skills> / load_skill_through_path。
                 // 必须排在下方禁用过滤之前——先立白名单（only/none），禁用中间件再以

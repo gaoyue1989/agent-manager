@@ -178,6 +178,9 @@ public class ToolFilterMiddleware implements MiddlewareBase {
                 continue;
             }
             var metadata = msg.getMetadata();
+            if (metadata != null && metadata.containsKey(io.agentscope.core.message.Msg.METADATA_CONFIRM_RESULTS)) {
+                continue;
+            }
             return metadata != null && metadata.containsKey(METADATA_TOOLS_KEY)
                 ? toToolNames(metadata.get(METADATA_TOOLS_KEY))
                 : null;

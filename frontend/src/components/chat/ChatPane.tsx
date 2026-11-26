@@ -8,7 +8,7 @@
 // UI：deer-flow 风格——工具事件渲染为时间线状态步骤、历史回放同构展示、欢迎态 Hero + 错峰建议；
 //     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
 import { useCallback, useEffect, useRef, useState } from "react";
-import { buildHistoryAssistantMessage, completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
+import { appendAssistantImageBlock, appendAssistantTextBlock, buildHistoryAssistantMessage, completeToolCall, createDirectReturnOrderTracker, markAwaitingConfirm, markDeniedWithoutResult, normalizeStoredSessionId, resolveInlineImageUrl, settlePendingToolCalls } from "@/lib/assistant-events";
 import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import { isQuotaError, makeQuotaError, parseQuota409, quotaFromSseError, stopThreadUrl } from "@/lib/sandbox-quota";
 import { contextMessagesFromHistory, isWelcomeState } from "@/lib/session-context";
@@ -52,10 +52,7 @@ function persistSessionId(key: string, sid: string, withCookie: boolean): void {
 
 function getSessionId(key: string): string {
   if (typeof window === "undefined") return "";
-  let sid = window.localStorage.getItem(key);
-  if (!sid) {
-    sid = `webui-${uid()}`;
-  }
+  const sid = normalizeStoredSessionId(window.localStorage.getItem(key), () => `webui-${uid()}`);
   // 幂等补写（新建与已有 sid 同路径）：cookie 是会话级（无 Max-Age，浏览器关闭即失效
   // 而 localStorage 持久），存量用户升级前只写过 localStorage——不补写会让 proxy 在
   // EVAL_COLLECTOR_MODE=1 下读不到 oaf-assistant-sid，直到手动切换/新开会话才恢复
@@ -227,13 +224,20 @@ export default function ChatPane({
   const createStreamProcessor = useCallback((onAsk: (card: ConfirmCard) => void) => {
     // 文本增量节流：60ms 窗口内累积 delta 后批量 setState，避免每 token 触发整段 markdown 解析
     let pendingDelta = "";
+    const directReturnTracker = createDirectReturnOrderTracker();
+    let directReturnLocked = false;
+    let inlineImageSeq = 0;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const flushDelta = () => {
       flushTimer = null;
       if (!pendingDelta) return;
       const d = pendingDelta;
       pendingDelta = "";
-      updateLastAssistant((m) => ({ ...m, content: m.content + d }));
+      updateLastAssistant((m) => ({
+        ...m,
+        content: m.content + d,
+        blocks: directReturnLocked ? m.blocks : appendAssistantTextBlock(m.blocks, m.content, d),
+      }));
     };
     const scheduleFlush = () => {
       if (flushTimer) return;
@@ -246,8 +250,25 @@ export default function ChatPane({
       try { ev = JSON.parse(line); } catch { return; }
       switch (ev.type) {
         case "TEXT_BLOCK_DELTA":
+          if (ev.generateReason === "TOOL_RETURN_DIRECT") {
+            const ordered = directReturnTracker.orderedBlocks();
+            if (ordered) {
+              directReturnLocked = true;
+              updateLastAssistant((m) => ({
+                ...m,
+                blocks: ordered,
+              }));
+            }
+          }
           pendingDelta += ev.delta ?? "";
           scheduleFlush();
+          break;
+        case "MODEL_CALL_START":
+          directReturnTracker.reset();
+          directReturnLocked = false;
+          break;
+        case "TOOL_RESULT_TEXT_DELTA":
+          directReturnTracker.onTextDelta(ev.toolCallId ?? ev.tool_call_id, ev.delta);
           break;
         case "THINKING_BLOCK_DELTA":
           break; // 思考过程不上屏
@@ -316,16 +337,25 @@ export default function ChatPane({
           }));
           break;
         case "TOOL_RESULT_DATA_DELTA":
-          // 图片类二进制工具结果内联（base64 小图直接渲染）
-          if (ev.media_type?.startsWith("image/") && ev.data) {
-            updateLastAssistant((m) => ({
-              ...m,
-              files: [...(m.files ?? []), {
-                file_id: `inline-${m.content.length}`, file_name: "inline-image",
-                mime_type: ev.media_type, size: 0,
-                download_url: `data:${ev.media_type};base64,${ev.data}`,
-              }],
-            }));
+          if (ev.media_type?.startsWith("image/")) {
+            const downloadUrl = resolveInlineImageUrl(ev.media_type, ev.url, ev.data);
+            if (downloadUrl) {
+              if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+              flushDelta();
+              const file = {
+                file_id: `inline-${inlineImageSeq++}`,
+                file_name: "inline-image",
+                mime_type: ev.media_type,
+                size: 0,
+                download_url: downloadUrl,
+              };
+              directReturnTracker.onImageDelta(ev.toolCallId ?? ev.tool_call_id, file);
+              updateLastAssistant((m) => ({
+                ...m,
+                files: [...(m.files ?? []), file],
+                blocks: appendAssistantImageBlock(m.blocks, m.content, file),
+              }));
+            }
           }
           break;
         case "error": {
@@ -820,7 +850,7 @@ export default function ChatPane({
             </div>
             {welcomeNotices.length > 0 && (
               <div className="mt-6 w-full max-w-md space-y-2">
-                {welcomeNotices.map((m, i) => <MessageItem key={i} msg={m} />)}
+                {welcomeNotices.map((m, i) => <MessageItem key={i} msg={m} agentBase={agentBase} />)}
               </div>
             )}
             <div className="mt-8 w-full max-w-2xl">{inputCard}</div>
@@ -832,7 +862,7 @@ export default function ChatPane({
               <div className="mx-auto max-w-3xl space-y-4 px-3 pb-4 pt-3">
                 {messages.map((m, i) => (
                   <div key={i} className="animate-fade-in space-y-2">
-                    <MessageItem msg={m} />
+                    <MessageItem msg={m} agentBase={agentBase} />
                     {m.confirm && (
                       <div className="pl-10">
                         <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />

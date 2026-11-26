@@ -383,4 +383,39 @@ class SandboxRenewalRegistryTest {
         reg.sweep();
         assertTrue(renewer.calls.get() > before, "信号异常按不持有处理，turn 信号照常续期");
     }
+
+    @Test
+    void acquireRefForNewSessionReplacesEntryAndResetsState() {
+        var reg = registry(clock());
+        var oldRenewer = new FakeRenewer();
+        reg.acquireRef("sb-1", "sid-1", TTL_SECONDS, oldRenewer);
+        reg.acquireRef("sb-1", "sid-1", TTL_SECONDS, oldRenewer);
+        reg.suspendForConfirm("sid-1");
+        oldRenewer.toThrow = new RuntimeException("net err");
+        reg.sweep();
+
+        advance(Duration.ofHours(1));
+        var newRenewer = new FakeRenewer();
+        reg.acquireRef("sb-1", "sid-2", TTL_SECONDS, newRenewer);
+
+        var debug = reg.debugEntries();
+        assertEquals(1, debug.size());
+        var entry = debug.get(0);
+        assertEquals("sid-2", entry.get("session_id"));
+        assertEquals(1, entry.get("call_refs"));
+        assertEquals("", entry.get("hold_until"));
+        assertEquals(0, entry.get("renew_failures"));
+        assertEquals(0L, entry.get("age_ms"));
+
+        int oldCallsBefore = oldRenewer.calls.get();
+        reg.unregisterTurn("sid-1");
+        assertEquals(oldCallsBefore, oldRenewer.calls.get());
+        assertEquals(0, newRenewer.calls.get());
+
+        advance(Duration.ofHours(1).plus(Duration.ofMinutes(30)));
+        reg.sweep();
+        assertFalse(events.contains("registry_overage"));
+        assertEquals(1, newRenewer.calls.get());
+    }
+
 }

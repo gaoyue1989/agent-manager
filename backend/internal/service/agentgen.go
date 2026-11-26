@@ -470,7 +470,7 @@ func GetBuiltinPlatformDecl() BuiltinPlatformDecl { return builtinPlatformDeclOn
 // buildAgentFiles 表单 → 包文件集。
 // base 非空时（编辑链路）以基础包文件为底（copy-on-write 沿用 SOUL.md 等补充文件），
 // AGENTS.md / mcp-configs/ 按表单重新生成；skills 按勾选重建。
-func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byte) (map[string][]byte, error) {
+func (c *Core) buildAgentFiles(workspaceID uint, fm fmRoot, form *AgentForm, base map[string][]byte) (map[string][]byte, error) {
 	agentsMD, err := buildAgentsMD(fm, form.Prompt)
 	if err != nil {
 		return nil, err
@@ -501,7 +501,7 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 		var copied map[string][]byte
 		switch s.Source {
 		case "skill":
-			src, err := c.copySkillAssetDir(s.SkillID, s.Version, s.Name)
+			src, err := c.copySkillAssetDir(workspaceID, s.SkillID, s.Version, s.Name)
 			if err != nil {
 				return nil, err
 			}
@@ -511,7 +511,7 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 				continue
 			}
 			srcPkg, err := c.Packages.Get(s.PackageID)
-			if err != nil {
+			if err != nil || (srcPkg.WorkspaceID != 0 && srcPkg.WorkspaceID != workspaceID) {
 				return nil, fmt.Errorf("%w: skill source package %d not found", ErrInvalidForm, s.PackageID)
 			}
 			src, err := c.copySkillDir(srcPkg, s.Name)
@@ -542,7 +542,7 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 			files["mcp-configs/"+builtinPlatformMCPServer+"/config.yaml"] = []byte(builtinPlatformMCPConfig())
 			continue
 		}
-		conn, err := c.GetMcpConnector(ref.ConnectorID)
+		conn, err := c.GetMcpConnectorInWorkspace(workspaceID, ref.ConnectorID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: mcp connector %d not found", ErrInvalidForm, ref.ConnectorID)
 		}
@@ -591,7 +591,7 @@ func (c *Core) copySkillDir(src *store.OafPackage, name string) (map[string][]by
 }
 
 // deriveFrontmatter 表单 → frontmatter（决议 5 派生规则；编辑链路 name 允许改显示名）。
-func (c *Core) deriveFrontmatter(form *AgentForm, agentKey, version string) fmRoot {
+func (c *Core) deriveFrontmatter(workspaceID uint, form *AgentForm, agentKey, version string) fmRoot {
 	fm := fmRoot{
 		Name: form.Name, AgentKey: agentKey, Version: version,
 		Description: form.Description,
@@ -654,7 +654,7 @@ func (c *Core) deriveFrontmatter(form *AgentForm, agentKey, version string) fmRo
 		if ref.ConnectorID == 0 {
 			continue
 		}
-		if conn, err := c.GetMcpConnector(ref.ConnectorID); err == nil {
+		if conn, err := c.GetMcpConnectorInWorkspace(workspaceID, ref.ConnectorID); err == nil {
 			fm.MCPServers = append(fm.MCPServers, fmMCPServer{
 				Vendor: platformVendorKey, Server: conn.Name,
 				Version: "1.0.0", ConfigDir: "mcp-configs/" + conn.Name,
@@ -761,8 +761,11 @@ func (c *Core) buildFormEnv(workspaceID uint, def *store.ModelConnection, form *
 		if ref.Builtin != "" || ref.ConnectorID == 0 {
 			continue
 		}
-		conn, err := c.GetMcpConnector(ref.ConnectorID)
-		if err != nil || conn.AuthType != "bearer" || conn.AuthToken == "" {
+		conn, err := c.GetMcpConnectorInWorkspace(workspaceID, ref.ConnectorID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: mcp connector %d not found", ErrInvalidForm, ref.ConnectorID)
+		}
+		if conn.AuthType != "bearer" || conn.AuthToken == "" {
 			continue
 		}
 		key := "MCP_TOKEN_" + sanitizeEnvKey(conn.Name)
@@ -890,8 +893,8 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 	if cnt > 0 {
 		return nil, nil, fmt.Errorf("%w: duplicate_name (package slug exists in workspace)", ErrConflict)
 	}
-	fm := c.deriveFrontmatter(form, agentKey, "1.0.0")
-	files, err := c.buildAgentFiles(fm, form, nil)
+	fm := c.deriveFrontmatter(workspaceID, form, agentKey, "1.0.0")
+	files, err := c.buildAgentFiles(workspaceID, fm, form, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1228,12 +1231,12 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	if agentKey == "" {
 		agentKey = SlugifyAgentKey(form.Name)
 	}
-	fm := c.deriveFrontmatter(form, agentKey, nextVersion(base.Version))
+	fm := c.deriveFrontmatter(workspaceID, form, agentKey, nextVersion(base.Version))
 	baseFiles, err := c.Packages.CollectBaseFiles(base)
 	if err != nil {
 		return nil, nil, err
 	}
-	files, err := c.buildAgentFiles(fm, form, baseFiles)
+	files, err := c.buildAgentFiles(workspaceID, fm, form, baseFiles)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1253,54 +1256,67 @@ func (c *Core) UpdateAgent(workspaceID, userID, serviceID uint, form *AgentForm)
 	if err != nil {
 		return nil, nil, err
 	}
-	oldPlain, oldSecret, err := c.partitionServiceEnv(svc)
-	if err != nil {
-		return nil, nil, err
-	}
-	_, hasOldSbxURL := oldSecret["OPENSANDBOX_SERVER_URL"]
-	wasSandboxOn := oldPlain["SANDBOX_ENABLED"] == "true" || oldPlain["OPENSANDBOX_SERVER_URL"] != "" || hasOldSbxURL
-	if !wasSandboxOn && form.Sandbox.sandboxOn() {
-		sbxKeys := platformconfig.GroupKeys("sandbox")
-		for k, v := range c.platformDefaultEnv(form) {
-			if !sbxKeys[k] {
-				continue
-			}
-			_, inPlain := oldPlain[k]
-			_, inSecret := oldSecret[k]
-			if !inPlain && !inSecret {
-				oldPlain[k] = v
-			}
-		}
-	}
-	for k, v := range formEnv {
-		oldPlain[k] = v
-	}
-	if form.Sandbox != nil && form.Sandbox.Enabled != nil {
-		delete(oldPlain, "SANDBOX_ENABLED")
-		if _, inSecret := oldSecret["SANDBOX_ENABLED"]; inSecret {
-			oldPlain["SANDBOX_ENABLED"] = ""
-		}
-		if !*form.Sandbox.Enabled {
-			for k := range platformconfig.GroupKeys("sandbox") {
-				delete(oldPlain, k)
-				if _, inSecret := oldSecret[k]; inSecret {
-					oldPlain[k] = ""
-				}
-			}
-		}
-	}
-	if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {
-		for _, k := range clearKeys { // 表单显式默认/关：清除既有显式键（切回平台派生）
-			delete(oldPlain, k)
-		}
-	}
 	public := form.PublicEndpoint == nil || *form.PublicEndpoint
 	newPkgID := newPkg.ID
 	opt := RepublishOptions{
-		PackageID: &newPkgID,
-		Replicas:  intPtr(form.Replicas), Env: oldPlain, SecretKeys: secretKeys,
-		Spec: &form.Spec, PublicEndpoint: &public,
-		ProvisionSandboxPool: form.Sandbox.sandboxOn(), Actor: userID,
+		PackageID:            &newPkgID,
+		Replicas:             intPtr(form.Replicas),
+		Spec:                 &form.Spec,
+		PublicEndpoint:       &public,
+		ProvisionSandboxPool: form.Sandbox.sandboxOn(),
+		Actor:                userID,
+		EnvTransform: func(oldPlain, oldSecret map[string]string) (map[string]string, []string) {
+			merged := make(map[string]string, len(oldPlain)+len(formEnv))
+			for k, v := range oldPlain {
+				merged[k] = v
+			}
+			wasSandboxOn := false
+			if v, ok := merged["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
+				wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
+			} else if v, ok := oldSecret["SANDBOX_ENABLED"]; ok && strings.TrimSpace(v) != "" {
+				wasSandboxOn = strings.EqualFold(strings.TrimSpace(v), "true")
+			} else if rawMD, ok := baseFiles["AGENTS.md"]; ok {
+				if oldCfg, parseErr := parseOAFConfig(string(rawMD)); parseErr == nil && oldCfg.Config != nil && oldCfg.Config.Sandbox != nil {
+					wasSandboxOn = oldCfg.Config.Sandbox.Enabled
+				}
+			}
+			if !wasSandboxOn && form.Sandbox.sandboxOn() {
+				sbxKeys := platformconfig.GroupKeys("sandbox")
+				for k, v := range c.platformDefaultEnv(form) {
+					if !sbxKeys[k] {
+						continue
+					}
+					_, inPlain := merged[k]
+					_, inSecret := oldSecret[k]
+					if !inPlain && !inSecret {
+						merged[k] = v
+					}
+				}
+			}
+			for k, v := range formEnv {
+				merged[k] = v
+			}
+			if form.Sandbox != nil && form.Sandbox.Enabled != nil {
+				delete(merged, "SANDBOX_ENABLED")
+				if _, inSecret := oldSecret["SANDBOX_ENABLED"]; inSecret {
+					merged["SANDBOX_ENABLED"] = ""
+				}
+				if !*form.Sandbox.Enabled {
+					for k := range platformconfig.GroupKeys("sandbox") {
+						delete(merged, k)
+						if _, inSecret := oldSecret[k]; inSecret {
+							merged[k] = ""
+						}
+					}
+				}
+			}
+			if _, clearKeys := form.Memory.memoryEnv(); len(clearKeys) > 0 {
+				for _, k := range clearKeys {
+					delete(merged, k)
+				}
+			}
+			return merged, secretKeys
+		},
 	}
 	if form.Image != "" {
 		opt.Image = &form.Image // 空 = 沿用现镜像（UpdateEnv/Republish 语义）
@@ -1348,9 +1364,9 @@ func intPtr(v int) *int32 { x := int32(v); return &x }
 // copySkillAssetDir 从技能版本 PVC 目录复制 skills/<name>/（Skill 中心 source=skill 勾选；
 // 2026-10-19）。skillID+version 定位 skills/{skillID}/{version}；version 为空取最新发布版。
 // 目录名与资产名一致性由创建链路保证（zip 目录名即资产名；markdown 生成同名目录）。
-func (c *Core) copySkillAssetDir(skillID uint, version, name string) (map[string][]byte, error) {
+func (c *Core) copySkillAssetDir(workspaceID, skillID uint, version, name string) (map[string][]byte, error) {
 	skill, err := c.GetSkill(skillID)
-	if err != nil {
+	if err != nil || skill.WorkspaceID != workspaceID {
 		return nil, fmt.Errorf("%w: skill %d not found", ErrInvalidForm, skillID)
 	}
 	if skill.Name != name {

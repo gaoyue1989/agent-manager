@@ -285,3 +285,41 @@ func TestExtractZipToRejectsZipSlipFromRawInfo(t *testing.T) {
 		t.Fatalf("expected ErrZipSlip from second-line defense, got %v", err)
 	}
 }
+
+func TestExtractZipToEnforcesActualExtractedLimit(t *testing.T) {
+	f, done := newTestFS(t)
+	defer done()
+	zeros := bytes.Repeat([]byte{0}, 51<<20)
+	data := buildRawZip(t, []rawEntry{
+		{name: "a.bin", content: zeros},
+		{name: "b.bin", content: zeros},
+	})
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = f.ExtractZipTo("packages/bomb", &ZipInfo{Reader: zr})
+	if !errors.Is(err, ErrExtractTooLarge) {
+		t.Fatalf("expected ErrExtractTooLarge, got %v", err)
+	}
+	if _, statErr := os.Stat(f.PackageDir("packages/bomb")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected dest dir to be cleaned up, statErr=%v", statErr)
+	}
+}
+
+func TestWriteZipToEnforcesActualExtractedLimit(t *testing.T) {
+	f, done := newTestFS(t)
+	defer done()
+	zeros := bytes.Repeat([]byte{0}, 51<<20)
+	data := buildRawZip(t, []rawEntry{
+		{name: "a.bin", content: zeros},
+		{name: "b.bin", content: zeros},
+	})
+	_, _, err := f.WriteZipTo("packages/write-bomb", data)
+	if !errors.Is(err, ErrExtractTooLarge) {
+		t.Fatalf("expected ErrExtractTooLarge, got %v", err)
+	}
+	if _, statErr := os.Stat(f.PackageDir("packages/write-bomb")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected dest dir to be cleaned up, statErr=%v", statErr)
+	}
+}

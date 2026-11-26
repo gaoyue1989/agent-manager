@@ -1,5 +1,6 @@
 package io.agentmanager.framework.browser;
 
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -9,6 +10,7 @@ import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
 import org.springframework.web.socket.WebSocketHandler;
 import org.springframework.web.socket.server.HandshakeInterceptor;
+import org.springframework.web.socket.server.support.OriginHandshakeInterceptor;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import io.agentmanager.framework.service.SessionAccessGuard;
@@ -26,11 +28,22 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
 
     private final SessionUserStore sessionUserStore;
     private final BrowserViewTicketStore ticketStore;
+    private final OriginHandshakeInterceptor originInterceptor;
 
     public BrowserViewHandshakeInterceptor(SessionUserStore sessionUserStore,
                                            BrowserViewTicketStore ticketStore) {
+        this(sessionUserStore, ticketStore, List.of());
+    }
+
+    public BrowserViewHandshakeInterceptor(SessionUserStore sessionUserStore,
+                                           BrowserViewTicketStore ticketStore,
+                                           List<String> allowedOriginPatterns) {
         this.sessionUserStore = sessionUserStore;
         this.ticketStore = ticketStore;
+        this.originInterceptor = new OriginHandshakeInterceptor();
+        if (allowedOriginPatterns != null && !allowedOriginPatterns.isEmpty()) {
+            this.originInterceptor.setAllowedOriginPatterns(allowedOriginPatterns);
+        }
     }
 
     @Override
@@ -40,6 +53,15 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
         var matcher = VIEW_PATH.matcher(path);
         if (!matcher.matches()) {
             log.warn("[browser-view] handshake rejected: unexpected path {}", path);
+            return false;
+        }
+        try {
+            if (!originInterceptor.beforeHandshake(withForwardedOrigin(request), response, wsHandler, attributes)) {
+                log.info("[browser-view] handshake rejected: origin not allowed (path={})", path);
+                return false;
+            }
+        } catch (Exception e) {
+            log.warn("[browser-view] handshake rejected: origin check error ({})", e.getMessage());
             return false;
         }
         String sessionId = PathSafe.sanitize(matcher.group(1));
@@ -55,7 +77,8 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
             return false;
         }
         String headerUserId = request.getHeaders().getFirst("X-User-Id");
-        if (headerUserId != null && !headerUserId.isBlank() && !headerUserId.equals(claim.userId())) {
+        if (headerUserId != null && !headerUserId.isBlank()
+                && !SessionAccessGuard.normalizeRequester(headerUserId).equals(claim.userId())) {
             log.warn("[browser-view] handshake rejected: header identity conflicts with view ticket (sid={})",
                 sessionId);
             return false;
@@ -73,5 +96,96 @@ public class BrowserViewHandshakeInterceptor implements HandshakeInterceptor {
     @Override
     public void afterHandshake(ServerHttpRequest request, ServerHttpResponse response,
                                WebSocketHandler wsHandler, Exception exception) {
+    }
+
+    static ServerHttpRequest withForwardedOrigin(ServerHttpRequest request) {
+        var headers = request.getHeaders();
+        String fwdProto = firstToken(headers.getFirst("X-Forwarded-Proto"));
+        String fwdHost = firstToken(headers.getFirst("X-Forwarded-Host"));
+        String fwdPort = firstToken(headers.getFirst("X-Forwarded-Port"));
+        if (fwdProto == null && fwdHost == null && fwdPort == null) {
+            return request;
+        }
+        var base = request.getURI();
+        String scheme = fwdProto != null ? fwdProto : base.getScheme();
+        String host = base.getHost();
+        int port = base.getPort();
+        if (fwdHost != null) {
+            int colon = fwdHost.lastIndexOf(':');
+            if (colon > 0 && fwdHost.indexOf(']') < colon) {
+                host = fwdHost.substring(0, colon);
+                try {
+                    port = Integer.parseInt(fwdHost.substring(colon + 1));
+                } catch (NumberFormatException ignored) {
+                    port = -1;
+                }
+            } else {
+                host = fwdHost;
+                port = -1;
+            }
+        }
+        if (port < 0 && fwdPort != null) {
+            try {
+                port = Integer.parseInt(fwdPort);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        var resolved = UriComponentsBuilder.fromUri(base)
+            .scheme(scheme)
+            .host(host)
+            .port(port > 0 ? port : -1)
+            .build(true)
+            .toUri();
+        return new ServerHttpRequest() {
+            @Override
+            public java.net.URI getURI() {
+                return resolved;
+            }
+
+            @Override
+            public org.springframework.http.HttpMethod getMethod() {
+                return request.getMethod();
+            }
+
+            @Override
+            public org.springframework.http.HttpHeaders getHeaders() {
+                return request.getHeaders();
+            }
+
+            @Override
+            public java.io.InputStream getBody() throws java.io.IOException {
+                return request.getBody();
+            }
+
+            @Override
+            public java.security.Principal getPrincipal() {
+                return request.getPrincipal();
+            }
+
+            @Override
+            public java.net.InetSocketAddress getLocalAddress() {
+                return request.getLocalAddress();
+            }
+
+            @Override
+            public java.net.InetSocketAddress getRemoteAddress() {
+                return request.getRemoteAddress();
+            }
+
+            @Override
+            public org.springframework.http.server.ServerHttpAsyncRequestControl getAsyncRequestControl(
+                    ServerHttpResponse resp) {
+                return request.getAsyncRequestControl(resp);
+            }
+        };
+    }
+
+    private static String firstToken(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        int comma = raw.indexOf(',');
+        String first = (comma >= 0 ? raw.substring(0, comma) : raw).trim();
+        return first.isEmpty() ? null : first;
     }
 }

@@ -76,6 +76,18 @@ func dropPlatformInjectedEnv(env map[string]string, secretKeys []string) (map[st
 	return env, out
 }
 
+func (c *Core) preserveLegacyOpenVikingEnv(oldPlain, plain map[string]string) {
+	if c.Viking != nil || plain[AgentMemoryProviderEnv] == MemoryProviderLocal {
+		return
+	}
+	if v := oldPlain[OpenVikingURLEnv]; v != "" {
+		plain[OpenVikingURLEnv] = v
+	}
+	if v := oldPlain[OpenVikingAccountEnv]; v != "" {
+		plain[OpenVikingAccountEnv] = v
+	}
+}
+
 // VikingAdmin OpenViking Admin API 客户端（root key 身份）。nil = 平台未启用 OpenViking。
 type VikingAdmin struct {
 	baseURL string
@@ -533,12 +545,30 @@ func (c *Core) ConsoleMemoryBrowse(workspaceID, serviceID, uid uint, action, uri
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("openviking %s: HTTP %d: %.200s", action, resp.StatusCode, raw)
+		return nil, vikingBrowseHTTPError(action, resp.StatusCode)
 	}
 	if action == "list" {
 		raw = vikingNormalizeListOutput(raw, ownUserPrefix)
 	}
 	return json.RawMessage(raw), nil
+}
+
+
+// vikingBrowseHTTPError 将上游客户端错误映射为本地领域错误，不向调用方回显
+// OpenViking 的内部 URI、用户标识或服务端错误正文。
+func vikingBrowseHTTPError(action string, status int) error {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return fmt.Errorf("%w: memory %s request was rejected by OpenViking", ErrInvalidForm, action)
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("%w: memory %s is not permitted by OpenViking", ErrForbidden, action)
+	case http.StatusNotFound:
+		return fmt.Errorf("%w: memory %s target was not found", ErrNotFound, action)
+	case http.StatusConflict:
+		return fmt.Errorf("%w: memory %s conflicts with OpenViking state", ErrConflict, action)
+	default:
+		return fmt.Errorf("openviking memory %s failed (HTTP %d)", action, status)
+	}
 }
 
 // vikingNormalizeBrowseInput 入参 URI 归一（issue #374）：在 ~/ 契约口径外同时接受

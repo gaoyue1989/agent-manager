@@ -82,7 +82,8 @@ public class AgentScopeConfig {
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
         org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider,
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager> lifecycleManagerProvider,
-        org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> farmMeterRegistryProvider
+        org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> farmMeterRegistryProvider,
+        OafConfig oafConfig
     ) {
         if (!sandboxRuntime.enabled()) {
             log.info("Sandbox disabled (SandboxRuntime), using RemoteFilesystemSpec mode");
@@ -103,7 +104,7 @@ public class AgentScopeConfig {
         // 业务规范键解析（issue #52）：Channel 链路 ctx.userId 是网关 peer（=前端 sessionId），
         // 沙箱 userKey 须经 session_user 反查真实用户，否则 per-user 技能物化/回写退化为
         // per-session 命名空间。与 HarnessAgentFactory 的 LLM 记录/span 翻译同一实现（memo 共享）。
-        var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
+        var sessionKeyResolver = new SessionKeyResolver(sessionUserStore, oafConfig.slug());
         var spec = new OpenSandboxFilesystemSpec()
             .serverUrl(config.opensandbox().serverUrl())
             .apiKey(config.opensandbox().apiKey())
@@ -559,11 +560,12 @@ public class AgentScopeConfig {
         io.agentmanager.framework.config.AgentManagerProperties props,
         io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
-        SessionUserStore sessionUserStore
+        SessionUserStore sessionUserStore,
+        OafConfig oafConfig
     ) {
         // 规范键解析（issue #52）：present_file 沙箱归属校验须与 SandboxUserKeyMiddleware
         // 同源反查真实用户，否则 Channel 链路 ctx.userId（网关 peer）与沙箱绑定键不等 → 直读被误拒
-        var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
+        var sessionKeyResolver = new SessionKeyResolver(sessionUserStore, oafConfig.slug());
         // 沙箱部署注册无 file_content_base64 参数的形态：base64 回退要求 LLM 在 tool call
         // 参数里复述文件全文，大文件必超输出上限被截断 → 工具报错 → file_ready 静默丢失
         if (sandboxRuntime.enabled()) {

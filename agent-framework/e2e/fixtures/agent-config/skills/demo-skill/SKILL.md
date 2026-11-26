@@ -1,5 +1,6 @@
 ---
 name: demo-skill
+displayName: 演示技能
 description: E2E 动态技能目录发现标记（/skills 应显示 dynamic:true）
 version: 1.0.0
 ---

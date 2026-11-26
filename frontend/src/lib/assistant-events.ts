@@ -101,37 +101,192 @@ export interface InlineHistoryImage {
   download_url: string;
 }
 
+export type AssistantBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; file: InlineHistoryImage };
+
 export interface HistoryAssistantMessage {
   role: "assistant";
   content: string;
   files?: InlineHistoryImage[];
+  blocks?: AssistantBlock[];
+}
+
+export function isSafeFileDownloadUrl(url: string | undefined | null): boolean {
+  if (typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("https://") || lower.startsWith("http://")) {
+    return true;
+  }
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    const pathOnly = trimmed.split(/[?#]/, 1)[0];
+    const segs = pathOnly.split("/");
+    if (segs.includes("..")) return false;
+    return /^\/files\/.+$/.test(pathOnly) || /^\/agent\/[a-z0-9-]+\/files\/.+$/i.test(pathOnly);
+  }
+  return false;
+}
+
+export function isSafeInlineImageUrl(url: string | undefined | null): boolean {
+  if (typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.toLowerCase().startsWith("data:image/")) {
+    return true;
+  }
+  return isSafeFileDownloadUrl(trimmed);
+}
+
+export function createDirectReturnOrderTracker() {
+  const perTool = new Map<string, AssistantBlock[]>();
+  const toolOrder: string[] = [];
+  const ensure = (id: string) => {
+    let list = perTool.get(id);
+    if (!list) {
+      list = [];
+      perTool.set(id, list);
+      toolOrder.push(id);
+    }
+    return list;
+  };
+  return {
+    onTextDelta(toolCallId: string | undefined, delta: string | undefined) {
+      if (!toolCallId || !delta) return;
+      const list = ensure(toolCallId);
+      const last = list[list.length - 1];
+      if (last && last.type === "text") {
+        list[list.length - 1] = { type: "text", text: last.text + delta };
+      } else {
+        list.push({ type: "text", text: delta });
+      }
+    },
+    onImageDelta(toolCallId: string | undefined, file: InlineHistoryImage) {
+      if (!toolCallId) return;
+      ensure(toolCallId).push({ type: "image", file });
+    },
+    orderedBlocks(): AssistantBlock[] | null {
+      const merged: AssistantBlock[] = [];
+      let hasImage = false;
+      for (const id of toolOrder) {
+        const list = perTool.get(id);
+        if (!list) continue;
+        for (const b of list) {
+          if (b.type === "image") hasImage = true;
+          merged.push(b);
+        }
+      }
+      return hasImage && merged.length > 0 ? merged : null;
+    },
+    reset() {
+      perTool.clear();
+      toolOrder.length = 0;
+    },
+  };
+}
+
+export function resolveInlineImageUrl(
+  mediaType: string | undefined,
+  url: string | undefined,
+  data: string | undefined,
+): string | null {
+  if (typeof url === "string" && url.trim()) {
+    const trimmed = url.trim();
+    return isSafeInlineImageUrl(trimmed) ? trimmed : null;
+  }
+  if (typeof data === "string" && data.trim()) {
+    const mime = mediaType && mediaType.startsWith("image/") ? mediaType : "image/png";
+    return `data:${mime};base64,${data.trim()}`;
+  }
+  return null;
+}
+
+export function normalizeStoredSessionId(
+  sid: string | null | undefined,
+  createId: () => string,
+): string {
+  if (!sid || !sid.trim()) return createId();
+  const trimmed = sid.trim();
+  if (/^u-/i.test(trimmed) || /^gw-/i.test(trimmed) || /^debug-user$/i.test(trimmed)) {
+    return createId();
+  }
+  return trimmed;
+}
+
+export function appendAssistantTextBlock(
+  blocks: AssistantBlock[] | undefined,
+  existingContent: string,
+  delta: string,
+): AssistantBlock[] {
+  const base: AssistantBlock[] =
+    blocks && blocks.length > 0
+      ? [...blocks]
+      : existingContent
+        ? [{ type: "text", text: existingContent }]
+        : [];
+  if (!delta) return base;
+  const last = base[base.length - 1];
+  if (last && last.type === "text") {
+    base[base.length - 1] = { type: "text", text: last.text + delta };
+  } else {
+    base.push({ type: "text", text: delta });
+  }
+  return base;
+}
+
+export function appendAssistantImageBlock(
+  blocks: AssistantBlock[] | undefined,
+  existingContent: string,
+  file: InlineHistoryImage,
+): AssistantBlock[] {
+  const base: AssistantBlock[] =
+    blocks && blocks.length > 0
+      ? [...blocks]
+      : existingContent
+        ? [{ type: "text", text: existingContent }]
+        : [];
+  base.push({ type: "image", file });
+  return base;
 }
 
 export function buildHistoryAssistantMessage(m: {
   content?: string;
   msg_id?: string | number;
-  blocks?: Array<{ type?: string; media_type?: string; url?: string; data?: string }>;
+  blocks?: Array<{ type?: string; text?: string; media_type?: string; url?: string; data?: string }>;
 }): HistoryAssistantMessage | null {
-  const inline: InlineHistoryImage[] = Array.isArray(m.blocks)
-    ? m.blocks
-        .filter((b) => b?.type === "image")
-        .map((b, i) => {
-          const mime = b.media_type ?? "image/png";
-          return {
-            file_id: `inline-direct-${m.msg_id ?? "img"}-${i}`,
-            file_name: "inline-image",
-            mime_type: mime,
-            size: 0,
-            download_url: b.url ?? `data:${mime};base64,${b.data}`,
-          };
-        })
-    : [];
-  if (!m.content && inline.length === 0) {
+  const inline: InlineHistoryImage[] = [];
+  const orderedBlocks: AssistantBlock[] = [];
+  if (Array.isArray(m.blocks)) {
+    let imgIdx = 0;
+    for (const b of m.blocks) {
+      if (!b) continue;
+      if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) {
+        orderedBlocks.push({ type: "text", text: b.text });
+      } else if (b.type === "image") {
+        const mime = b.media_type ?? "image/png";
+        const downloadUrl = resolveInlineImageUrl(mime, b.url, b.data);
+        if (!downloadUrl) continue;
+        const file: InlineHistoryImage = {
+          file_id: `inline-direct-${m.msg_id ?? "img"}-${imgIdx++}`,
+          file_name: "inline-image",
+          mime_type: mime,
+          size: 0,
+          download_url: downloadUrl,
+        };
+        inline.push(file);
+        orderedBlocks.push({ type: "image", file });
+      }
+    }
+  }
+  const content = m.content ?? "";
+  if (!content && inline.length === 0 && orderedBlocks.length === 0) {
     return null;
   }
   return {
     role: "assistant",
-    content: m.content ?? "",
+    content,
     ...(inline.length > 0 ? { files: inline } : {}),
+    ...(orderedBlocks.length > 0 ? { blocks: orderedBlocks } : {}),
   };
 }

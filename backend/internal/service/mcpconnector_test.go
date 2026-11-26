@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"agent-manager/backend/internal/store"
@@ -89,6 +90,9 @@ func TestMcpConnectorPermissionEntryValidation(t *testing.T) {
 // TestMcpConnectorVerifyErrorLifecycle verify 失败路径写 lastVerifyError（512 字符截断、
 // 多字节按 rune 数截断）；复验成功路径清空。
 func TestMcpConnectorVerifyErrorLifecycle(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
 	c, _, done := newTestCore(t)
 	defer done()
 	ws := seedWs(t, c, "ws-375b", "验证错误空间")
@@ -244,5 +248,51 @@ func TestMcpConnectorDirectReturnDefaultsAndLegacyNull(t *testing.T) {
 	}
 	if len(legacy) != 1 || legacy[0].DirectReturn != "" {
 		t.Fatalf("legacy row directReturn: %+v", legacy)
+	}
+}
+
+func TestMcpListToolsBlocksLoopbackAndMetadata(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = false
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	blocked := []string{
+		"http://127.0.0.1:8080/mcp",
+		"http://localhost:8080/mcp",
+		"http://[::1]:8080/mcp",
+		"http://169.254.169.254/latest/meta-data",
+		"http://[fe80::1]/mcp",
+	}
+	for _, u := range blocked {
+		_, _, err := mcpListTools(u, "", 5)
+		if err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Fatalf("url %q should be blocked, got %v", u, err)
+		}
+	}
+}
+
+func TestMcpListToolsDoesNotFollowRedirect(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redir.Close()
+
+	_, _, err := mcpListTools(redir.URL, "", 5)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("expected HTTP 302 error without following redirect, got %v", err)
+	}
+	if atomic.LoadInt32(&targetHits) != 0 {
+		t.Fatalf("redirect target must not be contacted, hits=%d", targetHits)
 	}
 }

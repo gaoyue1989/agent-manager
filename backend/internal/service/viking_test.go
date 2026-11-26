@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -62,8 +63,9 @@ type fakeOpenViking struct {
 	browseURI []string
 	conflict  bool
 	deleteErr bool
-	writeErr  bool
-	onCreate  func()
+	writeErr     bool
+	browseStatus int
+	onCreate     func()
 
 	accounts          map[string]bool
 	ensureDelay       time.Duration
@@ -211,6 +213,11 @@ func (f *fakeOpenViking) handler() http.HandlerFunc {
 				"result": map[string]string{}})
 		case r.URL.Path == "/api/v1/fs/ls" && r.Method == http.MethodGet:
 			f.recordBrowse(r.URL.Query().Get("uri"))
+			if f.browseStatus >= 400 {
+				w.WriteHeader(f.browseStatus)
+				_, _ = fmt.Fprint(w, `{"status":"error","error":{"code":"NOT_FOUND","message":"private path viking://user/u-1001/private-memory"}}`)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "result": []map[string]any{
 				{"uri": "viking://user/u-1001/memories/plan.md", "size": 9007199254740993,
 					"isDir": false, "modTime": "2026-11-18T10:00:00+08:00", "abstract": "user u-1001 的计划摘要"},
@@ -820,6 +827,42 @@ func mustDecodeBrowseList(t *testing.T, raw json.RawMessage) []map[string]any {
 		t.Fatalf("ls status = %q", env.Status)
 	}
 	return env.Result
+}
+
+// 上游浏览错误按 HTTP 状态映射本地错误，且绝不回显上游内部路径或响应正文。
+func TestMemoryBrowseMapsUpstreamErrorsWithoutLeakingDetails(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{
+		{http.StatusBadRequest, ErrInvalidForm},
+		{http.StatusForbidden, ErrForbidden},
+		{http.StatusNotFound, ErrNotFound},
+		{http.StatusInternalServerError, nil},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			fake := &fakeOpenViking{browseStatus: tc.status}
+			core, _ := newVikingTestCore(t, fake.handler())
+			pkg := uploadTestPkg(t, core, "")
+			svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest",
+				Name: "svc", WorkspaceID: 7})
+			if err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+			waitForVikingTerminal(t, core, svc.ID)
+
+			_, err = core.ConsoleMemoryBrowse(7, svc.ID, 1001, "list", "viking://~/memories")
+			if err == nil {
+				t.Fatal("browse must return an error")
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want errors.Is(%v)", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "private-memory") || strings.Contains(err.Error(), "u-1001") {
+				t.Fatalf("upstream private details leaked: %v", err)
+			}
+		})
+	}
 }
 
 // 记忆浏览代理 URI 双向归一（issue #374）：入参 ~/ 与自有 user/{uid} 两形态等价、
@@ -1471,5 +1514,106 @@ func TestImportPackageDirRespectsOverallTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 400*time.Millisecond {
 		t.Fatalf("importPackageDirWith did not abort promptly on overall timeout: %v", time.Since(start))
+	}
+}
+
+func TestDisabledSwitchLegacyServiceUpdateEnvAndRepublishWithEnv(t *testing.T) {
+	fake := &fakeOpenViking{}
+	core, baseURL := newVikingTestCore(t, fake.handler())
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{
+		PackageID:   pkg.ID,
+		Image:       "agent-framework:latest",
+		Name:        "legacy-ovk",
+		WorkspaceID: 7,
+	})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	waitForVikingTerminal(t, core, svc.ID)
+	creations := fake.createCount()
+	core.Viking = NewVikingAdmin(false, baseURL, "root-key-test")
+
+	updated, err := core.UpdateEnv(svc.ID, map[string]string{
+		AgentMemoryProviderEnv: MemoryProviderOpenViking,
+		OpenVikingURLEnv:       "http://evil.invalid",
+		OpenVikingAccountEnv:   "evil-account",
+		"CUSTOM_FLAG":          "v1",
+	}, nil)
+	if err != nil {
+		t.Fatalf("UpdateEnv on legacy OpenViking service under disabled switch must pass: %v", err)
+	}
+	if fake.createCount() != creations {
+		t.Fatalf("disabled switch must not call upstream, creates=%d", fake.createCount())
+	}
+	var plain1, secret1 map[string]string
+	_ = json.Unmarshal([]byte(updated.EnvJSON), &plain1)
+	_ = json.Unmarshal([]byte(updated.EnvSecretJSON), &secret1)
+	if plain1[OpenVikingURLEnv] != baseURL || plain1[OpenVikingAccountEnv] != "oaf-legacy-ovk" {
+		t.Fatalf("UpdateEnv must restore trusted OPENVIKING_URL/ACCOUNT and ignore spoofed input: %v", plain1)
+	}
+	if plain1["CUSTOM_FLAG"] != "v1" || secret1[OvkAdminKeyEnv] == "" || secret1[OvkUserSeedEnv] == "" {
+		t.Fatalf("UpdateEnv must apply new env and keep sticky secrets: plain=%v secret=%v", plain1, secret1)
+	}
+
+	waitForVikingTerminal(t, core, svc.ID)
+	replicas := int32(2)
+	repub, err := core.Republish(svc.ID, RepublishOptions{
+		Replicas: &replicas,
+		Env: map[string]string{
+			AgentMemoryProviderEnv: MemoryProviderOpenViking,
+			OpenVikingURLEnv:       "http://evil2.invalid",
+			OpenVikingAccountEnv:   "evil-account-2",
+			"CUSTOM_FLAG":          "v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Republish with Env on legacy OpenViking service under disabled switch must pass: %v", err)
+	}
+	var plain2 map[string]string
+	_ = json.Unmarshal([]byte(repub.EnvJSON), &plain2)
+	if plain2[OpenVikingURLEnv] != baseURL || plain2[OpenVikingAccountEnv] != "oaf-legacy-ovk" || plain2["CUSTOM_FLAG"] != "v2" {
+		t.Fatalf("Republish with Env must preserve trusted OpenViking env: %v", plain2)
+	}
+
+	waitForVikingTerminal(t, core, svc.ID)
+	repubTransform, err := core.Republish(svc.ID, RepublishOptions{
+		EnvTransform: func(oldPlain, oldSecret map[string]string) (map[string]string, []string) {
+			merged := map[string]string{}
+			for k, v := range oldPlain {
+				merged[k] = v
+			}
+			merged["CUSTOM_FLAG"] = "v3"
+			return merged, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Republish with EnvTransform (UpdateAgent path) under disabled switch must pass: %v", err)
+	}
+	var plain3 map[string]string
+	_ = json.Unmarshal([]byte(repubTransform.EnvJSON), &plain3)
+	if plain3[OpenVikingURLEnv] != baseURL || plain3[OpenVikingAccountEnv] != "oaf-legacy-ovk" || plain3["CUSTOM_FLAG"] != "v3" {
+		t.Fatalf("Republish with EnvTransform must preserve trusted OpenViking env: %v", plain3)
+	}
+
+	localSvc, err := core.Publish(PublishRequest{
+		PackageID:   pkg.ID,
+		Image:       "agent-framework:latest",
+		Name:        "local-svc",
+		WorkspaceID: 7,
+		Env:         map[string]string{AgentMemoryProviderEnv: MemoryProviderLocal},
+	})
+	if err != nil {
+		t.Fatalf("publish local: %v", err)
+	}
+	waitForVikingTerminal(t, core, localSvc.ID)
+	if _, err := core.UpdateEnv(localSvc.ID, map[string]string{
+		AgentMemoryProviderEnv: MemoryProviderOpenViking,
+		OpenVikingURLEnv:       "http://evil.invalid",
+		OpenVikingAccountEnv:   "evil-account",
+		OvkAdminKeyEnv:         "forged-key",
+		OvkUserSeedEnv:         "forged-seed",
+	}, nil); err == nil {
+		t.Fatalf("unprovisioned service switching to openviking under disabled switch must still be rejected")
 	}
 }

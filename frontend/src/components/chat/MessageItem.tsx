@@ -6,10 +6,9 @@
 import { memo, useState } from "react";
 import Markdown from "./Markdown";
 import type { ChatMsg } from "./types";
-import { toolStatus } from "@/lib/assistant-events";
+import { isSafeFileDownloadUrl, isSafeInlineImageUrl, toolStatus } from "@/lib/assistant-events";
 import { IconAlert, IconCheck, IconChevronDown, IconDownload, IconFileText, IconImage, IconLoader, IconMinus, IconShieldCheck, IconSparkles, IconX } from "./icons";
 
-const AGENT_BASE = "/agent/release-agent";
 
 // 工具步骤按运行时真实状态渲染：执行中/等待确认/成功/失败/被拒/中断；
 // 历史回放从 AgentState 取真实状态与结果输出（DB 权威来源），无状态时中性显示
@@ -104,14 +103,17 @@ function Thinking() {
 }
 
 // 产出文件卡片：图片内联预览；普通文件给下载按钮
-function FileCards({ files }: { files: NonNullable<ChatMsg["files"]> }) {
+function FileCards({ files, agentBase }: { files: NonNullable<ChatMsg["files"]>; agentBase: string }) {
   return (
     <div className="space-y-2">
       {files.map((f, i) => {
         const isImage = f.mime_type?.startsWith("image/");
-        const inline = f.download_url.startsWith("data:");
+        const trimmedUrl = (f.download_url ?? "").trim();
+        const canDownload = isSafeFileDownloadUrl(trimmedUrl);
+        const inlinePreview = isImage && isSafeInlineImageUrl(trimmedUrl);
+        const resolvedUrl = trimmedUrl.startsWith("/files/") ? `${agentBase}${trimmedUrl}` : trimmedUrl;
         return (
-          <div key={i} data-testid="file-card" className="max-w-md">
+          <div key={f.file_id || i} data-testid="file-card" className="max-w-md">
             <div className="flex items-center gap-3 rounded-xl border border-blue-100/90 bg-gradient-to-r from-blue-50/90 to-indigo-50/60 p-2.5 shadow-sm">
               <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-blue-100 bg-white text-blue-600">
                 {isImage ? <IconImage className="size-[18px]" /> : <IconFileText className="size-[18px]" />}
@@ -122,16 +124,16 @@ function FileCards({ files }: { files: NonNullable<ChatMsg["files"]> }) {
                   {f.size > 0 ? `${(f.size / 1024).toFixed(1)} KB · ` : ""}{f.mime_type}
                 </p>
               </div>
-              {!inline && (
-                <a href={f.download_url.startsWith("/files") ? `${AGENT_BASE}${f.download_url}` : f.download_url}
+              {canDownload && (
+                <a href={resolvedUrl}
                   download={f.file_name} data-testid="file-download"
                   className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1.5 text-xs text-white shadow-sm transition hover:bg-blue-700">
                   <IconDownload className="size-3.5" />下载
                 </a>
               )}
             </div>
-            {inline && isImage && (
-              <img src={f.download_url} alt={f.file_name} className="mt-1.5 max-h-44 rounded-xl border border-gray-200 shadow-sm" />
+            {inlinePreview && (
+              <img src={resolvedUrl} alt={f.file_name} className="mt-1.5 max-h-44 rounded-xl border border-gray-200 shadow-sm" />
             )}
           </div>
         );
@@ -161,7 +163,7 @@ function ContextCard({ msg }: { msg: ChatMsg }) {
   );
 }
 
-function MessageItem({ msg }: { msg: ChatMsg }) {
+function MessageItem({ msg, agentBase = "/agent/release-agent" }: { msg: ChatMsg; agentBase?: string }) {
   if (msg.role === "context") return <ContextCard msg={msg} />;
   if (msg.role === "tool") return <ToolStep msg={msg} />;
   if (msg.role === "system") return <SystemBanner content={msg.content} />;
@@ -181,17 +183,42 @@ function MessageItem({ msg }: { msg: ChatMsg }) {
         <IconSparkles className="size-4" />
       </span>
       <div className="min-w-0 flex-1 space-y-2">
-        <div data-testid="assistant-msg" className="text-sm leading-relaxed text-gray-800">
-          {msg.content ? (
-            <>
-              <Markdown text={msg.content} />
-              {msg.pending && <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse rounded bg-blue-500 align-text-bottom" />}
-            </>
-          ) : msg.pending ? (
-            <Thinking />
-          ) : null}
-        </div>
-        {msg.files && msg.files.length > 0 && <FileCards files={msg.files} />}
+        {msg.blocks && msg.blocks.length > 0 ? (
+          <div data-testid="assistant-msg" className="space-y-2 text-sm leading-relaxed text-gray-800">
+            {msg.blocks.map((block, idx) =>
+              block.type === "text" ? (
+                <div key={idx}>
+                  <Markdown text={block.text} />
+                  {msg.pending && idx === msg.blocks!.length - 1 && (
+                    <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse rounded bg-blue-500 align-text-bottom" />
+                  )}
+                </div>
+              ) : (
+                <FileCards key={block.file.file_id || idx} files={[block.file]} agentBase={agentBase} />
+              ),
+            )}
+          </div>
+        ) : (
+          <div data-testid="assistant-msg" className="text-sm leading-relaxed text-gray-800">
+            {msg.content ? (
+              <>
+                <Markdown text={msg.content} />
+                {msg.pending && <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse rounded bg-blue-500 align-text-bottom" />}
+              </>
+            ) : msg.pending ? (
+              <Thinking />
+            ) : null}
+          </div>
+        )}
+        {(() => {
+          const blockFileIds = new Set(
+            (msg.blocks ?? [])
+              .filter((b): b is Extract<NonNullable<ChatMsg["blocks"]>[number], { type: "image" }> => b.type === "image")
+              .map((b) => b.file.file_id),
+          );
+          const remainingFiles = (msg.files ?? []).filter((f) => !blockFileIds.has(f.file_id));
+          return remainingFiles.length > 0 ? <FileCards files={remainingFiles} agentBase={agentBase} /> : null;
+        })()}
       </div>
     </div>
   );

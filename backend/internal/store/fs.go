@@ -152,6 +152,11 @@ func validateEntry(zf *zip.File) error {
 	if len(name) > 512 || zf.Mode()&os.ModeSymlink != 0 {
 		return ErrZipSlip
 	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == ".." {
+			return ErrZipSlip
+		}
+	}
 	clean := filepath.Clean(name)
 	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") ||
 		strings.Contains(name, "\\") || strings.Contains(clean, "../") {
@@ -201,14 +206,18 @@ func (f *FS) ExtractZipTo(rel string, zi *ZipInfo) (int, int64, string, error) {
 			src.Close()
 			return 0, 0, "", err
 		}
-		n, err := io.Copy(out, src)
+		n, err := io.Copy(out, io.LimitReader(src, MaxExtracted-total+1))
 		src.Close()
 		out.Close()
 		if err != nil {
 			return 0, 0, "", err
 		}
-		count++
 		total += n
+		if total > MaxExtracted {
+			_ = os.RemoveAll(dest)
+			return 0, 0, "", ErrExtractTooLarge
+		}
+		count++
 	}
 	return count, total, zi.Checksum, nil
 }
@@ -311,8 +320,13 @@ func CleanSubPath(sub string) (string, error) {
 	if sub == "" {
 		return "", fmt.Errorf("%w: empty", ErrZipSlip)
 	}
-	if len(sub) > 512 || strings.Contains(sub, "\\") || strings.Contains(sub, "..") {
+	if len(sub) > 512 || strings.Contains(sub, "\\") {
 		return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+	}
+	for _, seg := range strings.Split(sub, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+		}
 	}
 	clean := strings.TrimPrefix(filepath.Clean("/"+sub), "/")
 	if clean == "" || clean == "." {
@@ -411,14 +425,18 @@ func (f *FS) WriteZipTo(rel string, zipData []byte) (int, int64, error) {
 			src.Close()
 			return 0, 0, err
 		}
-		n, err := io.Copy(out, src)
+		n, err := io.Copy(out, io.LimitReader(src, MaxExtracted-total+1))
 		src.Close()
 		out.Close()
 		if err != nil {
 			return 0, 0, err
 		}
-		count++
 		total += n
+		if total > MaxExtracted {
+			_ = os.RemoveAll(dest)
+			return 0, 0, ErrExtractTooLarge
+		}
+		count++
 	}
 	return count, total, nil
 }

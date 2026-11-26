@@ -1,7 +1,7 @@
 "use client";
 // 运维侧 · 记忆管理（openviking-memory-integration-design §11.1，与沙箱管理平级）：
 // 全平台 Agent×记忆供给状态总览 + 为任意平台用户代签发访问 Key。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type MemorySupplyItem } from "@/lib/api";
 import { Badge, Btn, Card, CopyBtn, Note, PageHead } from "@/components/ui";
 
@@ -14,16 +14,28 @@ export default function AdminMemoryPage() {
   const [issuing, setIssuing] = useState(false);
   const [msg, setMsg] = useState("");
   const [issued, setIssued] = useState<{ key: string; label: string } | null>(null);
+  const reqSeqRef = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++reqSeqRef.current;
     setLoading(true);
-    try { setRows(await api.admin.memorySupply(keyword)); } catch { setRows([]); }
-    setLoading(false);
+    try {
+      const next = await api.admin.memorySupply(keyword);
+      if (seq !== reqSeqRef.current) return;
+      setRows(next);
+    } catch {
+      if (seq !== reqSeqRef.current) return;
+      setRows([]);
+    }
+    if (seq === reqSeqRef.current) setLoading(false);
   }, [keyword]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    return () => { reqSeqRef.current += 1; };
+  }, [load]);
 
   const issue = async () => {
-    if (!target) return;
+    if (!target || issuing || !userId.trim()) return;
     setIssuing(true); setMsg("");
     try {
       const out = await api.admin.issueMemoryKey(target.serviceId, userId.trim());
@@ -91,7 +103,7 @@ export default function AdminMemoryPage() {
             {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
             <div className="flex justify-end gap-2">
               <Btn onClick={() => setTarget(null)}>取消</Btn>
-              <Btn kind="pri" disabled={!userId.trim()} onClick={issue}>{issuing ? "签发中…" : "签发"}</Btn>
+              <Btn kind="pri" disabled={issuing || !userId.trim()} onClick={issue}>{issuing ? "签发中…" : "签发"}</Btn>
             </div>
           </Card>
         </div>

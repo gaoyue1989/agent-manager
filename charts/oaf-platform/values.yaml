@@ -84,6 +84,11 @@ backend:
   adminInitUser: admin           # 首个 admin 用户名（仅 users 表为空时生效，幂等；空 = 跳过种子）
   adminInitPassword: OafConsole2026  # 首个 admin 密码（经 Secret 注入；生产务必覆盖，首登后立即改密）
   packageDownloadBase: ""        # 空 = 集群内默认（platform-backend svc）
+  exportBaseImage: "busybox:1.36"
+  openviking:
+    enabled: false
+    baseUrl: ""
+  prometheusUrl: ""
   register: { timeoutSeconds: 120, retry: 5 }
   resources:
     requests: { cpu: 100m, memory: 128Mi }

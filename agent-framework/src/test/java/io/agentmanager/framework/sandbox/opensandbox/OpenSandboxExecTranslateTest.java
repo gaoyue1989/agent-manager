@@ -583,4 +583,15 @@ class OpenSandboxExecTranslateTest {
         assertEquals("yes", r2.stdout().trim());
         verify(files).listDirectory("/workspace");
     }
+
+    @Test
+    void translateExistsShouldFallBackToRealExecForDotAndDotDotSegments643() {
+        var osb = mock(Sandbox.class);
+        mockOsb(osb);
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+        for (String p : List.of(".", "/workspace/.", "/workspace/skills/.", "/workspace/skills/..")) {
+            assertNull(sandbox.translateForProbe("test -e '" + p + "' && echo yes || echo no"),
+                "dot segment path " + p + " must fall back to real exec");
+        }
+    }
 }

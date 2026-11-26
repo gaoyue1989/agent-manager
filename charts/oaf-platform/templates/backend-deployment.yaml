@@ -105,6 +105,20 @@ spec:
             - name: PACKAGE_DOWNLOAD_BASE
               value: {{ .Values.backend.packageDownloadBase | quote }}
             {{- end }}
+            {{- with .Values.backend.exportBaseImage }}
+            - name: EXPORT_BASE_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: OPENVIKING_ENABLED
+              value: {{ .Values.backend.openviking.enabled | quote }}
+            {{- with .Values.backend.openviking.baseUrl }}
+            - name: OPENVIKING_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.backend.prometheusUrl }}
+            - name: PROMETHEUS_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.business.deploymentOverlay.enabled }}
             - name: DEPLOYMENT_TEMPLATE
               value: /etc/oaf/business-overlay/overlay.yaml

@@ -80,6 +80,14 @@ class SkillCatalogServiceTest {
         Files.writeString(dir.resolve("SKILL.md"), fm.toString());
     }
 
+    private void writeSkillWithDisplayName(String name, String description, String displayName) throws IOException {
+        var dir = skillsDir.resolve(name);
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("SKILL.md"),
+            "---\nname: " + name + "\ndescription: " + description + "\ndisplayName: " + displayName
+                + "\n---\n\n# " + name + "\n");
+    }
+
     private SkillManageService manageService() {
         return new SkillManageService(props());
     }
@@ -107,6 +115,25 @@ class SkillCatalogServiceTest {
         assertEquals("2.0.0", entry.get("version"));
         assertEquals(true, entry.get("dynamic"));
         assertEquals(false, entry.get("declaredButMissing"));
+    }
+
+    @Test
+    void displayNameShouldComeFromFrontmatter() throws IOException {
+        writeSkillWithDisplayName("gongwen", "Format official documents", "公文排版");
+        writeSkill("plain", "No display name", "1.0.0");
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService(), userSkillService());
+
+        assertEquals("公文排版", byName(service, "gongwen").get("displayName"));
+        assertEquals("", byName(service, "plain").get("displayName"));
+
+        var brief = service.availableSkills().stream()
+            .filter(m -> "gongwen".equals(m.get("name")))
+            .findFirst().orElseThrow();
+        assertEquals("公文排版", brief.get("displayName"));
+        assertEquals("Format official documents", brief.get("description"));
+        assertEquals("", service.availableSkills().stream()
+            .filter(m -> "plain".equals(m.get("name")))
+            .findFirst().orElseThrow().get("displayName"));
     }
 
     @Test
@@ -229,7 +256,7 @@ class SkillCatalogServiceTest {
         org.mockito.Mockito.when(userService.readSkill("u1", "personal-a", null))
             .thenReturn(java.util.Optional.of(new UserSkillService.UserSkillContent(
                 "u1", "personal-a",
-                "---\nname: personal-a\ndescription: Personal skill\n---\nbody",
+                "---\nname: personal-a\ndescription: Personal skill\ndisplayName: 个人技能\n---\nbody",
                 "user", true, 1, List.of("SKILL.md"), true)));
 
         var service = new SkillCatalogService(
@@ -241,6 +268,9 @@ class SkillCatalogServiceTest {
             m -> m.get("name"), m -> m.get("description")));
         assertEquals("Global skill", byName.get("global-a"));
         assertEquals("Personal skill", byName.get("personal-a"));
+        // L4 SKILL.md 的 displayName 与 description 同源覆盖（缺省空串，不与全局基线混用）
+        assertEquals("个人技能", merged.stream()
+            .filter(m -> "personal-a".equals(m.get("name"))).findFirst().orElseThrow().get("displayName"));
 
         // 无 userId：不合并 L4（仅全局目录）
         assertTrue(service.availableSkills().stream().noneMatch(m -> "personal-a".equals(m.get("name"))));

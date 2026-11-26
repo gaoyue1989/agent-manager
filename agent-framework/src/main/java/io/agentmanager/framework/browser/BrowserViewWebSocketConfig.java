@@ -41,7 +41,7 @@ public class BrowserViewWebSocketConfig implements WebSocketConfigurer {
     @Bean
     public BrowserViewHandshakeInterceptor browserViewHandshakeInterceptor(
             SessionUserStore sessionUserStore, BrowserViewTicketStore ticketStore) {
-        return new BrowserViewHandshakeInterceptor(sessionUserStore, ticketStore);
+        return new BrowserViewHandshakeInterceptor(sessionUserStore, ticketStore, props.originPatterns());
     }
 
     @Override

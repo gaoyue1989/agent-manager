@@ -42,9 +42,7 @@ cd frontend && npm install && npm run dev
 #   wss + 安全上下文；经只放行 CONNECT:443 的代理访问时也能通
 npm run dev:https     # https://<主机IP>/
 
-# 可选：实时画面直连 OpenSandbox 网关（访问链路阻断业务面 WS 时的演示用通路；
-#   绕过业务面的会话归属校验，仅限本地演示）
-#   http://<主机IP>:5188/?vncBase=42.194.213.236（OpenSandbox 网关公网 IP；VPC 内网地址为 100.66.1.6）
+# 实时画面统一经同源业务代理，避免 URL 参数覆盖 VNC 网关并绕过会话归属校验。
 
 # 3. e2e（API 级，无需前端）
 node e2e/browser-takeover-e2e.mjs

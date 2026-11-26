@@ -298,4 +298,49 @@ class SessionContextControllerTest {
 
         verify(store, never()).remove(anyString(), eq("u:1"), anyString());
     }
+
+    @Test
+    void listShouldRejectSessionIdMatchingExistingUserIdWith404() throws Exception {
+        when(store.existsAsUserId("alice")).thenReturn(true);
+
+        mockMvc.perform(get("/threads/alice/context").header("X-User-Id", "mallory"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("thread_not_found"));
+
+        verify(store, never()).findBySession(any());
+    }
+
+    @Test
+    void listShouldAllowSessionIdMatchingRequesterOwnUserId() throws Exception {
+        when(store.existsAsUserId("alice")).thenReturn(true);
+        when(store.ownerOf("alice")).thenReturn("alice");
+        when(store.findBySession("alice")).thenReturn(List.of(entry()));
+
+        mockMvc.perform(get("/threads/alice/context").header("X-User-Id", "alice"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.sessionId").value("alice"));
+    }
+
+    @Test
+    void listShouldRejectReservedNamespacesWith404_632() throws Exception {
+        for (String sid : List.of("u-1001", "U-1001", "debug-user", "gw-0123456789ab")) {
+            mockMvc.perform(get("/threads/" + sid + "/context").header("X-User-Id", "u-2002"))
+                .andExpect(status().isNotFound());
+        }
+    }
+
+    @Test
+    void injectRejectsEntryLimitExceededWith413() throws Exception {
+        when(store.upsert("s-1", "u-1", "k51", "t51", "body"))
+            .thenReturn(new UpsertOutcome.EntryLimitExceeded(51, 50));
+
+        mockMvc.perform(post("/threads/s-1/context")
+                .header("X-User-Id", "u-1")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{\"key\":\"k51\",\"title\":\"t51\",\"content\":\"body\"}"))
+            .andExpect(status().isPayloadTooLarge())
+            .andExpect(jsonPath("$.error").value("context_entry_limit_exceeded"))
+            .andExpect(jsonPath("$.count").value(51))
+            .andExpect(jsonPath("$.maxEntries").value(50));
+    }
 }

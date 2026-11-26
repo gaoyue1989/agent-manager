@@ -307,8 +307,9 @@ function handleMentionInput() {
   const lowerQuery = query.toLowerCase();
   const filtered = mentionSkills.filter(s => {
     const name = (s.name || '').toLowerCase();
+    const displayName = (s.displayName || '').toLowerCase();
     const desc = (s.description || '').toLowerCase();
-    return name.includes(lowerQuery) || desc.includes(lowerQuery);
+    return name.includes(lowerQuery) || displayName.includes(lowerQuery) || desc.includes(lowerQuery);
   });
 
   if (filtered.length === 0 && query.length > 0) {
@@ -332,11 +333,13 @@ function renderMentionDropdown(query) {
 
   mentionDropdown.innerHTML = mentionSkills.map((s, idx) => {
     const name = s.name || '?';
+    const displayName = s.displayName || '';
     const desc = s.description || '';
     const isActive = idx === mentionActiveIdx;
     return '<div class="skill-mention-item' + (isActive ? ' active' : '') + '" data-idx="' + idx + '">' +
       '<span class="sm-icon">📚</span>' +
       '<span class="sm-name"><span class="sm-at">/</span>' + ctx.utils.esc(name) + '</span>' +
+      (displayName ? '<span class="sm-alias">' + ctx.utils.esc(displayName) + '</span>' : '') +
       '<span class="sm-desc">' + ctx.utils.esc(desc.substring(0, 60)) + '</span>' +
       '</div>';
   }).join('');
@@ -854,10 +857,46 @@ function addAssistantHistory(content, toolCalls, blocks) {
         group = null;
       }
     };
+    const resolveImageSrc = (b) => {
+      if (typeof b.url === 'string' && b.url.trim()) {
+        const u = b.url.trim();
+        const l = u.toLowerCase();
+        if (l.startsWith('https://') || l.startsWith('http://') || l.startsWith('data:image/')) {
+          return u;
+        }
+        if (u.startsWith('/files/')) {
+          return (ctx.api && ctx.api.BASE && !u.startsWith(ctx.api.BASE)) ? ctx.api.BASE + u : u;
+        }
+        return null;
+      }
+      if (typeof b.data === 'string' && b.data.trim()) {
+        const mime = b.media_type && b.media_type.startsWith('image/') ? b.media_type : 'image/png';
+        return 'data:' + mime + ';base64,' + b.data.trim();
+      }
+      return null;
+    };
+    const appendImage = (src, mime) => {
+      const bubbleEl = document.createElement('div');
+      bubbleEl.className = 'msg-bubble';
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = mime || 'image';
+      img.style.maxWidth = '100%';
+      img.style.maxHeight = '240px';
+      img.style.borderRadius = '8px';
+      bubbleEl.appendChild(img);
+      msg.appendChild(bubbleEl);
+    };
     for (const b of blocks) {
       if (b && b.type === 'text' && b.text) {
         flushGroup();
         appendBubble(b.text);
+      } else if (b && b.type === 'image') {
+        const imgSrc = resolveImageSrc(b);
+        if (imgSrc) {
+          flushGroup();
+          appendImage(imgSrc, b.media_type);
+        }
       } else if (b && b.type === 'tool') {
         const tc = (toolCalls || []).find((c) => b.id && c.id === b.id) || {};
         group = group || [];
@@ -1904,6 +1943,37 @@ function handleEvent(data) {
       // 兜底：AGENT_END 后到达或 currentReply 为 null 时，用 replyId 或占位 id 确保卡片仍渲染
       const fr = r || ensureReply(data.replyId || 'file-' + Date.now());
       renderFileReadyCard(fr, data);
+      break;
+    }
+    case 'TOOL_RESULT_DATA_DELTA': {
+      if (data.media_type && data.media_type.startsWith('image/')) {
+        let imgSrc = null;
+        if (typeof data.url === 'string' && data.url.trim()) {
+          const u = data.url.trim();
+          const l = u.toLowerCase();
+          if (l.startsWith('https://') || l.startsWith('http://') || l.startsWith('data:image/')) {
+            imgSrc = u;
+          } else if (u.startsWith('/files/')) {
+            imgSrc = (ctx.api && ctx.api.BASE && !u.startsWith(ctx.api.BASE)) ? ctx.api.BASE + u : u;
+          }
+        } else if (typeof data.data === 'string' && data.data.trim()) {
+          imgSrc = 'data:' + data.media_type + ';base64,' + data.data.trim();
+        }
+        if (imgSrc) {
+          const ir = r || ensureReply(data.replyId || 'img-' + Date.now());
+          const bubbleEl = document.createElement('div');
+          bubbleEl.className = 'msg-bubble';
+          const img = document.createElement('img');
+          img.src = imgSrc;
+          img.alt = data.media_type || 'image';
+          img.style.maxWidth = '100%';
+          img.style.maxHeight = '240px';
+          img.style.borderRadius = '8px';
+          bubbleEl.appendChild(img);
+          ir.contentEl.appendChild(bubbleEl);
+          scrollToBottom(false);
+        }
+      }
       break;
     }
     case 'user_confirm_result': {

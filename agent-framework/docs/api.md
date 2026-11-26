@@ -3,7 +3,7 @@
 **版本:** v2.1.0 (Java) — 无状态单次流架构
 **复核日期:** 2026-10-25（master @ `e729a67`）— 增量重核：新增 §AG-UI 协议 API（`/agui/*`，
 b2946ca，默认关闭；事件词表权威见 [api-frontend-sse.md](api-frontend-sse.md) §15）
-（最新 2026-11-09：增补 chat `tools` 请求体字段与 `/tools` 的 fullName/sessionControllable/sessionTools/?tools=（session-tool-list-design）；2026-11-04：增补 PUT /sandbox/env 与 /debug/monitor 三端点、skills 请求体字段（对应 PR #223 后 HEAD）；
+（最新 2026-11-26：增补 chat `presetTurn` 请求体字段（预置一问一答轮次，preset-answer-turn-design-261126）；2026-11-09：增补 chat `tools` 请求体字段与 `/tools` 的 fullName/sessionControllable/sessionTools/?tools=（session-tool-list-design）；2026-11-04：增补 PUT /sandbox/env 与 /debug/monitor 三端点、skills 请求体字段（对应 PR #223 后 HEAD）；
 上一轮 2026-10-08：Flyway V9（#87 PER_PEER 会话重键）、llm-calls 记录键 gw-hash 形态订正；
 上一轮 2026-10-01 @ `4a4dea8`：数据表迁 Flyway（V1–V8）、模型采样参数、confirm_context 多行化、
 `/a2a/jobs`、ASKING 入口预检、远程转发事件标注；
@@ -676,6 +676,16 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 | `model` | String | | 会话模型（`GET /models` 的 id；**缺省=不改变绑定**，传值即绑定本会话并本 turn 生效，`""`/`system`=回到默认模型；未知/禁用返回 error 帧 `unknown_model: xxx`） |
 | `skills` | List\<String\> | | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进模型侧 `<available_skills>`、不可经 `load_skill_through_path` 加载、`/Skill` 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 [session-skill-list-design.md](../../docs/design/session-skill-list-design.md)） |
 | `tools` | List\<String\> | | 本轮可用工具白名单，作用域限 **MCP + 自定义**（**缺省 = 全部**；`[]` = 仅内置——内置工具恒可见、不受会话级控制，关闭走包级 `deniedTools`；仅本轮生效，不落库、不跨轮沿用）。名单外的 MCP/自定义工具不进模型侧请求（省 token），模型幻觉调用在 acting 层兜底 DENY。名单可用裸名（主口径，= `GET /tools` 的 `name` / `sessionTools.tools`）或 MCP 全名 `mcp__{server}__{tool}`（别名）；未知名忽略；内置名写入名单 WARN 且不改变可见性。可传清单见 `GET /tools` 的 `sessionTools`。见 [session-tool-list-design.md](../../docs/design/session-tool-list-design.md) |
+| `presetTurn` | Object | | 预置一问一答轮次 `{question, answer}`：本轮不触达真实模型，`question` 作用户消息、`answer` 作助手消息写入会话，其余与普通轮次相同；**与非空 `message`/`fileIds` 互斥**。见 [preset-answer-turn-design-261126.md](../../docs/design/preset-answer-turn-design-261126.md) |
+
+> **预置一问一答轮次**：`presetTurn.question` 与 `presetTurn.answer` 均必填且非空白，否则 error 帧
+> `preset_turn_invalid`；与非空 `message` 或 `fileIds` 同时出现 → `preset_turn_conflict`（空白 `message`、
+> 空 `fileIds` 不算冲突）。`skills`/`tools` 对预置轮没有作用（不触达真实模型）；`model` 传值仍照常
+> 绑定会话。SSE 帧与普通轮次一致；`AGENT_END.usage` 的 token 全为 0、`model_calls` 为 1（对本地预置
+> 模型 `preset-answer` 的一次调用）。历史接口不做任何标记，这组问答就是一条普通用户消息加一条普通
+> 助手消息；`GET /threads/{sessionId}/llm-calls` 里 `request.model = "preset-answer"` 的记录是唯一可按
+> 会话查询的明细痕迹（链路追踪的模型名标签同值）。`answer` 长度无上限，全文作为单个 `TEXT_BLOCK_DELTA` 下发。
+> 会话处于 `permission_ask` 挂起态时与普通消息一样被拒（`turn_pending_confirm`）。
 
 > **请求级透传头（mcp-chat-header-forward-design / mcp-header-arguments-injection-design）**：
 > 请求携带的 HTTP header 可按 OAF 包 `mcp-configs/{server}/config.yaml` 的 `userHeaders`
@@ -1147,13 +1157,14 @@ curl http://localhost:8100/actuator/health
 
 ## 数据库表（无状态单次流架构）
 
-自建 14 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V15，启动自动执行，
-存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context` / `turn_lease` /
-`tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user` /
-`session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）/
-`turn_intent`（V10，排队 turn 意图）/ `turn_stop`（V13，单轮停止请求）/
-`sandbox_user`（V15，单用户沙箱配额计数锚，binding_count 与绑定行数不变量）/
-`sandbox_binding`（V15，沙箱借出簿记：uk_sandbox/uk_session 唯一键 + PENDING 占额行；见 sandbox-pool-opensandbox-design §4.1）。
+自建 14 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V19，启动自动执行，
+存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context`（V16 补 `skills` 列）/
+`turn_lease` / `tool_audit_log`（V17 补 `result_state` 列）/ `ui_context` / `file_asset` /
+`model_config` / `session_user` / `session_message`（V5，消息轨归档；V14 补 `trace_id`）/
+`remote_task_registry`（V8，远程子任务在途登记）/ `turn_intent`（V10，排队 turn 意图）/
+`turn_stop`（V13，单轮停止请求）/ `sandbox_user`（V15，单用户沙箱配额计数锚，binding_count 与绑定行数不变量）/
+`sandbox_binding`（V15，沙箱借出簿记：uk_sandbox/uk_session 唯一键 + PENDING 占额行；见 sandbox-pool-opensandbox-design §4.1）/
+`session_context`（V19，会话注入上下文持久化）；历史 `kv_sync_key` 表已于 V18 删除。
 设计与规范见 [db-migration-flyway-design.md](../../docs/design/db-migration-flyway-design.md)。
 
 事件流（`session_event`）已整体迁至 Redis Streams，见本节末。SDK 侧的
@@ -1289,7 +1300,7 @@ MCP Apps 静默上下文（卡片与 LLM 共享的中间态，见 [mcp-apps-exte
 
 ---
 
-### kv_sync_key
+### kv_sync_key（已于 V18 删除）
 
 KV 同步去重键（沙箱 `WorkspaceSyncService` 回写时避免重复写，见 [opensandbox-integration-plan.md](opensandbox-integration-plan.md)）。
 

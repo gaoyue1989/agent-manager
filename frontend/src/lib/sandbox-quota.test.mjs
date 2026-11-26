@@ -9,7 +9,7 @@ import { test } from "node:test";
 import {
   bindingAdvice, capacityFromForm, confirmHoldText, countdown, deriveBindingState, isQuotaError, makeQuotaError,
   parseQuota409, poolLevel, quotaFromSseError, quotaHeadline, stopThreadUrl,
-  validateCapacityForm, validatePoolName,
+  validateCapacityForm, validateCapacitySpec, validatePoolName,
 } from "./sandbox-quota.ts";
 
 // ---- 入口一：chat 预检 409 响应体（§4.3）----
@@ -197,4 +197,17 @@ test("countdown formatting: minute/hour bands with frozen clock", (t) => {
   } finally {
     t.mock.timers.reset();
   }
+});
+
+test("capacity spec: valid non-negative integer chain passes", () => {
+  assert.equal(validateCapacitySpec({ poolMin: 0, bufferMin: 1, bufferMax: 2, poolMax: 3 }), null);
+  assert.equal(validateCapacitySpec({ poolMin: 1, bufferMin: 1, bufferMax: 1, poolMax: 1 }), null);
+});
+
+test("capacity spec: negative, non-integer, and chain violations rejected", () => {
+  assert.match(validateCapacitySpec({ poolMin: -1, bufferMin: 1, bufferMax: 2, poolMax: 3 }) ?? "", /非负整数/);
+  assert.match(validateCapacitySpec({ poolMin: 0, bufferMin: 1.5, bufferMax: 2, poolMax: 3 }) ?? "", /非负整数/);
+  assert.match(validateCapacitySpec({ poolMin: 0, bufferMin: 1, bufferMax: Number.NaN, poolMax: 3 }) ?? "", /非负整数/);
+  assert.match(validateCapacitySpec({ poolMin: 0, bufferMin: 1, bufferMax: 2, poolMax: Number.POSITIVE_INFINITY }) ?? "", /非负整数/);
+  assert.match(validateCapacitySpec({ poolMin: 2, bufferMin: 1, bufferMax: 2, poolMax: 3 }) ?? "", /poolMin/);
 });

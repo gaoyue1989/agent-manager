@@ -231,6 +231,9 @@ public class VikingMemoryClient {
             var body = MAPPER.writeValueAsString(Map.of("role", role, "content", content));
             var resp = sendWithReauth("POST", cfg.url() + "/api/v1/sessions/" + ovSid + "/messages",
                 key, userId, body);
+            if (resp != null && resp.statusCode() == 404) {
+                ovSessionIds.remove(platformSessionId, ovSid);
+            }
             if (resp == null || resp.statusCode() >= 300) {
                 log.warn("[viking] append session message failed (sid={}): HTTP {}", platformSessionId,
                     resp == null ? "null" : resp.statusCode());

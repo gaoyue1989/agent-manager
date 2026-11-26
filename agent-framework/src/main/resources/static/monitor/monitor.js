@@ -700,10 +700,34 @@ function assistantBlocks(m) {
   if (Array.isArray(blocks) && blocks.length > 0) {
     let group = null;
     const flush = () => { if (group) { html += toolGroupHtml(group); group = null; } };
+    const resolveImageSrc = (b) => {
+      if (typeof b.url === 'string' && b.url.trim()) {
+        const u = b.url.trim();
+        const l = u.toLowerCase();
+        if (l.startsWith('https://') || l.startsWith('http://') || l.startsWith('data:image/')) {
+          return u;
+        }
+        if (u.startsWith('/files/')) {
+          return (ctx.api && ctx.api.BASE && !u.startsWith(ctx.api.BASE)) ? ctx.api.BASE + u : u;
+        }
+        return null;
+      }
+      if (typeof b.data === 'string' && b.data.trim()) {
+        const mime = b.media_type && b.media_type.startsWith('image/') ? b.media_type : 'image/png';
+        return 'data:' + mime + ';base64,' + b.data.trim();
+      }
+      return null;
+    };
     for (const b of blocks) {
       if (b && b.type === 'text' && b.text) {
         flush();
         appendText(b.text);
+      } else if (b && b.type === 'image') {
+        const imgSrc = resolveImageSrc(b);
+        if (imgSrc) {
+          flush();
+          html += '<div class="msg-bubble"><img src="' + ctx.utils.esc(imgSrc) + '" alt="' + ctx.utils.esc(b.media_type || 'image') + '" style="max-width:100%;max-height:240px;border-radius:8px;" /></div>';
+        }
       } else if (b && b.type === 'tool') {
         const tc = toolCalls.find((c) => b.id && c.id === b.id) || {};
         group = group || [];

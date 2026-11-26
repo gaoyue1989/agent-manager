@@ -19,26 +19,38 @@ export function ToolCallStatsPanel({ fetcher, testid }: {
   const [data, setData] = useState<ToolCallStatsView | null>(null);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
+  const fetcherRef = useRef(fetcher);
+  const reqSeqRef = useRef(0);
   const loadRef = useRef<(silent: boolean) => void>(() => {});
 
+  useEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
+
   const load = useCallback(async (silent: boolean, r: string) => {
+    const seq = ++reqSeqRef.current;
     if (!silent) setError("");
     try {
-      const view = await fetcher(r);
+      const view = await fetcherRef.current(r);
+      if (seq !== reqSeqRef.current) return;
       setData(view);
       setError("");
       setUpdatedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
     } catch (e: any) {
+      if (seq !== reqSeqRef.current) return;
       // 静默轮询失败保留旧数据（页面级门控口径，#377/#379）；首载失败展示错误态
       if (!silent) setError(e.message || "加载失败");
     }
-  }, [fetcher]);
+  }, []);
 
   useEffect(() => {
     loadRef.current = (silent: boolean) => { load(silent, range); };
     loadRef.current(false);
     const timer = setInterval(() => loadRef.current(true), REFRESH_MS);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      reqSeqRef.current += 1;
+    };
   }, [load, range]);
 
   return (
@@ -62,8 +74,8 @@ export function ToolCallStatsPanel({ fetcher, testid }: {
         </div>
       </div>
 
-      {error && !data && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-600"
+      {error && (
+        <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-600"
           data-testid={`${testid}-error`}>
           观测数据加载失败：{error}
         </div>

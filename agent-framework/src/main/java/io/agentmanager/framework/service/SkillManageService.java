@@ -115,10 +115,19 @@ public class SkillManageService {
                 throw new IllegalArgumentException("无效的 Skill 名称");
             }
 
-            // 5. 检查是否已存在同名 skill（已存在则覆盖更新）
             var targetDir = skillsDir.resolve(skillName);
+            if (Files.isDirectory(skillsDir)) {
+                try (var stream = Files.list(skillsDir)) {
+                    for (var existing : stream.filter(Files::isDirectory).toList()) {
+                        var canonical = SkillZipSupport.canonicalSkillName(existing);
+                        if (skillName.equals(canonical) || existing.equals(targetDir)) {
+                            log.info("Skill '{}' existing dir '{}' removed for update", skillName, existing.getFileName());
+                            SkillZipSupport.deleteRecursive(existing);
+                        }
+                    }
+                }
+            }
             if (Files.exists(targetDir)) {
-                log.info("Skill '{}' already exists, will be updated", skillName);
                 SkillZipSupport.deleteRecursive(targetDir);
             }
 
@@ -336,9 +345,6 @@ public class SkillManageService {
         }
         boolean directChild = direct.getParent() != null && direct.getParent().equals(root)
             && !name.startsWith(".") && Files.isDirectory(direct);
-        if (directChild && name.equals(SkillZipSupport.canonicalSkillName(direct))) {
-            return direct;
-        }
         try (var stream = Files.list(skillsDir)) {
             var matched = SkillZipSupport.canonicalDirIndex(stream.filter(Files::isDirectory).toList())
                 .get(name);
@@ -373,9 +379,10 @@ public class SkillManageService {
     /** 历史目录名条目经现存目录索引归一为规范名；目录已消失的条目原样保留（删除时清） */
     private Set<String> normalizeToCanonicalNames(Set<String> stored) {
         var index = canonicalNameIndex();
+        var canonicalNames = new HashSet<>(index.values());
         var out = new HashSet<String>();
         for (var entry : stored) {
-            out.add(index.getOrDefault(entry, entry));
+            out.add(canonicalNames.contains(entry) ? entry : index.getOrDefault(entry, entry));
         }
         return out;
     }

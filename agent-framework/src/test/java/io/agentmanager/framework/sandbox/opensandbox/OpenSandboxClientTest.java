@@ -574,4 +574,86 @@ class OpenSandboxClientTest {
         // 未设置 = null（走 SDK 默认）
         assertNull(new OpenSandboxFilesystemSpec().clientOptions().getRequestTimeout());
     }
+
+    @Test
+    void probeAliveClosesHandleOn404() {
+        var osb = mockOsbSandbox("sb-404");
+        when(osb.getInfo()).thenThrow(new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException(
+            "not found", null, 404, mock(com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.class)));
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var client = new OpenSandboxClient(options(), null, null, null);
+            var result = client.probeAlive("sb-404");
+
+            assertEquals(SandboxLifecycleManager.ProbeResult.ProbeState.DEAD, result.state());
+            verify(osb).close();
+        }
+    }
+
+    @Test
+    void probeAliveClosesHandleOnExecdPingFailure() {
+        var osb = mockOsbSandbox("sb-ping-fail");
+        when(osb.commands().run("true")).thenThrow(new RuntimeException("502"));
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var client = new OpenSandboxClient(options(), null, null, null);
+            var result = client.probeAlive("sb-ping-fail");
+
+            assertEquals(SandboxLifecycleManager.ProbeResult.ProbeState.DEAD, result.state());
+            verify(osb).close();
+        }
+    }
+
+    @Test
+    void probeAliveClosesHandleOnUnexpectedException() {
+        var osb = mockOsbSandbox("sb-err");
+        when(osb.getInfo()).thenThrow(new RuntimeException("timeout"));
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var client = new OpenSandboxClient(options(), null, null, null);
+            var result = client.probeAlive("sb-err");
+
+            assertEquals(SandboxLifecycleManager.ProbeResult.ProbeState.UNKNOWN, result.state());
+            verify(osb).close();
+        }
+    }
+
+    @Test
+    void probeAliveKeepsHandleOpenWhenAlive() {
+        var osb = mockOsbSandbox("sb-ok");
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var client = new OpenSandboxClient(options(), null, null, null);
+            var result = client.probeAlive("sb-ok");
+
+            assertEquals(SandboxLifecycleManager.ProbeResult.ProbeState.ALIVE, result.state());
+            assertEquals(osb, result.handle());
+            verify(osb, never()).close();
+        }
+    }
+
 }

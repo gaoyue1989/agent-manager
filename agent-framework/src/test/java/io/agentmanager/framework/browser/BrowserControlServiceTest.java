@@ -136,4 +136,21 @@ class BrowserControlServiceTest {
         assertTrue(service.isHumanControlled(SESSION));
         verify(store, org.mockito.Mockito.times(2)).isHumanControlled(eq(SESSION));
     }
+
+    @Test
+    void isHeldShouldMatchA2AUserKeyWhenSessionIsUnderTakeover637() {
+        when(store.heldSessionsForUser("u-alice")).thenReturn(java.util.Set.of("a2a-sess-1"));
+        when(store.isHumanControlled("a2a-sess-1")).thenReturn(true);
+        when(store.isHumanControlled("u-alice")).thenReturn(false);
+        assertTrue(service.isHeld("u-alice"));
+
+        when(store.isHumanControlled("a2a-sess-1"))
+            .thenThrow(new BrowserControlUnavailableException("redis timeout", new RuntimeException()));
+        assertFalse(service.isHeld("u-alice"));
+        verify(store, org.mockito.Mockito.never()).removeUserHeldSession("u-alice", "a2a-sess-1");
+
+        org.mockito.Mockito.doReturn(false).when(store).isHumanControlled("a2a-sess-1");
+        assertFalse(service.isHeld("u-alice"));
+        verify(store).removeUserHeldSession("u-alice", "a2a-sess-1");
+    }
 }

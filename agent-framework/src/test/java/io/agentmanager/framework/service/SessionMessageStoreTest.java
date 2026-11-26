@@ -193,9 +193,9 @@ class SessionMessageStoreTest {
         var sql = sqlCap.getValue();
         assertTrue(sql.contains("session_id = ?"));
         assertTrue(sql.contains("LIKE CONCAT(?, ':%')"));
-        assertTrue(sql.contains("LIKE CONCAT(?, '__%')"));
+        assertTrue(sql.contains("LIKE CONCAT(?, '!_!_%') ESCAPE '!'"));
         assertTrue(sql.contains("LIKE CONCAT('%:', ?)"));
-        assertTrue(sql.contains("LIKE CONCAT('%__', ?)"));
+        assertTrue(sql.contains("LIKE CONCAT('%!_!_', ?) ESCAPE '!'"));
         assertTrue(sql.contains("AND id < ?"));
         assertTrue(sql.endsWith("ORDER BY id DESC LIMIT ?"));
     }
@@ -316,5 +316,42 @@ class SessionMessageStoreTest {
 
         verify(store, org.mockito.Mockito.never())
             .archiveBatch(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void sessionQueriesShouldEscapeLikeWildcards() throws Exception {
+        var store = new SessionMessageStore(dataSource);
+        store.findPage("%_!", null, 10);
+        store.findAllMsgIds("%_!");
+        store.deleteBySession("%_!");
+
+        var sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(conn, times(3)).prepareStatement(sqlCap.capture());
+        for (String sql : sqlCap.getAllValues()) {
+            assertTrue(sql.contains("ESCAPE '!'"), "SQL must declare ESCAPE '!': " + sql);
+            assertTrue(sql.contains("'!_!_%'"), "SQL must escape literal __ separator: " + sql);
+        }
+        verify(ps, times(3)).setString(1, "%_!");
+        verify(ps, times(3)).setString(2, "!%!_!!");
+        verify(ps, times(3)).setString(3, "!%!_!!");
+        verify(ps, times(3)).setString(4, "!%!_!!");
+        verify(ps, times(3)).setString(5, "!%!_!!");
+    }
+
+    @Test
+    void agentStateReaderShouldEscapeLikeWildcards() throws Exception {
+        var reader = new AgentStateReader(dataSource);
+        reader.loadFragments("%_!");
+
+        var sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(conn).prepareStatement(sqlCap.capture());
+        var sql = sqlCap.getValue();
+        assertTrue(sql.contains("ESCAPE '!'"), "SQL must declare ESCAPE '!': " + sql);
+        assertTrue(sql.contains("'!_!_%'"), "SQL must escape literal __ separator: " + sql);
+        verify(ps).setString(1, "%_!");
+        verify(ps).setString(2, "!%!_!!");
+        verify(ps).setString(3, "!%!_!!");
+        verify(ps).setString(4, "!%!_!!");
+        verify(ps).setString(5, "!%!_!!");
     }
 }

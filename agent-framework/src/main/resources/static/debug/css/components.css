@@ -504,6 +504,11 @@ select.input { cursor: pointer; }
 .skill-mention-item .sm-name .sm-at {
   color: var(--accent);
 }
+.skill-mention-item .sm-alias {
+  color: var(--accent);
+  font-size: 11px;
+  flex-shrink: 0;
+}
 .skill-mention-empty {
   padding: 12px;
   text-align: center;

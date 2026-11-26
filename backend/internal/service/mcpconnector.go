@@ -97,6 +97,14 @@ func (c *Core) GetMcpConnector(id uint) (*store.McpConnector, error) {
 	return &m, nil
 }
 
+func (c *Core) GetMcpConnectorInWorkspace(workspaceID, id uint) (*store.McpConnector, error) {
+	var m store.McpConnector
+	if err := c.DB.Where("id = ? AND workspace_id = ?", id, workspaceID).First(&m).Error; err != nil {
+		return nil, ErrNotFound
+	}
+	return &m, nil
+}
+
 // ListMcpConnectors 空间内连接器列表（refCount = 生成包 mcpServers 声明命中本连接器名的
 // 空间内服务数，粗统计）。
 func (c *Core) ListMcpConnectors(workspaceID uint) ([]McpConnectorView, error) {
@@ -357,6 +365,9 @@ func mcpSessionHeaders(authToken string) [][2]string {
 
 // mcpListTools 两步探测（initialize → tools/list），返回工具快照与耗时。
 func mcpListTools(endpoint, authToken string, timeoutSec int) ([]McpToolInfo, int64, error) {
+	if err := validateProbeURL(endpoint); err != nil {
+		return nil, 0, err
+	}
 	client := httpTimeoutClient(timeoutSec)
 	start := time.Now()
 	// 会话头在 initialize 后回填；tools/list 必须复用同一 Mcp-Session-Id

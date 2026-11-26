@@ -90,6 +90,7 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
 
     /** key.value → 解析结果（真实 userId 或 null=回退原值）+ 时间戳。容量有界（活跃会话数），过期条目惰性清理 */
     private final ConcurrentHashMap<String, CachedLookup> lookupCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> userIdCache = new ConcurrentHashMap<>();
 
     private record CachedLookup(String realUserId, long at) {}
 
@@ -161,7 +162,8 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
             return;
         }
         try {
-            if (key.getScope() != io.agentscope.harness.agent.IsolationScope.USER) {
+            if (key.getScope() != io.agentscope.harness.agent.IsolationScope.USER
+                    && key.getScope() != io.agentscope.harness.agent.IsolationScope.SESSION) {
                 return;
             }
             String value = key.getValue();
@@ -196,6 +198,22 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
             return raw;
         }
         long now = System.currentTimeMillis();
+        Long cachedUidAt = userIdCache.get(raw);
+        if (cachedUidAt != null && now - cachedUidAt < LOOKUP_CACHE_TTL_MS) {
+            return raw;
+        }
+        try {
+            if (sessionUserStore.existsAsUserId(raw)) {
+                userIdCache.put(raw, now);
+                lookupCache.remove(raw);
+                if (userIdCache.size() > 1024) {
+                    userIdCache.entrySet().removeIf(e -> now - e.getValue() > 2 * LOOKUP_CACHE_TTL_MS);
+                }
+                return raw;
+            }
+        } catch (Exception e) {
+            log.debug("Guard existsAsUserId lookup errored for {}: {}", raw, e.getMessage());
+        }
         var cached = lookupCache.get(raw);
         if (cached != null && now - cached.at() < (cached.realUserId() != null
                 ? LOOKUP_CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS)) {
@@ -205,11 +223,9 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
         try {
             real = sessionUserStore.findUserIdBySession(raw);
         } catch (Exception e) {
-            // SessionUserStore 内部已 fail-soft，此处兜底防御
             log.debug("Guard lock-value lookup errored for {}: {}", raw, e.getMessage());
         }
         lookupCache.put(raw, new CachedLookup(real, now));
-        // 惰性清理：超过正缓存 TTL 2 倍的条目顺手剔除，防长生命周期进程缓慢累积
         if (lookupCache.size() > 1024) {
             lookupCache.entrySet().removeIf(e -> now - e.getValue().at() > 2 * LOOKUP_CACHE_TTL_MS);
         }

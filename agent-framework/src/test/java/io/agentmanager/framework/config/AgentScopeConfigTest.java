@@ -64,7 +64,8 @@ class AgentScopeConfigTest {
             mock(io.agentmanager.framework.service.storage.FileStorage.class), propsForLlm(),
             mock(io.agentmanager.framework.service.SandboxRuntime.class),
             mock(io.agentmanager.framework.service.WorkspaceReader.class),
-            mock(io.agentmanager.framework.service.SessionUserStore.class));
+            mock(io.agentmanager.framework.service.SessionUserStore.class),
+            mock(OafConfig.class));
         // OafPackageTools 已迁移至 backend MCP（check_oaf_package/create_oaf_zip），
         // 自定义工具只剩框架通用能力（BusinessTools + FileTools）
         assertEquals(java.util.Arrays.asList(tool, fileTools),

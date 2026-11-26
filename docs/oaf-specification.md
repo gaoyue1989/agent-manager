@@ -320,6 +320,7 @@ skills/skill-name/
 ```yaml
 ---
 name: "skill-name"
+displayName: "技能中文名"
 description: "Brief description of what this skill does"
 license: "MIT"
 metadata:
@@ -332,6 +333,8 @@ allowed-tools: ["bash", "python", "edit"]
 
 Instructions for using this skill.
 ```
+
+`displayName` 可选：技能展示用的中文名，由运行时 `GET /skills/available` 透出（缺省空串），供前端选择技能时展示；技能标识与 `/Skill` 引用始终用 `name`。
 
 ---
 

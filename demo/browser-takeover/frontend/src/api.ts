@@ -107,10 +107,11 @@ export async function history(
   return response.json();
 }
 
-export async function browserState(sessionId: string, userId: string): Promise<BrowserState> {
+export async function browserState(sessionId: string, userId: string): Promise<BrowserState | null> {
   const response = await fetch(`${threadsUrl(sessionId)}/browser`, {
     headers: { 'X-User-Id': userId },
   });
+  if (response.status === 404) return null;
   if (!response.ok) throw new Error(`browser state HTTP ${response.status}`);
   return response.json();
 }
@@ -160,48 +161,11 @@ export async function confirmStream(
   await readSse(response, onFrame, signal);
 }
 
-const VNC_BASE_STORAGE = 'browser-takeover-vnc-base';
-
-export function configuredVncBase(): string {
-  const fromQuery = new URLSearchParams(window.location.search).get('vncBase');
-  if (fromQuery) {
-    try {
-      localStorage.setItem(VNC_BASE_STORAGE, fromQuery);
-    } catch {
-      // 隐私模式不可写时仅本次生效
-    }
-    return fromQuery;
-  }
-  try {
-    return localStorage.getItem(VNC_BASE_STORAGE) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function gatewayBase(raw: string): string {
-  const trimmed = raw.replace(/\/+$/, '');
-  if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {
-    return trimmed;
-  }
-  if (trimmed.startsWith('http://')) {
-    return 'ws://' + trimmed.slice('http://'.length);
-  }
-  if (trimmed.startsWith('https://')) {
-    return 'wss://' + trimmed.slice('https://'.length);
-  }
-  return 'ws://' + trimmed;
-}
-
 export async function vncUrl(
   sessionId: string,
   userId: string,
-  sandboxId: string | null,
+  _sandboxId: string | null,
 ): Promise<string> {
-  const base = configuredVncBase();
-  if (base && sandboxId) {
-    return `${gatewayBase(base)}/v1/sandboxes/${sandboxId}/proxy/6080/websockify`;
-  }
   const response = await fetch(`${threadsUrl(sessionId)}/browser/vnc-ticket`, {
     method: 'POST',
     headers: { 'X-User-Id': userId },

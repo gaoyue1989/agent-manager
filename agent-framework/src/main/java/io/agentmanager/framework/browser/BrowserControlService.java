@@ -3,6 +3,8 @@ package io.agentmanager.framework.browser;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -126,6 +128,36 @@ public class BrowserControlService implements SandboxHoldSignal {
 
     @Override
     public boolean isHeld(String sessionId) {
-        return isHumanControlled(sessionId);
+        if (isHumanControlled(sessionId)) {
+            return true;
+        }
+        if (sessionId == null || sessionId.isBlank()) {
+            return false;
+        }
+        java.util.Set<String> sessions;
+        try {
+            sessions = store.heldSessionsForUser(sessionId);
+        } catch (BrowserControlUnavailableException e) {
+            log.warn("[browser-control] user hold probe failed, gate fails open (uid={}): {}",
+                sessionId, e.getMessage());
+            return false;
+        }
+        if (sessions == null || sessions.isEmpty()) {
+            return false;
+        }
+        boolean anyHeld = false;
+        for (var sid : sessions) {
+            try {
+                if (store.isHumanControlled(sid)) {
+                    anyHeld = true;
+                } else {
+                    store.removeUserHeldSession(sessionId, sid);
+                }
+            } catch (BrowserControlUnavailableException e) {
+                log.warn("[browser-control] transient hold probe error, keeping entry (uid={}, sid={}): {}",
+                    sessionId, sid, e.getMessage());
+            }
+        }
+        return anyHeld;
     }
 }

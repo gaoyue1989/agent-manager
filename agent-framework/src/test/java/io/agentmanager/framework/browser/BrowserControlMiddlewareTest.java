@@ -143,4 +143,15 @@ class BrowserControlMiddlewareTest {
         assertEquals(ToolResultState.DENIED, last.getState());
         assertEquals("t2", last.getToolCallId());
     }
+
+    @Test
+    void parallelBatchWithTakeoverShouldDenyAgentSpawnAndAgentSend638() {
+        var run = run(false, List.of(
+            new ToolUseBlock("c1", "agent_spawn", Map.of()),
+            new ToolUseBlock("c2", "agent_send", Map.of()),
+            new ToolUseBlock("c3", "request_browser_takeover", Map.of("reason", "login"))));
+        assertNotNull(run.passed().get());
+        assertEquals(List.of("request_browser_takeover"),
+            run.passed().get().toolCalls().stream().map(ToolUseBlock::getName).toList());
+    }
 }

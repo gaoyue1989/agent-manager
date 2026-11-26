@@ -6,12 +6,14 @@
 package service
 
 import (
+	"path"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"io"
 	"path/filepath"
 	"regexp"
@@ -242,7 +244,10 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 		if zf.FileInfo().IsDir() {
 			continue
 		}
-		p := strings.Trim(zf.Name, "/")
+		p := path.Clean(strings.Trim(zf.Name, "/"))
+		if p == "." || p == "" || p == ".." || strings.HasPrefix(p, "../") {
+			continue
+		}
 		rc, err := zf.Open()
 		if err != nil {
 			return nil, nil, err
@@ -280,6 +285,9 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 			continue
 		}
 		rel[p] = data
+	}
+	if _, ok := rel["SKILL.md"]; !ok {
+		return nil, nil, fmt.Errorf("%w: zip must contain SKILL.md", ErrInvalidForm)
 	}
 	// 技能名：表单 > 布局目录 > frontmatter > zip 文件名
 	if name == "" {
@@ -363,7 +371,11 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 	c.DB.Model(&store.SkillVersion{}).Where("id = ?", created.LatestVersionID).
 		Updates(map[string]interface{}{"storage_dir": ver.StorageDir, "checksum": ver.Checksum})
 	// 文件清单落 FilesJSON（含 sha256，供下载校验）
-	filesInfo, _ := c.skillVersionFiles(created.ID, ver.Version)
+	filesInfo, ferr := c.skillVersionFiles(created.ID, ver.Version)
+	if ferr != nil {
+		slog.Warn("skillcenter: failed to collect version files", "skillId", created.ID, "version", ver.Version, "err", ferr)
+		filesInfo = []SkillFileInfo{}
+	}
 	c.DB.Model(&store.SkillVersion{}).Where("id = ?", created.LatestVersionID).
 		Update("files_json", mustJSON(filesInfo))
 	return created, warnings, nil
@@ -372,7 +384,7 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 // skillZipJunk 压缩工具元数据条目（macOS 资源分叉 / Finder 元数据、Windows 缩略图缓存）：
 // 布局识别与落盘前剔除，否则一个 __MACOSX/ 目录就会让「唯一顶层目录」判定失效。
 func skillZipJunk(p string) bool {
-	if strings.HasPrefix(p, "__MACOSX/") {
+	if p == "__MACOSX" || strings.HasPrefix(p, "__MACOSX/") || strings.Contains(p, "/__MACOSX/") {
 		return true
 	}
 	base := p[strings.LastIndex(p, "/")+1:]
@@ -426,13 +438,22 @@ func resolveSkillZipLayout(raw map[string][]byte, wantName string) (prefix, layo
 
 // skillDirsUnderSkills 全部条目都在 skills/ 下时返回其一级目录名（升序）。
 func skillDirsUnderSkills(cur map[string][]byte) ([]string, bool) {
+	if _, ok := cur["skills/SKILL.md"]; ok {
+		return nil, false
+	}
 	set := map[string]bool{}
 	for p := range cur {
 		rest, ok := strings.CutPrefix(p, "skills/")
 		if !ok || rest == "" {
 			return nil, false
 		}
-		set[strings.SplitN(rest, "/", 2)[0]] = true
+		dir, _, hasSlash := strings.Cut(rest, "/")
+		if !hasSlash || dir == "" {
+			continue
+		}
+		if _, ok := cur["skills/"+dir+"/SKILL.md"]; ok {
+			set[dir] = true
+		}
 	}
 	dirs := make([]string, 0, len(set))
 	for d := range set {
