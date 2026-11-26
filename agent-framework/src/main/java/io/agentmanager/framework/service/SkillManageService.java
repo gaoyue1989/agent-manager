@@ -115,10 +115,19 @@ public class SkillManageService {
                 throw new IllegalArgumentException("无效的 Skill 名称");
             }
 
-            // 5. 检查是否已存在同名 skill（已存在则覆盖更新）
             var targetDir = skillsDir.resolve(skillName);
+            if (Files.isDirectory(skillsDir)) {
+                try (var stream = Files.list(skillsDir)) {
+                    for (var existing : stream.filter(Files::isDirectory).toList()) {
+                        var canonical = SkillZipSupport.canonicalSkillName(existing);
+                        if (skillName.equals(canonical) || existing.equals(targetDir)) {
+                            log.info("Skill '{}' existing dir '{}' removed for update", skillName, existing.getFileName());
+                            SkillZipSupport.deleteRecursive(existing);
+                        }
+                    }
+                }
+            }
             if (Files.exists(targetDir)) {
-                log.info("Skill '{}' already exists, will be updated", skillName);
                 SkillZipSupport.deleteRecursive(targetDir);
             }
 

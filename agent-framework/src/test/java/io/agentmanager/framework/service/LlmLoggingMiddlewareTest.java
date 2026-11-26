@@ -227,7 +227,7 @@ class LlmLoggingMiddlewareTest {
             (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 2, 3, 0.1))))
             .blockLast();
 
-        assertEquals(1, logger.getCalls("acme-test-agent__thread-1").size());
+        assertEquals(1, logger.getCalls("thread-1").size());
     }
 
     /** 反查抛异常（DB 抖动）时 fail-soft 回落 Channel 规范键（peer），不得丢一次模型调用 */

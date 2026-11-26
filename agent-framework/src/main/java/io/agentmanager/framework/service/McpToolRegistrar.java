@@ -266,15 +266,18 @@ public class McpToolRegistrar {
                 mcp.server(), e.getMessage());
             return null;
         }
+        boolean settled = false;
         for (int attempt = 0; attempt < 4; attempt++) {
             var prev = sharedWrappers.putIfAbsent(mcp.server(), wrapper);
             if (prev == null) {
+                settled = true;
                 break;
             }
             if (prev instanceof ReconnectableMcpClientWrapper dead && dead.isClosed()) {
                 if (sharedWrappers.replace(mcp.server(), prev, wrapper)) {
                     log.info("[MCP] synthetic server '{}' closed shared handle replaced with fresh build",
                         mcp.server());
+                    settled = true;
                     break;
                 }
                 continue;
@@ -285,13 +288,28 @@ public class McpToolRegistrar {
                     log.info("[MCP] synthetic server '{}' poisoned shared handle rebuilt in place", mcp.server());
                 }
                 wrapper = prev;
+                settled = true;
                 break;
             }
             log.info("[MCP] synthetic server '{}' already has a shared handle, reusing (rejected wrapper closed)",
                 mcp.server());
             closeQuietly(wrapper);
             wrapper = prev;
+            settled = true;
             break;
+        }
+        if (!settled) {
+            closeQuietly(wrapper);
+            var current = sharedWrappers.get(mcp.server());
+            if (current == null || (current instanceof ReconnectableMcpClientWrapper dead && dead.isClosed())) {
+                log.warn("[MCP] synthetic server '{}' CAS retry exhausted without live shared handle, skipped (fail-soft)",
+                    mcp.server());
+                return null;
+            }
+            if (current instanceof ReconnectableMcpClientWrapper reconnectable && reconnectable.poisoned()) {
+                rebuildSharedWrapper(mcp.server(), mcp);
+            }
+            wrapper = current;
         }
         // 毒化比对基准快照（issue #493）：注册期间看门狗换芯后，旧连接的迟到失败不得毒化新 delegate
         var poisonTarget = wrapper instanceof ReconnectableMcpClientWrapper r ? r.delegate() : null;
