@@ -336,9 +336,6 @@ public class SkillManageService {
         }
         boolean directChild = direct.getParent() != null && direct.getParent().equals(root)
             && !name.startsWith(".") && Files.isDirectory(direct);
-        if (directChild && name.equals(SkillZipSupport.canonicalSkillName(direct))) {
-            return direct;
-        }
         try (var stream = Files.list(skillsDir)) {
             var matched = SkillZipSupport.canonicalDirIndex(stream.filter(Files::isDirectory).toList())
                 .get(name);
@@ -373,9 +370,10 @@ public class SkillManageService {
     /** 历史目录名条目经现存目录索引归一为规范名；目录已消失的条目原样保留（删除时清） */
     private Set<String> normalizeToCanonicalNames(Set<String> stored) {
         var index = canonicalNameIndex();
+        var canonicalNames = new HashSet<>(index.values());
         var out = new HashSet<String>();
         for (var entry : stored) {
-            out.add(index.getOrDefault(entry, entry));
+            out.add(canonicalNames.contains(entry) ? entry : index.getOrDefault(entry, entry));
         }
         return out;
     }
