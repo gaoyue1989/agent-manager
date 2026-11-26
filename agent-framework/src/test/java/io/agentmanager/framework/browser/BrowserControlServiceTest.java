@@ -139,12 +139,18 @@ class BrowserControlServiceTest {
 
     @Test
     void isHeldShouldMatchA2AUserKeyWhenSessionIsUnderTakeover637() {
+        when(store.heldSessionsForUser("u-alice")).thenReturn(java.util.Set.of("a2a-sess-1"));
         when(store.isHumanControlled("a2a-sess-1")).thenReturn(true);
         when(store.isHumanControlled("u-alice")).thenReturn(false);
-        service.takeover("a2a-sess-1", "u-alice", "login", "agent");
-        assertTrue(service.isHeld("u-alice"), "A2A userKey must report held while session is under takeover");
-        when(store.release("a2a-sess-1")).thenReturn(true);
-        service.release("a2a-sess-1");
-        assertFalse(service.isHeld("u-alice"), "A2A userKey must clear after release");
+        assertTrue(service.isHeld("u-alice"));
+
+        when(store.isHumanControlled("a2a-sess-1"))
+            .thenThrow(new BrowserControlUnavailableException("redis timeout", new RuntimeException()));
+        assertFalse(service.isHeld("u-alice"));
+        verify(store, org.mockito.Mockito.never()).removeUserHeldSession("u-alice", "a2a-sess-1");
+
+        org.mockito.Mockito.doReturn(false).when(store).isHumanControlled("a2a-sess-1");
+        assertFalse(service.isHeld("u-alice"));
+        verify(store).removeUserHeldSession("u-alice", "a2a-sess-1");
     }
 }

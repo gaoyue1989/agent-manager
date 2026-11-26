@@ -171,8 +171,7 @@ public class AguiRunController {
             ? UUID.randomUUID().toString() : body.threadId());
         var runId = PathSafe.sanitize(body.runId() == null || body.runId().isBlank()
             ? UUID.randomUUID().toString() : body.runId());
-        var userId = PathSafe.sanitize(headerUserId == null || headerUserId.isBlank()
-            ? "debug-user" : headerUserId);
+        var userId = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(headerUserId);
 
         log.info("[agui] run start: threadId={}, runId={}, userId={}, hasResume={}",
             threadId, runId, userId, body.resume() != null && !body.resume().isEmpty());
