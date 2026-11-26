@@ -504,4 +504,34 @@ class SkillManageServiceTest {
         assertFalse(Files.exists(dirA));
         assertTrue(Files.exists(dirFoo));
     }
+
+    @Test
+    void toggleSkillShouldNotRemapCanonicalNameToCollidingPhysicalDir621() throws Exception {
+        var dirA = skillsDir.resolve("dirA");
+        Files.createDirectories(dirA);
+        Files.writeString(dirA.resolve("SKILL.md"), "---\nname: foo\ndescription: A\n---\n# Foo\n");
+        var dirFoo = skillsDir.resolve("foo");
+        Files.createDirectories(dirFoo);
+        Files.writeString(dirFoo.resolve("SKILL.md"), "---\nname: bar\ndescription: B\n---\n# Bar\n");
+
+        var service = createService();
+        service.toggleSkill("foo");
+        var disabled = service.getDisabledSet();
+        assertTrue(disabled.contains("foo"), "foo must be disabled");
+        assertFalse(disabled.contains("bar"), "bar must not be disabled");
+    }
+
+    @Test
+    void resolveSkillDirShouldMatchCanonicalDirIndexOnDuplicateCanonicalName629() throws Exception {
+        var dirA = skillsDir.resolve("a-dir");
+        Files.createDirectories(dirA);
+        Files.writeString(dirA.resolve("SKILL.md"), "---\nname: dup-skill\ndescription: A\n---\nCONTENT-A\n");
+        var dirDup = skillsDir.resolve("dup-skill");
+        Files.createDirectories(dirDup);
+        Files.writeString(dirDup.resolve("SKILL.md"), "---\nname: dup-skill\ndescription: D\n---\nCONTENT-DUP\n");
+
+        var service = createService();
+        var content = service.readSkillContent("dup-skill");
+        assertTrue(content.contains("CONTENT-A"), "must resolve lexicographically first canonical dir a-dir, got: " + content);
+    }
 }
