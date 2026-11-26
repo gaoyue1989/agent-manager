@@ -242,6 +242,9 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("package %d: %w", req.PackageID, err)
 	}
+	if req.WorkspaceID != 0 && pkg.WorkspaceID != 0 && pkg.WorkspaceID != req.WorkspaceID {
+		return nil, ErrNotFound
+	}
 
 	k8sName := k8s.DeriveK8sName(orStr(req.K8sNameBase, req.Name), pkg.Slug)
 	k8sName, err = c.uniqName(k8sName)
