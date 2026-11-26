@@ -266,6 +266,9 @@ func (c *Core) TestModelConnection(workspaceID, id uint) (*TestResult, error) {
 
 // testOpenAIEndpoint 最小 completion 探测（POST {base}/chat/completions）。
 func testOpenAIEndpoint(baseURL, apiKey, modelID string, timeoutSec int) *TestResult {
+	if err := validateProbeURL(baseURL); err != nil {
+		return &TestResult{OK: false, Error: err.Error()}
+	}
 	if timeoutSec <= 0 {
 		timeoutSec = 30
 	}
@@ -273,7 +276,7 @@ func testOpenAIEndpoint(baseURL, apiKey, modelID string, timeoutSec int) *TestRe
 		"model": modelID, "max_tokens": 16,
 		"messages": []map[string]string{{"role": "user", "content": "ping"}},
 	})
-	client := &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
+	client := newProbeHTTPClient(timeoutSec)
 	start := time.Now()
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(baseURL, "/")+"/chat/completions",
 		bytes.NewReader(body))

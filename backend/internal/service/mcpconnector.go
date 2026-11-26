@@ -365,6 +365,9 @@ func mcpSessionHeaders(authToken string) [][2]string {
 
 // mcpListTools 两步探测（initialize → tools/list），返回工具快照与耗时。
 func mcpListTools(endpoint, authToken string, timeoutSec int) ([]McpToolInfo, int64, error) {
+	if err := validateProbeURL(endpoint); err != nil {
+		return nil, 0, err
+	}
 	client := httpTimeoutClient(timeoutSec)
 	start := time.Now()
 	// 会话头在 initialize 后回填；tools/list 必须复用同一 Mcp-Session-Id
