@@ -294,7 +294,7 @@ func (c *Core) releaseBoundSandboxPool(k8sName string) error {
 	}
 	status, body, err := cfg.do(http.MethodDelete, "/v1/pools/"+poolName, nil, sandboxOpTimeout)
 	if err != nil {
-		return fmt.Errorf("服务 %s 删除前绑定池 %s 清理失败（opensandbox 管理面不可达），已拒绝：恢复管理面或先手动删池后重试: %w", k8sName, poolName, err)
+		return fmt.Errorf("服务 %s 删除前绑定池 %s 清理失败（opensandbox 管理面不可达），已拒绝：恢复管理面或先手动删池后重试: %w", k8sName, poolName, mapSandboxUpstream(0, nil, err))
 	}
 	switch status {
 	case http.StatusOK, http.StatusNoContent, http.StatusNotFound, http.StatusNotImplemented:
@@ -306,8 +306,8 @@ func (c *Core) releaseBoundSandboxPool(k8sName string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("服务 %s 删除前绑定池 %s 清理返回异常状态 HTTP %d，已拒绝：恢复管理面后重试（%s）",
-			k8sName, poolName, status, truncateBytes(body, 200))
+		return fmt.Errorf("服务 %s 删除前绑定池 %s 清理返回异常状态 HTTP %d，已拒绝：恢复管理面后重试: %w",
+			k8sName, poolName, status, mapSandboxUpstream(status, body, nil))
 	}
 }
 
@@ -856,7 +856,7 @@ func (c *Core) ensureServiceSandboxPool(k8sName, sandboxImage string, capacity S
 	}
 	status, body, err := cfg.do(http.MethodGet, "/v1/pools/"+poolName, nil, sandboxGetTimeout)
 	if err != nil {
-		return false, poolName, fmt.Errorf("自动建池探测失败（%s，opensandbox 不可达）: %w", poolName, err)
+		return false, poolName, fmt.Errorf("自动建池探测失败（%s，opensandbox 不可达）: %w", poolName, mapSandboxUpstream(0, nil, err))
 	}
 	switch status {
 	case http.StatusOK:
