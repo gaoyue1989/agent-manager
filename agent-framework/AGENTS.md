@@ -441,7 +441,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_BROWSER_VIEW_PORT` | `6080` | | 沙箱内实时画面端口（websockify） |
 | `AGENT_BROWSER_VIEW_PATH` | `/websockify` | | 沙箱内实时画面 WS 路径（VNC 代理上游 `ws://{沙箱端点}{view-path}`） |
 | `AGENT_BROWSER_VNC_TICKET_TTL_SECONDS` | `60` | | 一次性 VNC WS ticket 有效期（Redis key `brw:vnc:{ticket}`，握手 GETDEL 消费即销毁） |
-| `AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS` | 空 | | VNC WS 握手 Origin 白名单（逗号分隔，Spring `OriginPattern` 语法）；空 = 同源放行。禁止 `*`；TLS 入口终止或演示前端经代理跨源时必须显式配置 |
+| `AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS` | 空 | | VNC WS 握手 Origin 白名单（逗号分隔，Spring `OriginPattern` 语法）；空 = 同源放行。禁止无主机约束通配符（如 `*`、`https://*`、`https://*.*`）；TLS 入口终止或演示前端经代理跨源时必须显式配置 |
 | `AGENT_AGUI_*` | 见左 | | AG-UI 协议面（`/agui/runs` + 续传端点，`@ConditionalOnProperty` 装配）：`AGENT_AGUI_ENABLED`=`false` 总开关 / `AGENT_AGUI_EMIT_TOKEN_USAGE`=`true` / `AGENT_AGUI_EMIT_TOOL_CALL_ARGS`=`true` / `AGENT_AGUI_ENABLE_REASONING`=`true` / `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE`=`false`（application.yml `agent.agui` 段） |
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活共享缓存句柄，失联对句柄原地换芯（build+握手成功才 swap，存量会话免重注册自愈，issue #348）；缓存无句柄 compensate 补建；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
@@ -532,7 +532,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐；顶层 `files[]` 与 SSE `file_ready` 同构：`type/file_id/file_name/mime_type/size/download_url` + 挂载键 `reply_id`，`download_url` 同口径带 `X-Forwarded-Prefix`；用户上传卡片另带 `origin=upload`）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId；顶层 `context[]` 为与 `messages` 平级的已注入会话上下文（控制台展示用，见下「会话上下文注入」） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录（记录键 = 规范 sid，由 `SessionKeyResolver` 从 RuntimeContext 反查——Channel 链路的 ctx.sessionId 是全进程共享的网关 gw-hash，见 issue #44） |
-| POST | `/threads/{sid}/context` | **会话上下文注入**（[../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)）：body `{key, title?, content}`，按资料名 `key` 覆盖（新建 201 / 覆盖 200）；**不调用模型**，对下一轮生效——每轮组装系统提示词时追加，不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档；全新会话由首次注入认领，注入刷新会话的保留时钟（视为会话活跃）；他人会话 404、会话合计超限 413 `context_budget_exceeded`、存储不可用 503 `storage_unavailable`；`title` 必须单行 |
+| POST | `/threads/{sid}/context` | **会话上下文注入**（[../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)）：body `{key, title?, content}`，按资料名 `key` 覆盖（新建 201 / 覆盖 200）；**不调用模型**，对下一轮生效——每轮组装系统提示词时追加，不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档；全新会话由首次注入认领，注入刷新会话的保留时钟（视为会话活跃）；他人会话 404、单会话条目超限（默认 50 条）413 `context_entry_limit_exceeded`、会话合计超限 413 `context_budget_exceeded`、存储不可用 503 `storage_unavailable`；`title` 必须单行 |
 | GET | `/threads/{sid}/context` | 列出会话已注入的上下文（默认不带正文，`?includeContent=true` 附带）；他人会话 404，归属读取失败 503 不放行 |
 | DELETE | `/threads/{sid}/context/{key}` | 移除指定资料名的上下文（未知 key 404 `context_not_found`）；归属在事务内持锁裁决 |
 | GET | `/threads/{sid}/subscribe` | SSE 断连续传：`afterSeq` 回放 + 按需拉取实时追赶（`Flux.generate`），支持 `replyId`（turn 信封 id）过滤；终态补 `done`、被抢占补 `interrupted`；排队 turn 由 `turn_intent` 暴露 turn id；索引丢失时单次重建 ZSET |
@@ -554,7 +554,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/threads/{sid}/browser/takeover` | 人工接管（body `{reason?}`）：先翻锁为 HUMAN，再复用协作式停止结束当前轮；返回 `{control, stop_outcome}` |
 | POST | `/threads/{sid}/browser/release` | 交还控制权（SSE）：翻锁为 AGENT 后经 `ChatStreamController.chat` 送固定续跑消息（要求先 `list_pages`/`take_snapshot` 重采样）；非 HUMAN 持有 → `not_taken_over` 错误帧 |
 | POST | `/threads/{sid}/browser/vnc-ticket` | 为会话所有者签发一次性 WS ticket（Redis TTL 缺省 60s，消费即销毁）；无归属 404、Redis 不可用 503 |
-| GET | `/threads/{sid}/browser/vnc?ticket=` | WebSocket 实时画面代理：握手只认一次性 ticket（`sid` 必须与路径一致且 claim 用户仍是归属者，冲突的 `X-User-Id` 拒绝；URL `?userId=` 不参与身份，issue #560）；Origin 缺省同源、可配白名单、禁止 `*`；上游=沙箱固定端口经 OpenSandbox server 代理（注入 `OPEN-SANDBOX-API-KEY`），双向透传 binary/text（4MB 上限、分片聚合、发送串行化） |
+| GET | `/threads/{sid}/browser/vnc?ticket=` | WebSocket 实时画面代理：握手只认一次性 ticket（`sid` 必须与路径一致且 claim 用户仍是归属者，冲突的 `X-User-Id` 拒绝；URL `?userId=` 不参与身份，issue #560）；Origin 缺省同源（经 `X-Forwarded-Proto`/`X-Forwarded-Host` 还原外部源）、可配白名单、禁止无主机约束通配符（如 `*`/`https://*`）；上游=沙箱固定端口经 OpenSandbox server 代理（注入 `OPEN-SANDBOX-API-KEY`），双向透传 binary/text（4MB 上限、分片聚合、发送串行化） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（?inline=1 内联） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |
