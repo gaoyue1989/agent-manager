@@ -8,7 +8,7 @@
 // UI：deer-flow 风格——工具事件渲染为时间线状态步骤、历史回放同构展示、欢迎态 Hero + 错峰建议；
 //     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appendAssistantImageBlock, appendAssistantTextBlock, buildHistoryAssistantMessage, completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, normalizeStoredSessionId, resolveInlineImageUrl, settlePendingToolCalls } from "@/lib/assistant-events";
+import { appendAssistantImageBlock, appendAssistantTextBlock, buildHistoryAssistantMessage, completeToolCall, createDirectReturnOrderTracker, markAwaitingConfirm, markDeniedWithoutResult, normalizeStoredSessionId, resolveInlineImageUrl, settlePendingToolCalls } from "@/lib/assistant-events";
 import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import { isQuotaError, makeQuotaError, parseQuota409, quotaFromSseError, stopThreadUrl } from "@/lib/sandbox-quota";
 import { contextMessagesFromHistory, isWelcomeState } from "@/lib/session-context";
@@ -224,6 +224,8 @@ export default function ChatPane({
   const createStreamProcessor = useCallback((onAsk: (card: ConfirmCard) => void) => {
     // 文本增量节流：60ms 窗口内累积 delta 后批量 setState，避免每 token 触发整段 markdown 解析
     let pendingDelta = "";
+    const directReturnTracker = createDirectReturnOrderTracker();
+    let directReturnLocked = false;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const flushDelta = () => {
       flushTimer = null;
@@ -233,7 +235,7 @@ export default function ChatPane({
       updateLastAssistant((m) => ({
         ...m,
         content: m.content + d,
-        blocks: appendAssistantTextBlock(m.blocks, m.content, d),
+        blocks: directReturnLocked ? m.blocks : appendAssistantTextBlock(m.blocks, m.content, d),
       }));
     };
     const scheduleFlush = () => {
@@ -247,8 +249,21 @@ export default function ChatPane({
       try { ev = JSON.parse(line); } catch { return; }
       switch (ev.type) {
         case "TEXT_BLOCK_DELTA":
+          if (ev.generateReason === "TOOL_RETURN_DIRECT") {
+            const ordered = directReturnTracker.orderedBlocks();
+            if (ordered) {
+              directReturnLocked = true;
+              updateLastAssistant((m) => ({
+                ...m,
+                blocks: ordered,
+              }));
+            }
+          }
           pendingDelta += ev.delta ?? "";
           scheduleFlush();
+          break;
+        case "TOOL_RESULT_TEXT_DELTA":
+          directReturnTracker.onTextDelta(ev.toolCallId, ev.delta);
           break;
         case "THINKING_BLOCK_DELTA":
           break; // 思考过程不上屏
@@ -330,6 +345,7 @@ export default function ChatPane({
                   size: 0,
                   download_url: downloadUrl,
                 };
+                directReturnTracker.onImageDelta(ev.toolCallId, file);
                 return {
                   ...m,
                   files: [...(m.files ?? []), file],
@@ -831,7 +847,7 @@ export default function ChatPane({
             </div>
             {welcomeNotices.length > 0 && (
               <div className="mt-6 w-full max-w-md space-y-2">
-                {welcomeNotices.map((m, i) => <MessageItem key={i} msg={m} />)}
+                {welcomeNotices.map((m, i) => <MessageItem key={i} msg={m} agentBase={agentBase} />)}
               </div>
             )}
             <div className="mt-8 w-full max-w-2xl">{inputCard}</div>
@@ -843,7 +859,7 @@ export default function ChatPane({
               <div className="mx-auto max-w-3xl space-y-4 px-3 pb-4 pt-3">
                 {messages.map((m, i) => (
                   <div key={i} className="animate-fade-in space-y-2">
-                    <MessageItem msg={m} />
+                    <MessageItem msg={m} agentBase={agentBase} />
                     {m.confirm && (
                       <div className="pl-10">
                         <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />

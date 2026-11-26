@@ -214,3 +214,23 @@ test("buildHistoryAssistantMessage preserves interleaved block order and drops e
   blocks = appendAssistantTextBlock(blocks, "hello world", "after");
   assert.deepEqual(blocks.map((b) => b.type), ["text", "image", "text"]);
 });
+
+test("directReturnOrderTracker preserves [text, image, text, image] order and isSafeInlineImageUrl supports /agent/*/files/*", async () => {
+  const { createDirectReturnOrderTracker, isSafeInlineImageUrl } = await import("./assistant-events.ts");
+  const tracker = createDirectReturnOrderTracker();
+  tracker.onTextDelta("tc-1", "Text1");
+  tracker.onImageDelta("tc-1", {
+    file_id: "img-1", file_name: "inline-image", mime_type: "image/png", size: 0, download_url: "data:image/png;base64,AAA=",
+  });
+  tracker.onTextDelta("tc-1", "Text2");
+  tracker.onImageDelta("tc-1", {
+    file_id: "img-2", file_name: "inline-image", mime_type: "image/png", size: 0, download_url: "https://example.com/2.png",
+  });
+  const ordered = tracker.orderedBlocks();
+  assert.deepEqual(ordered?.map((b) => b.type), ["text", "image", "text", "image"]);
+
+  assert.equal(isSafeInlineImageUrl("/agent/my-bot/files/f1"), true);
+  assert.equal(isSafeInlineImageUrl("DATA:image/png;base64,AAA="), true);
+  assert.equal(isSafeInlineImageUrl("//evil.example/files/a.png"), false);
+  assert.equal(isSafeInlineImageUrl("/agent/my-bot/files/../secret"), false);
+});
