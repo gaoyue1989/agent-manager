@@ -138,6 +138,20 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
     }
 
     @Test
+    void buildShouldNestPresetAnswerInsideSessionModelRoutingAndOutsideLlmLogging() throws Exception {
+        var agent = buildAgent(mock(RemoteConfirmBridge.class), factory -> { });
+
+        var classes = middlewaresOf(agent).stream().map(MiddlewareBase::getClass).toList();
+        int routing = classes.indexOf(SessionModelMiddleware.class);
+        int preset = classes.indexOf(PresetAnswerMiddleware.class);
+        int logging = classes.indexOf(LlmLoggingMiddleware.class);
+
+        assertTrue(routing >= 0 && preset >= 0 && logging >= 0, "三个中间件都应注册：" + classes);
+        assertTrue(routing < preset, "预置回答须在会话模型路由之内，否则路由会把预置模型换回真实模型：" + classes);
+        assertTrue(preset < logging, "预置回答须在 LLM 调用记录之外，记录到的才是预置模型：" + classes);
+    }
+
+    @Test
     void buildSkipsSessionContextInjectionWhenNoStoreIsWired() throws Exception {
         var agent = buildAgent(mock(RemoteConfirmBridge.class), factory -> { });
 

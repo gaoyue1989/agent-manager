@@ -263,6 +263,7 @@ public class HarnessAgentFactory {
                 // 下游 LLM 记录/span/实际调用看到的都是会话生效模型
                 .middleware(new io.agentmanager.framework.service.SessionModelMiddleware(
                     sessionUserStore, modelCatalog))
+                .middleware(new PresetAnswerMiddleware())
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 模型实际输入/输出补录到 chat span（gen_ai.input/output.messages）
