@@ -66,6 +66,7 @@ agent-framework/
 │   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
 │   │   │   │   ├── SessionContextStore.java       # session_context 表 (会话注入上下文唯一写入口: 认领/归属/预算裁决单事务, 按资料名覆盖)
 │   │   │   │   ├── SessionContextInjectionMiddleware.java # 每轮 onSystemPrompt 追加会话注入上下文 (order=0 落提示词尾部)
+│   │   │   │   ├── PresetAnswerMiddleware.java     # 预置一问一答轮次: 上下文带 PresetAnswer 时把本轮模型换成返回预置文本的本地模型 (会话模型路由之内、LLM 记录之外)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
@@ -177,7 +178,11 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 ### 3.6 会话上下文注入链路
 
-`POST /threads/{sid}/context` 把公告、头条等参考资料按会话持久化到 `session_context`（`SessionContextStore`，按资料名覆盖），每轮由 `SessionContextInjectionMiddleware` 在系统提示词组装期追加——它是 `onSystemPrompt` 管线的最后一个转换器，但 Harness 在管线之后还会追加静态块，所以注入段并不在最终提示词的绝对末尾。注入不调用模型，对下一轮生效，并刷新会话的保留时钟；上下文不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档。三个端点的归属裁决都在 `SessionContextStore` 内完成（写入与移除在事务内持锁，查询读取失败即 503），不走吞异常的 `SessionAccessGuard.ownedBy`。history 与会话详情以与 `messages` 平级的 `context[]` 返回，供控制台在会话顶部展示。设计与选型与否决记录见 [../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)。
+`POST /threads/{sid}/context` 把公告、头条等参考资料按会话持久化到 `session_context`（`SessionContextStore`，按资料名覆盖），每轮由 `SessionContextInjectionMiddleware` 在系统提示词组装期追加——它是 `onSystemPrompt` 管线的最后一个转换器，但 Harness 在管线之后还会追加静态块，所以注入段并不在最终提示词的绝对末尾
+
+### 3.7 预置一问一答轮次
+
+`POST /threads/chat` 带 `presetTurn {question, answer}` 时，前端已生成好的一组问答作为一轮正常对话写入会话：`question` 充当本轮用户消息，`answer` 经 `RuntimeContext` 类型化属性随行，由 `PresetAnswerMiddleware` 把本轮模型换成返回预置文本的本地模型（`preset-answer`）——走 SDK 完整的模型调用路径，消息 id、事件流、落库、归档全部由既有逻辑处理，只是不触达真实模型。中间件必须注册在会话模型路由之内（否则路由会把预置模型换回真实模型）、LLM 调用记录之外（记录到的才是预置模型）。不要改成「中间件直接发文本事件」的短路：SDK 只在处理模型响应分片时给助手消息分配 id，短路边出来的答案没有 id，进不了归档表，history 合并会把它排到末尾（[preset-answer-turn-design-261126.md](../docs/design/preset-answer-turn-design-261126.md)）。注入不调用模型，对下一轮生效，并刷新会话的保留时钟；上下文不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档。三个端点的归属裁决都在 `SessionContextStore` 内完成（写入与移除在事务内持锁，查询读取失败即 503），不走吞异常的 `SessionAccessGuard.ownedBy`。history 与会话详情以与 `messages` 平级的 `context[]` 返回，供控制台在会话顶部展示。设计与选型与否决记录见 [../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)。
 
 ### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 
@@ -539,7 +544,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END / error / cancelled）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | POST | `/threads/{sid}/stop` | **单轮停止**（协作式中断，[docs/turn-stop-design.md](docs/turn-stop-design.md)）：写 `turn_stop`（reply_id 栅栏）→ 属主副本 1s 轮询 → `agent.interrupt(effectiveUserId, effectiveSessionId)`；202 已受理 / 404 无运行中 turn / 409 HITL 挂起或尚无事件（retryable）/ 503 关闭或存储不可用。终态帧 `cancelled`（排在 AGENT_END 前），history 标注 `stopped`；不撤销工具副作用、不强杀阻塞中的工具 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
-| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?, skills?, tools?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效；skills=本轮技能白名单（缺省=全部、`[]`=无技能、未知名忽略，仅本轮生效，per-call SkillFilter overlay；HITL 挂起时暂存 `confirm_context.skills_json`、confirm 恢复轮继承（issue #264）；A2A `message.metadata.skills` 同口径，旧客户端 `"a,b"` 逗号串归一为 List（issue #266））；tools=本轮工具白名单（session-tool-list-design §2：作用域限 MCP+自定义、内置恒可见，缺省=全部、`[]`=仅内置、未知名忽略、内置名 WARN 不生效，仅本轮生效不落库，ToolFilterMiddleware onReasoning 收敛 + onActing 兜底 DENY；裸名/全名 `mcp__{server}__{tool}` 皆可，可传清单见 `GET /tools` 的 `sessionTools`；A2A `message.metadata.tools` 同口径）） |
+| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?, skills?, tools?, presetTurn?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效；skills=本轮技能白名单（缺省=全部、`[]`=无技能、未知名忽略，仅本轮生效，per-call SkillFilter overlay；HITL 挂起时暂存 `confirm_context.skills_json`、confirm 恢复轮继承（issue #264）；A2A `message.metadata.skills` 同口径，旧客户端 `"a,b"` 逗号串归一为 List（issue #266））；tools=本轮工具白名单（session-tool-list-design §2：作用域限 MCP+自定义、内置恒可见，缺省=全部、`[]`=仅内置、未知名忽略、内置名 WARN 不生效，仅本轮生效不落库，ToolFilterMiddleware onReasoning 收敛 + onActing 兜底 DENY；裸名/全名 `mcp__{server}__{tool}` 皆可，可传清单见 `GET /tools` 的 `sessionTools`；A2A `message.metadata.tools` 同口径）；presetTurn={question, answer} 预置一问一答轮次（不触达真实模型，与 message/fileIds 互斥，见 3.7）） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复；`default_model`=默认对话模型 id，`fallback_model`/`fallback_source`=有效备用模型与来源 db/env/none） |
 | GET | `/models/{id}` | 模型详情（托管模型 key 掩码；系统模型只读视图） |
 | POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；采样参数可空：`reasoningEffort` 格式 `^[a-z0-9_]{1,16}$`、`frequencyPenalty` ∈[-2,2]、`provider` ∈方言枚举；重复 name 400） |
@@ -657,8 +662,8 @@ mvn -o test  # 离线模式 (离线开发镜像内；2026-11-03 实跑同为 175
 
 | job | 内容 |
 |-----|------|
-| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / DR 结果直返 / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI + CX 会话上下文注入（必需检查） |
-| e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账/跨副本会话上下文 R7）+ U9（必需检查） |
+| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / DR 结果直返 / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI + CX 会话上下文注入 + PA 预置一问一答轮次（必需检查） |
+| e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账/跨副本会话上下文 R7/跨副本预置轮 R8）+ U9（必需检查） |
 | e2e-sandbox | X 组沙箱（api-sandbox，mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流）（必需检查） |
 | e2e-protocol-multi | P 组协议多副本（api-protocol-multi：lead×2 + member×2 共享 MySQL/Redis，委派链路跨副本正确性 + EventBus 跨副本对账 + A2A Job 同键收敛）（必需检查） |
 | e2e-agui | AG 组 AG-UI 协议面（api-agui，单实例 `AGENT_AGUI_ENABLED=true`：帧序/跨面可见/HITL interrupt+resume/断联续传；非必需） |

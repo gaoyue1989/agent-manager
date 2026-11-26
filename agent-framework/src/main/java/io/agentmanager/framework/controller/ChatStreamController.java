@@ -305,7 +305,7 @@ public class ChatStreamController {
      *   "model": "01J8XK...",          // 可选，会话模型（GET /models 的 id；""/system = 回默认模型）
      *   "skills": ["refund", "order"], // 可选，本轮可用技能列表（缺省 = 全部；[] = 无技能）
      *   "tools": ["query", "get_order"], // 可选，本轮可用工具列表（缺省 = 全部；[] = 仅内置）
-     *   "presetTurn": {                 // 可选，预置轮：question + answer 原样写入会话，本轮不调模型
+     *   "presetTurn": {                 // 可选，预置轮：question + answer 原样写入会话，不触达真实模型
      *     "question": "总结今天的头条",
      *     "answer": "今天共有三条要闻：……"
      *   }
@@ -313,8 +313,8 @@ public class ChatStreamController {
      * }</pre>
      *
      * <p>{@code presetTurn} 与非空 {@code message}/{@code fileIds} 互斥：本轮以 {@code question} 作用户消息、
-     * {@code answer} 作助手消息进入会话历史，其余（归属、标题、租约、事件流、记忆、压缩、归档）
-     * 与普通轮次相同。见 docs/design/preset-answer-turn-design-261126.md。
+     * {@code answer} 作助手消息进入会话历史，不触达真实模型。
+     * 见 docs/design/preset-answer-turn-design-261126.md。
      *
      * <p>{@code skills} 仅对本轮生效（不落库、不跨轮沿用），白名单外的技能不出现在模型侧
      * {@code <available_skills>}、不可经 {@code load_skill_through_path} 加载、{@code /Skill}
