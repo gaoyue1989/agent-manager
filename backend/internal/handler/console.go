@@ -884,6 +884,15 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 			return
 		}
 		if err := core.Delete(id); err != nil {
+			var ue *service.SandboxUpstreamError
+			if errors.Is(err, service.ErrSandboxNotConfigured) {
+				Fail(c, http.StatusServiceUnavailable, sandboxUnavailableMsg)
+				return
+			}
+			if errors.As(err, &ue) {
+				Fail(c, ue.Status, sandboxUnavailableMsg)
+				return
+			}
 			mapError(c, err)
 			return
 		}
