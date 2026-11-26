@@ -156,6 +156,13 @@ runs:
         sed -i "s|__AGENT_IMAGE__|${{ steps.agent-image.outputs.image }}|g" manifests/ci/patch-backend-env.yaml
         grep -n "AVAILABLE_IMAGES\|DEFAULT_IMAGE" -A1 manifests/ci/patch-backend-env.yaml
 
+    - name: 等待 ingress-nginx 就绪
+      shell: bash
+      run: |
+        set -euo pipefail
+        . "$GITHUB_ACTION_PATH/bg.sh"
+        wait_group cluster
+
     - name: 部署平台
       shell: bash
       run: |
@@ -224,10 +231,3 @@ runs:
         LLM_MODEL=e2e-mock
         LLM_ENDPOINT=http://mock-llm.agent-platform.svc.cluster.local:8080/v1
         EOF
-
-    - name: 等待 ingress-nginx 就绪
-      shell: bash
-      run: |
-        set -euo pipefail
-        . "$GITHUB_ACTION_PATH/bg.sh"
-        wait_group cluster
