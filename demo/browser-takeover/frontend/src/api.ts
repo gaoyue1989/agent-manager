@@ -107,10 +107,11 @@ export async function history(
   return response.json();
 }
 
-export async function browserState(sessionId: string, userId: string): Promise<BrowserState> {
+export async function browserState(sessionId: string, userId: string): Promise<BrowserState | null> {
   const response = await fetch(`${threadsUrl(sessionId)}/browser`, {
     headers: { 'X-User-Id': userId },
   });
+  if (response.status === 404) return null;
   if (!response.ok) throw new Error(`browser state HTTP ${response.status}`);
   return response.json();
 }
