@@ -48,23 +48,26 @@ public final class ActingDenials {
             return next.apply(input);
         }
         var slot = new BridgeSlot();
+        var agentEndEmitted = new java.util.concurrent.atomic.AtomicBoolean(false);
         ctx.put(EVENT_BRIDGE_KEY, slot);
         return next.apply(input)
             .concatMap(event -> {
+                if (event instanceof AgentEndEvent) {
+                    agentEndEmitted.set(true);
+                    slot.active = false;
+                }
                 var drained = drain(slot.queue);
                 if (drained.isEmpty()) {
                     return Flux.just(event);
                 }
-                if (event instanceof AgentEndEvent) {
-                    drained.add(event);
-                    return Flux.fromIterable(drained);
-                }
-                var out = new ArrayList<AgentEvent>(drained.size() + 1);
-                out.add(event);
-                out.addAll(drained);
-                return Flux.fromIterable(out);
+                drained.add(event);
+                return Flux.fromIterable(drained);
             })
             .concatWith(Flux.defer(() -> {
+                if (agentEndEmitted.get()) {
+                    slot.queue.clear();
+                    return Flux.empty();
+                }
                 var remaining = drain(slot.queue);
                 return remaining.isEmpty() ? Flux.empty() : Flux.fromIterable(remaining);
             }))
@@ -149,7 +152,80 @@ public final class ActingDenials {
         if (allowed.isEmpty()) {
             return Flux.fromIterable(syntheticEvents);
         }
+        if (agent instanceof io.agentscope.core.ReActAgent reactAgent
+                && allAllowedAreDirectReturn(reactAgent, allowed)) {
+            final BridgeSlot activeBridge = bridge;
+            return Flux.concat(
+                Flux.fromIterable(syntheticEvents),
+                Flux.fromIterable(allowed).concatMap(call ->
+                    executeAllowedWithoutShortCircuit(reactAgent, ctx, state, call, activeBridge)));
+        }
         return Flux.concat(Flux.fromIterable(syntheticEvents),
             next.apply(new ActingInput(allowed)));
+    }
+
+    private static boolean allAllowedAreDirectReturn(io.agentscope.core.ReActAgent agent,
+                                                     List<ToolUseBlock> allowed) {
+        var toolkit = agent.getToolkit();
+        if (toolkit == null || allowed.isEmpty()) {
+            return false;
+        }
+        for (var call : allowed) {
+            var tool = toolkit.getTool(call.getName());
+            if (tool == null || !tool.isReturnDirect()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Flux<AgentEvent> executeAllowedWithoutShortCircuit(
+            io.agentscope.core.ReActAgent agent,
+            RuntimeContext ctx,
+            AgentState state,
+            ToolUseBlock call,
+            BridgeSlot bridge) {
+        var param = io.agentscope.core.tool.ToolCallParam.builder()
+            .toolUseBlock(call)
+            .input(call.getInput() != null ? call.getInput() : java.util.Map.of())
+            .agent(agent)
+            .runtimeContext(ctx)
+            .build();
+        return agent.getToolkit().callTool(param)
+            .onErrorResume(err -> reactor.core.publisher.Mono.just(
+                ToolResultBlock.error("Tool execution failed: " + err.getMessage())))
+            .flatMapMany(result -> {
+                var effective = result != null ? result : ToolResultBlock.error("Tool returned null");
+                state.contextMutable().add(
+                    ToolResultMessageBuilder.buildToolResultMsg(effective, call, agent.getName()));
+                String replyId = java.util.UUID.randomUUID().toString().replace("-", "");
+                String toolId = call.getId();
+                var events = new ArrayList<AgentEvent>();
+                var resStart = new ToolResultStartEvent(replyId, toolId, call.getName());
+                events.add(new ToolCallStartEvent(replyId, toolId, call.getName()));
+                events.add(new ToolCallEndEvent(replyId, toolId, call.getName()));
+                events.add(resStart);
+                if (bridge != null) {
+                    bridge.queue.offer(resStart);
+                }
+                if (effective.getOutput() != null) {
+                    for (var block : effective.getOutput()) {
+                        if (block instanceof TextBlock tb && tb.getText() != null) {
+                            var delta = new ToolResultTextDeltaEvent(replyId, toolId, call.getName(), tb.getText());
+                            events.add(delta);
+                            if (bridge != null) {
+                                bridge.queue.offer(delta);
+                            }
+                        }
+                    }
+                }
+                var finalState = effective.getState() != null ? effective.getState() : ToolResultState.SUCCESS;
+                var resEnd = new ToolResultEndEvent(replyId, toolId, call.getName(), finalState);
+                events.add(resEnd);
+                if (bridge != null) {
+                    bridge.queue.offer(resEnd);
+                }
+                return Flux.fromIterable(events);
+            });
     }
 }
