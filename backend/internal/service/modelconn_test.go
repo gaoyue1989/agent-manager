@@ -715,3 +715,47 @@ func TestModelConnFieldLengthCaps(t *testing.T) {
 		t.Fatal("long baseUrl should fail")
 	}
 }
+
+func TestValidateBaseURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "https_host", raw: "https://api.openai.com/v1", wantErr: false},
+		{name: "http_host_port", raw: "http://llm.internal:8080/v1", wantErr: false},
+		{name: "empty", raw: "", wantErr: true},
+		{name: "missing_host", raw: "http://", wantErr: true},
+		{name: "ftp_scheme", raw: "ftp://example.com/v1", wantErr: true},
+		{name: "javascript_scheme", raw: "javascript:alert(1)", wantErr: true},
+		{name: "relative_path", raw: "/v1/chat/completions", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBaseURL(tc.raw)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validateBaseURL(%q) = nil, want error", tc.raw)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validateBaseURL(%q) unexpected error: %v", tc.raw, err)
+			}
+		})
+	}
+}
+
+func TestMaskKey(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "", want: ""},
+		{in: "abc", want: "***"},
+		{in: "123456", want: "***"},
+		{in: "sk-1234567890abcd", want: "sk-***abcd"},
+	}
+	for _, tc := range cases {
+		if got := maskKey(tc.in); got != tc.want {
+			t.Errorf("maskKey(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
