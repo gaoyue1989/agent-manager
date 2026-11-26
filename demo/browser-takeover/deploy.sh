@@ -106,7 +106,7 @@ PY
 
 derive_env() {
   local key="$1"
-  NS="$NS" python3 - "$SANDBOX_IMAGE" "$OSB_SERVER_URL" "$key" "${DEMO_ORIGIN_PATTERNS:-http://*:5188,https://*}" <<'PY'
+  NS="$NS" python3 - "$SANDBOX_IMAGE" "$OSB_SERVER_URL" "$key" "${DEMO_ORIGIN_PATTERNS:-http://127.0.0.1:5188,http://localhost:5188}" <<'PY'
 import base64, json, os, subprocess, sys
 ns = os.environ["NS"]
 

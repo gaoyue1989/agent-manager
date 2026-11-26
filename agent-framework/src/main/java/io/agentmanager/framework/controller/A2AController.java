@@ -427,10 +427,11 @@ public class A2AController {
                 log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, sanitizedUid);
                 return sessionAccessDenied(req.get("id"));
             }
-            if (sanitizedUid != null) {
-                sessionUserStore.upsert(sanitizedSid, sanitizedUid);
-                log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, sanitizedUid);
-            }
+            var effectiveUid = sanitizedUid != null
+                ? sanitizedUid
+                : io.agentmanager.framework.service.SessionAccessGuard.ANONYMOUS_USER;
+            sessionUserStore.upsert(sanitizedSid, effectiveUid);
+            log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, effectiveUid);
             return null;
         } catch (Exception e) {
             log.debug("[A2A] recordSessionUser skipped: {}", e.getMessage());
