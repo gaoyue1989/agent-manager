@@ -170,4 +170,22 @@ class DirectReturnSignalTrackerTest {
 
         assertTrue(run.frames().isEmpty());
     }
+
+    @Test
+    void agentResultWithToolReturnDirectShouldEmitSignalEvenAfterPartialDeny640() {
+        var emitted = new java.util.ArrayList<String>();
+        var tracker = new DirectReturnSignalTracker(
+            name -> "direct_img".equals(name) ? new McpToolRegistrar.ToolCallMeta(null, null, true) : null,
+            (ev, data) -> emitted.add(data));
+        tracker.onEvent(new io.agentscope.core.event.ToolResultEndEvent("r1", "c1", "execute", io.agentscope.core.message.ToolResultState.DENIED));
+        tracker.onEvent(new io.agentscope.core.event.ToolResultEndEvent("r1", "c2", "direct_img", io.agentscope.core.message.ToolResultState.SUCCESS));
+        var msg = io.agentscope.core.message.Msg.builder()
+            .name("assistant")
+            .role(io.agentscope.core.message.MsgRole.ASSISTANT)
+            .generateReason(io.agentscope.core.message.GenerateReason.TOOL_RETURN_DIRECT)
+            .build();
+        tracker.onEvent(new io.agentscope.core.event.AgentResultEvent("r1", "agent", msg));
+        tracker.onEvent(new io.agentscope.core.event.AgentEndEvent("r1"));
+        assertEquals(1, emitted.size(), "must emit synthetic TOOL_RETURN_DIRECT signal when SDK actually short-circuited");
+    }
 }
