@@ -135,3 +135,16 @@ func TestWriteZipTo(t *testing.T) {
 		t.Error("invalid zip should be rejected")
 	}
 }
+
+func TestCleanSubPathAllowsDotDotInFilename(t *testing.T) {
+	for _, ok := range []string{"notes/v1..v2.diff", "changelog..md", "skills/demo/a..b/c.txt"} {
+		if _, err := CleanSubPath(ok); err != nil {
+			t.Errorf("CleanSubPath(%q) unexpected error: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"../etc/passwd", "a/../b", "a/b/.."} {
+		if _, err := CleanSubPath(bad); err == nil {
+			t.Errorf("CleanSubPath(%q) should fail", bad)
+		}
+	}
+}

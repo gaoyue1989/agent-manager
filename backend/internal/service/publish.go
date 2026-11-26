@@ -273,10 +273,17 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// 之外的值）零影响；需要注入 poolRef 时预留 1 个 env 键位。
 	poolRef := strings.TrimSpace(plain["SANDBOX_POOL_REF"])
 	managedPool := req.ProvisionSandboxPool && (poolRef == "" || poolRef == k8sName+sandboxPoolServiceSuffix)
+	extraKeys := 0
 	if managedPool && poolRef == "" {
-		if _, cfgErr := c.sandboxProxyConfig(); cfgErr == nil && countUserEnvKeys(plain, secret) >= MaxEnvKeys {
-			return nil, fmt.Errorf("too many env keys: %d (max %d)", countUserEnvKeys(plain, secret)+1, MaxEnvKeys)
+		if _, cfgErr := c.sandboxProxyConfig(); cfgErr == nil {
+			extraKeys++
 		}
+	}
+	if c.Viking != nil && strings.TrimSpace(plain["AGENT_MEMORY_PROVIDER"]) == "" {
+		extraKeys++
+	}
+	if totalKeys := countUserEnvKeys(plain, secret) + extraKeys; totalKeys > MaxEnvKeys {
+		return nil, fmt.Errorf("too many env keys: %d (max %d)", totalKeys, MaxEnvKeys)
 	}
 	params := applySpec(c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath), req.Spec)
 	params.EnvSecret = secret
