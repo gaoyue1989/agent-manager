@@ -878,3 +878,64 @@ func TestRouterEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestIngressBuilderHostModeEnforcesPrefixPathType(t *testing.T) {
+	makeOverlay := func(rootType, internalType, actuatorType string) string {
+		return fmt.Sprintf(`
+spec:
+  rules:
+    - host: oaf-acme-demo.region-c86-test.test-kzx1.cncb
+      http:
+        paths:
+          - path: /
+            pathType: %s
+            backend:
+              service:
+                name: oaf-acme-demo-svc
+                port:
+                  number: 8100
+          - path: /internal
+            pathType: %s
+            backend:
+              service:
+                name: %q
+                port:
+                  number: %d
+          - path: /actuator
+            pathType: %s
+            backend:
+              service:
+                name: %q
+                port:
+                  number: %d
+`, rootType, internalType, RouterServiceName, RouterServicePort, actuatorType, RouterServiceName, RouterServicePort)
+	}
+
+	if _, err := ingressWithOverlay(t, makeOverlay("Prefix", "Prefix", "Prefix")).Build(hostModeParams()); err != nil {
+		t.Fatalf("all Prefix pathTypes must pass, got: %v", err)
+	}
+
+	rejectCases := []struct {
+		name         string
+		rootType     string
+		internalType string
+		actuatorType string
+		wantPath     string
+	}{
+		{"root-exact", "Exact", "Prefix", "Prefix", "/"},
+		{"internal-exact", "Prefix", "Exact", "Prefix", "/internal"},
+		{"actuator-exact", "Prefix", "Prefix", "Exact", "/actuator"},
+		{"internal-impl-specific", "Prefix", "ImplementationSpecific", "Prefix", "/internal"},
+	}
+	for _, tc := range rejectCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ingressWithOverlay(t, makeOverlay(tc.rootType, tc.internalType, tc.actuatorType)).Build(hostModeParams())
+			if err == nil {
+				t.Fatalf("case %q must be rejected", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantPath) || !strings.Contains(err.Error(), "Prefix") {
+				t.Fatalf("unexpected error for %q: %v", tc.name, err)
+			}
+		})
+	}
+}

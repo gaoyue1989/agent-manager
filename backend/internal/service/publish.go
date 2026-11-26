@@ -563,6 +563,7 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if err != nil {
 		return nil, err
 	}
+	c.preserveLegacyOpenVikingEnv(oldPlain, plain)
 	created, err := c.applyOpenVikingEnv(svc.K8sName, pkg, plain, secret)
 	if err != nil {
 		c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)
@@ -724,6 +725,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		}
 		newPkg = p
 	}
+	c.preserveLegacyOpenVikingEnv(oldPlain, plain)
 	created, err := c.applyOpenVikingEnv(svc.K8sName, newPkg, plain, secret)
 	if err != nil {
 		c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)
