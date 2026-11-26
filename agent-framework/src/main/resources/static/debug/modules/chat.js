@@ -307,8 +307,9 @@ function handleMentionInput() {
   const lowerQuery = query.toLowerCase();
   const filtered = mentionSkills.filter(s => {
     const name = (s.name || '').toLowerCase();
+    const displayName = (s.displayName || '').toLowerCase();
     const desc = (s.description || '').toLowerCase();
-    return name.includes(lowerQuery) || desc.includes(lowerQuery);
+    return name.includes(lowerQuery) || displayName.includes(lowerQuery) || desc.includes(lowerQuery);
   });
 
   if (filtered.length === 0 && query.length > 0) {
@@ -332,11 +333,13 @@ function renderMentionDropdown(query) {
 
   mentionDropdown.innerHTML = mentionSkills.map((s, idx) => {
     const name = s.name || '?';
+    const displayName = s.displayName || '';
     const desc = s.description || '';
     const isActive = idx === mentionActiveIdx;
     return '<div class="skill-mention-item' + (isActive ? ' active' : '') + '" data-idx="' + idx + '">' +
       '<span class="sm-icon">📚</span>' +
       '<span class="sm-name"><span class="sm-at">/</span>' + ctx.utils.esc(name) + '</span>' +
+      (displayName ? '<span class="sm-alias">' + ctx.utils.esc(displayName) + '</span>' : '') +
       '<span class="sm-desc">' + ctx.utils.esc(desc.substring(0, 60)) + '</span>' +
       '</div>';
   }).join('');

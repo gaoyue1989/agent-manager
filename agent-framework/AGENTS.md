@@ -506,7 +506,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
 | GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记）。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
-| GET | `/skills/available` | 可用技能摘要（name+description，供 /Skill 提示）。**按用户合并 L4**：`X-User-Id`（网关注入）或 `?userId=` 时并集该用户个人技能（同名以 L4 描述为准），无则仅全局目录。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
+| GET | `/skills/available` | 可用技能摘要（name+description+displayName，供 /Skill 提示；displayName 取 SKILL.md frontmatter 中文显示名，缺省空串）。**按用户合并 L4**：`X-User-Id`（网关注入）或 `?userId=` 时并集该用户个人技能（同名以 L4 的 description/displayName 为准），无则仅全局目录。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 | GET | `/skills/parse-refs` | 解析消息中的 /Skill 引用（`?message=`；同样按 `X-User-Id`/`?userId=` 合并 L4 校验）。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 | GET | `/skills/users` | **当前用户**（`X-User-Id` 头，缺失 400 `missing_user_id` / 非法 400 `invalid_user_id`）的个人技能列表：每项含 `description`（SKILL.md frontmatter）、`enabled`（启停状态）、`updatedAt`（该技能最晚 KV 写入时间，即更新时间）、`hasPackageBaseline`（删除后回落该包内技能）、`adminOverride`（带管理面写入栅栏）；另含 `tombstones`（已删除但标记仍在的技能）；枚举/标记读取失败 500，不降级为空 |
 | GET | `/skills/users/{name}` | 技能文件内容（?file= 相对路径，默认 SKILL.md；L4 优先，无覆盖回落包内基线，source=user/package；`files`/`version`/`hasUserOverride` 与 source 同源，`userOverrideExists` 表示该用户另有个人覆盖） |

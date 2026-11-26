@@ -1277,9 +1277,11 @@ test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
 // 合并语义（同名 L4 覆盖描述/独有补入/X-User-Id 头优先/删除回落）此前只有单测覆盖，
 // e2e HTTP 黑盒面零断言（grep skills/available|parse-refs 于 tests/ 零命中）。
 
-/** 写入用户 L4 技能主文件：description 承载 /available 合并视图的覆盖描述（l4Description 解析 frontmatter） */
-async function putL4(request: APIRequestContext, uid: string, name: string, description: string): Promise<APIResponse> {
-  const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
+/** 写入用户 L4 技能主文件：description/displayName 承载 /available 合并视图的覆盖值（l4Brief 解析 frontmatter） */
+async function putL4(request: APIRequestContext, uid: string, name: string, description: string,
+                     displayName?: string): Promise<APIResponse> {
+  const dn = displayName ? `displayName: ${displayName}\n` : '';
+  const content = `---\nname: ${name}\ndescription: ${description}\n${dn}---\n\n# ${name}\n`;
   return request.put(`/skills/users/${encodeURIComponent(name)}`, {
     headers: { 'X-User-Id': uid },
     data: { content }
@@ -1291,12 +1293,14 @@ const nameSorted = (arr: unknown) =>
   (arr as Array<Record<string, string>>).slice().sort((a, b) => (a.name < b.name ? -1 : 1));
 
 test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、Header 优先、删除回落', async ({ request }) => {
-  // 旧行为基线（不传 userId）：全局启用目录的 name+description 精简视图（SkillCatalogService.availableSkills()）
+  // 旧行为基线（不传 userId）：全局启用目录的 name+description+displayName 精简视图（SkillCatalogService.availableSkills()）
   const baseline = await (await request.get('/skills/available')).json() as Array<Record<string, string>>;
   expect(Array.isArray(baseline)).toBe(true);
-  for (const e of baseline) expect(Object.keys(e).sort()).toEqual(['description', 'name']);
+  for (const e of baseline) expect(Object.keys(e).sort()).toEqual(['description', 'displayName', 'name']);
   const baseDemo = baseline.find(e => e.name === 'demo-skill');
   expect(baseDemo, 'fixture 目录应含 demo-skill（fixtures/agent-config/skills）').toBeTruthy();
+  // displayName 取 SKILL.md frontmatter（中文显示名），未声明为空串
+  expect(baseDemo!.displayName).toBe('演示技能');
   // 空串 userId 等价不传（effectiveUserId blank → 全局目录）
   expect(nameSorted(await (await request.get('/skills/available?userId=')).json()))
     .toEqual(nameSorted(baseline));
@@ -1317,7 +1321,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
   const putBody = await putDemo.json() as Record<string, unknown>;
   expect(putBody.action).toBe('created');
   expect(Number(putBody.version)).toBeGreaterThan(0);
-  expect(((await (await putL4(request, uidA, l4Only, onlyMarker)).json()) as Record<string, unknown>).action).toBe('created');
+  expect(((await (await putL4(request, uidA, l4Only, onlyMarker, '独有中文名')).json()) as Record<string, unknown>).action).toBe('created');
   // uidB 写入必须显式断言成功：否则下方「X-User-Id 优先」的负向断言（hdr 不含 markerB）
   // 在 PUT 失败时自然成立，头部优先级实际未被行使（假绿窗口，SK1 注释所防的静默合入形态）
   const putB = await putL4(request, uidB, 'demo-skill', markerB);
@@ -1328,6 +1332,9 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
   const merged = await (await request.get(`/skills/available?userId=${encodeURIComponent(uidA)}`)).json() as Array<Record<string, string>>;
   expect(merged.find(e => e.name === 'demo-skill')?.description).toBe(markerA);
   expect(merged.find(e => e.name === l4Only)?.description).toBe(onlyMarker);
+  expect(merged.find(e => e.name === l4Only)?.displayName).toBe('独有中文名');
+  // displayName 与 description 同源覆盖：L4 SKILL.md 未声明 displayName → 空串（不混用全局基线）
+  expect(merged.find(e => e.name === 'demo-skill')?.displayName).toBe('');
 
   // X-User-Id 头优先于 ?userId=（网关注入登录态优先）：返回 A 的视图且不混入 B 的 L4
   const hdr = await (await request.get('/skills/available', { headers: { 'X-User-Id': uidA }, params: { userId: uidB } })).json() as Array<Record<string, string>>;
