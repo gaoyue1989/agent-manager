@@ -345,10 +345,10 @@ public class ChatStreamController {
         }
 
         // 网关 Header 优先 > 请求体 userId > 默认 debug-user
-        var userId = (headerUserId != null && !headerUserId.isBlank())
+        var rawUserId = (headerUserId != null && !headerUserId.isBlank())
             ? headerUserId
-            : (body.userId() != null && !body.userId().isBlank()) ? body.userId() : "debug-user";
-        userId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+            : (body.userId() != null && !body.userId().isBlank()) ? body.userId() : null;
+        var userId = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(rawUserId);
 
         log.info("[chat] start: sessionId={}, userId={}, isNew={}, messageLen={}, fileCount={}",
             sessionId, userId, isNewSession,

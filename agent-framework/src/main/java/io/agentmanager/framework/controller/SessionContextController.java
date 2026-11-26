@@ -53,6 +53,15 @@ public class SessionContextController {
         var sid = PathSafe.sanitize(sessionId);
         var requester = requester(headerUserId);
         var outcome = sessionContextStore.upsert(sid, requester, request.key(), request.title(), request.content());
+        if (outcome instanceof UpsertOutcome.EntryLimitExceeded limit) {
+            var body = new LinkedHashMap<String, Object>();
+            body.put("error", "context_entry_limit_exceeded");
+            body.put("message", "Session context entry limit exceeded: " + limit.count()
+                + " > " + limit.maxEntries() + " entries");
+            body.put("count", limit.count());
+            body.put("maxEntries", limit.maxEntries());
+            return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(body);
+        }
         if (outcome instanceof UpsertOutcome.BudgetExceeded exceeded) {
             var body = new LinkedHashMap<String, Object>();
             body.put("error", "context_budget_exceeded");

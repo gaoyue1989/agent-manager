@@ -226,6 +226,9 @@ public class A2AController {
                 }
             }
             canonicalizeReservedMeta(meta);
+            var effectiveUserId = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(
+                nonBlank(sdkMetaString(meta, "userId")));
+            meta.put("userId", effectiveUserId);
             var effectiveSessionId = nonBlank(sdkMetaString(meta, "sessionId"));
             if (effectiveSessionId != null) {
                 meta.put("sessionId", io.agentmanager.framework.util.PathSafe.sanitize(effectiveSessionId));
@@ -417,19 +420,17 @@ public class A2AController {
                 sessionId = nonBlank(sdkMetaString(params, "sessionId"));
             }
 
+            var effectiveUid = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(userId);
             if (sessionId == null) {
+                sessionUserStore.upsert("a2a-user:" + effectiveUid, effectiveUid);
                 return null;
             }
             var sanitizedSid = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
-            var sanitizedUid = userId != null ? io.agentmanager.framework.util.PathSafe.sanitize(userId) : null;
             if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
-                    sessionUserStore, sanitizedSid, sanitizedUid)) {
-                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, sanitizedUid);
+                    sessionUserStore, sanitizedSid, effectiveUid)) {
+                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, effectiveUid);
                 return sessionAccessDenied(req.get("id"));
             }
-            var effectiveUid = sanitizedUid != null
-                ? sanitizedUid
-                : io.agentmanager.framework.service.SessionAccessGuard.ANONYMOUS_USER;
             sessionUserStore.upsert(sanitizedSid, effectiveUid);
             log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, effectiveUid);
             return null;
