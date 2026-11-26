@@ -1861,7 +1861,8 @@ test('PA1 新会话预置轮：首帧 session_created；答案逐字下发；零
     input_tokens: 0, output_tokens: 0, total_tokens: 0, model_calls: 1 });
 
   const titleCalls = await pollUntil(async () => (await llmStats()).calls
-    .filter(c => JSON.stringify(c.dialogue ?? []).includes(question)), calls => calls.length === 1, 15_000);
+    .filter(c => c.scenario !== 'background-synth' && JSON.stringify(c.dialogue ?? []).includes(question)),
+    calls => calls.length === 1, 15_000);
   expect(titleCalls[0].roles).toEqual(['system', 'user']);
   expect(String(titleCalls[0].systemContent)).not.toContain('## AgentStateStore Context');
   expect(await agentTurnCalls('plain'), '预置轮不得触达真实模型').toEqual([]);
@@ -1902,6 +1903,8 @@ test('PA2 预置问答即对话历史：后续真实提问的模型请求携带�
   const followUp = chat({ message: followUpText, userId: U, sessionId: sid });
   await waitTerminal(followUp);
   expect(followUp.terminal?.type, JSON.stringify(followUp.terminal)).toBe('done');
+  expect(textOf(followUp.frames), '预置只作用于发起它的那一轮，后续轮次必须由真实模型作答')
+    .toBe('端到端链路畅通，测试正常。');
 
   const calls = await pollUntil(() => agentTurnCalls('plain'), found => found.length === 1, 15_000);
   expect(calls[0].dialogue).toEqual([

@@ -683,8 +683,9 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 > 空 `fileIds` 不算冲突）。`skills`/`tools` 对预置轮没有作用（不触达真实模型）；`model` 传值仍照常
 > 绑定会话。SSE 帧与普通轮次一致；`AGENT_END.usage` 的 token 全为 0、`model_calls` 为 1（对本地预置
 > 模型 `preset-answer` 的一次调用）。历史接口不做任何标记，这组问答就是一条普通用户消息加一条普通
-> 助手消息；`GET /threads/{sessionId}/llm-calls` 里 `request.model = "preset-answer"` 的记录是服务端
-> 识别预置轮的唯一痕迹。会话处于 `permission_ask` 挂起态时与普通消息一样被拒（`turn_pending_confirm`）。
+> 助手消息；`GET /threads/{sessionId}/llm-calls` 里 `request.model = "preset-answer"` 的记录是唯一可按
+> 会话查询的明细痕迹（链路追踪的模型名标签同值）。`answer` 长度无上限，全文作为单个 `TEXT_BLOCK_DELTA` 下发。
+> 会话处于 `permission_ask` 挂起态时与普通消息一样被拒（`turn_pending_confirm`）。
 
 > **请求级透传头（mcp-chat-header-forward-design / mcp-header-arguments-injection-design）**：
 > 请求携带的 HTTP header 可按 OAF 包 `mcp-configs/{server}/config.yaml` 的 `userHeaders`

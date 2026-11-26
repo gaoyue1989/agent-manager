@@ -1,7 +1,6 @@
 package io.agentmanager.framework.service;
 
 import java.util.List;
-import java.util.UUID;
 import java.util.function.Function;
 
 import io.agentscope.core.agent.Agent;
@@ -46,7 +45,6 @@ public class PresetAnswerMiddleware implements MiddlewareBase {
         public Flux<ChatResponse> stream(List<Msg> messages, List<ToolSchema> tools,
                                          GenerateOptions options) {
             return Flux.just(ChatResponse.builder()
-                .id(UUID.randomUUID().toString())
                 .content(List.of(TextBlock.builder().text(text).build()))
                 .finishReason("stop")
                 .build());

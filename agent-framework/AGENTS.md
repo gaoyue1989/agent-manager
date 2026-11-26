@@ -178,11 +178,11 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 ### 3.6 会话上下文注入链路
 
-`POST /threads/{sid}/context` 把公告、头条等参考资料按会话持久化到 `session_context`（`SessionContextStore`，按资料名覆盖），每轮由 `SessionContextInjectionMiddleware` 在系统提示词组装期追加——它是 `onSystemPrompt` 管线的最后一个转换器，但 Harness 在管线之后还会追加静态块，所以注入段并不在最终提示词的绝对末尾
+`POST /threads/{sid}/context` 把公告、头条等参考资料按会话持久化到 `session_context`（`SessionContextStore`，按资料名覆盖），每轮由 `SessionContextInjectionMiddleware` 在系统提示词组装期追加——它是 `onSystemPrompt` 管线的最后一个转换器，但 Harness 在管线之后还会追加静态块，所以注入段并不在最终提示词的绝对末尾。注入不调用模型，对下一轮生效，并刷新会话的保留时钟；上下文不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档。三个端点的归属裁决都在 `SessionContextStore` 内完成（写入与移除在事务内持锁，查询读取失败即 503），不走吞异常的 `SessionAccessGuard.ownedBy`。history 与会话详情以与 `messages` 平级的 `context[]` 返回，供控制台在会话顶部展示。设计与选型与否决记录见 [../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)。
 
 ### 3.7 预置一问一答轮次
 
-`POST /threads/chat` 带 `presetTurn {question, answer}` 时，前端已生成好的一组问答作为一轮正常对话写入会话：`question` 充当本轮用户消息，`answer` 经 `RuntimeContext` 类型化属性随行，由 `PresetAnswerMiddleware` 把本轮模型换成返回预置文本的本地模型（`preset-answer`）——走 SDK 完整的模型调用路径，消息 id、事件流、落库、归档全部由既有逻辑处理，只是不触达真实模型。中间件必须注册在会话模型路由之内（否则路由会把预置模型换回真实模型）、LLM 调用记录之外（记录到的才是预置模型）。不要改成「中间件直接发文本事件」的短路：SDK 只在处理模型响应分片时给助手消息分配 id，短路边出来的答案没有 id，进不了归档表，history 合并会把它排到末尾（[preset-answer-turn-design-261126.md](../docs/design/preset-answer-turn-design-261126.md)）。注入不调用模型，对下一轮生效，并刷新会话的保留时钟；上下文不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档。三个端点的归属裁决都在 `SessionContextStore` 内完成（写入与移除在事务内持锁，查询读取失败即 503），不走吞异常的 `SessionAccessGuard.ownedBy`。history 与会话详情以与 `messages` 平级的 `context[]` 返回，供控制台在会话顶部展示。设计与选型与否决记录见 [../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)。
+`POST /threads/chat` 带 `presetTurn {question, answer}` 时，前端已生成好的一组问答作为一轮正常对话写入会话：`question` 充当本轮用户消息，`answer` 经 `RuntimeContext` 类型化属性随行，由 `PresetAnswerMiddleware` 把本轮模型换成返回预置文本的本地模型（`preset-answer`）——走 SDK 完整的模型调用路径，消息 id、事件流、落库、归档全部由既有逻辑处理，只是不触达真实模型。中间件必须注册在会话模型路由之内（否则路由会把预置模型换回真实模型）、LLM 调用记录之外（记录到的才是预置模型）。不要改成「中间件直接发文本事件」的短路：SDK 只在处理模型响应分片时给助手消息分配 id，短路边出来的答案没有 id，进不了归档表，history 合并会把它排到末尾（[preset-answer-turn-design-261126.md](../docs/design/preset-answer-turn-design-261126.md)）。
 
 ### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 

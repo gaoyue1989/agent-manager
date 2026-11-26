@@ -145,6 +145,8 @@ test('R8 跨副本预置轮：A 副本写入一问一答 → B 副本历史可�
   const followUp = chat({ message: followUpText, userId: U(), sessionId: sid, base: REPLICA_B });
   await waitTerminal(followUp);
   expect(followUp.terminal?.type, JSON.stringify(followUp.terminal)).toBe('done');
+  expect(textOf(followUp.frames), '预置只作用于发起它的那一轮，后续轮次必须由真实模型作答')
+    .toBe('端到端链路畅通，测试正常。');
   const calls = await pollUntil(async () => (await llmStats()).calls
     .filter(c => String(c.systemContent).includes('## AgentStateStore Context')), found => found.length === 1, 15_000);
   expect(calls[0].dialogue).toEqual([
