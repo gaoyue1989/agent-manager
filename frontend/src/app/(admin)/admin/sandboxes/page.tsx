@@ -134,6 +134,8 @@ export default function AdminSandboxesPage() {
   const [err, setErr] = useState("");
   const [defaultImage, setDefaultImage] = useState("");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reqSeqRef = useRef(0);
+  const mountedRef = useRef(true);
 
   // 池编辑表单（打开的池 + 全量模板表单 + 错误）
   const [editing, setEditing] = useState<SandboxPool | null>(null);
@@ -145,7 +147,16 @@ export default function AdminSandboxesPage() {
   const [createErr, setCreateErr] = useState("");
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      reqSeqRef.current += 1;
+    };
+  }, []);
+
   const load = useCallback(async (silent = false) => {
+    const seq = ++reqSeqRef.current;
     if (!silent) setErr("");
     try {
       const [s, p, sb] = await Promise.all([
@@ -153,6 +164,7 @@ export default function AdminSandboxesPage() {
         api.admin.sandboxes.listPools(),
         api.admin.sandboxes.listSandboxes(stateFilter, page, PAGE_SIZE),
       ]);
+      if (!mountedRef.current || seq !== reqSeqRef.current) return;
       setSummary(s);
       setPools(p.items ?? []);
       setSandboxes(sb);
@@ -162,6 +174,7 @@ export default function AdminSandboxesPage() {
       if (sb.items.length === 0 && page > 1) setPage(Math.max(1, sb.pagination.totalPages));
       setErr("");
     } catch (e: any) {
+      if (!mountedRef.current || seq !== reqSeqRef.current) return;
       if (!silent) setErr(e?.message ?? String(e));
     }
   }, [stateFilter, page]);

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, type BuiltinPlatformDecl, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type MemoryFormPayload, SandboxFormPayload, type SkillRefPayload, type SkillRec } from "@/lib/api";
 import { parseSnapshotTools, parseToolPerms } from "@/lib/connectors";
+import { validateCapacitySpec } from "@/lib/sandbox-quota";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import { PERM_STYLE } from "@/lib/status";
 
@@ -187,10 +188,8 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     }
     if (mode === "edit" && !state.prompt.trim()) { setMsg("系统提示词不能为空"); submitLock.current = false; return; }
     if (mode === "create" && state.sandbox.enabled === true && state.sandbox.pool) {
-      const p = state.sandbox.pool;
-      if (!(p.poolMin <= p.bufferMin && p.bufferMin <= p.bufferMax && p.bufferMax <= p.poolMax)) {
-        setMsg("自动池容量须满足 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax"); submitLock.current = false; return;
-      }
+      const verr = validateCapacitySpec(state.sandbox.pool);
+      if (verr) { setMsg(verr); submitLock.current = false; return; }
     }
     setSubmitting(true);
     try {
