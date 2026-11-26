@@ -92,7 +92,12 @@ func mapCreateError(c *gin.Context, err error) {
 	if err == nil {
 		return
 	}
+	var ue *service.SandboxUpstreamError
 	switch {
+	case errors.Is(err, service.ErrSandboxNotConfigured):
+		Fail(c, http.StatusServiceUnavailable, sandboxUnavailableMsg)
+	case errors.As(err, &ue):
+		Fail(c, ue.Status, sandboxUnavailableMsg)
 	case errors.Is(err, service.ErrInvalidForm), errors.Is(err, service.ErrDuplicateName),
 		errors.Is(err, service.ErrImageNotAllowed):
 		Fail(c, http.StatusBadRequest, err.Error())
