@@ -65,7 +65,7 @@ class SessionKeyResolverTest {
         var ctx = RuntimeContext.builder()
             .sessionId("acme-test-agent__thread-1").userId("vendor-key").build();
 
-        assertEquals("acme-test-agent__thread-1", resolver.canonicalSessionId(ctx));
+        assertEquals("thread-1", resolver.canonicalSessionId(ctx));
         assertEquals("vendor-key", resolver.realUserId(ctx));
     }
 

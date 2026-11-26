@@ -67,6 +67,7 @@ public class OafReloadService {
 
     /** reload 进行中标记（并发防抖） */
     private final AtomicBoolean reloading = new AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicInteger activeReloads = new java.util.concurrent.atomic.AtomicInteger(0);
 
     /** reload 路径对 MCP 网络 IO 的单步阻塞上限（秒），防 server 挂起永久占住 synchronized 监视器 */
     private static final long RELOAD_BLOCK_TIMEOUT_SECONDS = 10;
@@ -139,6 +140,8 @@ public class OafReloadService {
      * 成功后同步刷新 OafConfigHolder（/metadata、McpResourceProxy 声明视图一致）。
      */
     public synchronized ReloadResult reloadMcpAll() {
+        activeReloads.incrementAndGet();
+        try {
         OafConfig freshConfig;
         try {
             freshConfig = oafConfigLoader.load();
@@ -192,12 +195,18 @@ public class OafReloadService {
         agentRuntimeService.evictAllSessionAgents();
         log.info("[Reload] MCP reloaded: {} servers processed", detail.size());
         return new ReloadResult("mcp", true, false, detail, null);
+    
+        } finally {
+            activeReloads.decrementAndGet();
+        }
     }
 
     /**
      * A 路径单 server 版（显式指定 server 的运维场景）。
      */
     public synchronized ReloadResult reloadMcpServer(String serverName) {
+        activeReloads.incrementAndGet();
+        try {
         OafConfig oafConfig;
         try {
             oafConfig = oafConfigLoader.load();
@@ -230,6 +239,10 @@ public class OafReloadService {
             agentRuntimeService.evictAllSessionAgents();
         }
         return new ReloadResult("mcp", true, false, detail, null);
+    
+        } finally {
+            activeReloads.decrementAndGet();
+        }
     }
 
     /**
@@ -239,6 +252,8 @@ public class OafReloadService {
      * 任何失败保持旧 agent 服务（新 toolkit 的连接由本方法兜底清理）。
      */
     public synchronized ReloadResult reloadAgent() throws IOException {
+        activeReloads.incrementAndGet();
+        try {
         // 1. 重新解析（语法错误等在此抛出，旧 agent 不受影响）
         var newConfig = oafConfigLoader.load();
 
@@ -327,6 +342,10 @@ public class OafReloadService {
         }
         log.info("[Reload] agent rebuilt: {} ({} MCP servers)", newConfig.name(), detail.size());
         return new ReloadResult("agent", true, true, detail, null);
+    
+        } finally {
+            activeReloads.decrementAndGet();
+        }
     }
 
     /**
@@ -373,7 +392,7 @@ public class OafReloadService {
 
     /** OAF reload 是否进行中（MCP 连接看门狗让位判据：换连语义同源，避免双 swap 竞态）。 */
     public boolean isReloadInProgress() {
-        return reloading.get();
+        return reloading.get() || activeReloads.get() > 0;
     }
 
     // ==================== 内部工具 ====================
