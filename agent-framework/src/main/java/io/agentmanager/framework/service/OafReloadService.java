@@ -273,7 +273,7 @@ public class OafReloadService {
 
         // 4.5 per-session agent 隔离世代失效 + 工厂更新：缓存的旧实例按旧配置构建，全部作废；
         //     会话级工厂改绑新配置构建器（capture 本次的构建参数，等价于 reloadAgent 对共享 agent 的重建）
-        agentRuntimeService.setSessionAgentFactory(() -> harnessAgentFactory.build(newConfig,
+        agentRuntimeService.setSessionAgentFactory(() -> harnessAgentFactory.build(oafConfigHolder.get(),
             distributedStore, llmLogger, uiContextStore, sessionUserStore, modelCatalog,
             sandboxSpecProvider.getIfAvailable()));
         agentRuntimeService.evictAllSessionAgents();

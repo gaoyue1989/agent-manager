@@ -5,6 +5,7 @@ import java.util.function.Function;
 
 import io.agentscope.core.event.AgentEndEvent;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.ModelCallStartEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
@@ -53,6 +54,11 @@ public final class DirectReturnSignalTracker {
                     && GenerateReason.TOOL_RETURN_DIRECT.name().equals(
                         metadata.get(AgentEvent.METADATA_GENERATE_REASON))) {
                 sdkSignalSeen = true;
+            }
+        } else if (event instanceof AgentResultEvent res) {
+            var msg = res.getResult();
+            if (msg != null && msg.getGenerateReason() == GenerateReason.TOOL_RETURN_DIRECT) {
+                shortCircuitCandidate = true;
             }
         } else if (event instanceof AgentEndEvent && shortCircuitCandidate && !sdkSignalSeen) {
             emitSynthetic.accept("TEXT_BLOCK_DELTA", SIGNAL_PAYLOAD);
