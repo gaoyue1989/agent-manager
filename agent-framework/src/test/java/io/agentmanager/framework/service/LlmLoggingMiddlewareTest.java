@@ -213,7 +213,7 @@ class LlmLoggingMiddlewareTest {
     void shouldKeepSessionIdWhenNeitherCandidateRegistered() {
         var logger = new LLMLogger();
         var store = mock(SessionUserStore.class);
-        var middleware = new LlmLoggingMiddleware(logger, new SessionKeyResolver(store));
+        var middleware = new LlmLoggingMiddleware(logger, new SessionKeyResolver(store, "acme-test-agent"));
 
         var ctx = mock(RuntimeContext.class);
         when(ctx.getSessionId()).thenReturn("acme-test-agent__thread-1");

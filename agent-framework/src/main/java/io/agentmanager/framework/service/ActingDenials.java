@@ -216,6 +216,14 @@ public final class ActingDenials {
                             if (bridge != null) {
                                 bridge.queue.offer(delta);
                             }
+                        } else if (block instanceof io.agentscope.core.message.ImageBlock
+                                || block instanceof io.agentscope.core.message.DataBlock) {
+                            var delta = new io.agentscope.core.event.ToolResultDataDeltaEvent(
+                                replyId, toolId, call.getName(), block);
+                            events.add(delta);
+                            if (bridge != null) {
+                                bridge.queue.offer(delta);
+                            }
                         }
                     }
                 }

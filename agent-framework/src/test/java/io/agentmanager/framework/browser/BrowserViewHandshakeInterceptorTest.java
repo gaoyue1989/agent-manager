@@ -151,4 +151,36 @@ class BrowserViewHandshakeInterceptorTest {
         assertFalse(interceptor.beforeHandshake(req, resp, mock(org.springframework.web.socket.WebSocketHandler.class), new HashMap<>()));
         org.mockito.Mockito.verify(ticketStore, org.mockito.Mockito.never()).consume(org.mockito.ArgumentMatchers.any());
     }
+
+    @Test
+    void forwardedHttpsOriginWithoutForwardedPortShouldMatchStandardHttpsOrigin() {
+        when(ticketStore.consume(TICKET)).thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER));
+        when(store.findUserIdBySession(SESSION)).thenReturn(USER);
+        var req = mock(org.springframework.http.server.ServerHttpRequest.class);
+        var resp = mock(org.springframework.http.server.ServerHttpResponse.class);
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setOrigin("https://app.example.com");
+        headers.add("X-Forwarded-Proto", "https");
+        headers.add("X-Forwarded-Host", "app.example.com");
+        when(req.getURI()).thenReturn(java.net.URI.create("http://10.244.0.9:8100/threads/" + SESSION + "/browser/vnc?ticket=" + TICKET));
+        when(req.getHeaders()).thenReturn(headers);
+
+        assertTrue(interceptor.beforeHandshake(req, resp, mock(org.springframework.web.socket.WebSocketHandler.class), new HashMap<>()));
+    }
+
+    @Test
+    void forwardedHttpHostWithExplicitPortShouldMatchOrigin() {
+        when(ticketStore.consume(TICKET)).thenReturn(new BrowserViewTicketStore.Claim(SESSION, USER));
+        when(store.findUserIdBySession(SESSION)).thenReturn(USER);
+        var req = mock(org.springframework.http.server.ServerHttpRequest.class);
+        var resp = mock(org.springframework.http.server.ServerHttpResponse.class);
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setOrigin("http://100.66.1.11:8911");
+        headers.add("X-Forwarded-Proto", "http");
+        headers.add("X-Forwarded-Host", "100.66.1.11:8911");
+        when(req.getURI()).thenReturn(java.net.URI.create("http://10.244.0.9:8100/threads/" + SESSION + "/browser/vnc?ticket=" + TICKET));
+        when(req.getHeaders()).thenReturn(headers);
+
+        assertTrue(interceptor.beforeHandshake(req, resp, mock(org.springframework.web.socket.WebSocketHandler.class), new HashMap<>()));
+    }
 }
