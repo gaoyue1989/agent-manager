@@ -82,11 +82,38 @@ public record SandboxConfig(
      * 经池 extraEnv 覆盖 SKILLSYNC_STORE_DIR 时必须同值改本键
      */
     @DefaultValue("/skills-store") String skillsSharedStore,
+    @DefaultValue("push") String skillsFallbackMode,
+    @DefaultValue("/tmp/.skills-store") String skillsFallbackStoreDir,
+    @DefaultValue("67108864") long skillsFallbackMaxBytes,
+    @DefaultValue("4") int skillsFallbackMaxConcurrency,
+    @DefaultValue("5000") long skillsFallbackAcquireTimeoutMs,
+    @DefaultValue("true") boolean skillsFallbackOnVersionMismatch,
     OpenSandboxConfig opensandbox
 ) {
     /** 绑定入口消歧：record 出现双构造器时 Binder 要求显式指定（与 AgentManagerProperties 同款） */
     @ConstructorBinding
     public SandboxConfig {
+    }
+
+    public SandboxConfig(boolean enabled, String image, int timeoutMinutes, int requestTimeoutSeconds,
+                         int memoryMb, int cpuCount,
+                         List<String> entrypoint, Duration execdGraceShutdown,
+                         boolean projectionEnabled, boolean guardEnabled, int guardLeaseSeconds,
+                         boolean skillRevisionGateEnabled,
+                         boolean syncSnapshotDiffEnabled, boolean syncSkipPackageBaselineEnabled,
+                         boolean sessionAgentIsolation,
+                         int sessionAgentCacheMax, int sessionAgentCacheTtlMinutes,
+                         String skillsBundleCacheDir, String skillsSharedStore,
+                         OpenSandboxConfig opensandbox) {
+        this(enabled, image, timeoutMinutes, requestTimeoutSeconds, memoryMb, cpuCount, entrypoint,
+            execdGraceShutdown,
+            projectionEnabled, guardEnabled, guardLeaseSeconds,
+            skillRevisionGateEnabled, syncSnapshotDiffEnabled,
+            syncSkipPackageBaselineEnabled, sessionAgentIsolation,
+            sessionAgentCacheMax, sessionAgentCacheTtlMinutes,
+            skillsBundleCacheDir, skillsSharedStore,
+            "push", "/tmp/.skills-store", 67108864L, 4, 5000L, true,
+            opensandbox);
     }
 
     /**
@@ -127,8 +154,8 @@ public record SandboxConfig(
             execdGraceShutdown,
             projectionEnabled, guardEnabled, guardLeaseSeconds,
             skillRevisionGateEnabled, syncSnapshotDiffEnabled,
-            syncSkipPackageBaselineEnabled, sessionAgentIsolation, sessionAgentCacheMax,
-            sessionAgentCacheTtlMinutes,
+            syncSkipPackageBaselineEnabled, sessionAgentIsolation,
+            sessionAgentCacheMax, sessionAgentCacheTtlMinutes,
             "", "", opensandbox);
     }
 

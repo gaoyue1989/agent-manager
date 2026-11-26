@@ -4,6 +4,8 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
+import java.util.regex.Pattern;
 
 import io.agentscope.harness.agent.sandbox.SandboxClient;
 import io.agentscope.harness.agent.sandbox.SandboxClientOptions;
@@ -20,6 +22,14 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
      * 直改 CM/Deployment 的部署形态，两者行为一致（启动期一条 WARN + 包技能不投放）
      */
     public static final String SKILLS_SHARED_STORE_OFF = "off";
+    public static final String SKILLS_FALLBACK_MODE_OFF = "off";
+    public static final String SKILLS_FALLBACK_MODE_PUSH = "push";
+    public static final String DEFAULT_SKILLS_FALLBACK_STORE_DIR = "/tmp/.skills-store";
+    public static final long DEFAULT_SKILLS_FALLBACK_MAX_BYTES = 64L * 1024 * 1024;
+    public static final int DEFAULT_SKILLS_FALLBACK_MAX_CONCURRENCY = 4;
+    public static final long DEFAULT_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS = 5000L;
+
+    private static final Pattern SAFE_ABS_PATH = Pattern.compile("^/[A-Za-z0-9._/\\-]+$");
 
     /**
      * 农场总闸关闸判定（§6.4，单一事实源）：null/空白或 {@code off}（忽略大小写与首尾空白，
@@ -29,6 +39,21 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public static boolean skillsSharedStoreOff(String store) {
         return store == null || store.isBlank()
             || SKILLS_SHARED_STORE_OFF.equalsIgnoreCase(store.trim());
+    }
+
+    public static boolean skillsFallbackPushEnabled(String mode) {
+        return mode != null && SKILLS_FALLBACK_MODE_PUSH.equalsIgnoreCase(mode.trim());
+    }
+
+    public static boolean isValidFallbackStoreDir(String dir) {
+        if (dir == null || dir.isBlank()) {
+            return false;
+        }
+        String trimmed = dir.trim();
+        return !"/".equals(trimmed)
+            && !trimmed.contains("..")
+            && !trimmed.endsWith("/")
+            && SAFE_ABS_PATH.matcher(trimmed).matches();
     }
 
     private String serverUrl;
@@ -51,6 +76,13 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private io.micrometer.core.instrument.MeterRegistry farmMeterRegistry;
     private boolean skillRevisionGateEnabled = true;
     private boolean syncSnapshotDiffEnabled = true;
+    private String skillsFallbackMode = SKILLS_FALLBACK_MODE_OFF;
+    private String skillsFallbackStoreDir = DEFAULT_SKILLS_FALLBACK_STORE_DIR;
+    private long skillsFallbackMaxBytes = DEFAULT_SKILLS_FALLBACK_MAX_BYTES;
+    private int skillsFallbackMaxConcurrency = DEFAULT_SKILLS_FALLBACK_MAX_CONCURRENCY;
+    private long skillsFallbackAcquireTimeoutMs = DEFAULT_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS;
+    private boolean skillsFallbackOnVersionMismatch = true;
+    private Semaphore skillsFallbackSemaphore;
 
     @Override
     public String getType() {
@@ -82,6 +114,13 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public io.micrometer.core.instrument.MeterRegistry getFarmMeterRegistry() { return farmMeterRegistry; }
     public boolean isSkillRevisionGateEnabled() { return skillRevisionGateEnabled; }
     public boolean isSyncSnapshotDiffEnabled() { return syncSnapshotDiffEnabled; }
+    public String getSkillsFallbackMode() { return skillsFallbackMode; }
+    public String getSkillsFallbackStoreDir() { return skillsFallbackStoreDir; }
+    public long getSkillsFallbackMaxBytes() { return skillsFallbackMaxBytes; }
+    public int getSkillsFallbackMaxConcurrency() { return skillsFallbackMaxConcurrency; }
+    public long getSkillsFallbackAcquireTimeoutMs() { return skillsFallbackAcquireTimeoutMs; }
+    public boolean isSkillsFallbackOnVersionMismatch() { return skillsFallbackOnVersionMismatch; }
+    public Semaphore getSkillsFallbackSemaphore() { return skillsFallbackSemaphore; }
 
     // ---- fluent builder methods ----
     public OpenSandboxClientOptions serverUrl(String serverUrl) { this.serverUrl = serverUrl; return this; }
@@ -99,4 +138,11 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public OpenSandboxClientOptions farmMeterRegistry(io.micrometer.core.instrument.MeterRegistry registry) { this.farmMeterRegistry = registry; return this; }
     public OpenSandboxClientOptions skillRevisionGateEnabled(boolean enabled) { this.skillRevisionGateEnabled = enabled; return this; }
     public OpenSandboxClientOptions syncSnapshotDiffEnabled(boolean enabled) { this.syncSnapshotDiffEnabled = enabled; return this; }
+    public OpenSandboxClientOptions skillsFallbackMode(String mode) { this.skillsFallbackMode = mode; return this; }
+    public OpenSandboxClientOptions skillsFallbackStoreDir(String dir) { this.skillsFallbackStoreDir = dir; return this; }
+    public OpenSandboxClientOptions skillsFallbackMaxBytes(long maxBytes) { this.skillsFallbackMaxBytes = maxBytes; return this; }
+    public OpenSandboxClientOptions skillsFallbackMaxConcurrency(int maxConcurrency) { this.skillsFallbackMaxConcurrency = maxConcurrency; return this; }
+    public OpenSandboxClientOptions skillsFallbackAcquireTimeoutMs(long timeoutMs) { this.skillsFallbackAcquireTimeoutMs = timeoutMs; return this; }
+    public OpenSandboxClientOptions skillsFallbackOnVersionMismatch(boolean enabled) { this.skillsFallbackOnVersionMismatch = enabled; return this; }
+    public OpenSandboxClientOptions skillsFallbackSemaphore(Semaphore semaphore) { this.skillsFallbackSemaphore = semaphore; return this; }
 }
