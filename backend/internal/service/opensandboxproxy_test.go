@@ -1367,3 +1367,18 @@ func TestDeleteServiceProceedsWhenSandboxNotConfigured(t *testing.T) {
 		t.Fatal("deployment must be deleted after successful Delete")
 	}
 }
+
+func TestSandboxPoolExtraEnvAndCapacityGuard631(t *testing.T) {
+	for _, bad := range []SandboxPoolExtraEnv{
+		{Name: "SKILLSYNC_BASE_URL", Value: "ftp://invalid"},
+		{Name: "SKILLSYNC_INTERVAL", Value: "not-a-duration"},
+		{Name: "SKILLSYNC_STORE_DIR", Value: "relative/path"},
+	} {
+		if err := validateSandboxExtraEnv([]SandboxPoolExtraEnv{bad}); !errors.Is(err, ErrInvalidForm) {
+			t.Fatalf("expected ErrInvalidForm for %+v, got %v", bad, err)
+		}
+	}
+	if err := (SandboxCapacitySpec{PoolMin: 5, BufferMin: 5, BufferMax: 25, PoolMax: 25}).validate(); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm for poolMax > %d, got %v", maxSandboxPoolCapacity, err)
+	}
+}
