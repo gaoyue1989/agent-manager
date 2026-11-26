@@ -119,7 +119,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 ├── manifests/          # 平台自举清单（platform/platform-router/platform-ingress/frontend.yaml + ci/ CI overlay）
 ├── charts/             # Helm Charts：oaf-platform（离线部署）+ oaf-agent（跨集群导出交付）
 ├── e2e/                # 全流程回归脚本（console-split 按模块套件 + 存量 A~E 场景）→ e2e 内 package.json
-├── demo/               # order-fulfillment 多 Agent 协同演示（Agent Protocol 远程子 agent）
+├── demo/               # 演示工程：order-fulfillment（多 Agent 协同）与 browser-takeover（浏览器人工接管）
 ├── scripts/            # 辅助脚本（每日更新日志 gen-daily-changelog.sh）
 └── docs/               # 部署指南(deployment.md) + 规范参考(oaf-specification.md) + 设计归档(design/，索引见 design/README.md) + 实施记录(implementation/)
 ```

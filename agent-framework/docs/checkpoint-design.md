@@ -139,12 +139,14 @@ src/main/java/io/agentmanager/framework/
 | `CHECKPOINT_USERNAME` | `agent_manager` | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | MySQL 密码 |
 
-除 `agent_state`/`agent_fs`（SDK 侧）外，框架自建 12 张表（表结构由 **Flyway 迁移**管理，
-`db/migration/` V1–V14 启动自动执行、存量库自动 baseline，结构见 [api.md](api.md) §数据库表）：
-`confirm_context` / `turn_lease` / `tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` /
-`model_config` / `session_user` / `session_message`（V5 消息轨归档；V14 补 trace_id）/
-`remote_task_registry`（V8 远程在途登记）/ `turn_intent`（V10 排队 turn 意图）/
-`turn_stop`（V13 单轮停止请求）；V11/V12 为 `model_config` 增默认/备用标记列。
+除 `agent_state`/`agent_fs`（SDK 侧）外，框架自建 14 张表（表结构由 **Flyway 迁移**管理，
+`db/migration/` V1–V19 启动自动执行、存量库自动 baseline，结构见 [api.md](api.md) §数据库表）：
+`confirm_context`（V16 补 `skills` 列）/ `turn_lease` / `tool_audit_log`（V17 补 `result_state` 列）/
+`ui_context` / `file_asset` / `model_config`（V11/V12 增默认/备用标记列）/ `session_user` /
+`session_message`（V5 消息轨归档；V14 补 `trace_id`）/ `remote_task_registry`（V8 远程在途登记）/
+`turn_intent`（V10 排队 turn 意图）/ `turn_stop`（V13 单轮停止请求）/
+`sandbox_user` & `sandbox_binding`（V15 沙箱生命周期簿记）/ `session_context`（V19 会话注入上下文）；
+历史 `kv_sync_key` 表已于 V18 移除。
 
 > 此前此处的尾注只列了 5 张，漏了 `session_user`、`model_config`、`kv_sync_key`；本版已补齐。
 
@@ -218,7 +220,7 @@ CREATE TABLE IF NOT EXISTS agent_fs (
 
 ```
 0. Flyway（flywayInitializer）
-   └── 执行 db/migration V1–V14，先于一切建表依赖 bean（distributedStore 已 @DependsOn 之）
+   └── 执行 db/migration V1–V19，先于一切建表依赖 bean（distributedStore 已 @DependsOn 之）
 
 1. AgentScopeConfig.java
    ├── DataSource (HikariCP) 创建
