@@ -704,8 +704,11 @@ function assistantBlocks(m) {
       if (typeof b.url === 'string' && b.url.trim()) {
         const u = b.url.trim();
         const l = u.toLowerCase();
-        if (l.startsWith('https://') || l.startsWith('http://') || l.startsWith('data:image/') || u.startsWith('/files/')) {
+        if (l.startsWith('https://') || l.startsWith('http://') || l.startsWith('data:image/')) {
           return u;
+        }
+        if (u.startsWith('/files/')) {
+          return (ctx.api && ctx.api.BASE && !u.startsWith(ctx.api.BASE)) ? ctx.api.BASE + u : u;
         }
         return null;
       }

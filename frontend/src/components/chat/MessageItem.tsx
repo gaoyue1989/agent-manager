@@ -9,7 +9,6 @@ import type { ChatMsg } from "./types";
 import { isSafeInlineImageUrl, toolStatus } from "@/lib/assistant-events";
 import { IconAlert, IconCheck, IconChevronDown, IconDownload, IconFileText, IconImage, IconLoader, IconMinus, IconShieldCheck, IconSparkles, IconX } from "./icons";
 
-const AGENT_BASE = "/agent/release-agent";
 
 // 工具步骤按运行时真实状态渲染：执行中/等待确认/成功/失败/被拒/中断；
 // 历史回放从 AgentState 取真实状态与结果输出（DB 权威来源），无状态时中性显示
@@ -104,14 +103,14 @@ function Thinking() {
 }
 
 // 产出文件卡片：图片内联预览；普通文件给下载按钮
-function FileCards({ files }: { files: NonNullable<ChatMsg["files"]> }) {
+function FileCards({ files, agentBase }: { files: NonNullable<ChatMsg["files"]>; agentBase: string }) {
   return (
     <div className="space-y-2">
       {files.map((f, i) => {
         const isImage = f.mime_type?.startsWith("image/");
-        const isDataUrl = f.download_url.startsWith("data:");
+        const isDataUrl = /^data:/i.test(f.download_url.trim());
         const inlinePreview = isImage && isSafeInlineImageUrl(f.download_url);
-        const resolvedUrl = f.download_url.startsWith("/files") ? `${AGENT_BASE}${f.download_url}` : f.download_url;
+        const resolvedUrl = f.download_url.startsWith("/files") ? `${agentBase}${f.download_url}` : f.download_url;
         return (
           <div key={f.file_id || i} data-testid="file-card" className="max-w-md">
             <div className="flex items-center gap-3 rounded-xl border border-blue-100/90 bg-gradient-to-r from-blue-50/90 to-indigo-50/60 p-2.5 shadow-sm">
@@ -163,7 +162,7 @@ function ContextCard({ msg }: { msg: ChatMsg }) {
   );
 }
 
-function MessageItem({ msg }: { msg: ChatMsg }) {
+function MessageItem({ msg, agentBase = "/agent/release-agent" }: { msg: ChatMsg; agentBase?: string }) {
   if (msg.role === "context") return <ContextCard msg={msg} />;
   if (msg.role === "tool") return <ToolStep msg={msg} />;
   if (msg.role === "system") return <SystemBanner content={msg.content} />;
@@ -194,7 +193,7 @@ function MessageItem({ msg }: { msg: ChatMsg }) {
                   )}
                 </div>
               ) : (
-                <FileCards key={block.file.file_id || idx} files={[block.file]} />
+                <FileCards key={block.file.file_id || idx} files={[block.file]} agentBase={agentBase} />
               ),
             )}
           </div>
@@ -217,7 +216,7 @@ function MessageItem({ msg }: { msg: ChatMsg }) {
               .map((b) => b.file.file_id),
           );
           const remainingFiles = (msg.files ?? []).filter((f) => !blockFileIds.has(f.file_id));
-          return remainingFiles.length > 0 ? <FileCards files={remainingFiles} /> : null;
+          return remainingFiles.length > 0 ? <FileCards files={remainingFiles} agentBase={agentBase} /> : null;
         })()}
       </div>
     </div>

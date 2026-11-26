@@ -117,12 +117,63 @@ export function isSafeInlineImageUrl(url: string | undefined | null): boolean {
   const trimmed = url.trim();
   if (!trimmed) return false;
   const lower = trimmed.toLowerCase();
-  return (
-    lower.startsWith("data:image/") ||
-    lower.startsWith("https://") ||
-    lower.startsWith("http://") ||
-    trimmed.startsWith("/files/")
-  );
+  if (lower.startsWith("data:image/") || lower.startsWith("https://") || lower.startsWith("http://")) {
+    return true;
+  }
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    const pathOnly = trimmed.split(/[?#]/, 1)[0];
+    const segs = pathOnly.split("/");
+    if (segs.includes("..")) return false;
+    return pathOnly.startsWith("/files/") || /^\/agent\/[a-z0-9-]+\/files\/.+$/i.test(pathOnly);
+  }
+  return false;
+}
+
+export function createDirectReturnOrderTracker() {
+  const perTool = new Map<string, AssistantBlock[]>();
+  const toolOrder: string[] = [];
+  const ensure = (id: string) => {
+    let list = perTool.get(id);
+    if (!list) {
+      list = [];
+      perTool.set(id, list);
+      toolOrder.push(id);
+    }
+    return list;
+  };
+  return {
+    onTextDelta(toolCallId: string | undefined, delta: string | undefined) {
+      if (!toolCallId || !delta) return;
+      const list = ensure(toolCallId);
+      const last = list[list.length - 1];
+      if (last && last.type === "text") {
+        list[list.length - 1] = { type: "text", text: last.text + delta };
+      } else {
+        list.push({ type: "text", text: delta });
+      }
+    },
+    onImageDelta(toolCallId: string | undefined, file: InlineHistoryImage) {
+      if (!toolCallId) return;
+      ensure(toolCallId).push({ type: "image", file });
+    },
+    orderedBlocks(): AssistantBlock[] | null {
+      const merged: AssistantBlock[] = [];
+      let hasImage = false;
+      for (const id of toolOrder) {
+        const list = perTool.get(id);
+        if (!list) continue;
+        for (const b of list) {
+          if (b.type === "image") hasImage = true;
+          merged.push(b);
+        }
+      }
+      return hasImage && merged.length > 0 ? merged : null;
+    },
+    reset() {
+      perTool.clear();
+      toolOrder.length = 0;
+    },
+  };
 }
 
 export function resolveInlineImageUrl(
