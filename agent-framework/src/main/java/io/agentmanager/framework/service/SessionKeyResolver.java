@@ -87,10 +87,9 @@ public class SessionKeyResolver {
             var real = uid != null ? lookup(uid) : null;
             return new Resolved(uid != null ? uid : sid, real != null ? real : uid);
         }
-        // A2A / direct invoke 链路：sid 是规范会话键；ctx.userId 是入口裁决后的真实用户，
-        // 禁止作为 session 键反查（否则攻击者抢注 session_id=受害者 userId 即可劫持身份）
-        var sidUser = lookup(sid);
-        return new Resolved(sid, sidUser != null ? sidUser : uid);
+        var canonicalSid = stripTenantPrefix(sid);
+        var sidUser = lookup(canonicalSid);
+        return new Resolved(canonicalSid, sidUser != null ? sidUser : uid);
     }
 
     /** session_user 命中返回该会话的 user_id；未登记/查库失败返回 null（按"未登记"处理） */
@@ -104,6 +103,14 @@ public class SessionKeyResolver {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static String stripTenantPrefix(String sid) {
+        int sep = sid.indexOf("__");
+        if (sep > 0 && sep + 2 < sid.length()) {
+            return sid.substring(sep + 2);
+        }
+        return sid;
     }
 
     private static String trimToNull(String s) {
