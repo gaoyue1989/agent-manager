@@ -57,6 +57,7 @@ class VikingMemoryClientTest {
     private final AtomicInteger createSessionCalls = new AtomicInteger();
     private final AtomicInteger appendMessageCalls = new AtomicInteger();
     private volatile boolean failCreateSession = false;
+    private volatile boolean return404OnAppend = false;
     private volatile boolean hangRegister = false;
 
     @BeforeEach
@@ -90,6 +91,10 @@ class VikingMemoryClientTest {
         }
         if (path.startsWith("/api/v1/sessions/") && path.endsWith("/messages")) {
             appendMessageCalls.incrementAndGet();
+            if (return404OnAppend) {
+                send(ex, 404, "{\"status\":\"error\"}");
+                return;
+            }
             send(ex, 200, "{\"status\":\"ok\"}");
             return;
         }
@@ -205,6 +210,24 @@ class VikingMemoryClientTest {
         client.appendSessionMessage("u-1001", "slot:sa", "assistant", "第一答");
         assertEquals(1, createSessionCalls.get(), "同一会话必须复用同一个 OV session");
         assertEquals(2, appendMessageCalls.get());
+    }
+
+    @Test
+    void append404ShouldEvictCachedOvSessionIdAndRecreateOnNextAppend() {
+        unregisteredUser = false;
+        var client = new VikingMemoryClient(config());
+        client.appendSessionMessage("u-1001", "slot:s404", "user", "first");
+        assertEquals(1, createSessionCalls.get());
+        assertTrue(client.ovSessionIds.containsKey("slot:s404"));
+
+        return404OnAppend = true;
+        client.appendSessionMessage("u-1001", "slot:s404", "user", "expired");
+        assertFalse(client.ovSessionIds.containsKey("slot:s404"));
+
+        return404OnAppend = false;
+        client.appendSessionMessage("u-1001", "slot:s404", "user", "recreated");
+        assertEquals(2, createSessionCalls.get());
+        assertTrue(client.ovSessionIds.containsKey("slot:s404"));
     }
 
     @Test
