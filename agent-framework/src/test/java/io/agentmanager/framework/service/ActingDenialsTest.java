@@ -153,47 +153,54 @@ class ActingDenialsTest {
     }
 
     @Test
-    void mixedDirectReturnAllowAndDenyShouldEmitImageDataDelta() {
+    void partialDenyWithDirectReturnShouldDelegateToNextAndSuppressShortCircuit() {
         var agent = mock(io.agentscope.core.ReActAgent.class);
         when(agent.getName()).thenReturn("test-agent");
         var toolkit = mock(io.agentscope.core.tool.Toolkit.class);
-        var tool = mock(io.agentscope.core.tool.AgentTool.class);
-        when(tool.isReturnDirect()).thenReturn(true);
-        when(toolkit.getTool("render_chart")).thenReturn(tool);
-        var img = io.agentscope.core.message.ImageBlock.builder()
-            .source(io.agentscope.core.message.URLSource.builder().url("https://example.com/chart.png").build())
-            .build();
-        var resultBlock = io.agentscope.core.message.ToolResultBlock.of(
-            List.of(io.agentscope.core.message.TextBlock.builder().text("chart caption").build(), img));
-        when(toolkit.callTool(org.mockito.ArgumentMatchers.any()))
-            .thenReturn(reactor.core.publisher.Mono.just(resultBlock));
         when(agent.getToolkit()).thenReturn(toolkit);
+
+        var client = mock(io.agentscope.core.tool.mcp.McpClientWrapper.class);
+        when(client.callTool(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+            .thenReturn(reactor.core.publisher.Mono.just(
+                new io.modelcontextprotocol.spec.McpSchema.CallToolResult(
+                    List.of(new io.modelcontextprotocol.spec.McpSchema.TextContent("rendered card")), false)));
+        var delegateTool = new io.agentscope.core.tool.mcp.McpTool(
+            "render_chart", "render_chart", "desc", Map.of("type", "object"), null, client, null, "srv", true);
+        var directTool = new io.agentmanager.framework.mcp.DirectReturnMcpTool(delegateTool);
 
         var ctx = newContext();
         var allowedCall = ToolUseBlock.builder().id("c-allow").name("render_chart").input(Map.of()).build();
         var deniedCall = ToolUseBlock.builder().id("c-deny").name("blocked_tool").input(Map.of()).build();
 
-        var events = ActingDenials.deny(
+        var nextCalled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        var passedCalls = new java.util.concurrent.atomic.AtomicReference<List<ToolUseBlock>>();
+        var ctxFlagDuringNext = new java.util.concurrent.atomic.AtomicReference<Object>();
+        var toolResultDuringNext = new java.util.concurrent.atomic.AtomicReference<io.agentscope.core.message.ToolResultBlock>();
+
+        ActingDenials.deny(
             agent, ctx, new ActingInput(List.of(allowedCall, deniedCall)),
             ActingDenials.identitySet(List.of(deniedCall)),
             c -> "denied",
-            in -> Flux.empty()
-        ).collectList().block();
+            in -> {
+                nextCalled.set(true);
+                passedCalls.set(in.toolCalls());
+                ctxFlagDuringNext.set(ctx.get(ActingDenials.SUPPRESS_DIRECT_RETURN_KEY));
+                var param = io.agentscope.core.tool.ToolCallParam.builder()
+                    .toolUseBlock(allowedCall)
+                    .input(Map.of())
+                    .runtimeContext(ctx)
+                    .build();
+                toolResultDuringNext.set(directTool.callAsync(param).block());
+                return Flux.just(new ToolResultEndEvent("r1", "c-allow", "render_chart", ToolResultState.SUCCESS));
+            }
+        ).collectList().block(Duration.ofSeconds(5));
 
-        org.junit.jupiter.api.Assertions.assertNotNull(events);
-        int textIdx = -1;
-        int dataIdx = -1;
-        for (int i = 0; i < events.size(); i++) {
-            if (events.get(i) instanceof io.agentscope.core.event.ToolResultTextDeltaEvent td
-                    && "c-allow".equals(td.getToolCallId())) {
-                textIdx = i;
-            }
-            if (events.get(i) instanceof io.agentscope.core.event.ToolResultDataDeltaEvent dd
-                    && "c-allow".equals(dd.getToolCallId())) {
-                dataIdx = i;
-            }
-        }
-        org.junit.jupiter.api.Assertions.assertTrue(textIdx >= 0, "must emit ToolResultTextDeltaEvent");
-        org.junit.jupiter.api.Assertions.assertTrue(dataIdx > textIdx, "must emit ToolResultDataDeltaEvent after text");
+        assertTrue(nextCalled.get());
+        assertEquals(List.of(allowedCall), passedCalls.get());
+        assertEquals(Boolean.TRUE, ctxFlagDuringNext.get());
+        assertNotNull(toolResultDuringNext.get());
+        assertEquals(ToolResultState.ERROR, toolResultDuringNext.get().getState());
+        org.junit.jupiter.api.Assertions.assertNull(ctx.get(ActingDenials.SUPPRESS_DIRECT_RETURN_KEY));
+        org.mockito.Mockito.verify(toolkit, org.mockito.Mockito.never()).callTool(org.mockito.ArgumentMatchers.any());
     }
 }

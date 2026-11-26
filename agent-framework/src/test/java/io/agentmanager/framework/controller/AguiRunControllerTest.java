@@ -271,6 +271,50 @@ class AguiRunControllerTest {
     }
 
     @Test
+    void resumeRunsShouldCleanupToolBucketsOnCompleteAndError() throws Exception {
+        var threadId = "agui-resume-cleanup-1";
+        when(turnLeaseStore.acquire(eq(threadId), any())).thenReturn("tok-rc-1");
+        when(runtimeService.resumeWithConfirmEvents(eq(threadId), isNull(), anyList(), any()))
+            .thenReturn(Flux.just(
+                (AgentEvent) new io.agentscope.core.event.ToolCallStartEvent("r1", "tc-clean-1", "present_file"),
+                (AgentEvent) new io.agentscope.core.event.ToolResultTextDeltaEvent("r1", "tc-clean-1", "present_file", "{}"),
+                (AgentEvent) new AgentEndEvent("r1")));
+
+        controller.runs(
+                new AguiRunController.AguiRunRequest(threadId, null, null,
+                    List.of(new AguiRunController.AguiResumeDTO("run-1:tc-clean-1", "resolved",
+                        Map.of("approved", true)))),
+                null, new HttpHeaders())
+            .collectList().block(Duration.ofSeconds(10));
+        long deadline1 = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline1 && controller.bucketEntryCount() != 0) {
+            Thread.sleep(10);
+        }
+        assertEquals(0, controller.bucketEntryCount());
+
+        var errThreadId = "agui-resume-cleanup-2";
+        when(turnLeaseStore.acquire(eq(errThreadId), any())).thenReturn("tok-rc-2");
+        when(runtimeService.resumeWithConfirmEvents(eq(errThreadId), isNull(), anyList(), any()))
+            .thenReturn(Flux.concat(
+                Flux.just(
+                    (AgentEvent) new io.agentscope.core.event.ToolCallStartEvent("r2", "tc-clean-2", "present_file"),
+                    (AgentEvent) new io.agentscope.core.event.ToolResultTextDeltaEvent("r2", "tc-clean-2", "present_file", "{}")),
+                Flux.error(new IllegalStateException("resume failed"))));
+
+        controller.runs(
+                new AguiRunController.AguiRunRequest(errThreadId, null, null,
+                    List.of(new AguiRunController.AguiResumeDTO("run-2:tc-clean-2", "resolved",
+                        Map.of("approved", true)))),
+                null, new HttpHeaders())
+            .collectList().block(Duration.ofSeconds(10));
+        long deadline2 = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline2 && controller.bucketEntryCount() != 0) {
+            Thread.sleep(10);
+        }
+        assertEquals(0, controller.bucketEntryCount());
+    }
+
+    @Test
     void sandboxAcquireFailureShouldStillArchiveUserQuestion() {
         var threadId = "agui-archive-fail";
         var store = mock(io.agentmanager.framework.service.SessionMessageStore.class);

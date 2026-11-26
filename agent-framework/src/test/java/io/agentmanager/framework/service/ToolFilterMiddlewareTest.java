@@ -154,6 +154,21 @@ class ToolFilterMiddlewareTest {
     }
 
     @Test
+    void turnToolNamesShouldSkipHitlConfirmControlMessage() {
+        var scope = standardScope();
+        var confirmMsg = Msg.builder()
+            .role(MsgRole.USER)
+            .textContent("")
+            .metadata(Map.of(Msg.METADATA_CONFIRM_RESULTS, List.of()))
+            .build();
+        var msgs = List.of(userMsg(List.of("mcp__db__query")), assistantMsg(), confirmMsg);
+        var run = runReasoning(msgs, allSchemas(), scope);
+
+        assertEquals(List.of("read_file", "execute", "mcp__db__query"), names(run.passed().tools()));
+        assertNotNull(run.ctx().get(ToolFilterMiddleware.TurnToolWhitelist.class));
+    }
+
+    @Test
     void onlyLastUserMessageMetadataCounts() {
         var scope = standardScope();
         // 历史 USER 带 tools，最后一条 USER 不带 → 本轮未传

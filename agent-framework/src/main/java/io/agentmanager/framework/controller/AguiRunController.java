@@ -497,10 +497,11 @@ public class AguiRunController {
                     },
                     sink::complete);
 
+            var turnBucketKeys = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
             resumeFlux.subscribe(
                 event -> handleEventAndEmit(event, threadId, runId, lease, sink,
                     turnEnded, toolSummary, codecCtx,
-                    java.util.concurrent.ConcurrentHashMap.newKeySet(), turnSkills,
+                    turnBucketKeys, turnSkills,
                     directReturnSignal, directReturnJoiner),
                 e -> {
                     log.warn("[agui] resume stream error (sid={}): {}", threadId, e.getMessage());
@@ -511,9 +512,9 @@ public class AguiRunController {
                             "{\"type\":\"error\",\"error\":"
                                 + AgentEventSseSerializer.jsonEsc(errText) + "}");
                     }
-                    endTurnWithLifecycle(lease, threadId, turnEnded);
+                    endTurnAndCleanup(lease, threadId, turnEnded, turnBucketKeys);
                 },
-                () -> endTurnWithLifecycle(lease, threadId, turnEnded));
+                () -> endTurnAndCleanup(lease, threadId, turnEnded, turnBucketKeys));
 
             sink.onCancel(() -> log.info(
                 "[agui] SSE disconnected on resume, agent continues (sid={}, rid={})",
@@ -652,16 +653,6 @@ public class AguiRunController {
                 && !AgentEventSseSerializer.isRemoteForwarded(event)) {
             log.info("[agui] run completed: sessionId={}", sessionId);
             endTurnAndCleanup(lease, sessionId, turnEnded, turnBucketKeys);
-        }
-    }
-
-    /** turn 收尾（CAS 首胜）+ 沙箱生命周期终态注销（§4.4 T2；AG-UI resume 路径共用） */
-    private void endTurnWithLifecycle(TurnLeaseGuard lease, String sessionId, AtomicBoolean turnEnded) {
-        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
-            return;
-        }
-        if (sandboxLifecycle != null) {
-            sandboxLifecycle.onTurnEnd(sessionId);
         }
     }
 

@@ -98,6 +98,7 @@ public class SessionContextController {
         var sid = PathSafe.sanitize(sessionId);
         var requester = requester(headerUserId);
         if (SessionKeyNamespace.isReservedSessionId(sid)
+                || (!sid.equals(requester) && sessionContextStore.existsAsUserId(sid))
                 || !SessionAccessGuard.isOwner(sessionContextStore.ownerOf(sid), requester)) {
             return threadNotFound(sid);
         }
