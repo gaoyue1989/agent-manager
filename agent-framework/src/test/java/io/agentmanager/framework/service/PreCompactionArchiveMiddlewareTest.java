@@ -184,6 +184,39 @@ class PreCompactionArchiveMiddlewareTest {
     }
 
     @Test
+    void archivedIdsShouldStayBoundedBySlotCapacity() {
+        var store = mock(SessionMessageStore.class);
+        var middleware = new PreCompactionArchiveMiddleware(store);
+        for (int i = 0; i < PreCompactionArchiveMiddleware.SLOT_CAPACITY + 200; i++) {
+            var state = mock(AgentState.class);
+            when(state.getContext()).thenReturn(List.of(
+                Msg.builder().id("m-" + i).role(MsgRole.USER).textContent("q" + i).build()));
+            var ctx = mock(RuntimeContext.class);
+            when(ctx.getSessionId()).thenReturn("sid-" + i);
+            when(ctx.getUserId()).thenReturn("u1");
+            when(ctx.getAgentState()).thenReturn(state);
+            middleware.onReasoning(mockAgent(), ctx, input(), next()).blockLast();
+        }
+        org.junit.jupiter.api.Assertions.assertTrue(
+            middleware.archivedIds.size() <= PreCompactionArchiveMiddleware.SLOT_CAPACITY);
+    }
+
+    @Test
+    void singleSlotSeenSetShouldClearAndReplayWhenExceedingCapacity() {
+        var store = mock(SessionMessageStore.class);
+        var middleware = new PreCompactionArchiveMiddleware(store);
+        var msgs = new ArrayList<Msg>(PreCompactionArchiveMiddleware.SEEN_CAPACITY + 1);
+        for (int i = 0; i <= PreCompactionArchiveMiddleware.SEEN_CAPACITY; i++) {
+            msgs.add(Msg.builder().id("m-" + i).role(MsgRole.USER).textContent("q" + i).build());
+        }
+        middleware.onReasoning(mockAgent(), mockCtx(msgs), input(), next()).blockLast();
+        verify(store, times(1)).archiveBatch(anyString(), anyList());
+
+        middleware.onReasoning(mockAgent(), mockCtx(List.of(msgs.get(0))), input(), next()).blockLast();
+        verify(store, times(2)).archiveBatch(anyString(), anyList());
+    }
+
+    @Test
     void nullSessionOrStoreShouldSkip() {
         var store = mock(SessionMessageStore.class);
         var middleware = new PreCompactionArchiveMiddleware(store);

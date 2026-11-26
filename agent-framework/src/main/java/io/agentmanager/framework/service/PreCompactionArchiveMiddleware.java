@@ -48,9 +48,11 @@ public class PreCompactionArchiveMiddleware implements MiddlewareBase {
 
     private final SessionMessageStore sessionMessageStore;
 
+    static final int SLOT_CAPACITY = 1000;
+    static final int SEEN_CAPACITY = 2000;
+
     /** 已归档 msgId 集（按 slotKey 分桶；实例随 agent 构建，通常单会话一桶） */
-    private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> archivedIds =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    final java.util.Map<String, java.util.Set<String>> archivedIds = BoundedLruMap.of(SLOT_CAPACITY);
 
     public PreCompactionArchiveMiddleware(SessionMessageStore sessionMessageStore) {
         this.sessionMessageStore = sessionMessageStore;
@@ -95,6 +97,9 @@ public class PreCompactionArchiveMiddleware implements MiddlewareBase {
             String slot = SessionMessageArchiveStateStore.slotKey(ctx.getUserId(), sessionId);
             var seen = archivedIds.computeIfAbsent(slot,
                     k -> java.util.concurrent.ConcurrentHashMap.newKeySet());
+            if (seen.size() > SEEN_CAPACITY) {
+                seen.clear();
+            }
             var records = new ArrayList<SessionMessageStore.MessageRecord>(context.size());
             for (Msg msg : context) {
                 if (msg == null || msg.getId() == null || msg.getId().isBlank()

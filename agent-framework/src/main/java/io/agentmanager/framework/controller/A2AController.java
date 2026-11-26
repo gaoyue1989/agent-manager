@@ -75,7 +75,7 @@ public class A2AController {
             @RequestHeader Map<String, String> header) {
         var converted = normalizeMessageSendBody(body, headerUserId);
         if (converted == null) {
-            return sessionAccessDenied(null);
+            return rejectionFor(body, sessionAccessDenied(null));
         }
 
         var rejection = recordSessionUser(converted, headerUserId);
@@ -397,22 +397,29 @@ public class A2AController {
      */
     @SuppressWarnings("unchecked")
     private Object recordSessionUser(String body, String headerUserId) {
+        Object requestId = null;
+        boolean ownershipCheckReached = false;
         try {
             var req = MAPPER.readValue(body, Map.class);
-            var method = (String) req.get("method");
-            if (!"message/send".equals(method) && !"message/stream".equals(method)) {
+            requestId = req.get("id");
+            var methodObj = req.get("method");
+            if (!(methodObj instanceof String method)
+                    || (!"message/send".equals(method) && !"message/stream".equals(method))) {
                 return null;
             }
-            var params = (Map<String, Object>) req.get("params");
-            if (params == null) return null;
-            var message = (Map<String, Object>) params.get("message");
-            if (message == null) return null;
+            if (!(req.get("params") instanceof Map<?, ?> rawParams)) {
+                return null;
+            }
+            var params = (Map<String, Object>) rawParams;
+            if (!(params.get("message") instanceof Map<?, ?> rawMessage)) {
+                return null;
+            }
+            var message = (Map<String, Object>) rawMessage;
 
-            // 从 message.metadata 中提取（normalizeMessageSendBody 已将顶层参数挪入 metadata）
-            var meta = (Map<String, Object>) message.get("metadata");
+            Map<String, Object> meta = message.get("metadata") instanceof Map<?, ?> rawMeta
+                ? (Map<String, Object>) rawMeta : null;
             var userId = nonBlank(sdkMetaString(meta, "userId"));
             var sessionId = nonBlank(sdkMetaString(meta, "sessionId"));
-            // 兜底：顶层参数（兼容未经 normalize 的请求）
             if (userId == null) {
                 userId = nonBlank(sdkMetaString(params, "userId"));
             }
@@ -426,15 +433,21 @@ public class A2AController {
                 return null;
             }
             var sanitizedSid = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+            ownershipCheckReached = true;
             if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
                     sessionUserStore, sanitizedSid, effectiveUid)) {
                 log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, effectiveUid);
-                return sessionAccessDenied(req.get("id"));
+                return sessionAccessDenied(requestId);
             }
+            ownershipCheckReached = false;
             sessionUserStore.upsert(sanitizedSid, effectiveUid);
             log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, effectiveUid);
             return null;
         } catch (Exception e) {
+            if (ownershipCheckReached || (headerUserId != null && !headerUserId.isBlank())) {
+                log.warn("[A2A] recordSessionUser failed closed: {}", e.getMessage());
+                return sessionAccessDenied(requestId);
+            }
             log.debug("[A2A] recordSessionUser skipped: {}", e.getMessage());
             return null;
         }

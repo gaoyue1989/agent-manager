@@ -377,6 +377,29 @@ class VikingSessionCommitStateStoreTest {
     }
 
     @Test
+    void appendBatchShouldFallbackToUserIdWhenStoreReturnsPlaceholderUser() {
+        when(sessionUserStore.findUserIdBySession("s-ph")).thenReturn(SessionUserStore.PLACEHOLDER_USER);
+        var s = store();
+        s.save("u-1", "s-ph", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m1", MsgRole.USER, "hello"))));
+        verify(client, timeout(2000)).appendSessionMessage("u-1", "u-1:s-ph", "user", "hello");
+        s.close();
+    }
+
+    @Test
+    void appendBatchShouldSkipWhenOnlyPlaceholderUserAvailable() {
+        when(sessionUserStore.findUserIdBySession("front-sid")).thenReturn(SessionUserStore.PLACEHOLDER_USER);
+        when(sessionUserStore.findUserIdBySession("s-ph2")).thenReturn(SessionUserStore.PLACEHOLDER_USER);
+        var s = store();
+        s.save("front-sid", "gw-3f20f08c5499", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m1", MsgRole.USER, "channel-msg"))));
+        s.save(SessionUserStore.PLACEHOLDER_USER, "s-ph2", SessionMessageArchiveStateStore.AGENT_STATE_KEY,
+            stateWith(List.of(msg("m2", MsgRole.USER, "a2a-unknown-msg"))));
+        verify(client, after(200).never()).appendSessionMessage(anyString(), anyString(), anyString(), anyString());
+        s.close();
+    }
+
+    @Test
     void appendBatchShouldStopImmediatelyWhenWorkerThreadIsInterrupted() {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         Mockito.doAnswer(inv -> {

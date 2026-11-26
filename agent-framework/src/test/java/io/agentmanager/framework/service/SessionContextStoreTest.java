@@ -36,6 +36,8 @@ class SessionContextStoreTest {
 
     private DataSource dataSource;
     private Connection conn;
+    private PreparedStatement existsAsUserId;
+    private ResultSet existsAsUserIdRows;
     private PreparedStatement claim;
     private PreparedStatement lockOwner;
     private PreparedStatement takeOwnership;
@@ -51,6 +53,8 @@ class SessionContextStoreTest {
     void setUp() throws Exception {
         dataSource = mock(DataSource.class);
         conn = mock(Connection.class);
+        existsAsUserId = mock(PreparedStatement.class);
+        existsAsUserIdRows = mock(ResultSet.class);
         claim = mock(PreparedStatement.class);
         lockOwner = mock(PreparedStatement.class);
         takeOwnership = mock(PreparedStatement.class);
@@ -61,6 +65,9 @@ class SessionContextStoreTest {
         entryRows = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(conn);
         when(conn.getAutoCommit()).thenReturn(true);
+        when(conn.prepareStatement(argThat(contains("WHERE user_id = ? LIMIT 1")))).thenReturn(existsAsUserId);
+        when(existsAsUserId.executeQuery()).thenReturn(existsAsUserIdRows);
+        when(existsAsUserIdRows.next()).thenReturn(false);
         when(conn.prepareStatement(argThat(contains("INSERT INTO session_user")))).thenReturn(claim);
         when(conn.prepareStatement(argThat(sql -> sql != null && sql.contains("FROM session_user")
             && sql.contains("FOR UPDATE")))).thenReturn(lockOwner);
@@ -325,6 +332,53 @@ class SessionContextStoreTest {
         verify(conn).rollback();
         verifyNoInteractions(deleteByKey);
         verify(conn).setAutoCommit(true);
+    }
+
+    @Test
+    void upsertRejectsSessionIdMatchingAnotherExistingUserId() throws Exception {
+        when(existsAsUserIdRows.next()).thenReturn(true);
+
+        var outcome = store.upsert("alice", "mallory", "headline", null, "abc");
+
+        assertEquals(new UpsertOutcome.NotOwned(), outcome);
+        verify(conn).rollback();
+        verify(claim, never()).executeUpdate();
+        verify(lockOwner, never()).executeQuery();
+        verifyNoInteractions(write);
+    }
+
+    @Test
+    void upsertAllowsSessionIdMatchingRequesterOwnUserId() throws Exception {
+        ownedBy("alice");
+        when(entryRows.next()).thenReturn(false);
+
+        var outcome = store.upsert("alice", "alice", "headline", null, "abc");
+
+        assertEquals(new UpsertOutcome.Accepted("headline", "headline", 3, 3, 300, true), outcome);
+        verify(existsAsUserId, never()).executeQuery();
+    }
+
+    @Test
+    void removeRejectsSessionIdMatchingAnotherExistingUserId() throws Exception {
+        when(existsAsUserIdRows.next()).thenReturn(true);
+
+        var outcome = store.remove("alice", "mallory", "headline");
+
+        assertEquals(new RemoveOutcome.NotOwned(), outcome);
+        verify(conn).rollback();
+        verify(lockOwner, never()).executeQuery();
+        verifyNoInteractions(deleteByKey);
+    }
+
+    @Test
+    void existsAsUserIdQueriesSessionUserAndSurfacesStorageError() throws Exception {
+        when(existsAsUserIdRows.next()).thenReturn(true, false);
+        assertTrue(store.existsAsUserId("alice"));
+        assertTrue(!store.existsAsUserId("bob"));
+        assertTrue(!store.existsAsUserId(SessionUserStore.PLACEHOLDER_USER));
+
+        when(existsAsUserId.executeQuery()).thenThrow(new SQLException("db down"));
+        assertThrows(SessionContextStore.StorageException.class, () -> store.existsAsUserId("alice"));
     }
 
     @Test

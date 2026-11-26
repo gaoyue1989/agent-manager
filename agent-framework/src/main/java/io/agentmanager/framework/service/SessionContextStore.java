@@ -26,6 +26,10 @@ public class SessionContextStore {
         ON DUPLICATE KEY UPDATE updated_at = NOW(3)
         """;
 
+    private static final String EXISTS_AS_USER_ID_SQL = """
+        SELECT 1 FROM session_user WHERE user_id = ? LIMIT 1
+        """;
+
     private static final String LOCK_OWNER_SQL = """
         SELECT user_id FROM session_user WHERE session_id = ? FOR UPDATE
         """;
@@ -140,6 +144,10 @@ public class SessionContextStore {
         }
         var effectiveTitle = title == null || title.isBlank() ? key : title;
         return inTransaction(conn -> {
+            if (!sessionId.equals(requester) && existsAsUserId(conn, sessionId)) {
+                conn.rollback();
+                return new UpsertOutcome.NotOwned();
+            }
             try (var claim = conn.prepareStatement(CLAIM_SESSION_SQL)) {
                 claim.setString(1, sessionId);
                 claim.setString(2, requester);
@@ -197,6 +205,10 @@ public class SessionContextStore {
             return new RemoveOutcome.NotOwned();
         }
         return inTransaction(conn -> {
+            if (!sessionId.equals(requester) && existsAsUserId(conn, sessionId)) {
+                conn.rollback();
+                return new RemoveOutcome.NotOwned();
+            }
             var owner = lockOwner(conn, sessionId);
             if (!SessionAccessGuard.isOwner(owner, requester)) {
                 conn.rollback();
@@ -210,6 +222,17 @@ public class SessionContextStore {
             }
             return rows == 0 ? new RemoveOutcome.NotFound(key) : new RemoveOutcome.Deleted(key);
         });
+    }
+
+    public boolean existsAsUserId(String userId) {
+        if (userId == null || userId.isBlank() || SessionUserStore.PLACEHOLDER_USER.equals(userId)) {
+            return false;
+        }
+        try (var conn = dataSource.getConnection()) {
+            return existsAsUserId(conn, userId);
+        } catch (SQLException e) {
+            throw new StorageException(STORAGE_ERROR, e);
+        }
     }
 
     public String ownerOf(String sessionId) {
@@ -314,6 +337,18 @@ public class SessionContextStore {
             }
         } catch (SQLException e) {
             throw new StorageException(STORAGE_ERROR, e);
+        }
+    }
+
+    private static boolean existsAsUserId(Connection conn, String userId) throws SQLException {
+        if (userId == null || userId.isBlank() || SessionUserStore.PLACEHOLDER_USER.equals(userId)) {
+            return false;
+        }
+        try (var query = conn.prepareStatement(EXISTS_AS_USER_ID_SQL)) {
+            query.setString(1, userId);
+            try (var rows = query.executeQuery()) {
+                return rows.next();
+            }
         }
     }
 

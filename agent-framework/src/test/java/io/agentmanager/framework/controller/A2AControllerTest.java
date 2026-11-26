@@ -1117,6 +1117,67 @@ class A2AControllerTest {
     }
 
     @Test
+    void recordSessionUserShouldFailClosedWhenOwnershipCheckThrows() throws Exception {
+        when(sessionUserStore.findUserIdBySession("alice-sess"))
+            .thenThrow(new RuntimeException("db unavailable"));
+        mockWrapper();
+
+        mockMvc.perform(post("/")
+                .header("X-User-Id", "mallory")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"81","method":"message/send",
+                     "params":{"sessionId":"alice-sess",
+                       "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.error.code").value(-32001));
+
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageStreamShouldReturnSseRejectionWhenNormalizeFailsWithHeader() throws Exception {
+        mockWrapper();
+
+        var initial = mockMvc.perform(post("/")
+                .header("X-User-Id", "alice")
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .content("""
+                    {"jsonrpc":"2.0","id":"82","method":"message/stream","params":"not-a-map"}
+                    """))
+            .andReturn();
+        var result = initial.getRequest().isAsyncStarted()
+            ? mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .asyncDispatch(initial)).andReturn()
+            : initial;
+        org.junit.jupiter.api.Assertions.assertEquals(200, result.getResponse().getStatus());
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getResponse().getContentType() != null
+                && result.getResponse().getContentType().startsWith(MediaType.TEXT_EVENT_STREAM_VALUE));
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getResponse().getContentAsString().contains("-32001"));
+        verify(wrapper, never()).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
+    void messageSendWithoutHeaderShouldIgnoreNonMapParamsInRecordSessionUser() throws Exception {
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(
+            java.util.Map.of("jsonrpc", "2.0", "id", "83", "error", java.util.Map.of("code", -32602)));
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"83","method":"message/send","params":"not-a-map"}
+                    """))
+            .andExpect(status().isOk());
+
+        verify(wrapper).handleRequest(anyString(), anyMap(), any());
+    }
+
+    @Test
     void messageSendShouldAllowSecondTurnWhenUserIdRequiresSanitization() throws Exception {
         when(sessionUserStore.findUserIdBySession("s-lockout"))
             .thenReturn(null)

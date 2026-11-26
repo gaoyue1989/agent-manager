@@ -300,6 +300,28 @@ class SessionContextControllerTest {
     }
 
     @Test
+    void listShouldRejectSessionIdMatchingExistingUserIdWith404() throws Exception {
+        when(store.existsAsUserId("alice")).thenReturn(true);
+
+        mockMvc.perform(get("/threads/alice/context").header("X-User-Id", "mallory"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("thread_not_found"));
+
+        verify(store, never()).findBySession(any());
+    }
+
+    @Test
+    void listShouldAllowSessionIdMatchingRequesterOwnUserId() throws Exception {
+        when(store.existsAsUserId("alice")).thenReturn(true);
+        when(store.ownerOf("alice")).thenReturn("alice");
+        when(store.findBySession("alice")).thenReturn(List.of(entry()));
+
+        mockMvc.perform(get("/threads/alice/context").header("X-User-Id", "alice"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.sessionId").value("alice"));
+    }
+
+    @Test
     void listShouldRejectReservedNamespacesWith404_632() throws Exception {
         for (String sid : List.of("u-1001", "U-1001", "debug-user", "gw-0123456789ab")) {
             mockMvc.perform(get("/threads/" + sid + "/context").header("X-User-Id", "u-2002"))
