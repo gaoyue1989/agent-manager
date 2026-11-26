@@ -306,4 +306,19 @@ class SessionContextControllerTest {
                 .andExpect(status().isNotFound());
         }
     }
+
+    @Test
+    void injectRejectsEntryLimitExceededWith413() throws Exception {
+        when(store.upsert("s-1", "u-1", "k51", "t51", "body"))
+            .thenReturn(new UpsertOutcome.EntryLimitExceeded(51, 50));
+
+        mockMvc.perform(post("/threads/s-1/context")
+                .header("X-User-Id", "u-1")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{\"key\":\"k51\",\"title\":\"t51\",\"content\":\"body\"}"))
+            .andExpect(status().isPayloadTooLarge())
+            .andExpect(jsonPath("$.error").value("context_entry_limit_exceeded"))
+            .andExpect(jsonPath("$.count").value(51))
+            .andExpect(jsonPath("$.maxEntries").value(50));
+    }
 }
