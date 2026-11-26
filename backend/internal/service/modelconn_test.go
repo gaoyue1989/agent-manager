@@ -288,6 +288,9 @@ func TestAgentEditDefaultFlagLifecycle(t *testing.T) {
 }
 
 func TestModelConnTestThreeBranches(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
 	c, _, done := newTestCore(t)
 	defer done()
 	ws := seedWs(t, c, "ws-1000aaa2", "测试空间")
@@ -569,6 +572,9 @@ func fakeMCP(status int, tools []map[string]string) *httptest.Server {
 }
 
 func TestMcpConnectorCRUDAndVerify(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
 	c, _, done := newTestCore(t)
 	defer done()
 	ws := seedWs(t, c, "ws-1000aaa5", "mcp空间")
@@ -757,5 +763,51 @@ func TestMaskKey(t *testing.T) {
 		if got := maskKey(tc.in); got != tc.want {
 			t.Errorf("maskKey(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestOpenAIEndpointBlocksLoopbackAndMetadata(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = false
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	blocked := []string{
+		"http://127.0.0.1:8080/v1",
+		"http://localhost:8080/v1",
+		"http://[::1]:8080/v1",
+		"http://169.254.169.254/latest/meta-data",
+		"http://[fe80::1]/v1",
+	}
+	for _, u := range blocked {
+		res := testOpenAIEndpoint(u, "", "m", 5)
+		if res.OK || !strings.Contains(res.Error, "not allowed") {
+			t.Fatalf("url %q should be blocked, got %+v", u, res)
+		}
+	}
+}
+
+func TestOpenAIEndpointDoesNotFollowRedirect(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/chat/completions", http.StatusFound)
+	}))
+	defer redir.Close()
+
+	res := testOpenAIEndpoint(redir.URL, "", "m", 5)
+	if res.OK || !strings.Contains(res.Error, "HTTP 302") {
+		t.Fatalf("expected HTTP 302 error without following redirect, got %+v", res)
+	}
+	if atomic.LoadInt32(&targetHits) != 0 {
+		t.Fatalf("redirect target must not be contacted, hits=%d", targetHits)
 	}
 }

@@ -112,21 +112,31 @@ export interface HistoryAssistantMessage {
   blocks?: AssistantBlock[];
 }
 
-export function isSafeInlineImageUrl(url: string | undefined | null): boolean {
+export function isSafeFileDownloadUrl(url: string | undefined | null): boolean {
   if (typeof url !== "string") return false;
   const trimmed = url.trim();
   if (!trimmed) return false;
   const lower = trimmed.toLowerCase();
-  if (lower.startsWith("data:image/") || lower.startsWith("https://") || lower.startsWith("http://")) {
+  if (lower.startsWith("https://") || lower.startsWith("http://")) {
     return true;
   }
   if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
     const pathOnly = trimmed.split(/[?#]/, 1)[0];
     const segs = pathOnly.split("/");
     if (segs.includes("..")) return false;
-    return pathOnly.startsWith("/files/") || /^\/agent\/[a-z0-9-]+\/files\/.+$/i.test(pathOnly);
+    return /^\/files\/.+$/.test(pathOnly) || /^\/agent\/[a-z0-9-]+\/files\/.+$/i.test(pathOnly);
   }
   return false;
+}
+
+export function isSafeInlineImageUrl(url: string | undefined | null): boolean {
+  if (typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.toLowerCase().startsWith("data:image/")) {
+    return true;
+  }
+  return isSafeFileDownloadUrl(trimmed);
 }
 
 export function createDirectReturnOrderTracker() {

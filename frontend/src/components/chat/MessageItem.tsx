@@ -6,7 +6,7 @@
 import { memo, useState } from "react";
 import Markdown from "./Markdown";
 import type { ChatMsg } from "./types";
-import { isSafeInlineImageUrl, toolStatus } from "@/lib/assistant-events";
+import { isSafeFileDownloadUrl, isSafeInlineImageUrl, toolStatus } from "@/lib/assistant-events";
 import { IconAlert, IconCheck, IconChevronDown, IconDownload, IconFileText, IconImage, IconLoader, IconMinus, IconShieldCheck, IconSparkles, IconX } from "./icons";
 
 
@@ -108,9 +108,10 @@ function FileCards({ files, agentBase }: { files: NonNullable<ChatMsg["files"]>;
     <div className="space-y-2">
       {files.map((f, i) => {
         const isImage = f.mime_type?.startsWith("image/");
-        const isDataUrl = /^data:/i.test(f.download_url.trim());
-        const inlinePreview = isImage && isSafeInlineImageUrl(f.download_url);
-        const resolvedUrl = f.download_url.startsWith("/files") ? `${agentBase}${f.download_url}` : f.download_url;
+        const trimmedUrl = (f.download_url ?? "").trim();
+        const canDownload = isSafeFileDownloadUrl(trimmedUrl);
+        const inlinePreview = isImage && isSafeInlineImageUrl(trimmedUrl);
+        const resolvedUrl = trimmedUrl.startsWith("/files/") ? `${agentBase}${trimmedUrl}` : trimmedUrl;
         return (
           <div key={f.file_id || i} data-testid="file-card" className="max-w-md">
             <div className="flex items-center gap-3 rounded-xl border border-blue-100/90 bg-gradient-to-r from-blue-50/90 to-indigo-50/60 p-2.5 shadow-sm">
@@ -123,7 +124,7 @@ function FileCards({ files, agentBase }: { files: NonNullable<ChatMsg["files"]>;
                   {f.size > 0 ? `${(f.size / 1024).toFixed(1)} KB · ` : ""}{f.mime_type}
                 </p>
               </div>
-              {!isDataUrl && (
+              {canDownload && (
                 <a href={resolvedUrl}
                   download={f.file_name} data-testid="file-download"
                   className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1.5 text-xs text-white shadow-sm transition hover:bg-blue-700">
