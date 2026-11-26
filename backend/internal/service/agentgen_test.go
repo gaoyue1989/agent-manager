@@ -90,7 +90,7 @@ func TestAgentGenFrontmatterGolden(t *testing.T) {
 	form.ModelConnections[0].ConnectionID = conn.ID
 	form.Skills[0].PackageID = pkg.ID
 
-	fm := c.deriveFrontmatter(form, "demo-agent", "1.0.0")
+	fm := c.deriveFrontmatter(1, form, "demo-agent", "1.0.0")
 	if fm.Name != "demo-agent" || fm.AgentKey != "demo-agent" || fm.Version != "1.0.0" {
 		t.Fatalf("identity: %+v", fm)
 	}
@@ -875,11 +875,11 @@ func TestSkillDedupSameName(t *testing.T) {
 			{Name: "webapp-testing", Source: "package", PackageID: pkgB.ID},
 		},
 	}
-	fm := c.deriveFrontmatter(form, "dedup-agent", "1.0.0")
+	fm := c.deriveFrontmatter(1, form, "dedup-agent", "1.0.0")
 	if len(fm.Skills) != 1 || fm.Skills[0].Name != "webapp-testing" {
 		t.Fatalf("frontmatter skills must dedup to 1, got %+v", fm.Skills)
 	}
-	files, err := c.buildAgentFiles(fm, form, nil)
+	files, err := c.buildAgentFiles(1, fm, form, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1602,5 +1602,89 @@ func TestUpdateAgentWasSandboxOnRespectsFrontmatterAndExplicitEnv(t *testing.T) 
 	}
 	if secretB["OPENSANDBOX_API_KEY"] != "sbx-secret-key" && plainB["OPENSANDBOX_API_KEY"] != "sbx-secret-key" {
 		t.Fatalf("toggling SANDBOX_ENABLED=false -> on must backfill OPENSANDBOX_API_KEY, plain=%v secret=%v", plainB, secretB)
+	}
+}
+
+func TestCrossWorkspaceIsolationInAgentGenAndPublish(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	wsA := uint(101)
+	wsB := uint(202)
+
+	connB := &store.McpConnector{
+		WorkspaceID: wsB,
+		Name:        "secret-mcp",
+		Transport:   "streamable_http",
+		Endpoint:    "http://internal-b/mcp",
+		AuthType:    "bearer",
+		AuthToken:   "secret-bearer-token-b",
+	}
+	if err := c.DB.Create(connB).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	skillB := &store.Skill{
+		WorkspaceID: wsB,
+		Name:        "private-skill-b",
+		Enabled:     true,
+	}
+	if err := c.DB.Create(skillB).Error; err != nil {
+		t.Fatal(err)
+	}
+	svB := &store.SkillVersion{
+		SkillID:     skillB.ID,
+		Version:     "1.0.0",
+		Status:      SkillVerPublished,
+		ContentJSON: `{"markdown":"secret skill body"}`,
+	}
+	if err := c.DB.Create(svB).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	pkgB, err := c.Packages.RegisterGenerated(wsB, map[string][]byte{
+		"AGENTS.md":                        []byte("---\nvendorKey: agentmanager\nagentKey: priv-pkg-b\nname: priv-pkg-b\ndescription: priv\nauthor: tester\nlicense: MIT\nversion: 1.0.0\n---\nbody\n"),
+		"skills/priv-pkg-skill/SKILL.md": []byte("---\nname: priv-pkg-skill\n---\nsecret pkg skill\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	formMcp := &AgentForm{
+		Name:       "attacker",
+		McpServers: []McpServerRef{{ConnectorID: connB.ID}},
+	}
+	if _, _, err := c.buildFormEnv(wsA, nil, formMcp); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm for cross-workspace MCP in buildFormEnv, got %v", err)
+	}
+	fm := c.deriveFrontmatter(wsA, formMcp, "attacker", "1.0.0")
+	if len(fm.MCPServers) != 0 {
+		t.Fatalf("expected no cross-workspace MCP server in frontmatter, got %+v", fm.MCPServers)
+	}
+	if _, err := c.buildAgentFiles(wsA, fm, formMcp, nil); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm for cross-workspace MCP in buildAgentFiles, got %v", err)
+	}
+
+	formSkill := &AgentForm{
+		Name:   "attacker-skill",
+		Skills: []SkillRef{{Name: "private-skill-b", Source: "skill", SkillID: skillB.ID}},
+	}
+	if _, err := c.buildAgentFiles(wsA, c.deriveFrontmatter(wsA, formSkill, "attacker-skill", "1.0.0"), formSkill, nil); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm for cross-workspace skill asset, got %v", err)
+	}
+
+	formPkgSkill := &AgentForm{
+		Name:   "attacker-pkg",
+		Skills: []SkillRef{{Name: "priv-pkg-skill", Source: "package", PackageID: pkgB.ID}},
+	}
+	if _, err := c.buildAgentFiles(wsA, c.deriveFrontmatter(wsA, formPkgSkill, "attacker-pkg", "1.0.0"), formPkgSkill, nil); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm for cross-workspace package skill, got %v", err)
+	}
+
+	if _, err := c.Publish(PublishRequest{
+		WorkspaceID: wsA,
+		Name:        "attacker-pub",
+		PackageID:   pkgB.ID,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-workspace Publish, got %v", err)
 	}
 }
