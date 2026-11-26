@@ -73,6 +73,7 @@ public class SkillCatalogService {
                 byName.put(name, entry(
                     name,
                     orEmpty(skill.getDescription()),
+                    displayNameOf(skill),
                     versionOf(skill),
                     DYNAMIC_SOURCE,
                     false, true, false));
@@ -86,6 +87,7 @@ public class SkillCatalogService {
                 byName.put(declared.name(), entry(
                     declared.name(),
                     orEmpty(declared.description()),
+                    "",
                     declared.version() != null ? declared.version() : "",
                     declared.source() != null ? declared.source() : "local",
                     declared.required(), false, true));
@@ -121,6 +123,7 @@ public class SkillCatalogService {
                 byName.put(skill.getName(), entry(
                     skill.getName(),
                     orEmpty(skill.getDescription()),
+                    displayNameOf(skill),
                     versionOf(skill),
                     DYNAMIC_SOURCE,
                     false, true, false));
@@ -134,6 +137,7 @@ public class SkillCatalogService {
                 byName.put(declared.name(), entry(
                     declared.name(),
                     orEmpty(declared.description()),
+                    "",
                     declared.version() != null ? declared.version() : "",
                     declared.source() != null ? declared.source() : "local",
                     declared.required(), false, true));
@@ -192,11 +196,12 @@ public class SkillCatalogService {
 
     /**
      * 可用 Skill 摘要列表（供前端 /Skill 提示使用）。
-     * 仅返回已启用的 skill 的 name + description。
+     * 仅返回已启用的 skill 的 name + description + displayName（中文显示名，取 SKILL.md
+     * frontmatter {@code displayName}，缺省空串）。
      * 等价于 list() 的精简视图，去掉 version/source/required 等管理字段。
      */
     public List<Map<String, String>> availableSkills() {
-        return toNameDesc(collectAvailable(null));
+        return toBriefs(collectAvailable(null));
     }
 
     /**
@@ -209,7 +214,7 @@ public class SkillCatalogService {
         if (userId == null || userId.isBlank()) {
             return availableSkills();
         }
-        return toNameDesc(collectAvailable(userId));
+        return toBriefs(collectAvailable(userId));
     }
 
     /**
@@ -227,16 +232,14 @@ public class SkillCatalogService {
         var out = new ArrayList<Map<String, String>>();
         for (var e : merged.entrySet()) {
             if (e.getKey() != null && allow.contains(e.getKey())) {
-                out.add(Map.of(
-                    "name", e.getKey(),
-                    "description", e.getValue() != null ? e.getValue() : ""));
+                out.add(brief(e.getKey(), e.getValue()));
             }
         }
         return out;
     }
 
-    /** name → description 合并视图：全局目录为底，L4 个人技能覆盖同名描述（并补入独有技能） */
-    private Map<String, String> collectAvailable(String userId) {
+    /** name → 摘要合并视图：全局目录为底，L4 个人技能覆盖同名 description/displayName（并补入独有技能） */
+    private Map<String, SkillBrief> collectAvailable(String userId) {
         // L2 禁用集（oa-1110-repro-fixes-design §2.1b）：list() 已剔除禁用名，但下方 L4 合并
         // 的 enabled 分支会把同名 L4 覆盖重新放回，须在合并后强制剔除（读取失败按空集 fail-soft）
         java.util.Set<String> l2Disabled;
@@ -245,13 +248,15 @@ public class SkillCatalogService {
         } catch (Exception e) {
             l2Disabled = java.util.Set.of();
         }
-        var merged = new LinkedHashMap<String, String>();
+        var merged = new LinkedHashMap<String, SkillBrief>();
         for (var m : list()) {
             var name = (String) m.get("name");
             if (name == null || name.isBlank()) {
                 continue;
             }
-            merged.put(name, (String) m.getOrDefault("description", ""));
+            merged.put(name, new SkillBrief(
+                (String) m.getOrDefault("description", ""),
+                (String) m.getOrDefault("displayName", "")));
         }
         if (userId != null && !userId.isBlank()) {
             try {
@@ -265,7 +270,7 @@ public class SkillCatalogService {
                         merged.remove(name);
                         continue;
                     }
-                    merged.put(name, l4Description(userId, name));
+                    merged.put(name, l4Brief(userId, name));
                 }
             } catch (Exception e) {
                 // L4 合并失败降级为全局目录，避免 / 补全整体不可用
@@ -278,42 +283,53 @@ public class SkillCatalogService {
         return merged;
     }
 
-    /** 读取 L4 SKILL.md frontmatter 的 description（解析失败返回空串） */
-    private String l4Description(String userId, String name) {
+    /** 读取 L4 SKILL.md frontmatter 的 description/displayName（解析失败返回空串） */
+    private SkillBrief l4Brief(String userId, String name) {
         try {
             var opt = userSkillService.readSkill(userId, name, null);
             if (opt.isEmpty() || opt.get().content() == null) {
-                return "";
+                return new SkillBrief("", "");
             }
             var parsed = MarkdownSkillParser.parse(opt.get().content());
             var meta = parsed != null ? parsed.getMetadata() : null;
-            var desc = meta != null ? meta.get("description") : null;
-            return desc != null ? String.valueOf(desc) : "";
+            if (meta == null) {
+                return new SkillBrief("", "");
+            }
+            return new SkillBrief(stringValue(meta.get("description")), stringValue(meta.get("displayName")));
         } catch (Exception e) {
             log.debug("availableSkills: read L4 skill {} for user {} failed: {}", name, userId, e.getMessage());
-            return "";
+            return new SkillBrief("", "");
         }
     }
 
-    private static List<Map<String, String>> toNameDesc(Map<String, String> merged) {
+    private static List<Map<String, String>> toBriefs(Map<String, SkillBrief> merged) {
         var out = new ArrayList<Map<String, String>>();
         for (var e : merged.entrySet()) {
             if (e.getKey() == null || e.getKey().isBlank()) {
                 continue;
             }
-            out.add(Map.of(
-                "name", e.getKey(),
-                "description", e.getValue() != null ? e.getValue() : ""));
+            out.add(brief(e.getKey(), e.getValue()));
         }
         return out;
     }
 
+    /** 可用视图值对象：SKILL.md frontmatter 的 description 与 displayName（中文显示名）。 */
+    private record SkillBrief(String description, String displayName) {}
+
+    private static Map<String, String> brief(String name, SkillBrief skill) {
+        return Map.of(
+            "name", name,
+            "description", orEmpty(skill.description()),
+            "displayName", orEmpty(skill.displayName()));
+    }
+
     private static Map<String, Object> entry(
-        String name, String description, String version, String source,
+        String name, String description, String displayName, String version, String source,
         boolean required, boolean dynamic, boolean declaredButMissing) {
         var m = new LinkedHashMap<String, Object>();
         m.put("name", name);
         m.put("description", description);
+        m.put("displayName", displayName);
         m.put("version", version);
         m.put("source", source);
         m.put("required", required);
@@ -321,6 +337,17 @@ public class SkillCatalogService {
         m.put("declaredButMissing", declaredButMissing);
         m.put("enabled", true);
         return m;
+    }
+
+    /** SKILL.md frontmatter displayName（中文显示名，缺省空串） */
+    private static String displayNameOf(AgentSkill skill) {
+        var v = skill.getMetadataValue("displayName");
+        return v != null ? v.toString() : "";
+    }
+
+    /** frontmatter 值转字符串（缺失/null → 空串） */
+    private static String stringValue(Object v) {
+        return v != null ? String.valueOf(v) : "";
     }
 
     /** SKILL.md frontmatter 顶层 version（MarkdownSkillParser 将其归入 metadata） */
