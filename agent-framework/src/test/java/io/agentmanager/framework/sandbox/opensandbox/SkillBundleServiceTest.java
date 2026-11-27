@@ -434,11 +434,11 @@ class SkillBundleServiceTest {
     }
 
     @Test
-    void unsafeCanonicalNameShouldFallBackToDirName() throws Exception {
-        // 规范名进入 tar rel 与容器命令拼接（farm 建链引号路径段 + 孤儿差集 | 分隔符），
-        // 与 SkillsFarm isShellSafeRelPath 同白名单：`.`/`.` 开头/含 `..`/`|`/`\`/引号/空白/`/`
-        // 一律回落目录名——name: . 曾生成 rm -rf '<cache>/oaf-package/.'（GNU rm 拒绝删除 .），
-        // && 链中断导致整沙箱农场收敛失败；含 | 曾污染孤儿差集边界（issue #501）
+    void canonicalNameShouldFallBackOnlyForInvalidIdentifiers() throws Exception {
+        // 规范名必须能作为技能标识（单路径段、非隐藏名、不含 `..`、不含空白）才保留；
+        // shell 元字符（引号/管道等）不再回落目录名——路径与 tar 条目本身安全，farm 侧由
+        // isShellSafeRelPath 跳过并 WARN 留痕，回落到目录名反而让 SDK 渲染路径再次错位。
+        // `.` / `..` 与含 `/`、`\` 的名字仍回落（name: . 曾生成 rm -rf '<cache>/oaf-package/.'）
         var service = service(Duration.ZERO);
         skill("escape-dir", "---\nname: ../../escape\n---\n# x\n");
         skill("quote-dir", "---\nname: has'quote\n---\n# x\n");
@@ -452,14 +452,14 @@ class SkillBundleServiceTest {
 
         var version = service.currentVersion();
 
-        assertEquals(List.of("bslash-dir", "dot-dir", "dotdot-dir", "escape-dir", "hidden-dir",
-            "pipe-dir", "quote-dir", "slash-dir", "space-dir"), version.skills(),
-            "不安全规范名回落目录名");
+        assertEquals(List.of("bslash-dir", "dot-dir", "dotdot-dir", "escape-dir", "foo|bar",
+            "has'quote", "hidden-dir", "slash-dir", "space-dir"), version.skills(),
+            "非法标识回落目录名；shell 元字符名保留规范名");
         assertEquals(List.of(
             "bslash-dir/SKILL.md", "dot-dir/SKILL.md", "dotdot-dir/SKILL.md", "escape-dir/SKILL.md",
-            "hidden-dir/SKILL.md", "pipe-dir/SKILL.md", "quote-dir/SKILL.md", "slash-dir/SKILL.md",
+            "foo|bar/SKILL.md", "has'quote/SKILL.md", "hidden-dir/SKILL.md", "slash-dir/SKILL.md",
             "space-dir/SKILL.md"), bundleEntryNames(service, version.version()),
-            "回落名 = 目录名：bundle 顶层不得出现 './' 等不安全名 tar 条目");
+            "bundle 顶层段 = 规范名，不得出现 '../' 等路径穿越条目");
     }
 
     @Test

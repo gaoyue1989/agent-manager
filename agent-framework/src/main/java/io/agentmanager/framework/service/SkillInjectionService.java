@@ -7,7 +7,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -33,14 +32,12 @@ public class SkillInjectionService {
     private static final Logger log = LoggerFactory.getLogger(SkillInjectionService.class);
 
     /**
-     * 匹配 /SkillName 的正则。
-     * 支持：中文字符、字母、数字、下划线、连字符、点号（与 SkillManageService.sanitizeSkillName 一致）。
+     * 匹配 /SkillName 触发符。技能名集合已知，名字匹配由 {@link #findSkillMentions} 按
+     * 已知名最长前缀完成，不用字符类猜名字边界（中文标点无法用白名单穷举）。
      * "/" 前面不能是单词字符、":" 或 "/"（防止匹配 URL https://host/path、Unix 路径等）；
      * 但中文后面允许 "/"（"用/pdf处理" 是合法用法，Java 的 \w 默认为 ASCII）。
      */
-    private static final Pattern SLASH_SKILL_PATTERN = Pattern.compile(
-        "(?<![\\w:/.])/([\\w\\u4e00-\\u9fff.\\-]+)"
-    );
+    private static final Pattern SLASH_TRIGGER = Pattern.compile("(?<![\\w:/.])/");
 
     /**
      * 注入区块起始标记。
@@ -122,8 +119,7 @@ public class SkillInjectionService {
         }
 
         // 1. 先做零成本候选扫描：没有 /SkillName 形态直接返回，避免 URL/路径消息触发 L4 查询
-        Matcher matcher = SLASH_SKILL_PATTERN.matcher(message);
-        if (!matcher.find()) {
+        if (!SLASH_TRIGGER.matcher(message).find()) {
             return message;
         }
 
@@ -134,40 +130,17 @@ public class SkillInjectionService {
             return message;
         }
 
-        // 3. 扫描消息中的 /SkillName
-        var referencedSkills = new ArrayList<String>();
-        var injectedSet = new java.util.LinkedHashSet<String>();
-
-        matcher.reset();
-        while (matcher.find()) {
-            var skillName = matcher.group(1);
-            if (enabledSkills.contains(skillName) && !injectedSet.contains(skillName)) {
-                injectedSet.add(skillName);
-                referencedSkills.add(skillName);
-            }
-        }
-
-        if (referencedSkills.isEmpty()) {
+        // 3. 扫描消息中的 /SkillName（已知名最长前缀匹配）
+        var mentions = findSkillMentions(message, enabledSkills);
+        if (mentions.isEmpty()) {
             return message;
         }
+        var referencedSkills = mentions.stream().map(SkillMention::name).distinct().toList();
 
         // 4. 替换 /SkillName 为引用标记
-        matcher.reset();
-        var sb = new StringBuilder();
-        while (matcher.find()) {
-            var skillName = matcher.group(1);
-            if (enabledSkills.contains(skillName)) {
-                // 替换为引用标记
-                matcher.appendReplacement(sb, "[/Skill:" + skillName + "]");
-            } else {
-                // 不在启用列表中，保留原样
-                matcher.appendReplacement(sb, Matcher.quoteReplacement(matcher.group(0)));
-            }
-        }
-        matcher.appendTail(sb);
+        var contentBuilder = new StringBuilder(replaceSkillMentions(message, mentions));
 
         // 5. 追加 Skill 内容块（标记与 stripInjectedSkills 共用常量，剥离不漂移）
-        var contentBuilder = new StringBuilder(sb.toString());
         contentBuilder.append(SKILL_SECTION_MARKER);
 
         for (var skillName : referencedSkills) {
@@ -232,26 +205,58 @@ public class SkillInjectionService {
         }
 
         // 零成本候选扫描：没有 /SkillName 形态直接返回，避免 URL/路径消息触发 L4 查询
-        Matcher matcher = SLASH_SKILL_PATTERN.matcher(message);
-        if (!matcher.find()) {
+        if (!SLASH_TRIGGER.matcher(message).find()) {
             return List.of();
         }
 
         var enabledSkills = enabledSkillNames(userId, skillNames);
 
-        var result = new ArrayList<String>();
-        var seen = new java.util.LinkedHashSet<String>();
+        return findSkillMentions(message, enabledSkills).stream()
+            .map(SkillMention::name)
+            .distinct()
+            .toList();
+    }
 
-        matcher.reset();
+    private record SkillMention(int start, int end, String name) {
+    }
+
+    /**
+     * 按已知技能名做最长前缀匹配：名字集合已知，避免用字符类穷举中文标点边界。
+     * 同一位置优先长名（{@code pdf-pro} 先于 {@code pdf}）；已被前一个匹配覆盖的 "/" 跳过。
+     */
+    private static List<SkillMention> findSkillMentions(String message, java.util.Set<String> enabledNames) {
+        var ordered = enabledNames.stream()
+            .sorted(java.util.Comparator.comparingInt(String::length).reversed()
+                .thenComparing(java.util.Comparator.naturalOrder()))
+            .toList();
+        var mentions = new ArrayList<SkillMention>();
+        var matcher = SLASH_TRIGGER.matcher(message);
+        int consumedTo = -1;
         while (matcher.find()) {
-            var skillName = matcher.group(1);
-            if (enabledSkills.contains(skillName) && !seen.contains(skillName)) {
-                seen.add(skillName);
-                result.add(skillName);
+            if (matcher.start() <= consumedTo) {
+                continue;
+            }
+            var nameStart = matcher.end();
+            for (var name : ordered) {
+                if (message.startsWith(name, nameStart)) {
+                    mentions.add(new SkillMention(matcher.start(), nameStart + name.length(), name));
+                    consumedTo = nameStart + name.length();
+                    break;
+                }
             }
         }
+        return mentions;
+    }
 
-        return result;
+    private static String replaceSkillMentions(String message, List<SkillMention> mentions) {
+        var sb = new StringBuilder(message.length() + 32);
+        int cursor = 0;
+        for (var mention : mentions) {
+            sb.append(message, cursor, mention.start())
+                .append("[/Skill:").append(mention.name()).append(']');
+            cursor = mention.end();
+        }
+        return sb.append(message, cursor, message.length()).toString();
     }
 
     /**

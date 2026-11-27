@@ -392,6 +392,34 @@ class SkillManageServiceTest {
     }
 
     @Test
+    void chineseParenthesesCanonicalNameShouldResolveAllOperations() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("公文检查_内部_", "公文检查（内部）");
+
+        assertTrue(service.readSkillContent("公文检查（内部）").contains("公文检查（内部）"));
+
+        assertFalse(service.toggleSkill("公文检查（内部）"));
+        assertTrue(service.getDisabledSet().contains("公文检查（内部）"));
+        assertTrue(service.isDisabled("公文检查（内部）"));
+
+        assertTrue(service.deleteSkill("公文检查（内部）"));
+        assertFalse(Files.exists(skillsDir.resolve("公文检查_内部_")));
+        assertTrue(service.getDisabledSet().isEmpty());
+    }
+
+    @Test
+    void uploadSkillWithChineseParenthesesShouldKeepDirNameEqualToName() throws IOException {
+        var service = createService();
+        var zipBytes = createFlatZip("公文检查（内部）", "Chinese name", "1.0.0");
+
+        var name = service.uploadSkill(new ByteArrayInputStream(zipBytes), "gongwen.zip");
+
+        assertEquals("公文检查（内部）", name);
+        assertTrue(Files.isDirectory(skillsDir.resolve("公文检查（内部）")));
+        assertTrue(service.deleteSkill("公文检查（内部）"));
+    }
+
+    @Test
     void duplicateCanonicalNameShouldResolveByDirNameOrder() throws IOException {
         // issue #504 统一裁决：同规范名重复目录按目录名字典序首个命中（与 bundle 打包
         // 同口径，与文件系统扫描序无关；写入顺序与字典序相反以区分两种裁决）
