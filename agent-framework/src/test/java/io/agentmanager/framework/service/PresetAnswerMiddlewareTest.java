@@ -183,4 +183,12 @@ class PresetAnswerMiddlewareTest {
         assertSame(downstream, out);
         assertEquals(0, sessionModel.calls.get());
     }
+
+    @Test
+    void presetAnswerRejectsBlankText() {
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+            () -> new PresetAnswerMiddleware.PresetAnswer(null));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+            () -> new PresetAnswerMiddleware.PresetAnswer("   "));
+    }
 }

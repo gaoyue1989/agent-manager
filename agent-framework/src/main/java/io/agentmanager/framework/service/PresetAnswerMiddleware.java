@@ -20,7 +20,13 @@ public class PresetAnswerMiddleware implements MiddlewareBase {
 
     public static final String MODEL_NAME = "preset-answer";
 
-    public record PresetAnswer(String text) {}
+    public record PresetAnswer(String text) {
+        public PresetAnswer {
+            if (text == null || text.isBlank()) {
+                throw new IllegalArgumentException("preset answer text must not be blank");
+            }
+        }
+    }
 
     @Override
     public Flux<AgentEvent> onModelCall(Agent agent, RuntimeContext ctx, ModelCallInput input,
