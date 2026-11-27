@@ -51,6 +51,7 @@ class ToolPluginAssemblyTest {
     @AfterEach
     void tearDown() {
         System.clearProperty(ToolPluginBootstrapper.PLUGINS_DIR_ENV);
+        io.agentmanager.framework.tool.pluginfix.LifecyclePlugin.closed = false;
     }
 
     @Test
