@@ -8,8 +8,11 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -26,13 +29,11 @@ final class SkillBundlePusher {
     private static final Logger log = LoggerFactory.getLogger(SkillBundlePusher.class);
     private static final String STORE_VERSION_DIR_PREFIX = "v-";
     private static final Pattern HEX_SHA256 = Pattern.compile("^[0-9a-fA-F]{64}$");
-    private static final int LOCK_STRIPES = 64;
-    private static final Object[] SANDBOX_LOCKS = new Object[LOCK_STRIPES];
+    private static final ConcurrentHashMap<String, LockEntry> SANDBOX_LOCKS = new ConcurrentHashMap<>();
 
-    static {
-        for (int i = 0; i < LOCK_STRIPES; i++) {
-            SANDBOX_LOCKS[i] = new Object();
-        }
+    private static final class LockEntry {
+        final ReentrantLock lock = new ReentrantLock();
+        final AtomicInteger refs = new AtomicInteger(0);
     }
 
     enum Status {
@@ -67,7 +68,22 @@ final class SkillBundlePusher {
         if (probeCurrentMatches(osbSandbox, fb, expectedDir)) {
             return new PushOutcome(Status.HIT, 0L, elapsedMs(startNanos), null);
         }
-        synchronized (sandboxLock(osbSandbox)) {
+        long timeoutMs = Math.max(0L, acquireTimeoutMs);
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        String lockKey = sandboxLockKey(osbSandbox);
+        LockEntry lockEntry = acquireLockEntry(lockKey);
+        boolean lockHeld = false;
+        try {
+            try {
+                lockHeld = lockEntry.lock.tryLock(remainingMs(deadlineNanos), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return new PushOutcome(Status.FAILED, 0L, elapsedMs(startNanos), "interrupted");
+            }
+            if (!lockHeld) {
+                return new PushOutcome(Status.THROTTLED, 0L, elapsedMs(startNanos),
+                    "fallback push sandbox lock timeout");
+            }
             if (probeCurrentMatches(osbSandbox, fb, expectedDir)) {
                 return new PushOutcome(Status.HIT, 0L, elapsedMs(startNanos), null);
             }
@@ -89,7 +105,7 @@ final class SkillBundlePusher {
             boolean acquired = false;
             if (semaphore != null) {
                 try {
-                    acquired = semaphore.tryAcquire(Math.max(0L, acquireTimeoutMs), TimeUnit.MILLISECONDS);
+                    acquired = semaphore.tryAcquire(remainingMs(deadlineNanos), TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return new PushOutcome(Status.FAILED, payload.size(), elapsedMs(startNanos), "interrupted");
@@ -100,7 +116,7 @@ final class SkillBundlePusher {
                 }
             }
             String uid = UUID.randomUUID().toString();
-            String tmpTar = "/tmp/.skills-bundle." + uid + ".tar.gz";
+            String tmpTar = tmpTarPath(fb, uid);
             try {
                 if (probeCurrentMatches(osbSandbox, fb, expectedDir)) {
                     return new PushOutcome(Status.HIT, 0L, elapsedMs(startNanos), null);
@@ -151,6 +167,11 @@ final class SkillBundlePusher {
                     semaphore.release();
                 }
             }
+        } finally {
+            if (lockHeld) {
+                lockEntry.lock.unlock();
+            }
+            releaseLockEntry(lockKey, lockEntry);
         }
     }
 
@@ -179,11 +200,12 @@ final class SkillBundlePusher {
         }
         sb.append("if [ ! -d \"$fb/$ver\" ]; then mkdir -p \"$stg\"; tar xzf \"$tmp\" -C \"$stg\"; ")
             .append("chmod -R a+rX \"$stg\" 2>/dev/null || true; ")
-            .append("mv -T \"$stg\" \"$fb/$ver\" 2>/dev/null || rm -rf \"$stg\"; fi; ")
+            .append("(mv -T \"$stg\" \"$fb/$ver\" 2>/dev/null || { [ ! -e \"$fb/$ver\" ] && mv \"$stg\" \"$fb/$ver\"; }) 2>/dev/null || rm -rf \"$stg\"; fi; ")
+            .append("test -d \"$fb/$ver\"; ")
             .append("if [ -d \"$fb/CURRENT\" ] && [ ! -L \"$fb/CURRENT\" ]; then rm -rf \"$fb/CURRENT\"; fi; ")
             .append("ln -sfn \"$ver\" \"$cur\"; ")
-            .append("mv -Tf \"$cur\" \"$fb/CURRENT\" 2>/dev/null || ln -sfn \"$ver\" \"$fb/CURRENT\"; ")
-            .append("test -L \"$fb/CURRENT\"; ")
+            .append("mv -Tf \"$cur\" \"$fb/CURRENT\" 2>/dev/null || { rm -f \"$cur\"; ln -sfn \"$ver\" \"$fb/CURRENT\"; }; ")
+            .append("test -L \"$fb/CURRENT\" && test -d \"$fb/CURRENT\"; ")
             .append("active=$(readlink \"$fb/CURRENT\" 2>/dev/null || true); active=${active##*/}; ")
             .append("find \"$fb\" -mindepth 1 -maxdepth 1 -type d -name 'v-*' ! -name \"$ver\" ! -name \"$active\" ")
             .append("-exec rm -rf {} + 2>/dev/null || true");
@@ -221,15 +243,42 @@ final class SkillBundlePusher {
         }
     }
 
-    private static Object sandboxLock(Sandbox osbSandbox) {
+    private static String sandboxLockKey(Sandbox osbSandbox) {
         String id = null;
         try {
             id = osbSandbox.getId();
         } catch (Exception ignored) {
             id = null;
         }
-        int h = (id != null && !id.isBlank()) ? id.hashCode() : System.identityHashCode(osbSandbox);
-        return SANDBOX_LOCKS[(h & Integer.MAX_VALUE) % LOCK_STRIPES];
+        return (id != null && !id.isBlank()) ? id : ("identity:" + System.identityHashCode(osbSandbox));
+    }
+
+    private static LockEntry acquireLockEntry(String key) {
+        return SANDBOX_LOCKS.compute(key, (k, existing) -> {
+            LockEntry entry = existing != null ? existing : new LockEntry();
+            entry.refs.incrementAndGet();
+            return entry;
+        });
+    }
+
+    private static void releaseLockEntry(String key, LockEntry entry) {
+        SANDBOX_LOCKS.computeIfPresent(key, (k, current) -> {
+            if (current == entry && current.refs.decrementAndGet() <= 0) {
+                return null;
+            }
+            return current;
+        });
+    }
+
+    private static long remainingMs(long deadlineNanos) {
+        long rem = deadlineNanos - System.nanoTime();
+        return rem <= 0L ? 0L : TimeUnit.NANOSECONDS.toMillis(rem);
+    }
+
+    static String tmpTarPath(String fb, String uid) {
+        int slash = fb.lastIndexOf('/');
+        String parent = slash > 0 ? fb.substring(0, slash) : "/tmp";
+        return parent + "/.skills-bundle." + uid + ".tar.gz";
     }
 
     private static boolean isHexSha256(String sha) {

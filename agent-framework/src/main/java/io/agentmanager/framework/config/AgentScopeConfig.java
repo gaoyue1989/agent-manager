@@ -814,7 +814,8 @@ public class AgentScopeConfig {
                 return;
             }
             String primary = config.skillsSharedStore() == null ? "" : config.skillsSharedStore().trim();
-            if (fbDir.trim().equals(primary)) {
+            if (io.agentmanager.framework.sandbox.opensandbox.OpenSandboxClientOptions
+                    .fallbackStoreCollidesWithPrimary(fbDir, primary)) {
                 log.warn("SANDBOX_SKILLS_FALLBACK_STORE_DIR='{}' collides with SANDBOX_SKILLS_SHARED_STORE='{}'",
                     fbDir, primary);
             }
