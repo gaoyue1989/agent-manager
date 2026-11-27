@@ -30,11 +30,19 @@ public class TurnInterruptMiddleware implements MiddlewareBase {
 
     private final TurnControlRegistry registry;
     private final SessionKeyResolver sessionKeyResolver;
+    private final TurnStopWatcher turnStopWatcher;
 
     public TurnInterruptMiddleware(TurnControlRegistry registry,
                                    SessionKeyResolver sessionKeyResolver) {
+        this(registry, sessionKeyResolver, null);
+    }
+
+    public TurnInterruptMiddleware(TurnControlRegistry registry,
+                                   SessionKeyResolver sessionKeyResolver,
+                                   TurnStopWatcher turnStopWatcher) {
         this.registry = registry;
         this.sessionKeyResolver = sessionKeyResolver;
+        this.turnStopWatcher = turnStopWatcher;
     }
 
     /** 最外层（更大 = 更外层）：先登记再进入任何可能短路的中间件 */
@@ -52,6 +60,9 @@ public class TurnInterruptMiddleware implements MiddlewareBase {
                     ? sessionKeyResolver.canonicalSessionId(ctx)
                     : ctx.getSessionId();
                 registry.register(canonical, agent, ctx.getUserId(), ctx.getSessionId());
+                if (turnStopWatcher != null) {
+                    turnStopWatcher.onControlRegistered(canonical);
+                }
             } catch (Exception e) {
                 // 路由登记失败只影响「本 Pod 能否投递停止」，绝不阻断对话主链路
                 log.warn("TurnInterruptMiddleware: register failed: {}", e.getMessage());

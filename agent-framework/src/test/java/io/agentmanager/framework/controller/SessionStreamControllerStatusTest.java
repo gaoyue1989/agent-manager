@@ -215,4 +215,21 @@ class SessionStreamControllerStatusTest {
         assertFalse(resp.getBody().containsKey("latest_event_seq"),
             "503 响应不得携带 latest_event_seq，否则前端仍可能把游标重置为 0");
     }
+
+    @Test
+    void workingTurnWithMatchingTurnStopReportsStoppingTrue() {
+        var stopStore = mock(io.agentmanager.framework.service.TurnStopStore.class);
+        controller.setTurnStopStore(stopStore);
+        when(runtimeService.findPendingConfirm("s-stopping")).thenReturn(null);
+        when(turnLeaseStore.isHeld("s-stopping")).thenReturn(true);
+        when(eventStore.findLatestStrict("s-stopping")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(7, "TEXT_BLOCK_DELTA", "{}", "r-stopping"));
+        when(stopStore.find("s-stopping")).thenReturn(
+            new io.agentmanager.framework.service.TurnStopStore.StopRequest("s-stopping", "r-stopping"));
+
+        var resp = controller.status("s-stopping", null);
+        assertEquals(200, resp.getStatusCode().value());
+        assertEquals("working", resp.getBody().get("state"));
+        assertEquals(Boolean.TRUE, resp.getBody().get("stopping"));
+    }
 }

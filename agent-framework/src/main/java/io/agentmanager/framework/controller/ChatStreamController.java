@@ -507,7 +507,11 @@ public class ChatStreamController {
                     return;
                 }
                 try {
-                    Thread.sleep(stopPollIntervalMs());
+                    if (turnStopWatcher != null) {
+                        turnStopWatcher.awaitStop(replyId, stopPollIntervalMs());
+                    } else {
+                        Thread.sleep(stopPollIntervalMs());
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     if (turnStopWatcher != null) {

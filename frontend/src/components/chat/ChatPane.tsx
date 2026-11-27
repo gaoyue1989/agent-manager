@@ -367,6 +367,14 @@ export default function ChatPane({
         }
         case "interrupted":
           throw new Error(ev.reason || "执行流已中断");
+        case "cancelled":
+          if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+          flushDelta();
+          setMessages((prev) => [
+            ...settlePendingToolCalls(prev),
+            { role: "system", content: "已停止本次回复（已执行的工具调用不会回滚）。" },
+          ]);
+          break;
         // AGENT_END / done 等其余事件忽略（流关闭即终态）
       }
     };
