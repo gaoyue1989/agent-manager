@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,7 +20,7 @@ func stubPrometheus(t *testing.T) (*httptest.Server, *[]string) {
 	var seen []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/query", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("query")
+		q := r.FormValue("query")
 		seen = append(seen, q)
 		var result []map[string]any
 		switch {
@@ -49,10 +50,10 @@ func stubPrometheus(t *testing.T) (*httptest.Server, *[]string) {
 			"resultType": "vector", "result": result}})
 	})
 	mux.HandleFunc("/api/v1/query_range", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("query")
+		q := r.FormValue("query")
 		seen = append(seen, q)
 		// 采样点相对请求 start 落位（真实时间无关），保证桶对齐断言稳定
-		st, _ := strconv.ParseFloat(r.URL.Query().Get("start"), 64)
+		st, _ := strconv.ParseFloat(r.FormValue("start"), 64)
 		vals := [][]any{{st, "8"}, {st + 3600, "5"}}
 		if strings.Contains(q, `result="error"`) {
 			vals = [][]any{{st + 3600, "1"}}
@@ -109,7 +110,7 @@ func TestToolCallsShouldAggregateAndMerge(t *testing.T) {
 	seedObsService(t, core, "oaf-alpha", "Alpha", agent.URL, 1)
 	seedObsService(t, core, "oaf-beta", "Beta", "", 1)
 
-	view, err := core.ToolCalls(1, "24h")
+	view, err := core.ToolCalls(context.Background(), 1, "24h")
 	if err != nil {
 		t.Fatalf("ToolCalls: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestToolCallsShouldScopeToWorkspace(t *testing.T) {
 	seedObsService(t, core, "oaf-mine", "Mine", agent.URL, 7)
 	seedObsService(t, core, "oaf-other", "Other", agent.URL, 9)
 
-	if _, err := core.ToolCalls(7, "7d"); err != nil {
+	if _, err := core.ToolCalls(context.Background(), 7, "7d"); err != nil {
 		t.Fatalf("ToolCalls: %v", err)
 	}
 	for _, q := range *seen {
@@ -205,7 +206,7 @@ func TestToolCallsShouldMergeRecentAcrossAgents(t *testing.T) {
 	seedObsService(t, core, "oaf-b", "B", b.URL, 1)
 	seedObsService(t, core, "oaf-down", "Down", down.URL, 1) // 不可达：静默跳过
 
-	view, err := core.ToolCalls(1, "30d")
+	view, err := core.ToolCalls(context.Background(), 1, "30d")
 	if err != nil {
 		t.Fatalf("ToolCalls: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestToolCallsShouldMergeRecentAcrossAgents(t *testing.T) {
 func TestToolCallsShouldFailFastWithoutPrometheus(t *testing.T) {
 	core, _, cleanup := newTestCore(t)
 	defer cleanup()
-	if _, err := core.ToolCalls(0, "24h"); !errors.Is(err, ErrObservabilityDown) {
+	if _, err := core.ToolCalls(context.Background(), 0, "24h"); !errors.Is(err, ErrObservabilityDown) {
 		t.Fatalf("PROMETHEUS_URL 缺失应返回 ErrObservabilityDown, got %v", err)
 	}
 }
@@ -229,7 +230,7 @@ func TestToolCallsShouldRejectInvalidRange(t *testing.T) {
 	core, _, cleanup := newTestCore(t)
 	defer cleanup()
 	core.Cfg.PrometheusURL = "http://127.0.0.1:1"
-	if _, err := core.ToolCalls(0, "1w"); !errors.Is(err, ErrInvalidRange) {
+	if _, err := core.ToolCalls(context.Background(), 0, "1w"); !errors.Is(err, ErrInvalidRange) {
 		t.Fatalf("非法 range 应返回 ErrInvalidRange, got %v", err)
 	}
 }
@@ -238,7 +239,7 @@ func TestPromServiceSelectorShouldEscapeAndSort(t *testing.T) {
 	sel := promServiceSelector([]observabilityService{
 		{metricLabel: "b-agent"}, {metricLabel: "a.1"},
 	})
-	if sel != `service=~"a\.1|b-agent"` {
+	if sel != `service=~"a\\.1|b-agent"` {
 		t.Fatalf("selector = %q", sel)
 	}
 }
@@ -261,7 +262,7 @@ func TestToolCallsTrendShouldKeepInProgressBucketAndDropStaleTools(t *testing.T)
 	var gotStart, gotEnd int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/query", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("query")
+		q := r.FormValue("query")
 		var result []map[string]any
 		switch {
 		case strings.Contains(q, `sum by (tool)`) && strings.Contains(q, `result="error"`):
@@ -281,8 +282,8 @@ func TestToolCallsTrendShouldKeepInProgressBucketAndDropStaleTools(t *testing.T)
 			"resultType": "vector", "result": result}})
 	})
 	mux.HandleFunc("/api/v1/query_range", func(w http.ResponseWriter, r *http.Request) {
-		s, _ := strconv.ParseInt(r.URL.Query().Get("start"), 10, 64)
-		e, _ := strconv.ParseInt(r.URL.Query().Get("end"), 10, 64)
+		s, _ := strconv.ParseInt(r.FormValue("start"), 10, 64)
+		e, _ := strconv.ParseInt(r.FormValue("end"), 10, 64)
 		gotStart, gotEnd = s, e
 		// 进行中桶（最后一个评估点）有 7 次新增调用
 		vals := [][]any{{float64(e), "7"}}
@@ -296,7 +297,7 @@ func TestToolCallsTrendShouldKeepInProgressBucketAndDropStaleTools(t *testing.T)
 	seedObsService(t, core, "oaf-alpha", "Alpha", agent.URL, 1)
 
 	before := time.Now().UTC()
-	view, err := core.ToolCalls(1, "30d")
+	view, err := core.ToolCalls(context.Background(), 1, "30d")
 	if err != nil {
 		t.Fatalf("ToolCalls: %v", err)
 	}
@@ -329,5 +330,45 @@ func TestToolCallsTrendShouldKeepInProgressBucketAndDropStaleTools(t *testing.T)
 	}
 	if view.Totals.ToolKinds != 1 {
 		t.Fatalf("ToolKinds = %d, want 1", view.Totals.ToolKinds)
+	}
+}
+
+func TestPromServiceSelectorShouldQuoteSpecialChars(t *testing.T) {
+	sel := promServiceSelector([]observabilityService{
+		{metricLabel: `evil",foo=~".*`},
+		{metricLabel: "svc+test\nline"},
+	})
+	if strings.Count(sel, `"`) != 2+strings.Count(sel, `\"`) {
+		t.Fatalf("unescaped quote in selector: %s", sel)
+	}
+	if strings.Contains(sel, "\n") {
+		t.Fatalf("raw newline in selector: %q", sel)
+	}
+	if !strings.Contains(sel, `svc\\+test`) {
+		t.Fatalf("expected double-escaped plus in selector: %s", sel)
+	}
+}
+
+func TestRecentToolCallsShouldSkipStoppedAndRespectContext(t *testing.T) {
+	core, _, cleanup := newTestCore(t)
+	defer cleanup()
+	var stoppedHits int
+	stoppedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stoppedHits++
+		writeJSON(w, map[string]any{"connected": true, "recent": []any{}})
+	}))
+	defer stoppedSrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := core.recentToolCalls(ctx, []observabilityService{
+		{metricLabel: "stopped-svc", Status: "stopped", ClusterURL: stoppedSrv.URL},
+		{metricLabel: "running-svc", Status: "running", ClusterURL: stoppedSrv.URL},
+	}, 10)
+	if len(got) != 0 {
+		t.Fatalf("expected empty recent calls on canceled ctx, got %d", len(got))
+	}
+	if stoppedHits != 0 {
+		t.Fatalf("stopped service must not be contacted, hits=%d", stoppedHits)
 	}
 }
