@@ -907,19 +907,34 @@ async function submitConfirm(calls, approved) {
     confirmed: !!approved,
     accept_rule: false
   }));
-  renderer.dismissConfirmCard();
   enterStreamingUi();
-  activeSubHandle = ctx.api.confirmStream(sid, results, {
-    userId: uid(),
-    onEvent: (evt) => {
-      if (evt.type === 'done') { resetStreamingState(); return; }
-      handleEvent(evt);
-    },
-    onError: (e) => {
-      ctx.utils.toast('确认提交失败: ' + e.message, 'error');
-      resetStreamingState();
-    }
-  });
+  currentReply = renderer.ensureReply('confirm-' + Date.now());
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (err) => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err); else resolve();
+      };
+      activeSubHandle = ctx.api.confirmStream(sid, results, {
+        userId: uid(),
+        onEvent: (evt) => {
+          if (evt.type === 'done') { done(); return; }
+          if (evt.type === 'error') { handleEvent(evt); done(new Error(evt.error || 'confirm error')); return; }
+          handleEvent(evt);
+          if (evt.type === 'AGENT_END') done();
+        },
+        onError: (e) => done(e)
+      });
+    });
+  } catch (e) {
+    ctx.utils.toast('确认提交失败: ' + e.message, 'error');
+  } finally {
+    renderer.dismissConfirmCard();
+    resetStreamingState();
+    loadThreads();
+  }
 }
 
 function stop() {
