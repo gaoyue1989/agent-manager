@@ -98,7 +98,7 @@ class SkillsFarmFallbackTest {
             } else {
                 var res5 = execResult(0, "v-old999"); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res5);
             }
-            var res6 = execResult(1, ""); when(commands.run("readlink '/tmp/.skills-store/CURRENT'")).thenReturn(res6);
+            var res6 = execResult(1, ""); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res6);
             var r_101 = execResult(0, ""); when(commands.run(startsWith("set -e;"))).thenReturn(r_101);
             var res7 = execResult(0, ""); when(commands.run(contains("ln -s '/tmp/.skills-store/CURRENT/alpha'"))).thenReturn(res7);
 
@@ -180,7 +180,7 @@ class SkillsFarmFallbackTest {
         var files = mock(Filesystem.class);
         var res12 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res12);
         var res13 = execResult(1, ""); when(commands.run("test -d '/skills-store'")).thenReturn(res13);
-        var res14 = execResult(0, "v-v200"); when(commands.run("readlink '/tmp/.skills-store/CURRENT'")).thenReturn(res14);
+        var res14 = execResult(0, "v-v200"); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res14);
         var res15 = execResult(0, ""); when(commands.run(contains("ln -s '/tmp/.skills-store/CURRENT/alpha'"))).thenReturn(res15);
 
         var reader = mock(WorkspaceReader.class);
@@ -234,7 +234,7 @@ class SkillsFarmFallbackTest {
             if ("test -d '/skills-store'".equals(cmd)) {
                 return execResult(1, "");
             }
-            if ("readlink '/tmp/.skills-store/CURRENT'".equals(cmd)) {
+            if (SkillBundlePusher.probeCommand("/tmp/.skills-store").equals(cmd)) {
                 String v = fallbackCurrent.get();
                 return v != null ? execResult(0, v) : execResult(1, "");
             }

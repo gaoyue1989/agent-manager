@@ -52,7 +52,7 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private int skillsFallbackMaxConcurrency = OpenSandboxClientOptions.DEFAULT_SKILLS_FALLBACK_MAX_CONCURRENCY;
     private long skillsFallbackAcquireTimeoutMs = OpenSandboxClientOptions.DEFAULT_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS;
     private boolean skillsFallbackOnVersionMismatch = true;
-    private java.util.concurrent.Semaphore skillsFallbackSemaphore;
+    private volatile java.util.concurrent.Semaphore skillsFallbackSemaphore;
 
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
@@ -187,11 +187,16 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             // 裁决值，≠请求 scope 即他副本已 prune 掉本 scope——权威否定本 Pod 陈旧两表（清除并
             // 返回 null 重收敛）。槽缺失/Redis 不可达=未知，fail-open 维持本 Pod 信念不清本地
             // （旧布局副本窗口内不写槽=维持存量行为）
-            var slotScope = sharedFingerprintStore.slotScope(sandboxId);
-            if (slotScope != null && !slotScope.equals(scope)) {
-                scopedSkillCacheFingerprints.remove(sandboxId + "|" + scope);
-                hydratedScopedScopes.remove(sandboxId, scope);
-                podLocal = null;
+            var entry = sharedFingerprintStore.slotEntry(sandboxId);
+            if (entry != null) {
+                if (!entry.scope().equals(scope)) {
+                    scopedSkillCacheFingerprints.remove(sandboxId + "|" + scope);
+                    hydratedScopedScopes.remove(sandboxId, scope);
+                    podLocal = null;
+                } else if (!entry.value().equals(podLocal)) {
+                    podLocal = entry.value();
+                    scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, podLocal);
+                }
             }
         }
         return podLocal != null && podLocal.startsWith(mode + "|")
@@ -411,7 +416,21 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .skillsFallbackMaxConcurrency(skillsFallbackMaxConcurrency)
             .skillsFallbackAcquireTimeoutMs(skillsFallbackAcquireTimeoutMs)
             .skillsFallbackOnVersionMismatch(skillsFallbackOnVersionMismatch)
-            .skillsFallbackSemaphore(skillsFallbackSemaphore);
+            .skillsFallbackSemaphore(resolveSkillsFallbackSemaphore());
+    }
+
+    private java.util.concurrent.Semaphore resolveSkillsFallbackSemaphore() {
+        var sem = skillsFallbackSemaphore;
+        if (sem == null) {
+            synchronized (this) {
+                sem = skillsFallbackSemaphore;
+                if (sem == null) {
+                    sem = new java.util.concurrent.Semaphore(Math.max(1, skillsFallbackMaxConcurrency));
+                    skillsFallbackSemaphore = sem;
+                }
+            }
+        }
+        return sem;
     }
 
     @Override
