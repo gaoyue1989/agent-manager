@@ -204,12 +204,12 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `SANDBOX_GUARD_LEASE_SECONDS` | int | `900` | | 沙箱获取串行化租约时长（秒）（绑 `agent.sandbox.guard-lease-seconds`） |
 | `SANDBOX_SKILL_REVISION_GATE` | bool | `true` | | L4 物化 revision 门控（`agent.sandbox.skill-revision-gate-enabled`）；关闭=每 acquire 全量物化 |
 | `SANDBOX_SYNC_SNAPSHOT_DIFF` | bool | `true` | | 沙箱回写快照差分（`agent.sandbox.sync-snapshot-diff-enabled`）；关闭=每次 call 全量读容器 skills/ |
-| `SANDBOX_SYNC_SKIP_PACKAGE_BASELINE` | bool | `true` | | 沙箱同步跳过包基线文件回写（绑 `agent.sandbox.sync-skip-package-baseline`） |
+| `SANDBOX_SYNC_SKIP_PACKAGE_BASELINE` | bool | `true` | | 沙箱同步跳过包基线文件回写（绑 `agent.sandbox.sync-skip-package-baseline-enabled`） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | duration | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x；绑 `agent.sandbox.execd-grace-shutdown`） |
 | `SANDBOX_SESSION_AGENT_ISOLATION` | bool | `true` | | per-session agent 隔离（每会话独立 Agent 实例，消解同用户两会话的沙箱单槽互踩；绑 `agent.sandbox.session-agent-isolation`） |
 | `SANDBOX_SESSION_AGENT_CACHE_MAX` | int | `500` | | 会话级 Agent 实例缓存上限（绑 `agent.sandbox.session-agent-cache-max`） |
 | `SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES` | int | `30` | | 会话级 Agent 实例缓存空闲 TTL（分钟，绑 `agent.sandbox.session-agent-cache-ttl-minutes`） |
-| `SKILLSYNC_BUNDLE_CACHE_DIR` | path | 空 | | 本地技能打包缓存目录（空 = 使用默认临时目录；绑 `agent.sandbox.skillsync-bundle-cache-dir`） |
+| `SKILLSYNC_BUNDLE_CACHE_DIR` | path | 空 | | 本地技能打包缓存目录（空 = 使用默认临时目录；绑 `agent.sandbox.skills-bundle-cache-dir`） |
 | `SANDBOX_SKILLS_SHARED_STORE` | path | `/skills-store` | | 沙箱共享只读技能目录；设为 `off` 关闸强制走降级通道（绑 `agent.sandbox.skills-shared-store`） |
 | `SANDBOX_SKILLS_FALLBACK_MODE` | enum | `push` | | 共享存储不可用时的技能同步降级模式：`push`（OpenSandbox 二进制流式推送）\| `off`（绑 `agent.sandbox.skills-fallback-mode`） |
 | `SANDBOX_SKILLS_FALLBACK_STORE_DIR` | path | `/tmp/.skills-store` | | `push` 降级在沙箱内的目标根目录（绑 `agent.sandbox.skills-fallback-store-dir`） |
@@ -218,14 +218,14 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `SANDBOX_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS` | long | `5000` | | `push` 降级并发信号量等待超时（毫秒；绑 `agent.sandbox.skills-fallback-acquire-timeout-ms`） |
 | `SANDBOX_SKILLS_FALLBACK_ON_VERSION_MISMATCH` | bool | `true` | | 共享存储存在但版本不匹配时是否触发 `push` 降级（绑 `agent.sandbox.skills-fallback-on-version-mismatch`） |
 | `SANDBOX_LIFECYCLE_ENABLED` | bool | `true` | | 沙箱生命周期总开关（配额/绑定/续期三件套，依赖 `SANDBOX_GUARD_ENABLED=true`；绑 `agent.sandbox.lifecycle.enabled`） |
-| `SANDBOX_POOL_REF` | string | 空 | | OpenSandbox 服务端暖池名；空 = 不用池，非空时 create 由池模板定义资源上限（绑 `agent.sandbox.pool-ref`） |
+| `SANDBOX_POOL_REF` | string | 空 | | OpenSandbox 服务端暖池名；空 = 不用池，非空时 create 由池模板定义资源上限（绑 `agent.sandbox.lifecycle.pool-ref`） |
 | `SANDBOX_USER_QUOTA` | int | `5` | | 单用户沙箱配额（0 = 不限；满且全忙返回 409 / `user_quota_exhausted`；绑 `agent.sandbox.lifecycle.user-quota`） |
 | `SANDBOX_RENEW_INTERVAL_SECONDS` | int | `60` | | T3 在途续期扫描间隔（秒，须 `< TTL*60/2`；绑 `agent.sandbox.lifecycle.renew-interval-seconds`） |
 | `SANDBOX_CONFIRM_HOLD_MINUTES` | int | `20` | | T4 HITL 挂起保留窗（分钟，期间持续续期不被 LRU 驱逐；绑 `agent.sandbox.lifecycle.confirm-hold-minutes`） |
 | `SANDBOX_CREATE_MAX_ATTEMPTS` | int | `2` | | 沙箱创建瞬时失败最大重试次数（绑 `agent.sandbox.lifecycle.create-max-attempts`） |
 | `SANDBOX_CREATE_RETRY_BACKOFF_MS` | long | `1000` | | 沙箱创建重试退避毫秒（绑 `agent.sandbox.lifecycle.create-retry-backoff-ms`） |
 | `SANDBOX_LIFECYCLE_E2E_HOOKS` | bool | `false` | | `/debug/sandbox-cleanup` E2E 写钩子开关（生产务必保持 `false`；绑 `agent.sandbox.lifecycle.e2e-hooks`） |
-| `AGENT_SERVICE_K8S_NAME` | string | 空 | | 服务 K8s 名（注入沙箱 `metadata.service`；空则自动由 Pod `HOSTNAME` 推导；绑 `agent.sandbox.service-k8s-name`） |
+| `AGENT_SERVICE_K8S_NAME` | string | 空 | | （直读 env）服务 K8s 名（注入沙箱 `metadata.service`；空则回退读取 `HOST_NAME`） |
 | `OPENSANDBOX_SERVER_URL` | string | `192.168.31.155:8090` | | OpenSandbox Server 地址（绑 `agent.sandbox.opensandbox.server-url`） |
 | `OPENSANDBOX_API_KEY` | string | — | ✓(沙箱模式) | OpenSandbox API 密钥（绑 `agent.sandbox.opensandbox.api-key`） |
 | `SANDBOX_EXEC_TRANSLATE` | bool | `true` | | （直读 env）命令执行翻译层开关，优化路径与探测命令 |
@@ -287,7 +287,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `OTEL_METRICS_EXPORTER` | string | `none` | 镜像默认 `none`（统一关闭避免对 collector 的 404 噪音） |
 | `OTEL_LOGS_EXPORTER` | string | `none` | 镜像默认 `none` |
 | `OTEL_SERVICE_NAME` | string | `agent-framework` | 链路服务名 |
-| `OTEL_TRACES_EXPORTER` | string | — | **保持 unset**；设为 `none` 会关闭 Agent 的 trace 导出 |
+| `OTEL_TRACES_EXPORTER` | string | `none` | **保持 unset**；设为 `none` 会关闭 Agent 的 trace 导出 |
 
 #### 4.1.8 事件流存储 / Redis（`agent.redis.*`，绑 `AgentRedisProperties`）
 
@@ -421,7 +421,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `AGENT_TURN_STOP_POLL_MS` | int | `1000` | 属主副本对 `turn_stop` 表的全局轮询周期（毫秒；所有活跃 turn 共用一次查询，成本与并发 turn 数无关，下限 100；绑 `agent.turn-stop.poll-interval-ms`） |
 | `AGENT_TURN_STOP_GRACE_MS` | int | `15000` | 协作式停止告警阈值：超时仍无终态打 WARN（通常是阻塞中的工具调用，SDK 检查点在工具返回后）（绑 `agent.turn-stop.grace-ms`） |
 
-#### 4.1.16 外部记忆 / OpenViking（`agent.memory.*` / `agent.openviking.*`）
+#### 4.1.16 外部记忆 / OpenViking（`agent.memory.*` / `agent.viking.*`）
 
 | 变量 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|

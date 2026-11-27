@@ -57,7 +57,7 @@ skills:
     allowed-tools: "read_file write_file execute"
 
 # ------------------------------------------------------------------------------
-# MCP Server 声明（详细连接与鉴权配置位于 ${AGENT_CONFIG_DIR}/mcp-configs/<configDir>/config.yaml）
+# MCP Server 声明（详细连接与鉴权配置位于 ${AGENT_CONFIG_DIR}/<configDir>/config.yaml，默认 mcp-configs/<server>/config.yaml）
 # ------------------------------------------------------------------------------
 mcpServers:
   # [必填] MCP 厂商/命名空间
@@ -66,8 +66,8 @@ mcpServers:
     server: example-server
     # [可选] MCP 版本号
     version: "1.0.0"
-    # [可选] 自定义配置目录名（当目录名与 server 不同时指定；默认同 server）
-    configDir: example-server
+    # [可选] 相对 ${AGENT_CONFIG_DIR} 的配置目录路径（留空默认 mcp-configs/<server>）
+    configDir: mcp-configs/example-server
     # [可选] 仅回显声明；真正控制启动期连接失败是否阻断的是对应 config.yaml 中的 startup.required
     required: false
 
@@ -97,19 +97,19 @@ agents:
 # 内置工具白名单 / 黑名单
 # ------------------------------------------------------------------------------
 # [可选] 显式允许的内置工具列表（留空表示按默认策略启用全部内置工具）
-# 常见内置工具：read_file, write_file, edit_file, ls, glob, grep, execute, write_todos
+# 常见内置工具：read_file, write_file, edit_file, list_files, glob_files, grep_files, execute, web_search, web_fetch, plan_write
 tools:
   - read_file
   - write_file
   - edit_file
-  - ls
-  - glob
-  - grep
+  - list_files
+  - glob_files
+  - grep_files
   - execute
 
 # [可选] 显式禁用的工具列表（优先级高于 tools，适用于禁用危险或不需要的工具）
 deniedTools:
-  - internet_search
+  - web_search
 
 # ------------------------------------------------------------------------------
 # 模型元信息（⚠️ 仅元信息回显：运行时实际模型由环境变量 LLM_MODEL_ID 或 /models 托管模型决定）
@@ -141,9 +141,9 @@ config:
     # 适用于自定义工具（@Tool）与 SDK 内置工具；MCP 工具请在对应 config.yaml 的 permissions.tools 配置
     tools:
       read_file: allow
-      ls: allow
-      glob: allow
-      grep: allow
+      list_files: allow
+      glob_files: allow
+      grep_files: allow
       write_file: ask
       execute: ask
 
@@ -153,11 +153,11 @@ config:
     enabled: true
 
 # ------------------------------------------------------------------------------
-# 记忆配置（预留扩展区；运行时记忆开关与后端由 AGENT_MEMORY_ENABLED 与 AGENT_MEMORY_PROVIDER 驱动）
+# 记忆配置（可选；运行时记忆开关与后端由 AGENT_MEMORY_ENABLED 与 AGENT_MEMORY_PROVIDER 驱动）
 # ------------------------------------------------------------------------------
 memory:
-  # [可选] 记忆能力声明
-  enabled: true
+  # [可选] 记忆块模式（默认 editable）
+  type: editable
 
 # ------------------------------------------------------------------------------
 # Harness 扩展配置（驱动前端动态渲染协议等高级能力）
