@@ -51,7 +51,7 @@ class SkillBundlePusherTest {
     void ensureSyncedShouldReturnHitWithoutUploadWhenFallbackStoreMatchesVersion() throws Exception {
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res1 = execResult(0, "v-abcdef0123456789"); when(commands.run("readlink '/tmp/.skills-store/CURRENT'")).thenReturn(res1);
+        var res1 = execResult(0, "v-abcdef0123456789"); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res1);
         var svc = mock(SkillBundleService.class);
         var sem = new Semaphore(1);
 
@@ -71,7 +71,7 @@ class SkillBundlePusherTest {
     void ensureSyncedShouldStreamInputStreamAndRunAtomicExtractCommand() throws Exception {
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res2 = execResult(1, ""); when(commands.run(startsWith("readlink "))).thenReturn(res2);
+        var res2 = execResult(1, ""); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res2);
         var r_101 = execResult(0, ""); when(commands.run(startsWith("set -e;"))).thenReturn(r_101);
         var svc = mock(SkillBundleService.class);
         byte[] gzBytes = new byte[] { 0x1f, (byte) 0x8b, 0x08, 0x00 };
@@ -101,8 +101,8 @@ class SkillBundlePusherTest {
         assertInstanceOf(InputStream.class, entry.getData());
 
         ArgumentCaptor<String> cmdCaptor = ArgumentCaptor.forClass(String.class);
-        verify(commands, times(2)).run(cmdCaptor.capture());
-        String extractCmd = cmdCaptor.getAllValues().get(1);
+        verify(commands, atLeast(2)).run(cmdCaptor.capture());
+        String extractCmd = cmdCaptor.getAllValues().stream().filter(c -> c.startsWith("set -e;")).findFirst().orElseThrow();
         assertTrue(extractCmd.contains("trap 'rm -rf \"$stg\" \"$tmp\" \"$cur\"' EXIT"));
         assertTrue(extractCmd.contains("tar xzf \"$tmp\" -C \"$stg\""));
         assertTrue(extractCmd.contains("mv -Tf \"$cur\" \"$fb/CURRENT\""));
@@ -113,7 +113,7 @@ class SkillBundlePusherTest {
     void ensureSyncedShouldRejectBundleExceedingMaxBytes() throws Exception {
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res3 = execResult(1, ""); when(commands.run(startsWith("readlink "))).thenReturn(res3);
+        var res3 = execResult(1, ""); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res3);
         var svc = mock(SkillBundleService.class);
         when(svc.bundle("ver-big")).thenReturn(Optional.of(
             new SkillBundleService.BundlePayload(2048L, "sha", () -> new ByteArrayInputStream(new byte[0]))));
@@ -134,7 +134,7 @@ class SkillBundlePusherTest {
     void ensureSyncedShouldReturnThrottledWhenSemaphoreUnavailable() throws Exception {
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res4 = execResult(1, ""); when(commands.run(startsWith("readlink "))).thenReturn(res4);
+        var res4 = execResult(1, ""); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res4);
         var svc = mock(SkillBundleService.class);
         when(svc.bundle("ver-busy")).thenReturn(Optional.of(
             new SkillBundleService.BundlePayload(128L, "sha", () -> new ByteArrayInputStream(new byte[128]))));
@@ -153,7 +153,7 @@ class SkillBundlePusherTest {
     void ensureSyncedShouldReleaseSemaphoreAndFailOpenWhenUploadOrExtractFails() throws Exception {
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res5 = execResult(1, ""); when(commands.run(startsWith("readlink "))).thenReturn(res5);
+        var res5 = execResult(1, ""); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res5);
         doThrow(new RuntimeException("upload io error")).when(files).write(anyList());
         var svc = mock(SkillBundleService.class);
         when(svc.bundle("ver-err")).thenReturn(Optional.of(
@@ -169,7 +169,7 @@ class SkillBundlePusherTest {
         verify(files, times(1)).deleteFiles(anyList());
 
         reset(files, commands);
-        var res6 = execResult(1, ""); when(commands.run(startsWith("readlink "))).thenReturn(res6);
+        var res6 = execResult(1, ""); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res6);
         var r_102 = execResult(2, ""); when(commands.run(startsWith("set -e;"))).thenReturn(r_102);
 
         var extractFail = pusher.ensureSynced(

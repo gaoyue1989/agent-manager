@@ -17,34 +17,17 @@ import io.agentmanager.framework.service.WorkspaceReader;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
 
-/**
- * 软链农场子系统（skills-syncd §6.2：会话级二值判定 + 软链农场收敛），OpenSandbox 的
- * 内聚协作者：判定（store/端点探测、版本硬校验、D-5 打点、会话级记忆）+ 收敛（候选链、
- * 单条 exec 幂等建链、稳态短路记账、孤儿差集清理）+ 投放过滤原语（禁用解析/清理命令/
- * shell 安全路径——PR-4b 起 tar 投放路径已退役，本类是这些原语的唯一消费方）。
- * 候选 manifest = 端点 version 响应 skills 名单（SDK stager 已由 classpath 遮蔽类停写宿主，
- * 见 docs/design/sdk-stager-shadow-design-261114.md）。唯一入口 {@link #tryHydrate}：
- * 农场未启用或判定降级返回 false——PR-4b 后包技能仅 farm 一路，调用方<b>不回落 tar</b>
- * （降级会话 = 无包技能投放，回滚语义 = 回滚整个 release），命中则完成收敛并返回 true。
- */
 final class SkillsFarm {
 
     private static final Logger log = LoggerFactory.getLogger(SkillsFarm.class);
-
-    /** 农场判定打点（D-5）：会话级二值判定结果 Counter，farm 命中率是池漏配/灰度进度的唯一非日志信号 */
     private static final String DECISION_METRIC = "skills.farm.decision";
-    /** store 版本目录命名前缀（skills-syncd §4.4 {@code v-<version>}）；版本比对仅做字符串相等（§7.2 SSOT 边界） */
     private static final String STORE_VERSION_DIR_PREFIX = "v-";
 
     private final OpenSandboxClientOptions options;
     private final Sandbox osbSandbox;
-    /** 会话用户 L4 仓储（nullable）；判定源枚举与稳态指纹 revision 分量的来源 */
     private final WorkspaceReader workspaceReader;
-    /** Pod 级投放记账表（nullable）；稳态短路跨 call 记忆 */
     private final OpenSandboxFilesystemSpec filesystemSpec;
-    /** 实例绑定用户键（原始值，无兜底；指纹/禁用判定同源） */
     private final Supplier<String> userKey;
-    /** 沙箱代 id（gate 键与记账代际分量） */
     private final Supplier<String> sandboxId;
     private final SkillBundlePusher pusher;
 
@@ -98,13 +81,11 @@ final class SkillsFarm {
         return true;
     }
 
-    /** 农场开关（§6.4，PR-4b 语义；issue #392 起空或 off = 关闸，off 为平台可送达形态）：包技能不投放（总闸，无 tar 回落） */
     private boolean enabled() {
         return !OpenSandboxClientOptions.skillsSharedStoreOff(
             options != null ? options.getSkillsSharedStore() : null);
     }
 
-    /** 农场会话键（与 session_user 规范键同源）：middleware/ctx 已解析的 userKey，缺失时 spec ThreadLocal 兜底 */
     private String sessionUserKey() {
         var bound = userKey.get();
         if (bound != null && !bound.isBlank()) {
@@ -122,15 +103,17 @@ final class SkillsFarm {
         }
         var decision = decideMode(uid);
         var state = new SkillSyncGate.SkillFarmState(decision.mode(), decision.storeDir(), decision.l4Names());
-        gate.setSkillFarmState(state);
+        if (decision.cacheable()) {
+            gate.setSkillFarmState(state);
+        }
         recordDecision(decision.result());
         return new AcquireResult(state, decision.syncedVersion());
     }
 
     private record FarmDecision(SkillSyncGate.FarmMode mode, String storeDir, String result,
-                                Set<String> l4Names, String syncedVersion) {
+                                Set<String> l4Names, String syncedVersion, boolean cacheable) {
         FarmDecision(SkillSyncGate.FarmMode mode, String storeDir, String result, Set<String> l4Names) {
-            this(mode, storeDir, result, l4Names, null);
+            this(mode, storeDir, result, l4Names, null, true);
         }
     }
 
@@ -147,19 +130,23 @@ final class SkillsFarm {
             }
         } catch (Exception e) {
             log.warn("[sandbox-open] skills farm endpoint version unavailable: {}", e.getMessage());
-            return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_endpoint_down", Set.of());
+            return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_endpoint_down",
+                Set.of(), null, false);
         }
         String endpointVersion = snapshot.version();
         String primaryStore = options.getSkillsSharedStore().trim();
         var store = probeStore(primaryStore);
+        if (store.probeFailed()) {
+            log.warn("[sandbox-open] skills farm store probe transport failed (store={}, sandbox={})",
+                primaryStore, sandboxId.get());
+            return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_probe_failed",
+                Set.of(), null, false);
+        }
         if ((STORE_VERSION_DIR_PREFIX + endpointVersion).equals(store.version())) {
             return new FarmDecision(SkillSyncGate.FarmMode.FARM, primaryStore, "farm", captureL4SkillNames(uid));
         }
         String originReason;
         if (store.version() != null) {
-            log.error("[sandbox-open] skills farm version hard-check failed (store={}, endpoint={}): "
-                + "store treated as unusable",
-                store.version(), endpointVersion);
             originReason = "degraded_version_mismatch";
         } else if (store.dirPresent()) {
             originReason = "degraded_endpoint_down";
@@ -167,14 +154,22 @@ final class SkillsFarm {
             originReason = "degraded_store_missing";
         }
         if (!canFallbackPush(originReason)) {
+            if ("degraded_version_mismatch".equals(originReason)) {
+                log.error("[sandbox-open] skills farm version hard-check failed (store={}, endpoint={}): "
+                    + "store treated as unusable",
+                    store.version(), endpointVersion);
+            }
             return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, originReason, Set.of());
         }
         String fallbackStore = options.getSkillsFallbackStoreDir() == null
             ? "" : options.getSkillsFallbackStoreDir().trim();
+        if (!OpenSandboxClientOptions.isValidFallbackStoreDir(fallbackStore)) {
+            log.warn("[sandbox-open] skills fallback push disabled due to invalid store dir (store={})",
+                fallbackStore);
+            return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_failed",
+                Set.of(), null, true);
+        }
         if (snapshot.skills() != null && snapshot.skills().isEmpty()) {
-            if (!OpenSandboxClientOptions.isValidFallbackStoreDir(fallbackStore)) {
-                return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_failed", Set.of());
-            }
             return new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_hit",
                 captureL4SkillNames(uid));
         }
@@ -187,34 +182,49 @@ final class SkillsFarm {
             options.getSkillsFallbackSemaphore(),
             options.getSkillsFallbackAcquireTimeoutMs()
         );
+        logPushOutcome(originReason, endpointVersion, fallbackStore, outcome);
         return switch (outcome.status()) {
-            case HIT -> {
-                log.info("[sandbox-open] skills fallback push store hit (origin={}, version={}, store={}, sandbox={})",
-                    originReason, endpointVersion, fallbackStore, sandboxId.get());
-                yield new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_hit",
-                    captureL4SkillNames(uid), endpointVersion);
-            }
-            case SYNCED -> {
-                log.warn("[sandbox-open] skills fallback push synced (origin={}, version={}, bytes={}, costMs={}, store={}, sandbox={})",
-                    originReason, endpointVersion, outcome.bytes(), outcome.costMs(), fallbackStore, sandboxId.get());
-                yield new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_synced",
-                    captureL4SkillNames(uid), endpointVersion);
-            }
-            case TOO_LARGE -> {
-                log.warn("[sandbox-open] skills fallback push skipped, too large (origin={}, version={}, bytes={}, detail={})",
-                    originReason, endpointVersion, outcome.bytes(), outcome.detail());
-                yield new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_too_large", Set.of());
-            }
-            case THROTTLED -> {
-                log.warn("[sandbox-open] skills fallback push throttled (origin={}, version={}, detail={})",
-                    originReason, endpointVersion, outcome.detail());
-                yield new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_throttled", Set.of());
-            }
-            case FAILED -> {
-                log.warn("[sandbox-open] skills fallback push failed (origin={}, version={}, detail={})",
-                    originReason, endpointVersion, outcome.detail());
-                yield new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_failed", Set.of());
-            }
+            case HIT -> new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_hit",
+                captureL4SkillNames(uid), endpointVersion, true);
+            case SYNCED -> new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_synced",
+                captureL4SkillNames(uid), endpointVersion, true);
+            case TOO_LARGE -> new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_too_large",
+                Set.of(), null, true);
+            case THROTTLED -> new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_throttled",
+                Set.of(), null, false);
+            case FAILED -> new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_failed",
+                Set.of(), null, false);
+        };
+    }
+
+    private void logPushOutcome(String origin, String version, String fallbackStore,
+                                SkillBundlePusher.PushOutcome outcome) {
+        switch (outcome.status()) {
+            case HIT -> log.info(
+                "[sandbox-open] skills fallback push store hit (origin={}, version={}, store={}, sandbox={})",
+                origin, version, fallbackStore, sandboxId.get());
+            case SYNCED -> log.warn(
+                "[sandbox-open] skills fallback push synced (origin={}, version={}, bytes={}, costMs={}, store={}, sandbox={})",
+                origin, version, outcome.bytes(), outcome.costMs(), fallbackStore, sandboxId.get());
+            case TOO_LARGE -> log.warn(
+                "[sandbox-open] skills fallback push skipped, too large (origin={}, version={}, bytes={}, detail={})",
+                origin, version, outcome.bytes(), outcome.detail());
+            case THROTTLED -> log.warn(
+                "[sandbox-open] skills fallback push throttled (origin={}, version={}, detail={})",
+                origin, version, outcome.detail());
+            case FAILED -> log.warn(
+                "[sandbox-open] skills fallback push failed (origin={}, version={}, detail={})",
+                origin, version, outcome.detail());
+        }
+    }
+
+    private static String decisionResultFor(SkillBundlePusher.Status status) {
+        return switch (status) {
+            case HIT -> "fallback_push_hit";
+            case SYNCED -> "fallback_push_synced";
+            case TOO_LARGE -> "degraded_fallback_too_large";
+            case THROTTLED -> "degraded_fallback_throttled";
+            case FAILED -> "degraded_fallback_failed";
         };
     }
 
@@ -228,19 +238,15 @@ final class SkillsFarm {
         return true;
     }
 
-    /** store 探测结果：CURRENT 版本目录名（null = 无 CURRENT/readlink 未命中）+ 目录存在性 */
-    private record StoreProbe(String version, boolean dirPresent) {}
+    private record StoreProbe(String version, boolean dirPresent, boolean probeFailed) {}
 
-    /**
-     * store 探测（§7.2 SSOT 边界）：{@code readlink <store>/CURRENT} 的目录名，仅做字符串
-     * 相等比较、禁止在 Java 侧重算 store 内容指纹。readlink 未命中（store 无 CURRENT）时以
-     * {@code test -d} 补一次目录存在性探测，区分「守护活着但同步失败」与「守护未装/未跑」——
-     * farm 正常路径（readlink 命中）不跑 test -d，无额外 exec。
-     */
     private StoreProbe probeStore(String store) {
         try {
             var execution = osbSandbox.commands().run("readlink '" + store + "/CURRENT'");
-            if (execution.getExitCode() != null && execution.getExitCode() == 0) {
+            if (execution == null || (execution.getError() != null && execution.getExitCode() == null)) {
+                return new StoreProbe(null, false, true);
+            }
+            if (Integer.valueOf(0).equals(execution.getExitCode())) {
                 var stdout = execution.getLogs() != null && execution.getLogs().getStdout() != null
                     ? execution.getLogs().getStdout().stream()
                         .map(msg -> msg.getText())
@@ -249,28 +255,25 @@ final class SkillsFarm {
                 var token = stdout.trim();
                 if (!token.isEmpty()) {
                     int slash = token.lastIndexOf('/');
-                    return new StoreProbe(slash >= 0 ? token.substring(slash + 1) : token, true);
+                    return new StoreProbe(slash >= 0 ? token.substring(slash + 1) : token, true, false);
                 }
             }
         } catch (Exception e) {
             log.debug("[sandbox-open] skills farm store probe failed: {}", e.getMessage());
-            return new StoreProbe(null, false);
+            return new StoreProbe(null, false, true);
         }
-        boolean dirPresent = false;
         try {
             var probe = osbSandbox.commands().run("test -d '" + store + "'");
-            dirPresent = probe.getExitCode() != null && probe.getExitCode() == 0;
+            if (probe == null || probe.getExitCode() == null) {
+                return new StoreProbe(null, false, true);
+            }
+            return new StoreProbe(null, Integer.valueOf(0).equals(probe.getExitCode()), false);
         } catch (Exception e) {
             log.debug("[sandbox-open] skills farm store dir probe failed: {}", e.getMessage());
+            return new StoreProbe(null, false, true);
         }
-        return new StoreProbe(null, dirPresent);
     }
 
-    /**
-     * 同名 L4 优先的判定源（规则 1）：判定时刻的用户 L4 技能名集，会话级快照（农场会话全程
-     * 复用）。枚举失败按空集 fail-soft——同名裁决最终仍由 SDK 消费层兜底（workspace 优先），
-     * 农场建链只是收敛面收窄。
-     */
     private Set<String> captureL4SkillNames(String uid) {
         if (workspaceReader == null || uid == null || uid.isBlank()) {
             return Set.of();
@@ -283,7 +286,6 @@ final class SkillsFarm {
         }
     }
 
-    /** 判定打点（D-5）：Counter skills.farm.decision{result}；每次降级判定同步落一行结构化 WARN */
     private void recordDecision(String result) {
         var registry = options != null ? options.getFarmMeterRegistry() : null;
         if (registry != null) {
@@ -294,7 +296,6 @@ final class SkillsFarm {
         }
     }
 
-    /** 包技能在 .skills-cache 两层布局中的固定 ns 层（FileSystemSkillRepository 注册 source，HarnessAgentFactory） */
     private static final String SKILL_NS = "oaf-package";
 
     private List<String> linkCandidates(List<String> endpointSkills, Set<String> disabledNames,
@@ -352,6 +353,22 @@ final class SkillsFarm {
                 scope, hydrateMode);
             return;
         }
+        if (mode == SkillSyncGate.FarmMode.PUSH && endpointHealthy && justSyncedVersion == null) {
+            String primaryStore = options.getSkillsSharedStore().trim();
+            var primaryProbe = probeStore(primaryStore);
+            if (!primaryProbe.probeFailed()
+                    && (STORE_VERSION_DIR_PREFIX + snapshot.version()).equals(primaryProbe.version())) {
+                mode = SkillSyncGate.FarmMode.FARM;
+                storeDir = primaryStore;
+                hydrateMode = OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM;
+                log.info("[sandbox-open] skills farm recovered from PUSH to FARM (store={}, version={}, sandbox={})",
+                    primaryStore, snapshot.version(), id);
+                recordDecision("farm");
+            }
+        }
+        var manifest = endpointHealthy ? snapshot.skills() : List.<String>of();
+        var disabledNames = disabledSkillNames(
+            options.getSkillDisabledChecker(), uid, manifest);
         if (mode == SkillSyncGate.FarmMode.PUSH && endpointHealthy
                 && snapshot.skills() != null && !snapshot.skills().isEmpty()
                 && !snapshot.version().equals(justSyncedVersion)) {
@@ -364,15 +381,21 @@ final class SkillsFarm {
                 options.getSkillsFallbackSemaphore(),
                 options.getSkillsFallbackAcquireTimeoutMs()
             );
+            logPushOutcome("version_bump", snapshot.version(), storeDir, outcome);
+            recordDecision(decisionResultFor(outcome.status()));
             if (!outcome.ready()) {
-                throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
-                    "hydrateSkillsFarmPush", "skills fallback push failed: " + outcome.status()
-                    + " (" + outcome.detail() + ")", null);
+                String pruneCmd = "find " + options.getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR
+                    + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
+                String rmCmd = disabledRmCmd(scope, disabledNames, options.getWorkspaceRoot());
+                String partialCleanup = rmCmd.isEmpty() ? pruneCmd : pruneCmd + "; " + rmCmd;
+                try {
+                    osbSandbox.commands().run("{ " + partialCleanup + "; }");
+                } catch (Exception ignored) {
+                    log.debug("[sandbox-open] partial cleanup after push failure ignored: {}", ignored.getMessage());
+                }
+                return;
             }
         }
-        var manifest = endpointHealthy ? snapshot.skills() : List.<String>of();
-        var disabledNames = disabledSkillNames(
-            options.getSkillDisabledChecker(), uid, manifest);
         Set<String> l4Names = captureL4SkillNames(uid);
         if (gate != null) {
             gate.setSkillFarmState(new SkillSyncGate.SkillFarmState(mode, storeDir, l4Names));
@@ -396,12 +419,19 @@ final class SkillsFarm {
         String orphanCmd = fingerprint == null
             ? ""
             : orphanDiffCmd(scope, candidates, options.getWorkspaceRoot());
+        String emptyStoreGcCmd = (mode == SkillSyncGate.FarmMode.PUSH && endpointHealthy
+                && (snapshot.skills() == null || snapshot.skills().isEmpty()))
+            ? emptyFallbackStoreGcCmd(storeDir, snapshot.version())
+            : "";
         String cleanup = pruneCmd;
         if (!rmCmd.isEmpty()) {
             cleanup += "; " + rmCmd;
         }
         if (!orphanCmd.isEmpty()) {
             cleanup += "; " + orphanCmd;
+        }
+        if (!emptyStoreGcCmd.isEmpty()) {
+            cleanup += "; " + emptyStoreGcCmd;
         }
         String command = linkCmd.length() == 0 ? "{ " + cleanup + "; }" : linkCmd + " && { " + cleanup + "; }";
         var execution = osbSandbox.commands().run(command);
@@ -414,6 +444,23 @@ final class SkillsFarm {
             filesystemSpec.markHydratedScopedScope(id, scope);
         }
         filesystemSpec.pruneScopedSkillCacheFingerprintsExcept(id, scope);
+    }
+
+    private static String emptyFallbackStoreGcCmd(String storeDir, String version) {
+        if (!OpenSandboxClientOptions.isValidFallbackStoreDir(storeDir)
+                || !SkillZipSupport.isShellSafeSegment(version)) {
+            return "";
+        }
+        String verDir = STORE_VERSION_DIR_PREFIX + version;
+        return "if [ -d '" + storeDir + "' ]; then"
+            + " fb='" + storeDir + "'; ver='" + verDir + "'; cur=\"$fb/.CURRENT.$$\";"
+            + " mkdir -p \"$fb/$ver\";"
+            + " if [ -d \"$fb/CURRENT\" ] && [ ! -L \"$fb/CURRENT\" ]; then rm -rf \"$fb/CURRENT\"; fi;"
+            + " ln -sfn \"$ver\" \"$cur\";"
+            + " mv -Tf \"$cur\" \"$fb/CURRENT\" 2>/dev/null || ln -sfn \"$ver\" \"$fb/CURRENT\";"
+            + " active=$(readlink \"$fb/CURRENT\" 2>/dev/null || true); active=${active##*/};"
+            + " find \"$fb\" -mindepth 1 -maxdepth 1 -type d -name 'v-*' ! -name \"$ver\" ! -name \"$active\""
+            + " -exec rm -rf {} + 2>/dev/null || true; fi";
     }
 
     private String orphanDiffCmd(String scope, List<String> candidates, String workspaceRoot) {

@@ -100,6 +100,8 @@ public class AgentScopeConfig {
                 .skillsSharedStoreOff(config.skillsSharedStore())) {
             log.warn("SANDBOX_SKILLS_SHARED_STORE is explicitly disabled (empty or 'off'): skills "
                 + "farm master switch is OFF — package skills will NOT be delivered to sandboxes");
+        } else {
+            validateFallbackConfig(config);
         }
         // 业务规范键解析（issue #52）：Channel 链路 ctx.userId 是网关 peer（=前端 sessionId），
         // 沙箱 userKey 须经 session_user 反查真实用户，否则 per-user 技能物化/回写退化为
@@ -790,5 +792,32 @@ public class AgentScopeConfig {
                 sandboxRuntime.sessionAgentCacheMax(), sandboxRuntime.sessionAgentCacheTtlMinutes());
         }
         return service;
+    }
+
+    static void validateFallbackConfig(SandboxConfig config) {
+        String mode = config.skillsFallbackMode();
+        String trimmedMode = mode == null ? "" : mode.trim();
+        if (!trimmedMode.isEmpty()
+                && !io.agentmanager.framework.sandbox.opensandbox.OpenSandboxClientOptions.SKILLS_FALLBACK_MODE_PUSH
+                    .equalsIgnoreCase(trimmedMode)
+                && !io.agentmanager.framework.sandbox.opensandbox.OpenSandboxClientOptions.SKILLS_FALLBACK_MODE_OFF
+                    .equalsIgnoreCase(trimmedMode)) {
+            log.warn("Invalid SANDBOX_SKILLS_FALLBACK_MODE='{}' (expected 'push' or 'off'); fallback push is disabled",
+                mode);
+            return;
+        }
+        if (io.agentmanager.framework.sandbox.opensandbox.OpenSandboxClientOptions.skillsFallbackPushEnabled(mode)) {
+            String fbDir = config.skillsFallbackStoreDir();
+            if (!io.agentmanager.framework.sandbox.opensandbox.OpenSandboxClientOptions.isValidFallbackStoreDir(fbDir)) {
+                log.warn("Invalid SANDBOX_SKILLS_FALLBACK_STORE_DIR='{}'; fallback push will fail until fixed",
+                    fbDir);
+                return;
+            }
+            String primary = config.skillsSharedStore() == null ? "" : config.skillsSharedStore().trim();
+            if (fbDir.trim().equals(primary)) {
+                log.warn("SANDBOX_SKILLS_FALLBACK_STORE_DIR='{}' collides with SANDBOX_SKILLS_SHARED_STORE='{}'",
+                    fbDir, primary);
+            }
+        }
     }
 }

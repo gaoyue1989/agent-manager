@@ -50,10 +50,21 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
             return false;
         }
         String trimmed = dir.trim();
-        return !"/".equals(trimmed)
-            && !trimmed.contains("..")
-            && !trimmed.endsWith("/")
-            && SAFE_ABS_PATH.matcher(trimmed).matches();
+        if (!trimmed.startsWith("/")
+                || trimmed.endsWith("/")
+                || !SAFE_ABS_PATH.matcher(trimmed).matches()) {
+            return false;
+        }
+        String[] parts = trimmed.substring(1).split("/", -1);
+        if (parts.length < 2) {
+            return false;
+        }
+        for (String part : parts) {
+            if (part.isEmpty() || ".".equals(part) || "..".equals(part)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String serverUrl;
