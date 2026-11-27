@@ -479,6 +479,21 @@ export const api = {
         request<SkillVersionRec>(`/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/${action}`, { method: "POST" }),
       versionDownload: (ws: number | string, id: number, vid: number) =>
         `${BASE}/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/download`,
+      versionContent: (ws: number | string, id: number, vid: number) =>
+        request<{ content: string }>(`/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/content`),
+      updateVersionContent: (ws: number | string, id: number, vid: number, body: { content: string; changelog?: string }) =>
+        request<SkillVersionRec>(`/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/content`, { method: "PUT", body: JSON.stringify(body) }),
+      uploadVersionZip: (ws: number | string, id: number, vid: number, file: File, changelog?: string) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        if (changelog) fd.append("changelog", changelog);
+        return fetch(`${BASE}/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/upload`, { method: "POST", body: fd })
+          .then(async (res) => {
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body?.message || `HTTP ${res.status}`);
+            return body?.data as { version: SkillVersionRec; warnings: string[] };
+          });
+      },
     },
     skillMarket: {
       sources: (ws: number | string) => request<MarketSourceRec[]>(`/console/workspaces/${ws}/skill-market/sources`),
