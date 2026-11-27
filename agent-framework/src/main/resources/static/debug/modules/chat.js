@@ -904,8 +904,8 @@ async function submitConfirm(calls, approved) {
   if (!sid) return;
   const results = calls.map((c) => ({
     tool_call_id: c.tool_call_id || c.id,
-    name: c.name,
-    approved: !!approved
+    confirmed: !!approved,
+    accept_rule: false
   }));
   renderer.dismissConfirmCard();
   enterStreamingUi();
