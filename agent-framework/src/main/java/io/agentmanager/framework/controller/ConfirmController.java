@@ -545,7 +545,10 @@ public class ConfirmController {
             log.debug("tool summary synthesis failed (sid={}): {}", sessionId, e.getMessage());
         }
 
-
+        if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
+            lease.release();
+            eventBus.closeSession(sessionId);
+        }
 
         // AGENT_END（仅 lead 自身事件）→ 关闭 EventBus：远程子 agent 转发的 AGENT_END
         // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）
