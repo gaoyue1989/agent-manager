@@ -250,6 +250,12 @@ test("isSafeFileDownloadUrl enforces safe protocols and relative file paths", as
   assert.equal(isSafeFileDownloadUrl("vbscript:msgbox(1)"), false);
   assert.equal(isSafeFileDownloadUrl("//evil.example/files/a.pdf"), false);
   assert.equal(isSafeFileDownloadUrl("/files/../secret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%2e%2e/internal/secret"), false);
+  assert.equal(isSafeFileDownloadUrl("/agent/a1/files/%2e%2e/threads"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%2e%2e%2fsecret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%5csecret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%ZZbad"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/report%20v1.pdf"), true);
   assert.equal(isSafeFileDownloadUrl("/agent/my-bot/files/../secret"), false);
   assert.equal(isSafeFileDownloadUrl("/files/"), false);
   assert.equal(isSafeFileDownloadUrl("/other/path"), false);
