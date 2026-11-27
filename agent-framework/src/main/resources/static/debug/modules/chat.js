@@ -53,7 +53,7 @@ let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cac
 
 // 当前回复构建器（按 replyId 区分多 run）
 let currentReply = null;
-const replyMap = {};          // replyId -> builder
+let replyMap = {};          // replyId -> builder
 let pendingToolCalls = {};    // tcId -> {name, argsRaw, args, resultRaw, state}
 let thinkingTimer = null;
 
