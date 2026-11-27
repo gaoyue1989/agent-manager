@@ -379,8 +379,7 @@ async function loadModels() {
     const items = Array.isArray(data) ? data : (data.models || []);
     let html = '<option value="system">Default Model</option>';
     for (const m of items) {
-      if (m.enabled === false) continue;
-      const id = m.id || m.name;
+            const id = m.id || m.name;
       const label = (m.name || id) + (m.is_default ? ' ★' : '');
       html += '<option value="' + ctx.utils.esc(id) + '">' + ctx.utils.esc(label) + '</option>';
     }
@@ -429,7 +428,7 @@ async function bindSessionModel(sid, modelId) {
     await ctx.api.patchThread(sid, { model: modelId }, uid());
     return true;
   } catch (e) {
-    ctx.utils.toast('Model switch failed: ' + e.message, 'error');
+    ctx.utils.toast('模型切换失败: ' + e.message, 'error');
     return false;
   }
 }
@@ -738,7 +737,8 @@ async function sendMessage() {
   }
 
   const selectedModel = modelSelect ? modelSelect.value : 'system';
-  if (isNew && selectedModel && selectedModel !== 'system') {
+  const mode = ctx.state.getState('ui.streamMode') || 'channel';
+  if (mode === 'a2a' && selectedModel && selectedModel !== 'system') {
     const ok = await bindSessionModel(sid, selectedModel);
     if (!ok) return;
   }
@@ -757,7 +757,6 @@ async function sendMessage() {
   if (greeting) greeting.remove();
   renderer.addMessage('user', text || '(attachments)');
 
-  const mode = ctx.state.getState('ui.streamMode') || 'channel';
   if (mode === 'a2a') {
     await sendA2AStream(text, sid);
   } else {

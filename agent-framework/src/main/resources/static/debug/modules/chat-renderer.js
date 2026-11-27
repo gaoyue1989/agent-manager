@@ -99,7 +99,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     const details = document.createElement('details');
     details.className = 'compaction-divider';
     const summaryEl = document.createElement('summary');
-    summaryEl.textContent = 'Context compacted (click to view summary)';
+    summaryEl.textContent = '上下文已压缩 · 早期消息已归档（点开查看压缩摘要）';
     const body = document.createElement('div');
     body.className = 'compaction-summary';
     body.innerHTML = renderMarkdown(summary || '');
@@ -489,7 +489,12 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
   }
 
   function onToolCallSummary(r, tcId, summary, toolName) {
-    const tc = pendingToolCalls[tcId];
+    let tc = pendingToolCalls[tcId];
+    const inReply = r.toolGroups && r.toolGroups.some((g) => g.calls.some((c) => c.id === tcId));
+    if (!tc || !inReply) {
+      onToolCallStart(r, tcId, toolName || (tc && tc.name) || 'tool');
+      tc = pendingToolCalls[tcId];
+    }
     if (tc) {
       tc.summary = summary;
       if (toolName) tc.name = toolName;
