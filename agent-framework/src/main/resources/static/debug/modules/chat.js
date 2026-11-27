@@ -377,7 +377,8 @@ async function loadModels() {
   try {
     const data = await ctx.api.getModels(false);
     const items = Array.isArray(data) ? data : (data.models || []);
-    let html = '<option value="system">Default Model</option>';
+    const hasSystem = items.some((m) => (m.id || m.name) === 'system');
+    let html = hasSystem ? '' : '<option value="system">Default Model</option>';
     for (const m of items) {
             const id = m.id || m.name;
       const label = (m.name || id) + (m.is_default ? ' ★' : '');
