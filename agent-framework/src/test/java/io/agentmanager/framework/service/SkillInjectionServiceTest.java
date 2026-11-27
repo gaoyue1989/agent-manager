@@ -160,6 +160,34 @@ class SkillInjectionServiceTest {
         assertEquals(List.of("pdf"), service.parseSkillReferences("用/pdf"));
     }
 
+    @Test
+    void parseChineseParenthesesSkillReference() throws IOException {
+        writeSkill("公文检查（内部）", "公文检查", "# 公文");
+        var service = injectionService();
+
+        assertEquals(List.of("公文检查（内部）"),
+            service.parseSkillReferences("用/公文检查（内部）处理"));
+    }
+
+    @Test
+    void injectChineseParenthesesSkillReference() throws IOException {
+        writeSkill("公文检查（内部）", "公文检查", "# 公文内容");
+        var service = injectionService();
+
+        var result = service.injectSkillReferences("用/公文检查（内部）处理");
+
+        assertTrue(result.contains("[/Skill:公文检查（内部）]"));
+        assertTrue(result.contains("# 公文内容"));
+    }
+
+    @Test
+    void parseShouldMatchKnownSkillPrefixBeforePunctuation() throws IOException {
+        writeSkill("pdf", "PDF tool", "# PDF");
+        var service = injectionService();
+
+        assertEquals(List.of("pdf"), service.parseSkillReferences("/pdf，然后处理"));
+    }
+
     // ========== injectSkillReferences 测试 ==========
 
     @Test
