@@ -21,6 +21,7 @@ export default function ServiceDetailPage() {
   const router = useRouter();
   const [svc, setSvc] = useState<ServiceDetail | null>(null);
   const [msg, setMsg] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [envDirty, setEnvDirty] = useState(false);
   // OpenViking 记忆供给（env 只读快照 + per-user key 代签发）
@@ -70,10 +71,11 @@ export default function ServiceDetailPage() {
   // 若只依赖 [id]，setInterval 会永远持有挂载时的旧闭包（dirty 恒为 false），
   // 每 5s 用服务端值覆盖未保存的编辑/填入内容
   useEffect(() => {
+    if (deleting) return;
     load();
-    const t = setInterval(load, 5000); // 状态轮询
+    const t = setInterval(load, 5000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, deleting]);
 
   const act = async (fn: () => Promise<unknown>, okMsg: string) => {
     try {
@@ -141,8 +143,9 @@ const saveEnv = async () => {
   // 删除成功即回列表（issue #377）：留在本页会因已删 id 的 5s 轮询永久 404
   const remove = async () => {
     if (!confirm("确认删除该服务？")) return;
+    setDeleting(true);
     try { await api.deleteService(id); router.push("/admin/services"); }
-    catch (e: any) { setMsg(`删除失败: ${e.message}`); }
+    catch (e: any) { setDeleting(false); setMsg(`删除失败: ${e.message}`); }
   };
 
   if (!svc) return <p className="text-gray-500">{msg || "加载中…"}</p>;
