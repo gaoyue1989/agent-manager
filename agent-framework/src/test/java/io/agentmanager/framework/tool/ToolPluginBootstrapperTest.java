@@ -46,12 +46,14 @@ class ToolPluginBootstrapperTest {
         beanFactory = new DefaultListableBeanFactory();
         System.setProperty(ToolPluginBootstrapper.PLUGINS_DIR_ENV, pluginsDir.toString());
         ConfigPlugin.lastConfig = Map.of();
+        io.agentmanager.framework.tool.pluginfix.LifecyclePlugin.closed = false;
     }
 
     @AfterEach
     void tearDown() {
         System.clearProperty(ToolPluginBootstrapper.PLUGINS_DIR_ENV);
         System.clearProperty(ToolPluginBootstrapper.CONFIG_DIR_ENV);
+        io.agentmanager.framework.tool.pluginfix.LifecyclePlugin.closed = false;
     }
 
     @Test
