@@ -133,7 +133,7 @@ export function createChatComposer({ ctx, onSend, onStop }) {
     });
 
     if (filtered.length === 0) {
-      mentionDropdown.innerHTML = '<div class="skill-mention-empty">No matching skills</div>';
+      mentionDropdown.innerHTML = '<div class="skill-mention-empty">无匹配技能</div>';
       mentionDropdown.classList.add('visible');
       mentionVisible = true;
       mentionActiveIdx = -1;
@@ -211,7 +211,7 @@ export function createChatComposer({ ctx, onSend, onStop }) {
         '<span class="file-icon">' + icon('paperclip', 13) + '</span>' +
         '<span class="file-name" title="' + ctx.utils.esc(item.file.name) + '">' + ctx.utils.esc(item.file.name) + '</span>' +
         '<span class="file-size">' + formatFileSize(item.file.size) + '</span>' +
-        '<button class="remove-file" data-idx="' + idx + '" title="Remove">✕</button>' +
+        '<button class="remove-file" data-idx="' + idx + '" title="移除">✕</button>' +
       '</div>'
     ).join('');
     uploadFiles.querySelectorAll('.remove-file').forEach((btn) => {
@@ -241,7 +241,7 @@ export function createChatComposer({ ctx, onSend, onStop }) {
         fileIds.push(res.fileId);
       } catch (e) {
         item.status = 'error';
-        ctx.utils.toast('Upload failed: ' + item.file.name + ' - ' + e.message, 'error');
+        ctx.utils.toast('上传失败: ' + item.file.name + ' - ' + e.message, 'error');
         throw e;
       }
     }

@@ -76,7 +76,7 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     });
 
     if (filtered.length === 0) {
-      threadListEl.innerHTML = '<div class="empty">' + (searchQuery ? 'No matching sessions' : 'No sessions yet') + '</div>';
+      threadListEl.innerHTML = '<div class="empty">' + (searchQuery ? '无匹配会话' : '暂无会话') + '</div>';
       return;
     }
 
@@ -96,8 +96,8 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
           '<div class="meta">' + ctx.utils.esc(subParts.join(' · ') || sid) + '</div>' +
         '</div>' +
         '<div class="thread-actions">' +
-          '<button class="thread-action-btn" data-act="rename" title="Rename">' + icon('edit', 13) + '</button>' +
-          '<button class="thread-action-btn danger" data-act="delete" title="Delete">' + icon('trash', 13) + '</button>' +
+          '<button class="thread-action-btn" data-act="rename" title="重命名">' + icon('edit', 13) + '</button>' +
+          '<button class="thread-action-btn danger" data-act="delete" title="删除">' + icon('trash', 13) + '</button>' +
         '</div>' +
       '</div>';
     }).join('');
@@ -131,12 +131,12 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     const cur = list.find((t) => t.session_id === sid);
     const currentTitle = (cur && cur.title) || '';
     ctx.modal.open(
-      '<h2>Rename Session</h2>' +
+      '<h2>重命名会话</h2>' +
       '<div style="display:flex;flex-direction:column;gap:12px">' +
-        '<input id="renameSessionInput" class="input" type="text" value="' + ctx.utils.esc(currentTitle) + '" placeholder="Session title">' +
+        '<input id="renameSessionInput" class="input" type="text" value="' + ctx.utils.esc(currentTitle) + '" placeholder="请输入会话标题">' +
         '<div style="display:flex;justify-content:flex-end;gap:8px">' +
-          '<button class="btn" id="renameCancelBtn">Cancel</button>' +
-          '<button class="btn primary" id="renameSaveBtn">Save</button>' +
+          '<button class="btn" id="renameCancelBtn">取消</button>' +
+          '<button class="btn primary" id="renameSaveBtn">保存</button>' +
         '</div>' +
       '</div>'
     );
@@ -145,14 +145,14 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     document.getElementById('renameCancelBtn').addEventListener('click', () => ctx.modal.close());
     const save = async () => {
       const title = (input.value || '').trim();
-      if (!title) { ctx.utils.toast('Title cannot be empty', 'warn'); return; }
+      if (!title) { ctx.utils.toast('标题不能为空', 'warn'); return; }
       try {
         await ctx.api.patchThread(sid, { title }, uid());
         ctx.modal.close();
-        ctx.utils.toast('Session renamed', 'success');
+        ctx.utils.toast('会话已重命名', 'success');
         onThreadRenamed(sid, title);
       } catch (e) {
-        ctx.utils.toast('Rename failed: ' + e.message, 'error');
+        ctx.utils.toast('重命名失败: ' + e.message, 'error');
       }
     };
     document.getElementById('renameSaveBtn').addEventListener('click', save);
@@ -164,11 +164,11 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     const cur = list.find((t) => t.session_id === sid);
     const label = (cur && cur.title) || sid;
     ctx.modal.open(
-      '<h2>Delete Session</h2>' +
-      '<p style="font-size:13px;color:var(--text);margin-bottom:14px">Delete <strong>' + ctx.utils.esc(label) + '</strong> and all associated messages, context, and files?</p>' +
+      '<h2>删除会话</h2>' +
+      '<p style="font-size:13px;color:var(--text);margin-bottom:14px">确认删除会话 <strong>' + ctx.utils.esc(label) + '</strong> 及其关联的消息、上下文和文件？</p>' +
       '<div style="display:flex;justify-content:flex-end;gap:8px">' +
-        '<button class="btn" id="delCancelBtn">Cancel</button>' +
-        '<button class="btn danger" id="delConfirmBtn">Delete</button>' +
+        '<button class="btn" id="delCancelBtn">取消</button>' +
+        '<button class="btn danger" id="delConfirmBtn">确认删除</button>' +
       '</div>'
     );
     document.getElementById('delCancelBtn').addEventListener('click', () => ctx.modal.close());
@@ -176,10 +176,10 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
       try {
         await ctx.api.deleteThread(sid, uid());
         ctx.modal.close();
-        ctx.utils.toast('Session deleted', 'success');
+        ctx.utils.toast('会话已删除', 'success');
         onThreadDeleted(sid);
       } catch (e) {
-        ctx.utils.toast('Delete failed: ' + e.message, 'error');
+        ctx.utils.toast('删除失败: ' + e.message, 'error');
       }
     });
   }
@@ -209,10 +209,10 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     if (!contextDrawerEl) return;
     const sid = currentSid();
     if (!sid) {
-      contextDrawerEl.innerHTML = '<div class="empty">Send a message or select a session to manage context.</div>';
+      contextDrawerEl.innerHTML = '<div class="empty">请先选择或发送一个会话以管理上下文资料。</div>';
       return;
     }
-    contextDrawerEl.innerHTML = '<div class="empty">Loading session context...</div>';
+    contextDrawerEl.innerHTML = '<div class="empty">正在加载会话上下文...</div>';
     try {
       const data = await ctx.api.getThreadContext(sid, uid(), true);
       renderContextDrawer(sid, data);
@@ -221,7 +221,7 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
         renderContextDrawer(sid, { entries: [], totalChars: 0, maxTotalChars: 0, unpersisted: true });
         return;
       }
-      contextDrawerEl.innerHTML = '<div class="empty error-text">Failed to load context: ' + ctx.utils.esc(e.message) + '</div>';
+      contextDrawerEl.innerHTML = '<div class="empty error-text">加载会话上下文失败: ' + ctx.utils.esc(e.message) + '</div>';
     }
   }
 
@@ -234,13 +234,13 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     updateContextBadge(entries.length);
 
     let html = '<div class="context-drawer-head">' +
-      '<strong style="font-size:13px">Session Context</strong>' +
-      '<span class="badge accent">' + entries.length + ' item(s)</span>' +
+      '<strong style="font-size:13px">会话上下文</strong>' +
+      '<span class="badge accent">' + entries.length + ' 项资料</span>' +
       (max > 0
         ? '<div class="context-budget-bar"><div class="context-budget-fill' + barCls + '" style="width:' + pct + '%"></div></div>' +
-          '<span class="status-text" style="font-family:var(--mono)">' + total + ' / ' + max + ' chars</span>'
+          '<span class="status-text" style="font-family:var(--mono)">' + total + ' / ' + max + ' 字符</span>'
         : '') +
-      '<button class="btn ghost small" id="ctxCloseBtn" style="margin-left:auto">Close</button>' +
+      '<button class="btn ghost small" id="ctxCloseBtn" style="margin-left:auto">关闭</button>' +
     '</div>';
 
     if (entries.length > 0) {
@@ -248,21 +248,21 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
         '<div class="context-entry">' +
           '<span class="ce-key">' + ctx.utils.esc(e.key) + '</span>' +
           '<span class="ce-title" title="' + ctx.utils.esc(e.title || '') + '">' + ctx.utils.esc(e.title || '') + '</span>' +
-          '<span class="ce-chars">' + (e.contentChars || 0) + ' chars</span>' +
-          '<button class="btn small ghost" data-ctx-view="' + idx + '">View</button>' +
-          '<button class="btn small ghost" style="color:var(--red)" data-ctx-del="' + ctx.utils.esc(e.key) + '">Remove</button>' +
+          '<span class="ce-chars">' + (e.contentChars || 0) + ' 字符</span>' +
+          '<button class="btn small ghost" data-ctx-view="' + idx + '">查看</button>' +
+          '<button class="btn small ghost" style="color:var(--red)" data-ctx-del="' + ctx.utils.esc(e.key) + '">移除</button>' +
         '</div>'
       ).join('') + '</div>';
     } else {
-      html += '<div class="status-text">No injected context entries in this session.</div>';
+      html += '<div class="status-text">当前会话暂未注入上下文资料。</div>';
     }
 
     html += '<div class="context-form">' +
-      '<input id="ctxKeyInput" class="input" type="text" placeholder="key (e.g. spec-doc)">' +
-      '<input id="ctxTitleInput" class="input" type="text" placeholder="title (optional)">' +
-      '<textarea id="ctxContentInput" class="input" placeholder="Content injected from next turn..."></textarea>' +
+      '<input id="ctxKeyInput" class="input" type="text" placeholder="标识 key（如 spec-doc）">' +
+      '<input id="ctxTitleInput" class="input" type="text" placeholder="标题（可选）">' +
+      '<textarea id="ctxContentInput" class="input" placeholder="输入资料内容（将在下一轮对话生效）..."></textarea>' +
       '<div style="grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px">' +
-        '<button class="btn primary small" id="ctxInjectBtn">Inject Context</button>' +
+        '<button class="btn primary small" id="ctxInjectBtn">注入上下文</button>' +
       '</div>' +
     '</div>';
 
@@ -280,10 +280,10 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
         const key = btn.dataset.ctxDel;
         try {
           await ctx.api.deleteThreadContext(sid, key, uid());
-          ctx.utils.toast('Context removed: ' + key, 'success');
+          ctx.utils.toast('已移除上下文: ' + key, 'success');
           loadContextDrawer();
         } catch (e) {
-          ctx.utils.toast('Remove failed: ' + e.message, 'error');
+          ctx.utils.toast('移除失败: ' + e.message, 'error');
         }
       });
     });
@@ -292,19 +292,19 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
       const title = (document.getElementById('ctxTitleInput').value || '').trim();
       const content = document.getElementById('ctxContentInput').value || '';
       if (!key || !content.trim()) {
-        ctx.utils.toast('Key and content are required', 'warn');
+        ctx.utils.toast('请填写标识 key 与资料内容', 'warn');
         return;
       }
       try {
         const res = await ctx.api.injectThreadContext(sid, { key, title, content }, uid());
-        ctx.utils.toast('Injected ' + res.key + ' (effective next turn)', 'success');
+        ctx.utils.toast('已注入 ' + res.key + '（下一轮生效）', 'success');
         loadContextDrawer();
       } catch (e) {
         if (e && e.status === 413) {
           const d = e.data || {};
-          ctx.utils.toast('Context budget exceeded (' + (d.totalChars || '?') + ' / ' + (d.maxTotalChars || '?') + ' chars)', 'error');
+          ctx.utils.toast('超出上下文字符预算（' + (d.totalChars || '?') + ' / ' + (d.maxTotalChars || '?') + ' 字符）', 'error');
         } else {
-          ctx.utils.toast('Inject failed: ' + e.message, 'error');
+          ctx.utils.toast('注入失败: ' + e.message, 'error');
         }
       }
     });
@@ -322,7 +322,7 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
   async function probeBrowserState() {
     const sid = currentSid();
     if (!sid) {
-      ctx.utils.toast('Select a session first', 'warn');
+      ctx.utils.toast('请先选择一个会话', 'warn');
       return;
     }
     try {
@@ -333,9 +333,9 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     } catch (e) {
       hideBrowserBar();
       if (e && e.status === 404) {
-        ctx.utils.toast('Browser control is not enabled or session not found', 'info');
+        ctx.utils.toast('当前服务未启用浏览器接管或会话尚未落库', 'info');
       } else {
-        ctx.utils.toast('Browser status error: ' + e.message, 'error');
+        ctx.utils.toast('获取浏览器状态失败: ' + e.message, 'error');
       }
     }
   }
@@ -349,22 +349,22 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     browserBarEl.classList.toggle('human', isHuman);
 
     const ownerBadge = isHuman
-      ? '<span class="badge yellow">Human Control</span>'
-      : '<span class="badge green">Agent Control</span>';
+      ? '<span class="badge yellow">人工接管中</span>'
+      : '<span class="badge green">Agent 控制中</span>';
     const metaParts = [];
     if (sb.sandbox_id) metaParts.push('sandbox=' + sb.sandbox_id);
     if (ctrl.reason) metaParts.push(ctrl.reason);
     if (ctrl.expires_in_seconds != null) metaParts.push('ttl=' + ctrl.expires_in_seconds + 's');
 
     browserBarEl.innerHTML =
-      '<span class="bb-status">' + icon('globe', 15) + ' Browser ' + ownerBadge + '</span>' +
+      '<span class="bb-status">' + icon('globe', 15) + ' 浏览器 ' + ownerBadge + '</span>' +
       (metaParts.length ? '<span class="bb-meta">' + ctx.utils.esc(metaParts.join(' · ')) + '</span>' : '') +
       '<div class="bb-actions">' +
         (!isHuman
-          ? '<button class="btn small primary" id="bbTakeoverBtn">Takeover</button>'
-          : '<button class="btn small primary" id="bbReleaseBtn">Release & Resume</button>') +
+          ? '<button class="btn small primary" id="bbTakeoverBtn">接管控制权</button>'
+          : '<button class="btn small primary" id="bbReleaseBtn">交还并继续</button>') +
         '<button class="btn small ghost" id="bbRefreshBtn">' + icon('refresh', 13) + '</button>' +
-        '<button class="btn small ghost" id="bbCloseBtn">Hide</button>' +
+        '<button class="btn small ghost" id="bbCloseBtn">隐藏</button>' +
       '</div>';
 
     const takeoverBtn = document.getElementById('bbTakeoverBtn');
@@ -372,10 +372,10 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
       takeoverBtn.addEventListener('click', async () => {
         try {
           await ctx.api.takeoverBrowser(sid, 'manual debug takeover', uid());
-          ctx.utils.toast('Browser control taken over', 'success');
+          ctx.utils.toast('已接管浏览器控制权', 'success');
           probeBrowserState();
         } catch (e) {
-          ctx.utils.toast('Takeover failed: ' + e.message, 'error');
+          ctx.utils.toast('接管失败: ' + e.message, 'error');
         }
       });
     }

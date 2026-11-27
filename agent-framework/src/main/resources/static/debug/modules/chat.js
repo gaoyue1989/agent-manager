@@ -47,7 +47,7 @@ function currentSessionId() {
 
 function currentThreadTitle() {
   const sid = currentSessionId();
-  if (!sid) return 'Chat';
+  if (!sid) return '对话';
   const list = ctx.state.getState('threads.list') || [];
   const t = list.find((x) => x && x.session_id === sid);
   return (t && t.title && t.title.trim()) ? t.title.trim() : sid;
@@ -58,51 +58,51 @@ function renderTemplate() {
   <div class="chat-module">
     <div class="chat-sidebar">
       <div class="chat-sidebar-header">
-        <span class="cs-title">Sessions</span>
-        <button id="btnNewThread" class="btn small ghost" title="New session"></button>
+        <span class="cs-title">会话列表</span>
+        <button id="btnNewThread" class="btn small ghost" title="新建会话"></button>
       </div>
       <div class="chat-sidebar-search">
-        <input id="threadSearch" class="input" type="search" placeholder="Search sessions...">
+        <input id="threadSearch" class="input" type="search" placeholder="搜索会话...">
       </div>
       <div class="chat-sidebar-list" id="threadList">
-        <div class="empty">Loading...</div>
+        <div class="empty">加载中...</div>
       </div>
     </div>
     <div class="chat-main">
       <div class="chat-header-bar">
-        <button id="btnMobileSessions" class="icon-btn chat-mobile-sessions-btn" title="Sessions"></button>
-        <h2 id="chatTitle">Chat</h2>
+        <button id="btnMobileSessions" class="icon-btn chat-mobile-sessions-btn" title="会话列表"></button>
+        <h2 id="chatTitle">对话</h2>
         <span class="status-text" id="connBadge"></span>
         <div class="chat-header-right">
-          <input id="uidInput" class="input uid-input" style="width:96px" type="text" spellcheck="false" title="User ID">
-          <select id="modelSelect" class="input uid-input" title="Session model"></select>
+          <input id="uidInput" class="input uid-input" style="width:96px" type="text" spellcheck="false" title="用户标识（同用户共享工作区与记忆）">
+          <select id="modelSelect" class="input uid-input" title="当前会话模型"></select>
           <div class="seg">
             <button id="modeA2A">A2A</button>
             <button id="modeChannel" class="active">Channel</button>
           </div>
-          <button id="btnContextToggle" class="btn small ghost" title="Session Context">
+          <button id="btnContextToggle" class="btn small ghost" title="会话上下文注入">
             <span id="ctxIconSlot"></span>
-            <span>Context</span>
+            <span>上下文</span>
             <span class="badge accent ctx-count" style="display:none"></span>
           </button>
           <div class="chat-tools-wrap">
-            <button id="btnDebugTools" class="btn small" title="More Controls">
+            <button id="btnDebugTools" class="btn small" title="更多调试工具">
               <span id="toolsIconSlot"></span>
-              <span>More</span>
+              <span>更多</span>
             </button>
             <div id="chatToolsPopover" class="chat-tools-popover">
               <div class="popover-row">
-                <span>Protocol</span>
+                <span>对话协议</span>
                 <select id="protoSelect" class="input">
                   <option value="native">native</option>
                   <option value="agui">AG-UI</option>
                 </select>
               </div>
               <div class="popover-actions">
-                <button id="btnBrowserToggle" class="btn small accent">Browser</button>
-                <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
-                <button id="btnSysPrompt" class="btn small">System Prompt</button>
-                <button id="btnCard" class="btn small">Agent Card</button>
+                <button id="btnBrowserToggle" class="btn small accent">浏览器接管</button>
+                <button id="btnLlmCalls" class="btn small" disabled>LLM 调用</button>
+                <button id="btnSysPrompt" class="btn small">系统提示词</button>
+                <button id="btnCard" class="btn small">Agent 卡片</button>
               </div>
             </div>
           </div>
@@ -112,7 +112,7 @@ function renderTemplate() {
       <div id="contextDrawer" class="context-drawer"></div>
       <div class="chat-messages" id="chatMessages">
         <div class="chat-messages-inner" id="chatInner"></div>
-        <button id="scrollDown" class="scroll-down-btn" title="Scroll to bottom">↓</button>
+        <button id="scrollDown" class="scroll-down-btn" title="回到底部">↓</button>
       </div>
       <div class="chat-input">
         <div class="chat-composer-card">
@@ -120,11 +120,11 @@ function renderTemplate() {
             <div class="upload-files" id="uploadFiles"></div>
           </div>
           <div class="chat-input-pill">
-            <button id="uploadBtn" class="upload-btn" title="Upload files"></button>
+            <button id="uploadBtn" class="upload-btn" title="上传附件"></button>
             <input type="file" id="fileInput" multiple accept="image/*,text/plain,text/markdown,text/csv,application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt" style="display:none">
-            <textarea id="chatInput" rows="1" placeholder="Type your message... (/ to mention Skill, Enter to send)"></textarea>
-            <button id="sendBtn" class="btn primary">Send</button>
-            <button id="stopBtn" class="btn danger" style="display:none">Stop</button>
+            <textarea id="chatInput" rows="1" placeholder="输入消息...（/ 提及技能，Enter 发送，Shift+Enter 换行）"></textarea>
+            <button id="sendBtn" class="btn primary">发送</button>
+            <button id="stopBtn" class="btn danger" style="display:none">停止</button>
           </div>
           <div id="skillMentionDropdown" class="skill-mention-dropdown"></div>
         </div>
@@ -190,7 +190,7 @@ export default {
     bindHeaderEvents();
     updateConnBadge();
 
-    messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
+    messagesEl.innerHTML = '<div class="chat-greeting">今天有什么可以帮您？</div>';
     loadModels();
     loadThreads();
     const restoredSid = currentSessionId();
@@ -235,7 +235,7 @@ function bindHeaderEvents() {
 
   protoSelect.addEventListener('change', () => {
     ctx.state.setState('ui.protocol', protoSelect.value);
-    ctx.utils.toast('Protocol: ' + protoSelect.value + ' (next turn)', 'info');
+    ctx.utils.toast('对话协议已切换为 ' + protoSelect.value + '（下一轮生效）', 'info');
   });
 
   document.getElementById('modeA2A').addEventListener('click', () => setStreamMode('a2a'));
@@ -286,7 +286,7 @@ function updateHeaderTitle(connecting = false) {
   const el = document.getElementById('chatTitle');
   if (!el) return;
   const title = currentThreadTitle();
-  el.textContent = connecting ? title + ' · running' : title;
+  el.textContent = connecting ? title + ' · 运行中' : title;
   el.title = title;
 }
 
@@ -368,7 +368,7 @@ function newThread() {
   if (modelSelect) modelSelect.value = 'system';
   const llmBtn = document.getElementById('btnLlmCalls');
   if (llmBtn) llmBtn.disabled = true;
-  messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
+  messagesEl.innerHTML = '<div class="chat-greeting">今天有什么可以帮您？</div>';
   composer.focus();
 }
 
@@ -378,7 +378,7 @@ async function loadModels() {
     const data = await ctx.api.getModels(false);
     const items = Array.isArray(data) ? data : (data.models || []);
     const hasSystem = items.some((m) => (m.id || m.name) === 'system');
-    let html = hasSystem ? '' : '<option value="system">Default Model</option>';
+    let html = hasSystem ? '' : '<option value="system">默认模型</option>';
     for (const m of items) {
             const id = m.id || m.name;
       const label = (m.name || id) + (m.is_default ? ' ★' : '');
@@ -387,7 +387,7 @@ async function loadModels() {
     modelSelect.innerHTML = html;
     if (currentSessionId()) restoreModelForSession(currentSessionId());
   } catch (e) {
-    modelSelect.innerHTML = '<option value="system">Default Model</option>';
+    modelSelect.innerHTML = '<option value="system">默认模型</option>';
   }
 }
 
@@ -435,7 +435,7 @@ async function bindSessionModel(sid, modelId) {
 }
 
 async function loadThreadHistory(sessionId) {
-  messagesEl.innerHTML = '<div class="msg system">Loading history...</div>';
+  messagesEl.innerHTML = '<div class="msg system">正在加载历史消息...</div>';
   renderer.resetAll();
   try {
     const data = await ctx.api.getThreadHistory(sessionId, uid());
@@ -443,7 +443,7 @@ async function loadThreadHistory(sessionId) {
     const msgs = data.messages || [];
     messagesEl.innerHTML = '';
     if (msgs.length === 0) {
-      messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
+      messagesEl.innerHTML = '<div class="msg system">该会话暂无历史消息</div>';
       return;
     }
     const replyToContent = new Map();
@@ -474,7 +474,7 @@ async function loadThreadHistory(sessionId) {
       }
     }
   } catch (e) {
-    messagesEl.innerHTML = '<div class="msg system">Failed to load history</div>';
+    messagesEl.innerHTML = '<div class="msg system">历史消息加载失败</div>';
   }
 }
 
@@ -488,7 +488,7 @@ function enterStreamingUi() {
   const sendBtn = composer.getSendBtn();
   if (sendBtn) {
     sendBtn.disabled = true;
-    sendBtn.textContent = 'Send';
+    sendBtn.textContent = '发送';
     sendBtn.classList.remove('danger');
   }
   showStopButton();
@@ -499,7 +499,7 @@ function showStopButton() {
   if (!stopBtn) return;
   stopBtn.style.display = '';
   stopBtn.disabled = false;
-  stopBtn.textContent = 'Stop';
+  stopBtn.textContent = '停止';
   delete stopBtn.dataset.stopping;
 }
 
@@ -508,7 +508,7 @@ function hideStopButton() {
   if (!stopBtn) return;
   stopBtn.style.display = 'none';
   stopBtn.disabled = false;
-  stopBtn.textContent = 'Stop';
+  stopBtn.textContent = '停止';
   delete stopBtn.dataset.stopping;
 }
 
@@ -517,7 +517,7 @@ function enterStoppingUi() {
   if (!stopBtn) return;
   stopBtn.style.display = '';
   stopBtn.dataset.stopping = '1';
-  stopBtn.textContent = 'Stopping...';
+  stopBtn.textContent = '停止中...';
   stopBtn.disabled = true;
 }
 
@@ -537,7 +537,7 @@ function resetStreamingState() {
   const sendBtn = composer && composer.getSendBtn();
   if (sendBtn) {
     sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
+    sendBtn.textContent = '发送';
     sendBtn.classList.remove('danger');
   }
   hideStopButton();
@@ -783,7 +783,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
       scrollToBottom(false);
     }
     const secs = Math.round((Date.now() - waitingSince) / 1000);
-    waitingEl.textContent = 'Queued... (' + secs + 's)';
+    waitingEl.textContent = '排队等待中...（已等待 ' + secs + 's）';
   };
   const hideWaiting = () => { if (waitingEl) { waitingEl.remove(); waitingEl = null; } };
   const finishStream = () => {
@@ -817,7 +817,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
   const startReconnect = () => {
     syncLastEventIdFromHandles();
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      handleEvent({ type: 'error', error: 'Connection lost; max reconnect attempts reached' });
+      handleEvent({ type: 'error', error: '连接已断开，重连次数已达上限，请刷新页面' });
       finishStream();
       return;
     }
@@ -876,7 +876,7 @@ async function sendA2AStream(text, sid) {
 
 function releaseBrowserAndStream(sid, onDone) {
   if (isStreaming) {
-    ctx.utils.toast('Wait for current turn to finish before releasing control', 'warn');
+    ctx.utils.toast('请等待当前回复结束后再交还控制权', 'warn');
     return;
   }
   enterStreamingUi();
@@ -916,7 +916,7 @@ async function submitConfirm(calls, approved) {
       handleEvent(evt);
     },
     onError: (e) => {
-      ctx.utils.toast('Confirm failed: ' + e.message, 'error');
+      ctx.utils.toast('确认提交失败: ' + e.message, 'error');
       resetStreamingState();
     }
   });
@@ -931,24 +931,24 @@ function stop() {
     if (!stopBtn) { localStop(); return; }
     if (stopBtn.dataset.stopping === '1') return;
     stopBtn.dataset.stopping = '1';
-    stopBtn.textContent = 'Stopping...';
+    stopBtn.textContent = '停止中...';
     stopBtn.disabled = true;
     requestServerStop(sid, uid()).then(() => {
       clearTimeout(stopSlowTimer);
       stopSlowTimer = setTimeout(() => {
-        if (isStreaming) ctx.utils.toast('Stop accepted; waiting for running tool to return', 'warn');
+        if (isStreaming) ctx.utils.toast('已受理停止请求，正在等待运行中的工具返回', 'warn');
       }, 10000);
     }).catch((err) => {
       if (err && err.status === 409 && !isRetryableStopError(err)) {
         showStopButton();
         flushStoppingBuffer();
-        ctx.utils.toast(err.message || 'Cannot stop in current state', 'warn');
+        ctx.utils.toast(err.message || '当前状态无法停止，请先处理待确认项', 'warn');
         return;
       }
       delete stopBtn.dataset.stopping;
       stoppingBuffer = [];
       if (!err || err.status !== 404) {
-        ctx.utils.toast('Stop failed: ' + ((err && err.message) || 'unknown'), 'warn');
+        ctx.utils.toast('停止请求失败: ' + ((err && err.message) || '未知错误'), 'warn');
       }
       localStop();
     });
@@ -989,7 +989,7 @@ async function showLlmCalls() {
     const data = await ctx.api.getLlmCalls(sid, uid());
     const calls = Array.isArray(data) ? data : (data.calls || []);
     if (calls.length === 0) {
-      ctx.modal.open('<h2>LLM Calls</h2><div class="empty">No LLM calls recorded for this session</div>');
+      ctx.modal.open('<h2>LLM 调用记录</h2><div class="empty">当前会话暂无 LLM 调用记录</div>');
       return;
     }
     const html = calls.map((c, idx) => {
@@ -1004,9 +1004,9 @@ async function showLlmCalls() {
         '<div class="llm-call-body"><pre class="lc-pre">' + ctx.utils.esc(JSON.stringify(c, null, 2)) + '</pre></div>' +
       '</div>';
     }).join('');
-    ctx.modal.open('<h2>LLM Calls (' + calls.length + ')</h2>' + html);
+    ctx.modal.open('<h2>LLM 调用记录 (' + calls.length + ')</h2>' + html);
   } catch (e) {
-    ctx.utils.toast('Failed to load LLM calls: ' + e.message, 'error');
+    ctx.utils.toast('加载 LLM 调用记录失败: ' + e.message, 'error');
   }
 }
 
@@ -1014,17 +1014,17 @@ async function showSystemPrompt() {
   try {
     const data = await ctx.api.getSystemPrompt();
     const text = typeof data === 'string' ? data : (data.system_prompt || data.prompt || JSON.stringify(data, null, 2));
-    ctx.utils.showTextModal('System Prompt', text);
+    ctx.utils.showTextModal('系统提示词', text);
   } catch (e) {
-    ctx.utils.toast('Failed to load system prompt: ' + e.message, 'error');
+    ctx.utils.toast('加载系统提示词失败: ' + e.message, 'error');
   }
 }
 
 async function showAgentCard() {
   try {
     const data = await ctx.api.getAgentCard();
-    ctx.utils.showJsonModal('Agent Card', data);
+    ctx.utils.showJsonModal('Agent 卡片', data);
   } catch (e) {
-    ctx.utils.toast('Failed to load agent card: ' + e.message, 'error');
+    ctx.utils.toast('加载 Agent 卡片失败: ' + e.message, 'error');
   }
 }

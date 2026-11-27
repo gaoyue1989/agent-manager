@@ -140,9 +140,9 @@ function syncThemeIcon() {
   if (!btn) return;
   if (currentTheme() === 'dark') {
     btn.innerHTML = icon('sun', 17);
-    btn.title = 'Switch to light mode';
+    btn.title = '切换到浅色模式';
   } else {
     btn.innerHTML = icon('moon', 17);
-    btn.title = 'Switch to dark mode';
+    btn.title = '切换到深色模式';
   }
 }

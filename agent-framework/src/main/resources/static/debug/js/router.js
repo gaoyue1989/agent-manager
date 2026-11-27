@@ -83,7 +83,7 @@ export class Router {
       try { this.currentModule.unmount(); } catch (e) { console.warn('unmount failed:', e); }
     }
 
-    this.container.innerHTML = '<div class="module-loading">Loading ' + route.title + '...</div>';
+    this.container.innerHTML = '<div class="module-loading">正在加载 ' + route.title + '...</div>';
 
     try {
       const module = route.module;
@@ -97,7 +97,7 @@ export class Router {
       this.currentModule = module;
     } catch (e) {
       console.error('module mount failed:', e);
-      this.container.innerHTML = '<div class="empty error-text">Module load failed: ' + e.message + '</div>';
+      this.container.innerHTML = '<div class="empty error-text">模块加载失败: ' + e.message + '</div>';
     }
   }
 }

@@ -18,17 +18,17 @@ import sandboxModule from '../modules/sandbox.js';
 import logsModule from '../modules/logs.js';
 
 const routes = {
-  '#/':          { title: 'Chat',      icon: 'chat',      group: 'Core',         module: chatModule },
-  '#/tools':     { title: 'Tools',     icon: 'tools',     group: 'Capabilities', module: toolsModule },
-  '#/skills':    { title: 'Skills',    icon: 'skills',    group: 'Capabilities', module: skillsModule },
-  '#/mcp':       { title: 'MCP',       icon: 'mcp',       group: 'Capabilities', module: mcpModule },
-  '#/models':    { title: 'Models',    icon: 'models',    group: 'Capabilities', module: modelsModule },
-  '#/config':    { title: 'Config',    icon: 'config',    group: 'Capabilities', module: configModule },
-  '#/memory':    { title: 'Memory',    icon: 'memory',    group: 'Runtime',      module: memoryModule },
-  '#/database':  { title: 'Database',  icon: 'database',  group: 'Runtime',      module: databaseModule },
-  '#/workspace': { title: 'Workspace', icon: 'workspace', group: 'Runtime',      module: workspaceModule },
-  '#/sandbox':   { title: 'Sandbox',   icon: 'sandbox',   group: 'Runtime',      module: sandboxModule },
-  '#/logs':      { title: 'Logs',      icon: 'logs',      group: 'Runtime',      module: logsModule }
+  '#/':          { title: '对话',      icon: 'chat',      group: '核心调试',     module: chatModule },
+  '#/tools':     { title: '工具',      icon: 'tools',     group: '能力配置',     module: toolsModule },
+  '#/skills':    { title: '技能',      icon: 'skills',    group: '能力配置',     module: skillsModule },
+  '#/mcp':       { title: 'MCP 服务',  icon: 'mcp',       group: '能力配置',     module: mcpModule },
+  '#/models':    { title: '模型',      icon: 'models',    group: '能力配置',     module: modelsModule },
+  '#/config':    { title: '配置',      icon: 'config',    group: '能力配置',     module: configModule },
+  '#/memory':    { title: '记忆',      icon: 'memory',    group: '运行观测',     module: memoryModule },
+  '#/database':  { title: '数据库',    icon: 'database',  group: '运行观测',     module: databaseModule },
+  '#/workspace': { title: '工作区',    icon: 'workspace', group: '运行观测',     module: workspaceModule },
+  '#/sandbox':   { title: '沙箱',      icon: 'sandbox',   group: '运行观测',     module: sandboxModule },
+  '#/logs':      { title: '日志',      icon: 'logs',      group: '运行观测',     module: logsModule }
 };
 
 const modal = {
