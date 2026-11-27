@@ -57,14 +57,14 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'code-copy-btn';
-      btn.innerHTML = icon('copy', 12) + '<span>Copy</span>';
+      btn.innerHTML = icon('copy', 12) + '<span>复制</span>';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const text = code ? code.textContent : pre.textContent;
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text || '').then(() => {
-            btn.innerHTML = icon('check', 12) + '<span>Copied</span>';
-            setTimeout(() => { btn.innerHTML = icon('copy', 12) + '<span>Copy</span>'; }, 1500);
+            btn.innerHTML = icon('check', 12) + '<span>已复制</span>';
+            setTimeout(() => { btn.innerHTML = icon('copy', 12) + '<span>复制</span>'; }, 1500);
           }).catch(() => {});
         }
       });
@@ -80,15 +80,15 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
   function renderStoppedBadge() {
     const el = document.createElement('div');
     el.className = 'msg-stopped';
-    el.textContent = 'Stopped';
-    el.title = 'Turn stopped by user';
+    el.textContent = '已停止';
+    el.title = '本次回复由用户主动停止';
     return el;
   }
 
   function renderDirectBadge(toolName) {
     const el = document.createElement('div');
     el.className = 'msg-direct-badge';
-    el.textContent = toolName ? 'Direct Return · ' + toolName : 'Direct Return';
+    el.textContent = toolName ? '直返结果 · ' + toolName : '直返结果';
     return el;
   }
 
@@ -234,7 +234,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     const previewHtml = call.preview
       ? '<span class="tc-arg" style="margin-left:4px;opacity:.75">' + ctx.utils.esc(call.preview) + '</span>'
       : '';
-    const directTag = call.directReturn ? '<span class="badge accent">Direct</span>' : '';
+    const directTag = call.directReturn ? '<span class="badge accent">直返</span>' : '';
     const bodyHtml = renderToolBody(kind, call);
     return '<div class="tool-call-row' + (running ? ' shimmer' : '') + stateCls + '" onclick="window.App.toolRowToggle(this)">' +
       '<span class="tc-state">' + iconHtml + '</span>' +
@@ -263,7 +263,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
 
   function renderToolBody(kind, call) {
     if (call.state === 'running') {
-      return '<div class="tc-running">Running...</div>' +
+      return '<div class="tc-running">执行中...</div>' +
         (call.argsText ? '<div><div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(call.argsText) + '</pre></div>' : '');
     }
     if (kind === 'bash') {
@@ -386,7 +386,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     el.className = 'thinking-block';
     el.innerHTML =
       '<div class="thinking-header shimmer" onclick="window.App.thinkingToggle(this)">' +
-        '<span class="thinking-label">Thinking...</span>' +
+        '<span class="thinking-label">思考中...</span>' +
         '<span class="thinking-toggle">▼</span>' +
       '</div>' +
       '<div class="thinking-body"><pre class="thinking-content"></pre></div>';
@@ -409,7 +409,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     const header = r.thinkingEl.querySelector('.thinking-header');
     const label = r.thinkingEl.querySelector('.thinking-label');
     if (header) header.classList.remove('shimmer');
-    if (label) label.textContent = 'Thought (' + r.thinkingText.length + ' chars)';
+    if (label) label.textContent = '思考过程（' + r.thinkingText.length + ' 字）';
     r.thinkingEl = null;
     r.thinkingContentEl = null;
   }
@@ -442,7 +442,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     el.className = 'tool-group';
     el.innerHTML =
       '<div class="tool-group-header shimmer" onclick="window.App.toolGroupToggle(this)">' +
-        '<span class="tg-arrow">▸</span> <span class="tg-title">Running tools...</span>' +
+        '<span class="tg-arrow">▸</span> <span class="tg-title">正在调用工具...</span>' +
       '</div>' +
       '<div class="tool-group-body"></div>';
     r.contentEl.appendChild(el);
@@ -561,7 +561,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
   function updateToolGroupTitle(r, g) {
     const running = g.calls.some((c) => c.state === 'running');
     g.header.classList.toggle('shimmer', running);
-    g.titleEl.textContent = running ? 'Running ' + g.calls.length + ' tool(s)...' : summarizeToolCalls(g.calls);
+    g.titleEl.textContent = running ? '正在执行 ' + g.calls.length + ' 个工具...' : summarizeToolCalls(g.calls);
   }
 
   function ensureRemotePanel(r, spawnTcId) {
@@ -689,7 +689,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
           (descParts.length ? '<div class="file-ready-desc">' + ctx.utils.esc(descParts.join(' · ')) + '</div>' : '') +
         '</div>' +
       '</div>' +
-      '<a class="btn small accent file-ready-download" href="' + ctx.utils.esc(href) + '" target="_blank" rel="noopener">Open</a>';
+      '<a class="btn small accent file-ready-download" href="' + ctx.utils.esc(href) + '" target="_blank" rel="noopener">打开</a>';
     r.contentEl.appendChild(card);
     scrollToBottom(false);
   }
@@ -702,8 +702,8 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     card.className = 'confirm-card';
     card.innerHTML =
       '<div class="confirm-card-header">' +
-        '<span class="confirm-title">Approval Required</span>' +
-        '<span class="confirm-sub">' + calls.length + ' tool call(s) waiting for confirmation</span>' +
+        '<span class="confirm-title">需要人工确认</span>' +
+        '<span class="confirm-sub">' + calls.length + ' 个工具调用等待确认</span>' +
       '</div>' +
       '<div class="confirm-tools">' +
         calls.map((c) =>
@@ -715,8 +715,8 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
         ).join('') +
       '</div>' +
       '<div class="confirm-actions">' +
-        '<button class="btn danger small" data-act="reject">Reject</button>' +
-        '<button class="btn primary small" data-act="approve">Approve</button>' +
+        '<button class="btn danger small" data-act="reject">拒绝</button>' +
+        '<button class="btn primary small" data-act="approve">批准</button>' +
       '</div>';
 
     card.querySelector('[data-act="approve"]').addEventListener('click', () => {
@@ -756,7 +756,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
         '<span class="app-uri">' + ctx.utils.esc(uri) + '</span>' +
         '<span class="tc-toggle">▸</span>' +
       '</div>' +
-      '<div class="mcp-apps-body"><div class="mcp-apps-loading">Loading UI resource...</div></div>';
+      '<div class="mcp-apps-body"><div class="mcp-apps-loading">正在加载交互卡片...</div></div>';
     r.contentEl.appendChild(card);
     const bodyEl = card.querySelector('.mcp-apps-body');
     const host = new McpAppHost({
@@ -777,7 +777,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     } catch (e) {
       bodyEl.innerHTML =
         '<div class="mcp-apps-error">' + ctx.utils.esc(e.message || 'Resource load failed') + '</div>' +
-        '<div><button class="btn small" data-retry>Retry</button></div>';
+        '<div><button class="btn small" data-retry>重试</button></div>';
       const retry = bodyEl.querySelector('[data-retry]');
       if (retry) retry.addEventListener('click', () => {
         bodyEl.innerHTML = '<div class="mcp-apps-loading">Loading...</div>';
@@ -793,7 +793,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       card.className = 'confirm-card';
       card.innerHTML =
         '<div class="confirm-card-header">' +
-          '<span class="confirm-title">Approval Required</span>' +
+          '<span class="confirm-title">需要人工确认</span>' +
           '<span class="confirm-sub">MCP App tool call</span>' +
         '</div>' +
         '<div class="confirm-tools"><div class="confirm-tool">' +
@@ -801,8 +801,8 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
           '<div class="confirm-tool-input"><pre>' + ctx.utils.esc(JSON.stringify(call.arguments || {}, null, 2)) + '</pre></div>' +
         '</div></div>' +
         '<div class="confirm-actions">' +
-          '<button class="btn danger small" data-act="reject">Reject</button>' +
-          '<button class="btn primary small" data-act="approve">Approve</button>' +
+          '<button class="btn danger small" data-act="reject">拒绝</button>' +
+          '<button class="btn primary small" data-act="approve">批准</button>' +
         '</div>';
       const settle = (ok) => {
         try { card.remove(); } catch (e) {}

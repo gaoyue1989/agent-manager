@@ -8,11 +8,11 @@ export default {
     container.innerHTML = `
     <div class="module-page">
       <div class="module-header">
-        <h2>MCP Servers</h2>
+        <h2>MCP 服务</h2>
         <span class="sub">
           <span id="mcpSummary"></span>
-          <button class="btn small primary" id="btnReloadAllMcp">Reload All MCP</button>
-          <button class="btn small" id="btnRefreshMcp">Refresh</button>
+          <button class="btn small primary" id="btnReloadAllMcp">重载全部 MCP</button>
+          <button class="btn small" id="btnRefreshMcp">刷新</button>
         </span>
       </div>
       <div class="module-scroll" id="mcpBody"><div class="empty">Loading...</div></div>
@@ -33,7 +33,7 @@ async function reloadMcpServer(serverName) {
     await loadMcp();
   } catch (e) {
     if (!ctx) return;
-    ctx.utils.toast('MCP reload failed: ' + e.message, 'error');
+    ctx.utils.toast('MCP 重载失败: ' + e.message, 'error');
   }
 }
 
@@ -55,7 +55,7 @@ async function loadMcp() {
 
   document.getElementById('mcpSummary').textContent = mcpData.length + ' server(s)';
   if (mcpData.length === 0) {
-    body.innerHTML = '<div class="empty">No MCP servers</div>';
+    body.innerHTML = '<div class="empty">暂无 MCP 服务</div>';
     return;
   }
 
@@ -85,8 +85,8 @@ async function loadMcp() {
       info.map(([k, v]) => '<div class="info-row"><span class="label">' + k + '</span>' +
         '<span class="value" style="white-space:normal">' + ctx.utils.esc(v) + '</span></div>').join('') +
       '<div style="display:flex;gap:8px;margin-top:10px">' +
-        '<button class="btn small mcp-detail-btn" data-idx="' + idx + '">View Config</button>' +
-        '<button class="btn small accent mcp-reload-btn" data-server="' + ctx.utils.esc(serverName) + '">Reload Server</button>' +
+        '<button class="btn small mcp-detail-btn" data-idx="' + idx + '">查看配置</button>' +
+        '<button class="btn small accent mcp-reload-btn" data-server="' + ctx.utils.esc(serverName) + '">重载此服务</button>' +
       '</div>' +
       '</div></div>';
   }).join('');

@@ -5,8 +5,8 @@ export default {
     ctx = c;
     container.innerHTML = `
     <div class="module-page">
-      <div class="module-header"><h2>Sandbox</h2>
-        <span class="sub"><button class="btn small" id="btnReloadSb">Refresh</button></span></div>
+      <div class="module-header"><h2>沙箱管理</h2>
+        <span class="sub"><button class="btn small" id="btnReloadSb">刷新</button></span></div>
       <div class="module-scroll" id="sbBody"><div class="empty">Loading...</div></div>
     </div>`;
     document.getElementById('btnReloadSb').addEventListener('click', loadSandbox);
@@ -34,7 +34,7 @@ function renderEnvInjectPanel() {
   const defaultSid = (ctx && ctx.state.getState('threads.current')) || '';
   return '<div class="panel collapsible-panel" id="sbEnvPanel">' +
     '<div class="panel-header collapsible-head" id="sbEnvToggle">' +
-      '<span class="title">Inject Sandbox Environment Variables</span>' +
+      '<span class="title">注入沙箱环境变量</span>' +
       '<span class="count"><span class="badge dim">PUT /sandbox/env</span></span>' +
     '</div>' +
     '<div class="panel-body collapsible-body">' +
@@ -42,10 +42,10 @@ function renderEnvInjectPanel() {
         '<input id="sbEnvUser" class="input" type="text" placeholder="userId" value="' + ctx.utils.esc(defaultUid) + '">' +
         '<input id="sbEnvSid" class="input" type="text" placeholder="sessionId" value="' + ctx.utils.esc(defaultSid) + '">' +
       '</div>' +
-      '<textarea id="sbEnvPairs" class="input" rows="4" style="width:100%;font-family:var(--mono);font-size:12px;resize:vertical" placeholder="KEY=VALUE (one per line; values are cleared after submit)"></textarea>' +
+      '<textarea id="sbEnvPairs" class="input" rows="4" style="width:100%;font-family:var(--mono);font-size:12px;resize:vertical" placeholder="每行一个 KEY=VALUE（提交后自动清空，不保留敏感值）"></textarea>' +
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px">' +
         '<span id="sbEnvResult" class="status-text"></span>' +
-        '<button class="btn small primary" id="sbEnvSubmit">Apply Env</button>' +
+        '<button class="btn small primary" id="sbEnvSubmit">应用环境变量</button>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -66,11 +66,11 @@ function bindEnvInjectEvents() {
     const resultEl = document.getElementById('sbEnvResult');
     const env = parseEnvText(pairsEl.value);
     if (!userId || !sessionId) {
-      ctx.utils.toast('userId and sessionId are required', 'warn');
+      ctx.utils.toast('请填写 userId 与 sessionId', 'warn');
       return;
     }
     if (Object.keys(env).length === 0) {
-      ctx.utils.toast('Provide at least one KEY=VALUE line', 'warn');
+      ctx.utils.toast('请至少输入一行 KEY=VALUE', 'warn');
       return;
     }
     submit.disabled = true;
@@ -82,13 +82,13 @@ function bindEnvInjectEvents() {
         resultEl.style.color = 'var(--green)';
         resultEl.textContent = 'Updated [' + keys + '] on ' + (res.sandboxId || 'sandbox') + ' (' + (res.applied || 'next_exec') + ')';
       }
-      ctx.utils.toast('Sandbox env updated: ' + keys, 'success');
+      ctx.utils.toast('已更新沙箱环境变量: ' + keys, 'success');
     } catch (e) {
       if (resultEl) {
         resultEl.style.color = 'var(--red)';
         resultEl.textContent = e.message;
       }
-      ctx.utils.toast('Sandbox env update failed: ' + e.message, 'error');
+      ctx.utils.toast('更新沙箱环境变量失败: ' + e.message, 'error');
     } finally {
       submit.disabled = false;
     }
@@ -116,7 +116,7 @@ async function loadSandbox() {
     return;
   }
 
-  let html = '<div class="panel"><div class="panel-header"><span class="title">Sandbox Configuration</span>' +
+  let html = '<div class="panel"><div class="panel-header"><span class="title">沙箱配置</span>' +
     '<span class="count"><span class="badge green">Enabled</span></span></div><div class="panel-body">' +
     row('Image', sb.image) +
     row('Timeout (min)', sb.timeout_minutes) +
@@ -139,19 +139,19 @@ async function loadBindingsSection() {
     data = await ctx.api.getSandboxBindings();
   } catch (e) {
     if (!ctx) return '';
-    return panel('Quota & Bindings',
+    return panel('配额与绑定',
       '<div class="empty error-text">sandbox-bindings unavailable: ' + ctx.utils.esc(e.message) + '</div>');
   }
   if (!ctx) return '';
   if (!data || !data.enabled) {
-    return panel('Quota & Bindings',
+    return panel('配额与绑定',
       '<div class="info-row"><span class="label">Lifecycle</span><span class="value" style="color:var(--yellow)">Disabled</span></div>' +
       '<div class="info-row"><span class="label">Enable</span><span class="value">' +
       ctx.utils.esc((data && data.reason) || 'Set SANDBOX_LIFECYCLE_ENABLED=true') + '</span></div>');
   }
 
   const cfg = data.config || {};
-  let html = panel('Quota & Bindings · Config',
+  let html = panel('配额与绑定 · Config',
     row('Lifecycle', 'Enabled') +
     row('Pool Ref', cfg.pool_ref || '<span style="color:var(--yellow)">Not configured</span>') +
     row('User Quota', cfg.user_quota) +
@@ -184,11 +184,11 @@ async function loadBindingsSection() {
           '</tr>';
       }).join('') + '</tbody></table>';
   }
-  html += panel('Quota & Bindings · Table (' + bindings.length + ')', rows);
+  html += panel('配额与绑定 · Table (' + bindings.length + ')', rows);
 
   const reg = data.registry || {};
   const lagMs = Number(reg.loop_lag_ms || 0);
-  html += panel('Quota & Bindings · Renew Registry',
+  html += panel('配额与绑定 · Renew Registry',
     row('Registered', reg.size) +
     row('Active Turns', reg.active_turns) +
     row('Oldest Age', fmtDuration(reg.oldest_entry_age_ms)) +
@@ -206,7 +206,7 @@ async function loadBindingsSection() {
           '</span></div>';
       }).join('')
     : '<div class="empty">No events</div>';
-  html += panel('Quota & Bindings · Events (' + events.length + '/100)', eventRows);
+  html += panel('配额与绑定 · Events (' + events.length + '/100)', eventRows);
   return html;
 }
 

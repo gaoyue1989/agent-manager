@@ -8,15 +8,15 @@ export default {
     container.innerHTML = `
     <div class="module-page">
       <div class="module-header">
-        <h2>Configuration</h2>
+        <h2>系统配置</h2>
         <span class="sub">
           <select id="reloadScope" class="input" style="padding:4px 8px;font-size:12px">
-            <option value="auto">Reload: Auto</option>
-            <option value="mcp">Reload: MCP</option>
-            <option value="agent">Reload: Agent</option>
+            <option value="auto">热重载：自动</option>
+            <option value="mcp">热重载：仅 MCP</option>
+            <option value="agent">热重载：重建 Agent</option>
           </select>
-          <button class="btn small primary" id="btnHotReload">Hot Reload</button>
-          <button class="btn small" id="btnRefreshConfig">Refresh</button>
+          <button class="btn small primary" id="btnHotReload">触发热重载</button>
+          <button class="btn small" id="btnRefreshConfig">刷新</button>
         </span>
       </div>
       <div class="module-scroll" id="configBody"><div class="empty">Loading...</div></div>
@@ -32,32 +32,32 @@ async function triggerHotReload() {
   const btn = document.getElementById('btnHotReload');
   const scopeEl = document.getElementById('reloadScope');
   const scope = scopeEl ? scopeEl.value : 'auto';
-  if (btn) { btn.disabled = true; btn.textContent = 'Reloading...'; }
+  if (btn) { btn.disabled = true; btn.textContent = '重载中...'; }
   try {
     const res = await ctx.api.triggerReload(scope);
     if (!ctx) return;
     lastReloadResult = { ok: true, data: res };
-    ctx.utils.toast('Reload (' + scope + ') succeeded', 'success');
+    ctx.utils.toast('热重载（' + scope + '）成功', 'success');
     await loadConfig();
   } catch (e) {
     if (!ctx) return;
     lastReloadResult = { ok: false, error: e.message };
-    ctx.utils.toast('Reload failed: ' + e.message, 'error');
+    ctx.utils.toast('热重载失败: ' + e.message, 'error');
     await loadConfig();
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Hot Reload'; }
+    if (btn) { btn.disabled = false; btn.textContent = '触发热重载'; }
   }
 }
 
 function renderReloadBanner() {
   if (!lastReloadResult) return '';
   if (!lastReloadResult.ok) {
-    return '<div class="reload-result-banner error"><strong>Hot Reload Failed:</strong> ' +
+    return '<div class="reload-result-banner error"><strong>热重载失败:</strong> ' +
       ctx.utils.esc(lastReloadResult.error) + '</div>';
   }
   const d = lastReloadResult.data || {};
   return '<div class="reload-result-banner">' +
-    '<strong>Hot Reload Result</strong>' +
+    '<strong>热重载结果</strong>' +
     '<span class="badge accent">scope: ' + ctx.utils.esc(d.scope || 'auto') + '</span>' +
     '<span class="badge ' + (d.fingerprint_changed ? 'green' : 'dim') + '">fingerprint_changed: ' + String(!!d.fingerprint_changed) + '</span>' +
     '<span class="badge ' + (d.agent_rebuilt ? 'green' : 'dim') + '">agent_rebuilt: ' + String(!!d.agent_rebuilt) + '</span>' +
@@ -79,7 +79,7 @@ async function loadConfig() {
   let html = renderReloadBanner();
 
   if (env) {
-    html += '<div class="panel"><div class="panel-header"><span class="title">Environment Variables</span></div><div class="panel-body">';
+    html += '<div class="panel"><div class="panel-header"><span class="title">环境变量</span></div><div class="panel-body">';
     const groups = [
       ['LLM', env.llm && [
         ['LLM_API_KEY', env.llm.api_key],
@@ -115,7 +115,7 @@ async function loadConfig() {
   }
 
   if (oaf) {
-    html += '<div class="panel"><div class="panel-header"><span class="title">OAF Configuration (AGENTS.md frontmatter)</span></div><div class="panel-body">';
+    html += '<div class="panel"><div class="panel-header"><span class="title">OAF 配置（AGENTS.md）</span></div><div class="panel-body">';
     const fields = [
       ['Name', oaf.name],
       ['Slug', oaf.slug],
@@ -136,7 +136,7 @@ async function loadConfig() {
       html += '<div class="info-row"><span class="label">' + k + '</span>' +
         '<span class="value" style="white-space:normal">' + ctx.utils.esc(String(v)) + '</span></div>';
     }
-    html += '<button class="btn small oaf-raw-btn" style="margin-top:10px">View Raw OAF JSON</button>';
+    html += '<button class="btn small oaf-raw-btn" style="margin-top:10px">查看原始 JSON</button>';
     html += '</div></div>';
   }
 
