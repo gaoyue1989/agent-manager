@@ -109,7 +109,7 @@ PR-4b（PR #339）退役包技能旧版 scoped tar 投放路径、且 PR #340 �
 | 环境变量 | YAML 键（`agent.sandbox.*`） | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `SANDBOX_SKILLS_FALLBACK_MODE` | `skills-fallback-mode` | `push` | 降级模式：`push`（启用 Push-to-Store 降级）/ `off`（保持 PR-4b 现状：降级即无包技能，一键回滚开关） |
-| `SANDBOX_SKILLS_FALLBACK_STORE_DIR` | `skills-fallback-store-dir` | `/tmp/.skills-store` | 沙箱内降级库根目录；必须通过 shell 安全路径校验（不含空白、引号或 `..`） |
+| `SANDBOX_SKILLS_FALLBACK_STORE_DIR` | `skills-fallback-store-dir` | `/tmp/.skills-store` | 沙箱内降级库根目录；必须为至少二级绝对路径（不含空白、引号、`.`、`..` 或 `//`），且不得与主库 `SANDBOX_SKILLS_SHARED_STORE` 相同或嵌套 |
 | `SANDBOX_SKILLS_FALLBACK_MAX_BYTES` | `skills-fallback-max-bytes` | `67108864`（64 MiB） | 允许推送的压缩后 bundle 最大字节数；≤0 视为不限（不推荐生产配置） |
 | `SANDBOX_SKILLS_FALLBACK_MAX_CONCURRENCY` | `skills-fallback-max-concurrency` | `4` | 单副本并发推送信号量上限（进程级共享 `Semaphore`）；防止全池冷降级压垮 OpenSandbox Server 或本地 I/O |
 | `SANDBOX_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS` | `skills-fallback-acquire-timeout-ms` | `5000` | 获取推送并发许可的等待超时（毫秒）；超时快速 fail-open，不阻塞对话主链路 |
@@ -119,7 +119,7 @@ PR-4b（PR #339）退役包技能旧版 scoped tar 投放路径、且 PR #340 �
 
 ### 5.2 会话级三态判定状态机
 
-`SkillSyncGate.SkillFarmState` 扩展为三态模型（仍按 `userKey|sandboxId` 会话级记忆，降级会话不中途翻转，恢复以新会话/新沙箱代为粒度）：
+`SkillSyncGate.SkillFarmState` 扩展为三态模型（按 `userKey|sandboxId` 会话级记忆；瞬态探针失败 `degraded_probe_failed` 与限流 `degraded_fallback_throttled` 不写入门控缓存；同沙箱在 `PUSH` 模式下若后续非稳态 `hydrate()` 探测到主库已恢复就绪，支持即时 `PUSH -> FARM` 翻转恢复）：
 
 ```java
 public enum FarmMode { FARM, PUSH, NONE }
@@ -202,7 +202,7 @@ public record SkillFarmState(FarmMode mode, String storeDir, Set<String> l4Names
   * `FARM` → `PUSH`（例如滚发窗口旧 warm pod 触发降级）：同理 `farm` != `push`，强制重收敛改指 `/tmp/.skills-store/CURRENT/<skill>`。
 * **内容变更传播**：
   * 包技能发布新版或全局禁用变更 → `endpointVersion` 变化 → 指纹变化 → 打破稳态 → `hydrate()` 需确保降级库同步到新版本！
-  * **关键细节（同会话内版本更新）**：在 `PUSH` 模式下，如果 `hydrate()` 发现指纹变化且 `storeDir == fallbackStoreDir`，须先调用 `SkillBundlePusher.ensureSynced(endpointVersion)` 确保 `/tmp/.skills-store/CURRENT` 已更新至 `v-<endpointVersion>`，再执行软链与孤儿清理（如果推送失败则上抛/不记账，保持旧版可用并在下轮重试）。
+  * **关键细节（同会话内版本更新）**：在 `PUSH` 模式下，如果 `hydrate()` 发现指纹变化且 `storeDir == fallbackStoreDir`，须先调用 `SkillBundlePusher.ensureSynced(endpointVersion)` 确保 `/tmp/.skills-store/CURRENT` 已更新至 `v-<endpointVersion>`，再执行软链与孤儿清理（推送失败采用 fail-open：不记稳态指纹，仍执行 `partialCleanup` 清理已禁用技能与旧 scope 目录并同步清理指纹记账，保持下轮重试自愈）。
 
 ### 5.5 可观测性与防静默退化（D-5 扩展）
 
@@ -219,6 +219,7 @@ public record SkillFarmState(FarmMode mode, String storeDir, Set<String> l4Names
 | `degraded_fallback_too_large` | bundle 体积超过 `SANDBOX_SKILLS_FALLBACK_MAX_BYTES` | WARN |
 | `degraded_fallback_throttled` | 推送并发信号量等待超时 | WARN |
 | `degraded_fallback_failed` | 推送上传、解压或切换失败（fail-open） | WARN |
+| `degraded_probe_failed` | 主库探针传输/执行异常（瞬态不污染门控缓存） | WARN |
 
 通过 `fallback_push_synced` 的 Counter 增长与 WARN 日志，运维可以立即区分「业务正常可用（降级兜住了）」与「基础设施有缺陷（镜像漏装 `skills-syncd` 或池漏配）」，避免静默退化长期不被察觉。
 
@@ -226,7 +227,7 @@ public record SkillFarmState(FarmMode mode, String storeDir, Set<String> l4Names
 
 | 风险 / 边界 | 影响分析 | 缓解措施 |
 | :--- | :--- | :--- |
-| 精简镜像 `mv` 不支持 `-T`（如部分 BusyBox） | `mv -Tf` 在非 GNU coreutils 上可能报无效参数 | 兼容写法：先尝试 `mv -Tf "$fb/.CURRENT.<uuid>" "$fb/CURRENT" 2>/dev/null \|\| ln -sfn "$ver" "$fb/CURRENT"`，兼顾 GNU 原子性与 BusyBox 兼容 |
+| 精简镜像 `mv` 不支持 `-T`（如部分 BusyBox） | `mv -Tf` 在非 GNU coreutils 上可能报无效参数 | 兼容写法：先尝试 `mv -Tf "$fb/.CURRENT.<uuid>" "$fb/CURRENT" 2>/dev/null \|\| ln -sfn "$ver" "$fb/CURRENT"`，兼顾 GNU 原子性与 BusyBox 兼容；解压落盘同时支持 `mv -T` 失败时的非 GNU 回退与 `test -d "$fb/$ver"` / `test -d "$fb/CURRENT"` 校验，上传侧配合 `CountingDigestInputStream` 与容器侧 `wc -c` / `sha256sum -c` 完整性校验及空包 GC（`emptyFallbackStoreGcCmd`） |
 | 代理不支持 chunked multipart（`InputStream` 导致 `contentLength=-1`） | 极少数中间代理返回 411 | E2E 真实 OpenSandbox Server 实测验证；若遇 411 可按配置或小包回退 `byte[]` |
 | 容器 `/tmp` 为小容量 `tmpfs`（如 64MB） | 解压瞬间需约 `tar.gz + 解压后体积` | `SANDBOX_SKILLS_FALLBACK_MAX_BYTES` 默认 64MiB；`trap` 失败必清残留；失败 fail-open 不影响沙箱主进程 |
 | 同沙箱代内容更新（同会话长周期运行期间发新版） | `acquireMode` 已记忆 `PUSH`，后续 turn 仅进 `hydrate()` | §5.4 明确在 `PUSH` 模式非稳态重收敛前先调用 `ensureSynced(endpointVersion)` 刷新 `/tmp/.skills-store` |
