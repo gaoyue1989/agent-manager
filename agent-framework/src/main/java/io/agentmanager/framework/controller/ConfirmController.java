@@ -463,6 +463,10 @@ public class ConfirmController {
                                     io.agentmanager.framework.service.DirectReturnDeltaJoiner directReturnJoiner) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
+            if (turnStopWatcher != null) {
+                turnStopWatcher.unregister(sessionId, replyId);
+            }
+            clearTurnIntent(sessionId, replyId);
             return;
         }
 
@@ -481,6 +485,18 @@ public class ConfirmController {
                 "{\"type\":\"sandbox_rebuilt\",\"message\":\"沙箱已重建，未保存的工作区文件可能丢失\"}");
         }
 
+        boolean stopRequested = turnStopWatcher != null
+            && turnStopWatcher.isStopRequested(replyId);
+        if (stopRequested
+                && event instanceof io.agentscope.core.event.AgentResultEvent resultEvent
+                && resultEvent.getResult() != null
+                && resultEvent.getResult().getGenerateReason()
+                    == io.agentscope.core.message.GenerateReason.INTERRUPTED) {
+            log.info("[confirm] suppress SDK interrupt recovery message (sid={}, rid={})",
+                sessionId, replyId);
+            return;
+        }
+
         // 工具名登记 + 参数/结果累积（ToolCallStartEvent 是唯一携带真实工具名的事件）
         if (event instanceof io.agentscope.core.event.ToolCallStartEvent start) {
             toolSummary.onToolCallStart(start);
@@ -495,15 +511,17 @@ public class ConfirmController {
             usage.onModelCallEnd(mce);
         }
 
-        // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
         if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
             runtimeService.storeConfirmContext(sessionId, event, turnSkills);
-            lease.release();
-            // HITL 暂停点：锁已让出、状态已持久化
-            // T4 挂起保留窗（§4.4）：恢复段 ask 挂起同样保留沙箱续期，每次 ask 重新计窗
             if (sandboxLifecycle != null) {
                 sandboxLifecycle.onConfirmHold(sessionId);
             }
+        }
+
+        if (stopRequested && event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
+                && !AgentEventSseSerializer.isRemoteForwarded(event)) {
+            eventBus.emitSynthetic(sessionId, replyId, "cancelled",
+                "{\"type\":\"cancelled\",\"reason\":\"user_stopped\"}");
         }
 
         // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）；
@@ -527,10 +545,7 @@ public class ConfirmController {
             log.debug("tool summary synthesis failed (sid={}): {}", sessionId, e.getMessage());
         }
 
-        // HITL 是 turn 边界：permission_ask 已广播，关闭 sink（同上）
-        if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
-            eventBus.closeSession(sessionId);
-        }
+
 
         // AGENT_END（仅 lead 自身事件）→ 关闭 EventBus：远程子 agent 转发的 AGENT_END
         // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）

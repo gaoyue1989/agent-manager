@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -162,5 +163,24 @@ class TurnStopServiceTest {
 
         assertEquals(TurnStopService.Outcome.UNAVAILABLE, result.outcome());
         verify(stopStore, never()).request(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void requestTriggersLocalAndCrossReplicaWakeupHooks() {
+        var watcher = mock(TurnStopWatcher.class);
+        var notifier = mock(TurnStopNotifier.class);
+        service.setWakeupHooks(watcher, notifier);
+
+        when(runtimeService.findPendingConfirm("s-wake")).thenReturn(null);
+        when(leaseStore.isHeldStrict("s-wake")).thenReturn(true);
+        when(eventStore.findLatestStrict("s-wake")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(3, "TEXT_BLOCK_DELTA", "{}", "r-wake"));
+        when(stopStore.request("s-wake", "r-wake", "alice"))
+            .thenReturn(TurnStopStore.RequestOutcome.REQUESTED);
+
+        var res = service.request("s-wake", "alice");
+        assertEquals(TurnStopService.Outcome.REQUESTED, res.outcome());
+        verify(watcher).notifyLocal("s-wake", "r-wake");
+        verify(notifier).publish("s-wake", "r-wake");
     }
 }

@@ -277,13 +277,18 @@ public class SessionEventTailer {
                 ? startIntent.error() : "turn_failed")
             : null;
 
-        // afterSeq < 0 表示不回放（与 SessionEventBus.subscribe 的既有语义一致）
+        var terminalSeenInReplay = new java.util.concurrent.atomic.AtomicBoolean(false);
         Flux<ServerSentEvent<String>> replay = afterSeq < 0
             ? Flux.empty()
             : (startQueued || startError != null
                 ? eventStore.queryAfter(sessionId, replyId, afterSeq, false)
                 : eventStore.queryAfter(sessionId, replyId, afterSeq))
-                .doOnNext(e -> cursor.set(e.seq()))
+                .doOnNext(e -> {
+                    cursor.set(e.seq());
+                    if (isTerminalType(e.type())) {
+                        terminalSeenInReplay.set(true);
+                    }
+                })
                 .flatMapIterable(e -> renderer.render(e, sessionId));
 
         // 实时追赶：按下游需求逐帧拉取（Flux.generate 每次请求发一帧）。
@@ -297,6 +302,7 @@ public class SessionEventTailer {
             var st = new LiveState();
             st.queuedReply = startQueued;
             st.errorPending = startError;
+            st.donePending = terminalSeenInReplay.get();
             liveStateRef.set(st);
             return st;
         }, (st, sink) -> {

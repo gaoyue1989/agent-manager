@@ -2,6 +2,8 @@ package io.agentmanager.framework.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 /**
@@ -53,6 +55,14 @@ public class TurnStopService {
     private final TurnLeaseStore leaseStore;
     private final SessionEventStore eventStore;
     private final AgentRuntimeService runtimeService;
+
+    @Autowired(required = false)
+    @Lazy
+    private TurnStopWatcher turnStopWatcher;
+
+    @Autowired(required = false)
+    @Lazy
+    private TurnStopNotifier turnStopNotifier;
 
     public TurnStopService(TurnStopStore stopStore,
                            TurnIntentStore intentStore,
@@ -138,6 +148,12 @@ public class TurnStopService {
             return Result.of(Outcome.UNAVAILABLE, target);
         }
         log.info("[turn-stop] requested: sid={}, rid={}, by={}", sessionId, target, requestedBy);
+        if (turnStopWatcher != null) {
+            turnStopWatcher.notifyLocal(sessionId, target);
+        }
+        if (turnStopNotifier != null) {
+            turnStopNotifier.publish(sessionId, target);
+        }
         return Result.of(Outcome.REQUESTED, target);
     }
 
@@ -150,5 +166,10 @@ public class TurnStopService {
     /** 消费/清理本轮的停止请求（幂等；不匹配的行走不掉）。 */
     public void clear(String sessionId, String replyId) {
         stopStore.consume(sessionId, replyId);
+    }
+
+    void setWakeupHooks(TurnStopWatcher watcher, TurnStopNotifier notifier) {
+        this.turnStopWatcher = watcher;
+        this.turnStopNotifier = notifier;
     }
 }

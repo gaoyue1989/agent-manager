@@ -40,6 +40,8 @@ function transport() {
 }
 let activeSubHandle = null;  // subscribe 返回的 handle（重连时使用）
 let resumeSyncTimer = null;
+let activeSyncTimer = null;
+let stoppingBuffer = [];
 
 // ★ durable-sse-plan：SSE 断连自动重连
 let lastEventId = 0;         // 当前 session 最新收到的 seq（用于 afterSeq 游标）
@@ -519,6 +521,8 @@ function syncActiveThreadItem(sessionId) {
 async function selectThread(sessionId) {
   if (!sessionId) return;
   if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
+  if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+  stoppingBuffer = [];
   if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
   if (activeAbort) { activeAbort.abort(); activeAbort = null; }
   ctx.state.setState('threads.current', sessionId);
@@ -558,6 +562,7 @@ async function tryResumeSSE(sessionId) {
     if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
       console.log('[durable-sse] resuming SSE for working session:', sessionId);
       enterStreamingUi();
+      if (status.stopping) enterStoppingUi();
       currentReplyId = status.reply_id || null;
       // 刻意**不**把游标重置为 latest_event_seq：刷新后客户端从 0 开始，
       // 应从头回放当前 turn 的全部事件（replyId 过滤保证只回放本 turn，不重复历史）；
@@ -589,6 +594,7 @@ async function tryResumeSSE(sessionId) {
         userId: uid,
         onEvent: (evt) => {
           reconnectAttempts = 0;
+          syncLastEventIdFromHandles();
           // turnId 是服务端信封 id（subscribe?replyId= 的过滤口径）；帧内 replyId 是 SDK
           // 事件级 id，两者不同。仅有 turnId 时才用它更新续传游标。
           if (evt.turnId) currentReplyId = evt.turnId;
@@ -1793,7 +1799,12 @@ function handleEvent(data) {
     activeRemotePanel = null;
     Object.keys(remoteToolOwner).forEach((k) => delete remoteToolOwner[k]);
     setConnecting('chatTitle', true);
-    enterStreamingUi();
+    if (!isStoppingUi()) {
+      enterStreamingUi();
+    } else {
+      isStreaming = true;
+      sendBtn.disabled = true;
+    }
     usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
     // MCP Apps：新回合开始 → 清理上一回合卡片（保留当前回合可交互）
     teardownAllAppHosts();
@@ -1816,6 +1827,8 @@ function handleEvent(data) {
     sendBtn.classList.remove('danger');
     hideStopButton();
     clearTimeout(stopSlowTimer);
+    if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+    stoppingBuffer = [];
     setConnecting('chatTitle', false);
     scrollToBottom(true);
     loadThreads();
@@ -1834,6 +1847,10 @@ function handleEvent(data) {
 
   switch (data.type) {
     case 'TEXT_BLOCK_DELTA': {
+      if (isStoppingUi()) {
+        stoppingBuffer.push({ type: 'TEXT_BLOCK_DELTA', delta: data.delta || '' });
+        break;
+      }
       if (r) {
         appendTextDelta(r, data.delta || '');
       }
@@ -1841,6 +1858,10 @@ function handleEvent(data) {
       break;
     }
     case 'THINKING_BLOCK_DELTA': {
+      if (isStoppingUi()) {
+        stoppingBuffer.push({ type: 'THINKING_BLOCK_DELTA', delta: data.delta || '' });
+        break;
+      }
       if (r) appendThinkingDelta(r, data.delta || '');
       break;
     }
@@ -2047,7 +2068,9 @@ function handleEvent(data) {
       sendBtn.textContent = 'Send';
       sendBtn.classList.remove('danger');
       hideStopButton();
-        clearTimeout(stopSlowTimer);
+      clearTimeout(stopSlowTimer);
+      if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+      stoppingBuffer = [];
       if (r) {
         // 观察者路径可能在 cancelled（终态）后直接收流、不补 AGENT_END：主动关掉文本光标
         finishReply(r.replyId);
@@ -2255,13 +2278,19 @@ function stop() {
         }
       }, 10000);
     }).catch((err) => {
+      if (err && err.status === 409 && !isRetryableStopError(err)) {
+        showStopButton();
+        flushStoppingBuffer();
+        ctx.utils.toast(err.message || '当前状态无法停止（请先处理待确认操作）', 'warn');
+        return;
+      }
       delete stopBtn.dataset.stopping;
+      stoppingBuffer = [];
       if (err && err.status === 503) {
         ctx.utils.toast('服务端停止能力不可用，已仅断开本地连接（任务仍会在后台继续）', 'warn');
       } else if (err && err.status === 409) {
         ctx.utils.toast(err.message || '当前状态无法停止（请先处理待确认操作）', 'warn');
       } else if (!err || err.status !== 404) {
-        // 404 = 没有运行中的 turn（可能刚好结束）：静默退回断流
         ctx.utils.toast('停止请求失败: ' + ((err && err.message) || '未知错误'), 'error');
       }
       localStop();
@@ -2277,11 +2306,18 @@ function stop() {
 }
 
 /** 服务端停止（409 turn_not_ready：本轮尚无事件 → 短重试） */
+function isRetryableStopError(e) {
+  if (!e || e.status !== 409) return false;
+  if (e.retryable === true || (e.data && e.data.retryable === true)) return true;
+  const msg = String(e.message || '');
+  return msg.includes('turn_not_ready');
+}
+
 async function requestServerStop(sid, uid, attempt = 0) {
   try {
     await ctx.api.stopThread(sid, uid);
   } catch (e) {
-    if (e && e.status === 409 && attempt < 2) {
+    if (isRetryableStopError(e) && attempt < 2) {
       await new Promise((resolve) => setTimeout(resolve, 400));
       return requestServerStop(sid, uid, attempt + 1);
     }
@@ -2328,7 +2364,43 @@ function hideStopButton() {
   delete stopBtn.dataset.stopping;
 }
 
-// ★ durable-sse-plan：重置流式状态
+function isStoppingUi() {
+  return Boolean(stopBtn && stopBtn.dataset.stopping === '1');
+}
+
+function enterStoppingUi() {
+  if (!stopBtn) return;
+  stopBtn.style.display = '';
+  stopBtn.dataset.stopping = '1';
+  stopBtn.textContent = 'Stopping...';
+  stopBtn.disabled = true;
+}
+
+function flushStoppingBuffer() {
+  if (!stoppingBuffer.length) return;
+  const buffered = stoppingBuffer;
+  stoppingBuffer = [];
+  const r = currentReply;
+  if (!r) return;
+  for (const item of buffered) {
+    if (item.type === 'TEXT_BLOCK_DELTA') {
+      appendTextDelta(r, item.delta);
+    } else if (item.type === 'THINKING_BLOCK_DELTA') {
+      appendThinkingDelta(r, item.delta);
+    }
+  }
+  scrollToBottom(false);
+}
+
+function syncLastEventIdFromHandles() {
+  if (activeChatHandle && activeChatHandle.lastEventId > lastEventId) {
+    lastEventId = activeChatHandle.lastEventId;
+  }
+  if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) {
+    lastEventId = activeSubHandle.lastEventId;
+  }
+}
+
 function resetStreamingState() {
   isStreaming = false;
   sendBtn.disabled = false;
@@ -2336,6 +2408,8 @@ function resetStreamingState() {
   sendBtn.classList.remove('danger');
   hideStopButton();
   clearTimeout(stopSlowTimer);
+  if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+  stoppingBuffer = [];
   activeChatHandle = null;
   activeSubHandle = null;
 }
@@ -2364,6 +2438,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
 
   // ★ 重连逻辑：SSE 断连后通过 subscribe 续传
   const startReconnect = () => {
+    syncLastEventIdFromHandles();
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       handleEvent({ type: 'error', error: '连接断开，重连失败已达上限，请刷新页面' });
       return;
@@ -2379,6 +2454,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
         // 若落入下面的 else 分支，用户只会看到一个没有任何内容的 AGENT_END，无从得知执行已中断。
         if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
           currentReplyId = status.reply_id || currentReplyId;
+          if (status.stopping) enterStoppingUi();
           subscribeWithReconnect(sid, lastEventId, currentReplyId);
         } else if (status.state === 'failed') {
           // 排队超时/建立失败：本轮没有事件可回放，直接展示失败原因
@@ -2408,7 +2484,8 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
       replyId,
       userId: ctx.state.getState('ui.userId') || 'debug-user',
       onEvent: (evt) => {
-        reconnectAttempts = 0; // 收到事件说明连接正常，重置计数
+        reconnectAttempts = 0;
+        syncLastEventIdFromHandles();
         hideWaiting();
         handleEvent(evt);
       },
@@ -2451,6 +2528,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
     },
     onEvent: (evt) => {
       reconnectAttempts = 0;
+      syncLastEventIdFromHandles();
       hideWaiting();
       // 追踪续传用的 turn id：优先服务端信封 turnId（subscribe?replyId= 的过滤口径），
       // 老服务端无该字段时退回 AGENT_START 的 SDK replyId。
@@ -2484,17 +2562,13 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
     }
   });
 
-  // 同步 lastEventId
-  const syncId = setInterval(() => {
-    if (activeChatHandle) lastEventId = activeChatHandle.lastEventId;
-    if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) {
-      lastEventId = activeSubHandle.lastEventId;
-    }
+  if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+  activeSyncTimer = setInterval(() => {
+    syncLastEventIdFromHandles();
   }, 500);
 
-  // 当流真正结束时的清理（替代覆写全局函数的方式）
   const finishStream = () => {
-    clearInterval(syncId);
+    if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
     resetStreamingState();
     loadThreads();
   };

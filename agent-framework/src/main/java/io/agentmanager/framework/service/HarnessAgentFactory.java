@@ -106,6 +106,9 @@ public class HarnessAgentFactory {
     @Autowired(required = false)
     private TurnControlRegistry turnControlRegistry;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private TurnStopWatcher turnStopWatcher;
+
     /** OpenViking 记忆供给配置（agent.viking.*；未注册/未启用时 null → local 现状） */
     @Autowired(required = false)
     private io.agentmanager.framework.config.VikingConfig vikingConfig;
@@ -349,7 +352,7 @@ public class HarnessAgentFactory {
                 // (agent 实例, userId, sessionId) 登记到 TurnControlRegistry，供属主副本
                 // 的 TurnStopWatcher 调用 SDK 按会话 interrupt。order=3（最外层），
                 // 保证任何可能短路的中间件之前完成登记
-                .middleware(new TurnInterruptMiddleware(turnControlRegistry, sessionKeyResolver))
+                .middleware(new TurnInterruptMiddleware(turnControlRegistry, sessionKeyResolver, turnStopWatcher))
                 // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
                 .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）
