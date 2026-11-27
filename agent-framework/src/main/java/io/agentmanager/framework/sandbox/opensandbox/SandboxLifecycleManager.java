@@ -616,7 +616,7 @@ public class SandboxLifecycleManager {
                 if (pending.isPresent() && pending.get().createdAt() != null) {
                     confirmHolding = true;
                     holdExpires = java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
-                        .format(pending.get().createdAt().atZone(java.time.ZoneId.systemDefault())
+                        .format(pending.get().createdAt().atZone(java.time.ZoneOffset.UTC)
                             .toLocalDateTime().plusMinutes(config.confirmHoldMinutes()));
                 }
             }

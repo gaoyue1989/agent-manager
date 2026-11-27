@@ -110,7 +110,7 @@ class Pr732FallbackHardeningTest {
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
         var r1 = execResult(1, "", null);
-        when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(r1);
+        when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(r1);
         var r2 = execResult(1, "", null);
         when(commands.run("test -d '/skills-store'")).thenReturn(r2);
         var r3 = execResult(1, "", null);
@@ -136,7 +136,7 @@ class Pr732FallbackHardeningTest {
         var probeCmds = mock(Commands.class);
         var probeFiles = mock(Filesystem.class);
         var probeOk = execResult(0, "v-v100", null);
-        when(probeCmds.run("readlink '/skills-store/CURRENT'"))
+        when(probeCmds.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'"))
             .thenThrow(new RuntimeException("transient 502"))
             .thenReturn(probeOk);
         var linkOk = execResult(0, "", null);
@@ -245,7 +245,7 @@ class Pr732FallbackHardeningTest {
         var files = mock(Filesystem.class);
         when(commands.run(anyString())).thenAnswer(inv -> {
             String cmd = inv.getArgument(0);
-            if ("readlink '/skills-store/CURRENT'".equals(cmd)
+            if ("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'".equals(cmd)
                     || "test -d '/skills-store'".equals(cmd)
                     || SkillBundlePusher.probeCommand("/tmp/.skills-store").equals(cmd)) {
                 return execResult(1, "", null);
@@ -288,7 +288,7 @@ class Pr732FallbackHardeningTest {
         var files = mock(Filesystem.class);
         when(commands.run(anyString())).thenAnswer(inv -> {
             String cmd = inv.getArgument(0);
-            if ("readlink '/skills-store/CURRENT'".equals(cmd) || "test -d '/skills-store'".equals(cmd)) {
+            if ("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'".equals(cmd) || "test -d '/skills-store'".equals(cmd)) {
                 return execResult(1, "", null);
             }
             int rc = runSh(cmd);
@@ -321,7 +321,7 @@ class Pr732FallbackHardeningTest {
         var files = mock(Filesystem.class);
         when(commands.run(anyString())).thenAnswer(inv -> {
             String cmd = inv.getArgument(0);
-            if ("readlink '/skills-store/CURRENT'".equals(cmd)) {
+            if ("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'".equals(cmd)) {
                 return primaryReady.get() ? execResult(0, "v-v1", null) : execResult(1, "", null);
             }
             if ("test -d '/skills-store'".equals(cmd)) {
@@ -387,7 +387,7 @@ class Pr732FallbackHardeningTest {
             var p2 = execResult(1, "", null);
             var p3 = execResult(0, "", null);
             var p4 = execResult(0, "", null);
-            when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(p1);
+            when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(p1);
             when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(p2);
             when(commands.run(startsWith("set -e;"))).thenReturn(p3);
             when(commands.run(contains("ln -s '/tmp/.skills-store/CURRENT/alpha'"))).thenReturn(p4);
@@ -400,5 +400,87 @@ class Pr732FallbackHardeningTest {
         } finally {
             logger.detachAppender(appender);
         }
+    }
+
+    @Test
+    void issue746_buildExtractAndSwapCommandSupportsNonGnuMvAndVerifiesTargetDir() {
+        String cmd = SkillBundlePusher.buildExtractAndSwapCommand(
+            "/tmp/.skills-store", "v-abc", "abc", "u1", "/tmp/.skills-bundle.u1.tar.gz", 12L, null);
+        assertTrue(cmd.contains("[ ! -e \"$fb/$ver\" ] && mv \"$stg\" \"$fb/$ver\""));
+        assertTrue(cmd.contains("test -d \"$fb/$ver\""));
+        assertTrue(cmd.contains("test -L \"$fb/CURRENT\" && test -d \"$fb/CURRENT\""));
+        assertTrue(cmd.contains("{ rm -f \"$cur\"; ln -sfn \"$ver\" \"$fb/CURRENT\"; }"));
+    }
+
+    @Test
+    void issue754_fallbackStoreCollisionDetectionNormalizesTrailingSlashesAndNesting() {
+        assertTrue(OpenSandboxClientOptions.fallbackStoreCollidesWithPrimary("/var/skills", "/var/skills/"));
+        assertTrue(OpenSandboxClientOptions.fallbackStoreCollidesWithPrimary("/var/skills/sub", "/var/skills"));
+        assertTrue(OpenSandboxClientOptions.fallbackStoreCollidesWithPrimary("/var/skills", "/var/skills/sub"));
+        assertFalse(OpenSandboxClientOptions.fallbackStoreCollidesWithPrimary("/tmp/.skills-store", "/skills-store"));
+        assertFalse(OpenSandboxClientOptions.fallbackStoreCollidesWithPrimary("/tmp/.skills-store", "off"));
+    }
+
+    @Test
+    void issue757_tmpTarPathFollowsCustomFallbackStoreMount() {
+        assertEquals("/tmp/.skills-bundle.u1.tar.gz",
+            SkillBundlePusher.tmpTarPath("/tmp/.skills-store", "u1"));
+        assertEquals("/data/.skills-bundle.u1.tar.gz",
+            SkillBundlePusher.tmpTarPath("/data/skills-fallback", "u1"));
+    }
+
+    @Test
+    void issue747_hydrateThrowsWhenConvergeExitCodeIsNullAndDoesNotRecordFingerprint() {
+        var svc = mock(SkillBundleService.class);
+        when(svc.currentVersion()).thenReturn(
+            new SkillBundleService.SkillVersion("v1", 1, 1, 16L, List.of("alpha")));
+        var commands = mock(Commands.class);
+        var files = mock(Filesystem.class);
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            String cmd = inv.getArgument(0);
+            if ("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'".equals(cmd)) {
+                return execResult(0, "v-v1", null);
+            }
+            return execResult(null, "", null);
+        });
+        var spec = new OpenSandboxFilesystemSpec();
+        var farm = new SkillsFarm(pushOptions(svc, new SimpleMeterRegistry(), new Semaphore(2)),
+            mockSandbox("sbx-747", commands, files), null, spec, () -> "alice", () -> "sbx-747");
+
+        assertThrows(io.agentscope.harness.agent.sandbox.SandboxException.class, () -> farm.tryHydrate("scope-1"));
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-747", "scope-1",
+            OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM));
+    }
+
+    @Test
+    void issue748_partialCleanupAfterPushFailurePrunesOtherScopeFingerprints() throws Exception {
+        var svc = mock(SkillBundleService.class);
+        when(svc.currentVersion()).thenReturn(
+            new SkillBundleService.SkillVersion("v2", 1, 1, 2048L, List.of("alpha")));
+        when(svc.bundle("v2")).thenReturn(Optional.of(
+            new SkillBundleService.BundlePayload(2048L, "sha2", () -> new ByteArrayInputStream(new byte[1]))));
+        var commands = mock(Commands.class);
+        var files = mock(Filesystem.class);
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            String cmd = inv.getArgument(0);
+            if (cmd.contains("CURRENT")) {
+                return execResult(1, "", null);
+            }
+            return execResult(0, "", null);
+        });
+        var spec = new OpenSandboxFilesystemSpec();
+        spec.recordScopedSkillCacheFingerprint("sbx-748", "sess-a",
+            OpenSandboxFilesystemSpec.HYDRATE_MODE_PUSH, "v1|rev1");
+        spec.markHydratedScopedScope("sbx-748", "sess-a");
+        spec.skillSyncGate("alice", "sbx-748").setSkillFarmState(
+            new SkillSyncGate.SkillFarmState(SkillSyncGate.FarmMode.PUSH, "/tmp/.skills-store", Set.of()));
+        var opts = pushOptions(svc, new SimpleMeterRegistry(), new Semaphore(2))
+            .skillsFallbackMaxBytes(1024L);
+        var farm = new SkillsFarm(opts, mockSandbox("sbx-748", commands, files), null, spec,
+            () -> "alice", () -> "sbx-748");
+
+        assertTrue(farm.tryHydrate("sess-b"));
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-748", "sess-a",
+            OpenSandboxFilesystemSpec.HYDRATE_MODE_PUSH));
     }
 }

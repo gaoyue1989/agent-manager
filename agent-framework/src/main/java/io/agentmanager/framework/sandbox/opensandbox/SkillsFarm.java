@@ -163,15 +163,16 @@ final class SkillsFarm {
         }
         String fallbackStore = options.getSkillsFallbackStoreDir() == null
             ? "" : options.getSkillsFallbackStoreDir().trim();
-        if (!OpenSandboxClientOptions.isValidFallbackStoreDir(fallbackStore)) {
-            log.warn("[sandbox-open] skills fallback push disabled due to invalid store dir (store={})",
-                fallbackStore);
+        if (!OpenSandboxClientOptions.isValidFallbackStoreDir(fallbackStore)
+                || OpenSandboxClientOptions.fallbackStoreCollidesWithPrimary(fallbackStore, primaryStore)) {
+            log.warn("[sandbox-open] skills fallback push disabled due to invalid or colliding store dir (store={}, primary={})",
+                fallbackStore, primaryStore);
             return new FarmDecision(SkillSyncGate.FarmMode.NONE, null, "degraded_fallback_failed",
                 Set.of(), null, true);
         }
         if (snapshot.skills() != null && snapshot.skills().isEmpty()) {
             return new FarmDecision(SkillSyncGate.FarmMode.PUSH, fallbackStore, "fallback_push_hit",
-                captureL4SkillNames(uid));
+                captureL4SkillNames(uid), endpointVersion, true);
         }
         var outcome = pusher.ensureSynced(
             osbSandbox,
@@ -242,8 +243,8 @@ final class SkillsFarm {
 
     private StoreProbe probeStore(String store) {
         try {
-            var execution = osbSandbox.commands().run("readlink '" + store + "/CURRENT'");
-            if (execution == null || (execution.getError() != null && execution.getExitCode() == null)) {
+            var execution = osbSandbox.commands().run("readlink '" + store + "/CURRENT' && test -d '" + store + "/CURRENT'");
+            if (execution == null || execution.getExitCode() == null || execution.getError() != null) {
                 return new StoreProbe(null, false, true);
             }
             if (Integer.valueOf(0).equals(execution.getExitCode())) {
@@ -381,15 +382,22 @@ final class SkillsFarm {
                 options.getSkillsFallbackSemaphore(),
                 options.getSkillsFallbackAcquireTimeoutMs()
             );
-            logPushOutcome("version_bump", snapshot.version(), storeDir, outcome);
-            recordDecision(decisionResultFor(outcome.status()));
+            String origin = outcome.status() == SkillBundlePusher.Status.HIT ? "reconverge" : "version_bump";
+            logPushOutcome(origin, snapshot.version(), storeDir, outcome);
+            if (outcome.status() != SkillBundlePusher.Status.HIT) {
+                recordDecision(decisionResultFor(outcome.status()));
+            }
             if (!outcome.ready()) {
                 String pruneCmd = "find " + options.getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR
                     + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
                 String rmCmd = disabledRmCmd(scope, disabledNames, options.getWorkspaceRoot());
                 String partialCleanup = rmCmd.isEmpty() ? pruneCmd : pruneCmd + "; " + rmCmd;
                 try {
-                    osbSandbox.commands().run("{ " + partialCleanup + "; }");
+                    var cleanupExec = osbSandbox.commands().run("{ " + partialCleanup + "; }");
+                    if (cleanupExec != null && cleanupExec.getError() == null
+                            && Integer.valueOf(0).equals(cleanupExec.getExitCode())) {
+                        filesystemSpec.pruneScopedSkillCacheFingerprintsExcept(id, scope);
+                    }
                 } catch (Exception ignored) {
                     log.debug("[sandbox-open] partial cleanup after push failure ignored: {}", ignored.getMessage());
                 }
@@ -435,9 +443,15 @@ final class SkillsFarm {
         }
         String command = linkCmd.length() == 0 ? "{ " + cleanup + "; }" : linkCmd + " && { " + cleanup + "; }";
         var execution = osbSandbox.commands().run(command);
-        if (execution.getExitCode() != null && execution.getExitCode() != 0) {
+        if (execution == null || execution.getError() != null
+                || !Integer.valueOf(0).equals(execution.getExitCode())) {
+            String reason = execution == null
+                ? "null execution"
+                : (execution.getError() != null
+                    ? "error " + execution.getError().getValue()
+                    : "exit " + execution.getExitCode());
             throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
-                "hydrateSkillsFarm", "skills farm converge failed with exit " + execution.getExitCode(), null);
+                "hydrateSkillsFarm", "skills farm converge failed with " + reason, null);
         }
         filesystemSpec.recordScopedSkillCacheFingerprint(id, scope, hydrateMode, fingerprint);
         if (fingerprint != null) {
@@ -457,7 +471,7 @@ final class SkillsFarm {
             + " mkdir -p \"$fb/$ver\";"
             + " if [ -d \"$fb/CURRENT\" ] && [ ! -L \"$fb/CURRENT\" ]; then rm -rf \"$fb/CURRENT\"; fi;"
             + " ln -sfn \"$ver\" \"$cur\";"
-            + " mv -Tf \"$cur\" \"$fb/CURRENT\" 2>/dev/null || ln -sfn \"$ver\" \"$fb/CURRENT\";"
+            + " mv -Tf \"$cur\" \"$fb/CURRENT\" 2>/dev/null || { rm -f \"$cur\"; ln -sfn \"$ver\" \"$fb/CURRENT\"; };"
             + " active=$(readlink \"$fb/CURRENT\" 2>/dev/null || true); active=${active##*/};"
             + " find \"$fb\" -mindepth 1 -maxdepth 1 -type d -name 'v-*' ! -name \"$ver\" ! -name \"$active\""
             + " -exec rm -rf {} + 2>/dev/null || true; fi";

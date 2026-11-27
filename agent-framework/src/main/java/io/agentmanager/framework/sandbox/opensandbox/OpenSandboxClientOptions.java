@@ -67,6 +67,28 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
         return true;
     }
 
+    public static String normalizeStorePath(String dir) {
+        if (dir == null) {
+            return "";
+        }
+        String trimmed = dir.trim();
+        while (trimmed.length() > 1 && trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    public static boolean fallbackStoreCollidesWithPrimary(String fallbackDir, String primaryDir) {
+        String fb = normalizeStorePath(fallbackDir);
+        String primary = normalizeStorePath(primaryDir);
+        if (fb.isEmpty() || primary.isEmpty() || SKILLS_SHARED_STORE_OFF.equalsIgnoreCase(primary)) {
+            return false;
+        }
+        return fb.equals(primary)
+            || fb.startsWith(primary + "/")
+            || primary.startsWith(fb + "/");
+    }
+
     private String serverUrl;
     private String apiKey;
     private String image = "opensandbox/code-interpreter:v1.1.0";

@@ -90,13 +90,13 @@ class SkillsFarmFallbackTest {
             var files = mock(Filesystem.class);
             var registry = new SimpleMeterRegistry();
             if ("store_missing".equals(scenario)) {
-                var res1 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res1);
+                var res1 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(res1);
                 var res2 = execResult(1, ""); when(commands.run("test -d '/skills-store'")).thenReturn(res2);
             } else if ("daemon_endpoint_down".equals(scenario)) {
-                var res3 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res3);
+                var res3 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(res3);
                 var res4 = execResult(0, ""); when(commands.run("test -d '/skills-store'")).thenReturn(res4);
             } else {
-                var res5 = execResult(0, "v-old999"); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res5);
+                var res5 = execResult(0, "v-old999"); when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(res5);
             }
             var res6 = execResult(1, ""); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res6);
             var r_101 = execResult(0, ""); when(commands.run(startsWith("set -e;"))).thenReturn(r_101);
@@ -121,7 +121,7 @@ class SkillsFarmFallbackTest {
             new SkillBundleService.SkillVersion("v111", 1, 2, 100L, List.of("alpha")));
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res8 = execResult(0, "v-other"); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res8);
+        var res8 = execResult(0, "v-other"); when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(res8);
         var registry = new SimpleMeterRegistry();
         var opts = pushOptions(svc, registry).skillsFallbackOnVersionMismatch(false);
         var farm = new SkillsFarm(opts, mockSandbox(commands, files), null,
@@ -157,7 +157,7 @@ class SkillsFarmFallbackTest {
             new SkillBundleService.SkillVersion("emptyver", 0, 0, 0L, List.of()));
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res9 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res9);
+        var res9 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(res9);
         var res10 = execResult(1, ""); when(commands.run("test -d '/skills-store'")).thenReturn(res10);
         var res11 = execResult(0, ""); when(commands.run(startsWith("{ find "))).thenReturn(res11);
         var registry = new SimpleMeterRegistry();
@@ -178,7 +178,7 @@ class SkillsFarmFallbackTest {
             new SkillBundleService.SkillVersion("v200", 3, 6, 300L, List.of("alpha", "beta", "gamma")));
         var commands = mock(Commands.class);
         var files = mock(Filesystem.class);
-        var res12 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT'")).thenReturn(res12);
+        var res12 = execResult(1, ""); when(commands.run("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'")).thenReturn(res12);
         var res13 = execResult(1, ""); when(commands.run("test -d '/skills-store'")).thenReturn(res13);
         var res14 = execResult(0, "v-v200"); when(commands.run(SkillBundlePusher.probeCommand("/tmp/.skills-store"))).thenReturn(res14);
         var res15 = execResult(0, ""); when(commands.run(contains("ln -s '/tmp/.skills-store/CURRENT/alpha'"))).thenReturn(res15);
@@ -227,7 +227,7 @@ class SkillsFarmFallbackTest {
         var files = mock(Filesystem.class);
         when(commands.run(anyString())).thenAnswer(inv -> {
             String cmd = inv.getArgument(0);
-            if ("readlink '/skills-store/CURRENT'".equals(cmd)) {
+            if ("readlink '/skills-store/CURRENT' && test -d '/skills-store/CURRENT'".equals(cmd)) {
                 String v = primaryCurrent.get();
                 return v != null ? execResult(0, v) : execResult(1, "");
             }
