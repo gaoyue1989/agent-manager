@@ -402,6 +402,76 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 		}
 		OK(c, ver)
 	})
+	cg.GET("/workspaces/:ws/skill-center/:id/versions/:vid/content", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		vid, _ := strconv.ParseUint(c.Param("vid"), 10, 64)
+		content, err := core.GetSkillVersionContent(wsID, uint(id), uint(vid))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, gin.H{"content": content})
+	})
+	cg.PUT("/workspaces/:ws/skill-center/:id/versions/:vid/content", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		vid, _ := strconv.ParseUint(c.Param("vid"), 10, 64)
+		var in struct {
+			Content   string  `json:"content"`
+			Changelog *string `json:"changelog"`
+		}
+		if err := c.ShouldBindJSON(&in); err != nil {
+			Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		ver, err := core.UpdateSkillVersionContent(wsID, uint(id), uint(vid), in.Content, in.Changelog)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, ver)
+	})
+	cg.POST("/workspaces/:ws/skill-center/:id/versions/:vid/upload", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		vid, _ := strconv.ParseUint(c.Param("vid"), 10, 64)
+		fh, err := c.FormFile("file")
+		if err != nil {
+			Fail(c, http.StatusBadRequest, "file required: "+err.Error())
+			return
+		}
+		f, err := fh.Open()
+		if err != nil {
+			Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		defer f.Close()
+		ver, warnings, err := core.UploadSkillVersionZip(wsID, uint(id), uint(vid), fh.Filename, f, c.PostForm("changelog"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, gin.H{"version": ver, "warnings": warnings})
+	})
 	// 版本 zip 下载（zip 形态 PVC 打包；markdown 形态拼 SKILL.md 结构）
 	cg.GET("/workspaces/:ws/skill-center/:id/versions/:vid/download", func(c *gin.Context) {
 		wsID, _, err := wsCtx(c)

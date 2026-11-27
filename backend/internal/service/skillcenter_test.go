@@ -5,6 +5,7 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -620,5 +621,60 @@ func TestCreateSkillFromZipHardening626_627_628(t *testing.T) {
 	}
 	if sk3.Name != "skills" {
 		t.Fatalf("expected skills, got %q", sk3.Name)
+	}
+}
+
+func TestSkillVersionUploadZipAndUpdateContent(t *testing.T) {
+	core, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Name: "ws-ver-test", Slug: "ws-ver-test"}
+	if err := core.DB.Create(&ws).Error; err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	zipV1 := buildTestZip(map[string]string{
+		"SKILL.md": "---\nname: demo-ver\ndescription: v1 desc\n---\n# v1 body\n",
+	})
+	skill, _, err := core.CreateSkillFromZip(ws.ID, 1, "v1.zip", bytes.NewReader(zipV1), "demo-ver", "", "", nil, true)
+	if err != nil {
+		t.Fatalf("CreateSkillFromZip: %v", err)
+	}
+	vers, err := core.ListSkillVersions(ws.ID, skill.ID)
+	if err != nil || len(vers) != 1 {
+		t.Fatalf("ListSkillVersions: %v len=%d", err, len(vers))
+	}
+	pubVer := vers[0]
+	if _, err := core.UpdateSkillVersionContent(ws.ID, skill.ID, pubVer.ID, "nope", nil); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm editing published version, got %v", err)
+	}
+	draft, err := core.CreateSkillVersion(ws.ID, skill.ID, pubVer.ID, "1.0.1", "init draft")
+	if err != nil {
+		t.Fatalf("CreateSkillVersion: %v", err)
+	}
+	zipV2 := buildTestZip(map[string]string{
+		"SKILL.md":     "---\nname: demo-ver\ndescription: v2 desc\n---\n# v2 zip body\n",
+		"scripts/a.sh": "echo hi\n",
+	})
+	updated, _, err := core.UploadSkillVersionZip(ws.ID, skill.ID, draft.ID, "v2.zip", bytes.NewReader(zipV2), "upload v2 zip")
+	if err != nil {
+		t.Fatalf("UploadSkillVersionZip: %v", err)
+	}
+	if updated.Checksum == pubVer.Checksum {
+		t.Fatalf("expected checksum to change after uploading new zip")
+	}
+	gotContent, err := core.GetSkillVersionContent(ws.ID, skill.ID, draft.ID)
+	if err != nil || !strings.Contains(gotContent, "# v2 zip body") {
+		t.Fatalf("GetSkillVersionContent after zip upload: err=%v content=%q", err, gotContent)
+	}
+	cl := "edited markdown"
+	if _, err := core.UpdateSkillVersionContent(ws.ID, skill.ID, draft.ID, "# edited v2 body", &cl); err != nil {
+		t.Fatalf("UpdateSkillVersionContent: %v", err)
+	}
+	gotEdited, err := core.GetSkillVersionContent(ws.ID, skill.ID, draft.ID)
+	if err != nil || gotEdited != "# edited v2 body" {
+		t.Fatalf("GetSkillVersionContent after edit: err=%v content=%q", err, gotEdited)
+	}
+	pubContent, err := core.GetSkillVersionContent(ws.ID, skill.ID, pubVer.ID)
+	if err != nil || !strings.Contains(pubContent, "# v1 body") {
+		t.Fatalf("published version content must remain immutable, got err=%v content=%q", err, pubContent)
 	}
 }
