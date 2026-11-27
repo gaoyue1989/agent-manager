@@ -34,6 +34,14 @@ type McpToolInfo struct {
 // validatePermissions 三态权限声明强校验：仅接受对象形态 {"tools":{<tool>:"allow|ask|deny"}}。
 // *json.RawMessage 捕获的是原始字节——双重编码的字符串 token 在此直接拒绝而非静默修复
 // （带引号入库会让 agentgen 解析失败，生成包静默丢失 permissions 段）。
+func normalizeJSONObject(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "{}"
+	}
+	return trimmed
+}
+
 func validatePermissions(raw json.RawMessage) error {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
@@ -46,7 +54,7 @@ func validatePermissions(raw json.RawMessage) error {
 		return fmt.Errorf("%w: permissions must be an object {\"tools\":{...}}", ErrInvalidForm)
 	}
 	for tool, act := range perm.Tools {
-		if tool == "" {
+		if strings.TrimSpace(tool) == "" {
 			return fmt.Errorf("%w: permissions.tools has empty tool name", ErrInvalidForm)
 		}
 		switch act {
@@ -195,16 +203,8 @@ func (c *Core) CreateMcpConnector(workspaceID uint, in CreateMcpConnectorInput) 
 	} else {
 		m.ToolScope = `{"mode":"all"}`
 	}
-	if len(in.Permissions) > 0 {
-		m.Permissions = string(in.Permissions)
-	} else {
-		m.Permissions = "{}"
-	}
-	if len(in.DirectReturn) > 0 {
-		m.DirectReturn = string(in.DirectReturn)
-	} else {
-		m.DirectReturn = "{}"
-	}
+	m.Permissions = normalizeJSONObject(in.Permissions)
+	m.DirectReturn = normalizeJSONObject(in.DirectReturn)
 	if err := c.DB.Create(&m).Error; err != nil {
 		return nil, err
 	}
@@ -232,21 +232,47 @@ func (c *Core) UpdateMcpConnector(workspaceID, id uint, in PatchMcpConnectorInpu
 		return nil, ErrNotFound
 	}
 	updates := map[string]interface{}{}
-	if in.Name != nil && *in.Name != "" {
-		updates["name"] = *in.Name
+	if in.Name != nil {
+		name := strings.TrimSpace(*in.Name)
+		if name == "" {
+			return nil, fmt.Errorf("%w: name is required", ErrInvalidForm)
+		}
+		if utf8.RuneCountInString(name) > 64 {
+			return nil, fmt.Errorf("%w: name too long (max 64)", ErrInvalidForm)
+		}
+		if name != m.Name {
+			var cnt int64
+			if err := c.DB.Model(&store.McpConnector{}).
+				Where("workspace_id = ? AND name = ? AND id <> ?", workspaceID, name, m.ID).Count(&cnt).Error; err != nil {
+				return nil, err
+			}
+			if cnt > 0 {
+				return nil, fmt.Errorf("%w: duplicate_name", ErrDuplicateName)
+			}
+		}
+		updates["name"] = name
 	}
-	if in.Transport != nil && *in.Transport != "" {
-		updates["transport"] = *in.Transport
+	if in.Transport != nil {
+		transport := strings.TrimSpace(*in.Transport)
+		if transport != "sse" && transport != "streamable_http" {
+			return nil, fmt.Errorf("%w: invalid transport", ErrInvalidForm)
+		}
+		updates["transport"] = transport
 	}
-	if in.Endpoint != nil && *in.Endpoint != "" {
-		updates["endpoint"] = *in.Endpoint
-		updates["status"] = "unverified" // 目标变更需重新验证
+	if in.Endpoint != nil {
+		endpoint := strings.TrimSpace(*in.Endpoint)
+		if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+			return nil, fmt.Errorf("%w: endpoint must be http(s)", ErrInvalidForm)
+		}
+		updates["endpoint"] = endpoint
+		updates["status"] = "unverified"
 	}
 	if in.AuthType != nil && *in.AuthType != "" {
 		updates["auth_type"] = *in.AuthType
 	}
 	if in.AuthToken != nil {
 		updates["auth_token"] = *in.AuthToken
+		updates["status"] = "unverified"
 	}
 	if in.TimeoutSec != nil && *in.TimeoutSec > 0 {
 		updates["timeout_sec"] = *in.TimeoutSec
@@ -258,13 +284,13 @@ func (c *Core) UpdateMcpConnector(workspaceID, id uint, in PatchMcpConnectorInpu
 		if err := validatePermissions(*in.Permissions); err != nil {
 			return nil, err
 		}
-		updates["permissions"] = string(*in.Permissions)
+		updates["permissions"] = normalizeJSONObject(*in.Permissions)
 	}
 	if in.DirectReturn != nil {
 		if err := validateDirectReturn(*in.DirectReturn); err != nil {
 			return nil, err
 		}
-		updates["direct_return"] = string(*in.DirectReturn)
+		updates["direct_return"] = normalizeJSONObject(*in.DirectReturn)
 	}
 	if len(updates) > 0 {
 		if err := c.DB.Model(&m).Updates(updates).Error; err != nil {

@@ -296,3 +296,66 @@ func TestMcpListToolsDoesNotFollowRedirect(t *testing.T) {
 		t.Fatalf("redirect target must not be contacted, hits=%d", targetHits)
 	}
 }
+
+func TestMcpConnectorPermissionsNormalizeAndUpdateValidation(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Slug: "ws-mcp-norm", Name: "ws-mcp-norm"}
+	if err := c.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name:        "blank-tool",
+		Endpoint:    "http://mcp.local/sse",
+		Permissions: json.RawMessage(`{"tools":{"   ":"allow"}}`),
+	}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("whitespace tool name should fail with ErrInvalidForm, got %v", err)
+	}
+
+	v, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name:         "norm-null",
+		Endpoint:     "http://mcp.local/sse",
+		Permissions:  json.RawMessage("null"),
+		DirectReturn: json.RawMessage("null"),
+	})
+	if err != nil {
+		t.Fatalf("create with null permissions: %v", err)
+	}
+	if v.Permissions != "{}" || v.DirectReturn != "{}" {
+		t.Fatalf("expected {} normalized, got perm=%q dr=%q", v.Permissions, v.DirectReturn)
+	}
+
+	if err := c.DB.Model(&store.McpConnector{}).Where("id = ?", v.ID).Update("status", "verified").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	badTransport := "grpc"
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{Transport: &badTransport}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("invalid transport should fail, got %v", err)
+	}
+	badEndpoint := "ftp://bad.local"
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{Endpoint: &badEndpoint}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("invalid endpoint should fail, got %v", err)
+	}
+	longName := strings.Repeat("a", 65)
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{Name: &longName}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("overlong name should fail, got %v", err)
+	}
+
+	newTok := "tok-2"
+	nullPerm := json.RawMessage("null")
+	updated, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{
+		AuthToken:   &newTok,
+		Permissions: &nullPerm,
+	})
+	if err != nil {
+		t.Fatalf("update token + null perm: %v", err)
+	}
+	if updated.Status != "unverified" {
+		t.Fatalf("updating authToken must reset status to unverified, got %q", updated.Status)
+	}
+	if updated.Permissions != "{}" {
+		t.Fatalf("updating null permissions must normalize to {}, got %q", updated.Permissions)
+	}
+}

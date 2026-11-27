@@ -623,7 +623,7 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 			Fail(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		view, err := core.ToolCalls(int64(wsID), c.Query("range"))
+		view, err := core.ToolCalls(c.Request.Context(), int64(wsID), c.Query("range"))
 		if err != nil {
 			mapObservabilityError(c, err)
 			return
