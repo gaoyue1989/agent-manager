@@ -1,8 +1,7 @@
-/* ===== 应用入口：注册模块 + 初始化全局对象 ===== */
-
 import { Router } from './router.js';
 import { api } from './api.js';
 import { agui } from './agui.js';
+import { icon } from './icons.js';
 import * as state from './state.js';
 import * as utils from './utils.js';
 
@@ -19,17 +18,17 @@ import sandboxModule from '../modules/sandbox.js';
 import logsModule from '../modules/logs.js';
 
 const routes = {
-  '#/':          { title: 'Chat',      icon: '💬', module: chatModule },
-  '#/tools':     { title: 'Tools',     icon: '🔧', module: toolsModule },
-  '#/skills':    { title: 'Skills',    icon: '📚', module: skillsModule },
-  '#/mcp':       { title: 'MCP',       icon: '🔌', module: mcpModule },
-  '#/models':    { title: 'Models',    icon: '🤖', module: modelsModule },
-  '#/config':    { title: 'Config',    icon: '⚙️', module: configModule },
-  '#/memory':    { title: 'Memory',    icon: '🧠', module: memoryModule },
-  '#/database':  { title: 'Database',  icon: '🗄️', module: databaseModule },
-  '#/workspace': { title: 'Workspace', icon: '📁', module: workspaceModule },
-  '#/sandbox':   { title: 'Sandbox',   icon: '📦', module: sandboxModule },
-  '#/logs':      { title: 'Logs',      icon: '📋', module: logsModule }
+  '#/':          { title: 'Chat',      icon: 'chat',      group: 'Core',         module: chatModule },
+  '#/tools':     { title: 'Tools',     icon: 'tools',     group: 'Capabilities', module: toolsModule },
+  '#/skills':    { title: 'Skills',    icon: 'skills',    group: 'Capabilities', module: skillsModule },
+  '#/mcp':       { title: 'MCP',       icon: 'mcp',       group: 'Capabilities', module: mcpModule },
+  '#/models':    { title: 'Models',    icon: 'models',    group: 'Capabilities', module: modelsModule },
+  '#/config':    { title: 'Config',    icon: 'config',    group: 'Capabilities', module: configModule },
+  '#/memory':    { title: 'Memory',    icon: 'memory',    group: 'Runtime',      module: memoryModule },
+  '#/database':  { title: 'Database',  icon: 'database',  group: 'Runtime',      module: databaseModule },
+  '#/workspace': { title: 'Workspace', icon: 'workspace', group: 'Runtime',      module: workspaceModule },
+  '#/sandbox':   { title: 'Sandbox',   icon: 'sandbox',   group: 'Runtime',      module: sandboxModule },
+  '#/logs':      { title: 'Logs',      icon: 'logs',      group: 'Runtime',      module: logsModule }
 };
 
 const modal = {
@@ -42,27 +41,22 @@ const modal = {
   }
 };
 
-// 全局暴露（供内联 onclick 使用）
 window.App = { api, agui, state, utils, modal };
 
-// 工具分组折叠切换（供模块内联 onclick 使用）
 window.App.toolGroupToggle = (el) => {
   const group = el.closest('.tool-group');
   if (group) group.classList.toggle('open');
 };
 
-// 工具行折叠展开（供模块内联 onclick 使用）
 window.App.toolRowToggle = (el) => {
   el.classList.toggle('open');
 };
 
-// 远程子 agent 调用面板折叠切换（供模块内联 onclick 使用）
 window.App.remoteCallToggle = (headerEl) => {
   const panel = headerEl.closest('.remote-call');
   if (panel) panel.classList.toggle('open');
 };
 
-// 思维链块折叠切换（供模块内联 onclick 使用）
 window.App.thinkingToggle = (headerEl) => {
   const body = headerEl.nextElementSibling;
   const toggle = headerEl.querySelector('.thinking-toggle');
@@ -70,18 +64,29 @@ window.App.thinkingToggle = (headerEl) => {
   toggle.textContent = body.classList.contains('open') ? '▲' : '▼';
 };
 
-// LLM Call 条目折叠切换（供模块内联 onclick 使用）
 window.App.toggleLlmCall = (idx) => {
   const entry = document.getElementById('llm-entry-' + idx);
   if (entry) entry.classList.toggle('open');
 };
 
-// 弹窗遮罩点击关闭
 document.getElementById('modalOverlay').addEventListener('click', (e) => {
   if (e.target === e.target.closest('.modal-overlay')) modal.close();
 });
 
-// 初始化：主题 + 基础信息 + 启动路由
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const overlay = document.getElementById('modalOverlay');
+    if (overlay && overlay.classList.contains('active')) modal.close();
+  }
+});
+
+const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+if (mobileMenuBtn) mobileMenuBtn.innerHTML = icon('menu', 18);
+const sidebarToggle = document.getElementById('sidebarToggle');
+if (sidebarToggle) sidebarToggle.innerHTML = icon('sidebarToggle', 18);
+const monitorLink = document.getElementById('monitorLink');
+if (monitorLink) monitorLink.innerHTML = icon('monitor', 17);
+
 state.initTheme();
 state.loadAgentInfo();
 const router = new Router(routes);
