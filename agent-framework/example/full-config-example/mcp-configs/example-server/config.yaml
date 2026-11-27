@@ -27,8 +27,8 @@ connection:
   #   - stdio          : 本地子进程标准输入输出（需配置 command 与 args）
   type: streamableHttp
 
-  # [远程协议必填] MCP 服务端点 URL（支持 ${ENV_VAR} 占位符）
-  url: "${EXAMPLE_MCP_URL:http://example-mcp-server:8080/mcp}"
+  # [远程协议必填] MCP 服务端点 URL（直接填写具体 URL，不支持 ${ENV_VAR} 占位符）
+  url: "http://example-mcp-server:8080/mcp"
 
   # [stdio 协议必填] 启动命令与参数（远程协议可省略）
   # command: "npx"
@@ -45,7 +45,7 @@ connection:
 auth:
   # [可选] 静态 Bearer Token，将注入为 Authorization: Bearer <token>
   # 强烈建议通过 ${ENV_VAR} 引用 Secret 环境变量，勿明文提交
-  token: "${EXAMPLE_MCP_TOKEN:}"
+  token: "${EXAMPLE_MCP_TOKEN}"
 
 # ------------------------------------------------------------------------------
 # 用户身份与请求头透传配置（多租户 / 个人态 MCP 关键配置；stdio 传输会忽略 header 注入）
