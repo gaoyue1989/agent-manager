@@ -439,7 +439,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     if (r.currentGroup) return r.currentGroup;
     closeTextTail(r);
     const el = document.createElement('div');
-    el.className = 'tool-group open';
+    el.className = 'tool-group';
     el.innerHTML =
       '<div class="tool-group-header shimmer" onclick="window.App.toolGroupToggle(this)">' +
         '<span class="tg-arrow">▸</span> <span class="tg-title">Running tools...</span>' +
