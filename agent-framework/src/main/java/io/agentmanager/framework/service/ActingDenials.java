@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
@@ -17,6 +18,8 @@ import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultStartEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
+import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
@@ -31,6 +34,7 @@ public final class ActingDenials {
 
     private static final String EVENT_BRIDGE_KEY = "oaf.acting_denials.event_bridge";
     public static final String SUPPRESS_DIRECT_RETURN_KEY = "oaf.acting_denials.suppress_direct_return";
+    public static final String SUPPRESSED_DIRECT_RETURN_IDS_KEY = "oaf.acting_denials.suppressed_direct_return_ids";
 
     private static final class BridgeSlot {
         final ConcurrentLinkedQueue<AgentEvent> queue = new ConcurrentLinkedQueue<>();
@@ -154,22 +158,70 @@ public final class ActingDenials {
         if (allowed.isEmpty()) {
             return Flux.fromIterable(syntheticEvents);
         }
+        Set<String> suppressedIds = ConcurrentHashMap.newKeySet();
         Flux<AgentEvent> allowedFlux = Flux.defer(() -> {
             if (ctx != null) {
                 ctx.put(SUPPRESS_DIRECT_RETURN_KEY, Boolean.TRUE);
+                ctx.put(SUPPRESSED_DIRECT_RETURN_IDS_KEY, suppressedIds);
             }
-            return next.apply(new ActingInput(allowed));
+            return next.apply(new ActingInput(allowed))
+                .map(evt -> restoreSuppressedEndEvent(evt, suppressedIds))
+                .doOnComplete(() -> restoreSuppressedToolResults(state, suppressedIds));
         }).doFinally(sig -> {
             if (ctx != null) {
                 try {
                     var extra = ctx.getExtra();
                     if (extra != null) {
                         extra.remove(SUPPRESS_DIRECT_RETURN_KEY, Boolean.TRUE);
+                        extra.remove(SUPPRESSED_DIRECT_RETURN_IDS_KEY, suppressedIds);
                     }
                 } catch (UnsupportedOperationException ignored) {
                 }
             }
         });
         return Flux.concat(Flux.fromIterable(syntheticEvents), allowedFlux);
+    }
+
+    private static AgentEvent restoreSuppressedEndEvent(AgentEvent evt, Set<String> suppressedIds) {
+        if (evt instanceof ToolResultEndEvent end
+                && end.getState() == ToolResultState.ERROR
+                && end.getToolCallId() != null
+                && suppressedIds.contains(end.getToolCallId())) {
+            return new ToolResultEndEvent(
+                end.getReplyId(),
+                end.getToolCallId(),
+                end.getToolCallName(),
+                ToolResultState.SUCCESS);
+        }
+        return evt;
+    }
+
+    private static void restoreSuppressedToolResults(AgentState state, Set<String> suppressedIds) {
+        if (state == null || suppressedIds.isEmpty()) {
+            return;
+        }
+        List<Msg> msgs = state.contextMutable();
+        for (int i = 0; i < msgs.size(); i++) {
+            Msg msg = msgs.get(i);
+            if (msg == null || msg.getContent() == null) {
+                continue;
+            }
+            boolean changed = false;
+            List<ContentBlock> updated = new ArrayList<>(msg.getContent().size());
+            for (ContentBlock block : msg.getContent()) {
+                if (block instanceof ToolResultBlock tr
+                        && tr.getState() == ToolResultState.ERROR
+                        && tr.getId() != null
+                        && suppressedIds.contains(tr.getId())) {
+                    updated.add(tr.withState(ToolResultState.SUCCESS));
+                    changed = true;
+                } else {
+                    updated.add(block);
+                }
+            }
+            if (changed) {
+                msgs.set(i, msg.withContent(updated));
+            }
+        }
     }
 }

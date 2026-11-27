@@ -64,6 +64,16 @@ public final class DirectReturnMcpTool extends ToolBase {
                     + "nothing was presented to the user");
             }
             if (suppressDirectReturn) {
+                String callId = result.getId();
+                if ((callId == null || callId.isBlank()) && param != null && param.getToolUseBlock() != null) {
+                    callId = param.getToolUseBlock().getId();
+                }
+                if (callId != null && !callId.isBlank()
+                        && ctx.get(ActingDenials.SUPPRESSED_DIRECT_RETURN_IDS_KEY) instanceof java.util.Set<?> rawSet) {
+                    @SuppressWarnings("unchecked")
+                    java.util.Set<String> idSet = (java.util.Set<String>) rawSet;
+                    idSet.add(callId);
+                }
                 return result.withState(ToolResultState.ERROR);
             }
             return result;

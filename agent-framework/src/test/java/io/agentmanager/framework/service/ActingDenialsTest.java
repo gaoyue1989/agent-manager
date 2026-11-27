@@ -203,4 +203,48 @@ class ActingDenialsTest {
         org.junit.jupiter.api.Assertions.assertNull(ctx.get(ActingDenials.SUPPRESS_DIRECT_RETURN_KEY));
         org.mockito.Mockito.verify(toolkit, org.mockito.Mockito.never()).callTool(org.mockito.ArgumentMatchers.any());
     }
+
+    @Test
+    void denyRestoresSuppressedDirectReturnStateToSuccessInEventAndContext() {
+        var agent = org.mockito.Mockito.mock(io.agentscope.core.agent.Agent.class);
+        org.mockito.Mockito.when(agent.getName()).thenReturn("test-agent");
+        var ctx = newContext();
+        var state = ctx.getAgentState();
+        var deniedCall = io.agentscope.core.message.ToolUseBlock.builder().id("c-deny").name("bad_tool").build();
+        var allowedCall = io.agentscope.core.message.ToolUseBlock.builder().id("c-ok").name("direct_tool").build();
+        var input = new io.agentscope.core.middleware.ActingInput(java.util.List.of(deniedCall, allowedCall));
+
+        var events = ActingDenials.deny(
+            agent, ctx, input,
+            java.util.Set.of(deniedCall),
+            c -> "denied",
+            nextInput -> {
+                @SuppressWarnings("unchecked")
+                var ids = (java.util.Set<String>) ctx.get(ActingDenials.SUPPRESSED_DIRECT_RETURN_IDS_KEY);
+                ids.add("c-ok");
+                var tr = io.agentscope.core.message.ToolResultBlock.builder()
+                    .id("c-ok").name("direct_tool")
+                    .output(java.util.List.of(io.agentscope.core.message.TextBlock.builder().text("ok").build()))
+                    .state(io.agentscope.core.message.ToolResultState.ERROR)
+                    .build();
+                state.contextMutable().add(
+                    io.agentscope.core.tool.ToolResultMessageBuilder.buildToolResultMsg(tr, allowedCall, "test-agent"));
+                return reactor.core.publisher.Flux.just(
+                    new io.agentscope.core.event.ToolResultEndEvent("r1", "c-ok", "direct_tool",
+                        io.agentscope.core.message.ToolResultState.ERROR));
+            }
+        ).collectList().block();
+
+        var okEnd = events.stream()
+            .filter(e -> e instanceof io.agentscope.core.event.ToolResultEndEvent end && "c-ok".equals(end.getToolCallId()))
+            .map(e -> (io.agentscope.core.event.ToolResultEndEvent) e)
+            .findFirst().orElseThrow();
+        org.junit.jupiter.api.Assertions.assertEquals(io.agentscope.core.message.ToolResultState.SUCCESS, okEnd.getState());
+        var storedTr = state.contextMutable().stream()
+            .flatMap(m -> m.getContent().stream())
+            .filter(b -> b instanceof io.agentscope.core.message.ToolResultBlock tr && "c-ok".equals(tr.getId()))
+            .map(b -> (io.agentscope.core.message.ToolResultBlock) b)
+            .findFirst().orElseThrow();
+        org.junit.jupiter.api.Assertions.assertEquals(io.agentscope.core.message.ToolResultState.SUCCESS, storedTr.getState());
+    }
 }
