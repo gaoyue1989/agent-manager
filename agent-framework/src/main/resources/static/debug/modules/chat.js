@@ -74,29 +74,23 @@ function renderTemplate() {
         <h2 id="chatTitle">Chat</h2>
         <span class="status-text" id="connBadge"></span>
         <div class="chat-header-right">
+          <input id="uidInput" class="input uid-input" style="width:96px" type="text" spellcheck="false" title="User ID">
           <select id="modelSelect" class="input uid-input" title="Session model"></select>
+          <div class="seg">
+            <button id="modeA2A">A2A</button>
+            <button id="modeChannel" class="active">Channel</button>
+          </div>
           <button id="btnContextToggle" class="btn small ghost" title="Session Context">
             <span id="ctxIconSlot"></span>
             <span>Context</span>
             <span class="badge accent ctx-count" style="display:none"></span>
           </button>
           <div class="chat-tools-wrap">
-            <button id="btnDebugTools" class="btn small" title="Debug Controls">
+            <button id="btnDebugTools" class="btn small" title="More Controls">
               <span id="toolsIconSlot"></span>
-              <span>Tools</span>
+              <span>More</span>
             </button>
             <div id="chatToolsPopover" class="chat-tools-popover">
-              <div class="popover-row">
-                <span>User ID</span>
-                <input id="uidInput" class="input" type="text" spellcheck="false">
-              </div>
-              <div class="popover-row">
-                <span>Mode</span>
-                <div class="seg">
-                  <button id="modeA2A">A2A</button>
-                  <button id="modeChannel" class="active">Channel</button>
-                </div>
-              </div>
               <div class="popover-row">
                 <span>Protocol</span>
                 <select id="protoSelect" class="input">

@@ -710,7 +710,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
         ).join('') +
       '</div>' +
       '<div class="confirm-actions">' +
-        '<button class="btn danger small" data-act="deny">Deny</button>' +
+        '<button class="btn danger small" data-act="reject">Reject</button>' +
         '<button class="btn primary small" data-act="approve">Approve</button>' +
       '</div>';
 
@@ -719,7 +719,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       card.querySelectorAll('button').forEach((b) => { b.disabled = true; });
       onSubmitConfirm(calls, true);
     });
-    card.querySelector('[data-act="deny"]').addEventListener('click', () => {
+    card.querySelector('[data-act="reject"]').addEventListener('click', () => {
       card.classList.add('processing');
       card.querySelectorAll('button').forEach((b) => { b.disabled = true; });
       onSubmitConfirm(calls, false);
