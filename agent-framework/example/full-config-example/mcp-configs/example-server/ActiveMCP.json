@@ -1,0 +1,17 @@
+{
+  "_comment": "ActiveMCP.json 为可选工具子集过滤文件：仅 selectedTools 字段会被 McpToolRegistrar 读取，enabled=false 的工具不会注册到 Toolkit（LLM 不可见）。",
+  "selectedTools": [
+    {
+      "name": "query_metrics",
+      "enabled": true
+    },
+    {
+      "name": "export_report",
+      "enabled": true
+    },
+    {
+      "name": "delete_resource",
+      "enabled": false
+    }
+  ]
+}

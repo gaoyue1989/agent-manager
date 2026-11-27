@@ -391,7 +391,15 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_PROJECTION_ENABLED` | `true` | | 工作区投影开关（issue #27）：关闭后每次 sandbox start 不再 hydrate 投影目录（AGENTS.md/skills 等），降低每轮对话沙箱同步开销；skills 依赖强的包不要关 |
 | `SANDBOX_GUARD_ENABLED` | `true` | | 沙箱并发执行守卫（issue #27，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 slot 的沙箱获取，消解并发 hydrate 互踩/端口竞态触发面；锁粒度跟随 slot（2026-10-21，`sessionGranularLocks` 与 `SANDBOX_SESSION_AGENT_ISOLATION` 同源联动）：隔离开启（默认）时锁键=隔离键原值（Channel=每会话一个 slot，同会话互斥由 turn_lease 裁决），关闭时经 session_user 反查真实 userId 组键；Redis 不可用时 fail-open |
 | `SANDBOX_GUARD_LEASE_SECONDS` | `900` | | 守卫租约 TTL（崩溃自愈） |
-| `SANDBOX_PROJECTION_FINGERPRINT_CACHE` | `true` | | 投影新鲜度检查 stat 指纹缓存：指纹未变跳过 `WorkspaceProjectionApplier.build()`（省每次 call 全量读+sha256+堆内 tar，实测 4.5MB 工作区 17.9ms→3.2ms）；关闭=逐次全量 build（sandbox-skill-sync-optimization-design ①） |
+| `SANDBOX_SYNC_SKIP_PACKAGE_BASELINE` | `true` | | 沙箱同步跳过包基线文件回写，避免只读技能/包文件重复落库 |
+| `SKILLSYNC_BUNDLE_CACHE_DIR` | 空 | | 本地技能包打包缓存目录（空则走默认临时目录） |
+| `SANDBOX_SKILLS_SHARED_STORE` | `/skills-store` | | 沙箱内共享只读技能挂载根路径；设为 `off` 可主动关闸以触发降级通道 |
+| `SANDBOX_SKILLS_FALLBACK_MODE` | `push` | | 共享存储缺失/不可用时的技能同步降级模式：`push`（经 OpenSandbox 二进制流式推送至沙箱 store）\| `off`（禁用降级） |
+| `SANDBOX_SKILLS_FALLBACK_STORE_DIR` | `/tmp/.skills-store` | | `push` 降级模式写入沙箱内的目标根目录 |
+| `SANDBOX_SKILLS_FALLBACK_MAX_BYTES` | `67108864` | | `push` 降级单次技能包体积上限（字节，默认 64MiB） |
+| `SANDBOX_SKILLS_FALLBACK_MAX_CONCURRENCY` | `4` | | `push` 降级单副本并发推送信号量上限 |
+| `SANDBOX_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS` | `5000` | | `push` 降级获取并发信号量的等待超时（毫秒） |
+| `SANDBOX_SKILLS_FALLBACK_ON_VERSION_MISMATCH` | `true` | | 共享存储存在但技能版本指纹不匹配时是否触发 `push` 降级 |
 | `SANDBOX_SKILL_REVISION_GATE` | `true` | | L4 物化 revision 门控：KV 技能集 `/.revision` 未变且本沙箱代已物化 → 跳过全量物化（1 次 get 替代 list+glob+逐文件读，实测 36.5ms→0.3ms）；关闭=每 acquire 全量（设计 ③） |
 | `SANDBOX_SYNC_SNAPSHOT_DIFF` | `true` | | 沙箱回写快照差分：回写按 manifest（path+size）只读与快照不一致的容器文件（实测 449ms→64ms）；已知盲点=同字节数原位内容漂移不回写（设计 §7 接受）；关闭=每次全量读（设计 ②′） |
 | `SANDBOX_RUNTIME_READ_THROUGH` | `false` | | 记忆混合读穿（first-reasoning-memory-readthrough-design §3.1）：true 时跳过 KV 运行时文件（MEMORY.md/memory/，≈24MB 级）预热注入——记忆探测由 exec 翻译层回落 KV 点查应答（`baseStore.get`，不走 search 前缀扫描），真实命令访问记忆路径（含 `python3 -c` edit 形态）时先补注入再执行（语义与预热注入等价，防「模型盲写部分内容覆盖 KV 记忆」丢数据链）；容器空文件≠缺失（`__EMPTY__` 不回落 KV）；关闭=预热注入旧行为。**灰度约束：须一次翻完所有副本**——读穿 Pod 会置位 Pod 级 `SkillSyncGate.lastRuntimeInjected`，旧代码 Pod 复用 gate 跳过注入且无 KV 回落（设计 §5.4） |
@@ -450,6 +458,16 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_AGUI_*` | 见左 | | AG-UI 协议面（`/agui/runs` + 续传端点，`@ConditionalOnProperty` 装配）：`AGENT_AGUI_ENABLED`=`false` 总开关 / `AGENT_AGUI_EMIT_TOKEN_USAGE`=`true` / `AGENT_AGUI_EMIT_TOOL_CALL_ARGS`=`true` / `AGENT_AGUI_ENABLE_REASONING`=`true` / `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE`=`false`（application.yml `agent.agui` 段） |
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活共享缓存句柄，失联对句柄原地换芯（build+握手成功才 swap，存量会话免重注册自愈，issue #348）；缓存无句柄 compensate 补建；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
+| `AGENT_MEMORY_PROVIDER` | `local` | | 记忆后端提供方：`local`（本地/MySQL）\| `openviking`（OpenViking 语义记忆） |
+| `OPENVIKING_URL` | 空 | | OpenViking 服务地址（`AGENT_MEMORY_PROVIDER=openviking` 时配置） |
+| `OPENVIKING_ACCOUNT` | 空 | | OpenViking 租户/账号名 |
+| `OVK_ADMIN_KEY` | 空 | | OpenViking 管理员密钥（敏感键，走 Secret） |
+| `OVK_USER_SEED` | 空 | | OpenViking 用户 ID 派生种子 |
+| `OVK_SESSION_COMMIT` | `false` | | 是否异步归档会话消息到 OpenViking（与 `AGENT_MEMORY_ENABLED` 双开关门控） |
+| `OVK_MCP_SHARED_CONTEXT` | `false` | | 是否装配合成 `openviking` MCP 共享上下文工具 |
+| `OVK_SEARCH_TIMEOUT_MS` | `2000` | | OpenViking 检索超时（毫秒） |
+| `OVK_INJECT_CACHE_TTL_SECONDS` | `300` | | OpenViking 检索结果注入缓存 TTL（秒） |
+| `MANAGEMENT_SERVER_PORT` | `9091` | | Spring Boot Actuator 独立管理端口（暴露 `health,metrics,prometheus`） |
 
 > **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24；默认模型可配置，2026-10-22）**：`LLM_*` 是**系统模型**——
 > 未显式选择模型且未配置默认对话模型时的会话模型，同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**
