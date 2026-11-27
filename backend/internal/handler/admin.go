@@ -234,7 +234,7 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 
 	// 工具调用观测面板（全平台范围；tool-call-observability-design）
 	ad.GET("/observability/tool-calls", func(c *gin.Context) {
-		view, err := core.ToolCalls(0, c.Query("range"))
+		view, err := core.ToolCalls(c.Request.Context(), 0, c.Query("range"))
 		if err != nil {
 			mapObservabilityError(c, err)
 			return

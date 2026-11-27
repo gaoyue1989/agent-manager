@@ -75,9 +75,10 @@ type ToolCallServiceRow struct {
 
 // ToolCallTrendPoint 趋势分桶点。
 type ToolCallTrendPoint struct {
-	Bucket string  `json:"bucket"` // 桶起点（Prometheus UTC）
-	Calls  float64 `json:"calls"`
-	Errors float64 `json:"errors"`
+	Bucket    string  `json:"bucket"` // 桶起点（Prometheus UTC）
+	Timestamp string  `json:"timestamp,omitempty"`
+	Calls     float64 `json:"calls"`
+	Errors    float64 `json:"errors"`
 }
 
 // ToolCallRecent 最近调用明细行（多服务合并）。
@@ -101,7 +102,7 @@ type ToolCallStatsView struct {
 }
 
 // ToolCalls 工具调用观测聚合（workspaceID > 0 = 工作空间范围；0 = 全平台）。
-func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView, error) {
+func (c *Core) ToolCalls(reqCtx context.Context, workspaceID int64, rangeKey string) (*ToolCallStatsView, error) {
 	// range 先行校验（400 语义确定性，不依赖观测栈是否部署）；空缺省 24h
 	if rangeKey == "" {
 		rangeKey = "24h"
@@ -123,11 +124,13 @@ func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView
 		return emptyToolCallStats(rangeKey, r), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if reqCtx == nil {
+		reqCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(reqCtx, 15*time.Second)
 	defer cancel()
 	selector := promServiceSelector(services)
 
-	// ---- 汇总 / 排行 / 服务维度：instant 查询六发并行 ----
 	instant := map[string]string{
 		"totals":    fmt.Sprintf(`sum(increase(oaf_tool_calls_total{%s}[%s]))`, selector, r.Selector),
 		"errors":    fmt.Sprintf(`sum(increase(oaf_tool_calls_total{%s,result="error"}[%s]))`, selector, r.Selector),
@@ -137,7 +140,31 @@ func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView
 		"bySvcErr":  fmt.Sprintf(`sum by (service) (increase(oaf_tool_calls_total{%s,result="error"}[%s]))`, selector, r.Selector),
 	}
 	vectors := make(map[string][]promVector, len(instant))
-	promErr := fanOutQueries(ctx, c, instant, vectors)
+	end := time.Now().UTC()
+	start := end.Add(-time.Duration(r.Points-1) * r.Step)
+
+	var (
+		promErr     error
+		callsSeries promMatrixSeries
+		errsSeries  promMatrixSeries
+		trendErr    error
+		recent      []ToolCallRecent
+		fanWg       sync.WaitGroup
+	)
+	fanWg.Add(3)
+	go func() {
+		defer fanWg.Done()
+		promErr = fanOutQueries(ctx, c, instant, vectors)
+	}()
+	go func() {
+		defer fanWg.Done()
+		callsSeries, errsSeries, trendErr = c.trendSeries(ctx, selector, r, start, end)
+	}()
+	go func() {
+		defer fanWg.Done()
+		recent = c.recentToolCalls(ctx, services, 50)
+	}()
+	fanWg.Wait()
 	if promErr != nil {
 		return nil, errors.Join(ErrObservabilityDown, promErr)
 	}
@@ -179,19 +206,11 @@ func (c *Core) ToolCalls(workspaceID int64, rangeKey string) (*ToolCallStatsView
 	}
 	sort.SliceStable(view.ByService, func(i, j int) bool { return view.ByService[i].Calls > view.ByService[j].Calls })
 
-	// ---- 趋势：query_range 两发（step 即 rate 窗口），合并成完整桶序列 ----
-	// end 取当下不 Truncate：评估点 start+i*step 恰含进行中桶（Truncate 曾把 30d 档
-	// 当日 00:00 UTC 以来的全部数据丢掉，与 Totals instant 查询口径脱节）
-	end := time.Now().UTC()
-	start := end.Add(-time.Duration(r.Points-1) * r.Step)
-	callsSeries, errsSeries, err := c.trendSeries(ctx, selector, r, start, end)
-	if err != nil {
-		return nil, errors.Join(ErrObservabilityDown, err)
+	if trendErr != nil {
+		return nil, errors.Join(ErrObservabilityDown, trendErr)
 	}
 	view.Trend = buildTrendBuckets(start, r.Points, r.Step, callsSeries, errsSeries)
-
-	// 最近明细：fan-out 各 agent /debug/monitor/tools，合并按时间倒序取 50
-	view.Recent = c.recentToolCalls(services, 50)
+	view.Recent = recent
 	return view, nil
 }
 
@@ -243,7 +262,7 @@ func promServiceSelector(services []observabilityService) string {
 		names = append(names, regexp.QuoteMeta(s.metricLabel))
 	}
 	sort.Strings(names)
-	return `service=~"` + strings.Join(names, "|") + `"`
+	return "service=~" + strconv.Quote(strings.Join(names, "|"))
 }
 
 // fanOutQueries 并行执行 instant 查询集（单查询失败取第一个错误）。
@@ -272,20 +291,32 @@ func fanOutQueries(ctx context.Context, c *Core, queries map[string]string,
 	return first
 }
 
-// recentToolCalls 并行拉取各 agent 最近调用明细，合并倒序截断（单服务失败静默跳过）。
-func (c *Core) recentToolCalls(services []observabilityService, limit int) []ToolCallRecent {
+var observabilityRecentClient = &http.Client{Timeout: 5 * time.Second}
+
+const recentToolCallsMaxConcurrency = 8
+
+func (c *Core) recentToolCalls(ctx context.Context, services []observabilityService, limit int) []ToolCallRecent {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var all []ToolCallRecent
-	client := &http.Client{Timeout: 5 * time.Second}
+	sem := make(chan struct{}, recentToolCallsMaxConcurrency)
 	for _, s := range services {
-		if s.ClusterURL == "" {
+		if s.ClusterURL == "" || (s.Status != "" && s.Status != "running") {
 			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break
+		}
+		if ctx.Err() != nil {
+			break
 		}
 		wg.Add(1)
 		go func(s observabilityService) {
 			defer wg.Done()
-			rows, err := fetchAgentRecentCalls(client, s.ClusterURL)
+			defer func() { <-sem }()
+			rows, err := fetchAgentRecentCalls(ctx, observabilityRecentClient, s.ClusterURL)
 			if err != nil {
 				return
 			}
@@ -328,8 +359,13 @@ type agentRecentCall struct {
 	ResultState string
 }
 
-func fetchAgentRecentCalls(client *http.Client, clusterURL string) ([]agentRecentCall, error) {
-	resp, err := client.Get(strings.TrimSuffix(clusterURL, "/") + "/debug/monitor/tools?limit=50")
+func fetchAgentRecentCalls(ctx context.Context, client *http.Client, clusterURL string) ([]agentRecentCall, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(clusterURL, "/")+"/debug/monitor/tools?limit=50", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -358,17 +394,30 @@ func fetchAgentRecentCalls(client *http.Client, clusterURL string) ([]agentRecen
 func (c *Core) trendSeries(ctx context.Context, selector string, r toolCallRange,
 	start, end time.Time) (promMatrixSeries, promMatrixSeries, error) {
 	stepSec := strconv.Itoa(int(r.Step.Seconds()))
-	calls, err := c.promQueryRange(ctx,
-		fmt.Sprintf(`sum(increase(oaf_tool_calls_total{%s}[%s]))`, selector, stepSec+"s"),
-		start, end, r.Step)
-	if err != nil {
-		return promMatrixSeries{}, promMatrixSeries{}, err
+	var (
+		calls, errs     promMatrixSeries
+		callsErr, erErr error
+		wg              sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		calls, callsErr = c.promQueryRange(ctx,
+			fmt.Sprintf(`sum(increase(oaf_tool_calls_total{%s}[%s]))`, selector, stepSec+"s"),
+			start, end, r.Step)
+	}()
+	go func() {
+		defer wg.Done()
+		errs, erErr = c.promQueryRange(ctx,
+			fmt.Sprintf(`sum(increase(oaf_tool_calls_total{%s,result="error"}[%s]))`, selector, stepSec+"s"),
+			start, end, r.Step)
+	}()
+	wg.Wait()
+	if callsErr != nil {
+		return promMatrixSeries{}, promMatrixSeries{}, callsErr
 	}
-	errs, err := c.promQueryRange(ctx,
-		fmt.Sprintf(`sum(increase(oaf_tool_calls_total{%s,result="error"}[%s]))`, selector, stepSec+"s"),
-		start, end, r.Step)
-	if err != nil {
-		return promMatrixSeries{}, promMatrixSeries{}, err
+	if erErr != nil {
+		return promMatrixSeries{}, promMatrixSeries{}, erErr
 	}
 	return calls, errs, nil
 }
@@ -419,11 +468,12 @@ func (c *Core) promQueryRange(ctx context.Context, query string, start, end time
 }
 
 func (c *Core) promAPI(ctx context.Context, path string, q url.Values, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		strings.TrimSuffix(c.Cfg.PrometheusURL, "/")+path+"?"+q.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimSuffix(c.Cfg.PrometheusURL, "/")+path, strings.NewReader(q.Encode()))
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -473,9 +523,11 @@ func buildTrendBuckets(start time.Time, points int, step time.Duration,
 	errsAt := bucketValues(errs, start, step, points)
 	out := make([]ToolCallTrendPoint, points)
 	for i := 0; i < points; i++ {
+		t := start.Add(time.Duration(i) * step).UTC()
 		out[i] = ToolCallTrendPoint{
-			Bucket: start.Add(time.Duration(i) * step).Format("01-02 15:04"),
-			Calls:  callsAt[i], Errors: errsAt[i],
+			Bucket:    t.Format("01-02 15:04"),
+			Timestamp: t.Format(time.RFC3339),
+			Calls:     callsAt[i], Errors: errsAt[i],
 		}
 	}
 	return out
