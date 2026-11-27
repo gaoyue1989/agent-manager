@@ -1,11 +1,11 @@
-/* ===== Logs 模块：系统日志（内存 Appender） ===== */
-
 let ctx = null;
 let refreshTimer = null;
+let hasLoadedOnce = false;
 
 export default {
   mount(container, c) {
     ctx = c;
+    hasLoadedOnce = false;
     container.innerHTML = `
     <div class="module-page">
       <div class="module-header"><h2>Logs</h2>
@@ -19,37 +19,51 @@ export default {
         <span class="sub"><button class="btn small" id="btnReloadLogs">Refresh</button></span></div>
       <div class="module-scroll" id="logsBody" style="padding:8px 0"><div class="empty">Loading...</div></div>
     </div>`;
-    document.getElementById('btnReloadLogs').addEventListener('click', loadLogs);
-    document.getElementById('logLevel').addEventListener('change', loadLogs);
-    loadLogs();
-    refreshTimer = setInterval(loadLogs, 5000);
+    document.getElementById('btnReloadLogs').addEventListener('click', () => loadLogs(true));
+    document.getElementById('logLevel').addEventListener('change', () => loadLogs(true));
+    loadLogs(true);
+    refreshTimer = setInterval(() => loadLogs(false), 5000);
   },
   unmount() {
-    if (refreshTimer) clearInterval(refreshTimer);
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+    hasLoadedOnce = false;
     ctx = null;
   }
 };
 
-async function loadLogs() {
+async function loadLogs(forceScroll) {
   const body = document.getElementById('logsBody');
   if (!body) return;
   const level = document.getElementById('logLevel').value;
+  const prevScrollTop = body.scrollTop;
+  const wasNearBottom = forceScroll || !hasLoadedOnce
+    || (body.scrollHeight - body.scrollTop - body.clientHeight < 48);
   try {
     const data = await ctx.api.getLogs(level, 200);
-    if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
+    if (!ctx) return;
     const logs = data.logs || [];
     if (logs.length === 0) {
       body.innerHTML = '<div class="empty">No logs</div>';
+      hasLoadedOnce = true;
       return;
     }
-    body.innerHTML = logs.map((line) => {
+    const ordered = logs.slice().reverse();
+    body.innerHTML = ordered.map((line) => {
       const m = line.match(/\s(DEBUG|INFO|WARN|ERROR)\s/);
       const lv = m ? m[1] : '';
       return '<div class="log-line"><span class="lv-' + lv + '">' + ctx.utils.esc(line) + '</span></div>';
     }).join('');
-    body.scrollTop = body.scrollHeight;
+    hasLoadedOnce = true;
+    if (wasNearBottom) {
+      body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = prevScrollTop;
+    }
   } catch (e) {
-    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
+    if (!ctx) return;
     body.innerHTML = '<div class="empty error-text">Failed to load logs: ' + ctx.utils.esc(e.message) + '</div>';
   }
 }

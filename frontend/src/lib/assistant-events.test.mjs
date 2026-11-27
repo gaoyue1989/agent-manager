@@ -234,3 +234,32 @@ test("directReturnOrderTracker preserves [text, image, text, image] order and is
   assert.equal(isSafeInlineImageUrl("//evil.example/files/a.png"), false);
   assert.equal(isSafeInlineImageUrl("/agent/my-bot/files/../secret"), false);
 });
+
+test("isSafeFileDownloadUrl enforces safe protocols and relative file paths", async () => {
+  const { isSafeFileDownloadUrl } = await import("./assistant-events.ts");
+  assert.equal(isSafeFileDownloadUrl("https://example.com/report.pdf"), true);
+  assert.equal(isSafeFileDownloadUrl("http://example.com/report.pdf"), true);
+  assert.equal(isSafeFileDownloadUrl("HTTPS://example.com/report.pdf"), true);
+  assert.equal(isSafeFileDownloadUrl("/files/report.pdf"), true);
+  assert.equal(isSafeFileDownloadUrl("/files/report.pdf?download=1"), true);
+  assert.equal(isSafeFileDownloadUrl("/agent/my-bot/files/f1"), true);
+  assert.equal(isSafeFileDownloadUrl("data:image/png;base64,AAA="), false);
+  assert.equal(isSafeFileDownloadUrl("data:text/html,<script>alert(1)</script>"), false);
+  assert.equal(isSafeFileDownloadUrl("javascript:alert(1)"), false);
+  assert.equal(isSafeFileDownloadUrl("JAVASCRIPT:alert(1)"), false);
+  assert.equal(isSafeFileDownloadUrl("vbscript:msgbox(1)"), false);
+  assert.equal(isSafeFileDownloadUrl("//evil.example/files/a.pdf"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/../secret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%2e%2e/internal/secret"), false);
+  assert.equal(isSafeFileDownloadUrl("/agent/a1/files/%2e%2e/threads"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%2e%2e%2fsecret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%5csecret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%ZZbad"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/report%20v1.pdf"), true);
+  assert.equal(isSafeFileDownloadUrl("/agent/my-bot/files/../secret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/"), false);
+  assert.equal(isSafeFileDownloadUrl("/other/path"), false);
+  assert.equal(isSafeFileDownloadUrl(""), false);
+  assert.equal(isSafeFileDownloadUrl(null), false);
+  assert.equal(isSafeFileDownloadUrl(undefined), false);
+});

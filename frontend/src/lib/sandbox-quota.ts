@@ -160,6 +160,22 @@ export function validateCapacityForm(f: CapacityForm): string | null {
   return null;
 }
 
+export function validateCapacitySpec(p: {
+  poolMin: number;
+  bufferMin: number;
+  bufferMax: number;
+  poolMax: number;
+}): string | null {
+  for (const k of ["poolMin", "bufferMin", "bufferMax", "poolMax"] as const) {
+    const v = p[k];
+    if (!Number.isInteger(v) || v < 0) return `容量四值必须为非负整数（${k}）`;
+  }
+  if (!(p.poolMin <= p.bufferMin && p.bufferMin <= p.bufferMax && p.bufferMax <= p.poolMax)) {
+    return "自动池容量须满足 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax";
+  }
+  return null;
+}
+
 /** 容量表单 → 上游四键（校验通过后调用） */
 export function capacityFromForm(f: CapacityForm): { bufferMin: number; bufferMax: number; poolMin: number; poolMax: number } {
   return {

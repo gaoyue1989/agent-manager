@@ -343,69 +343,87 @@ public class SandboxLifecycleManager {
             // 死 → 守卫式删除 + 计数递减；不可判定 → 保守视为活但无句柄（不删、不可作 victim）
             record Candidate(SandboxBindingStore.BindingRow row, Sandbox handle) {}
             List<Candidate> candidates = new ArrayList<>();
-            for (var row : live) {
-                var probe = connector.probe(row.sandboxId());
-                switch (probe.state()) {
-                    case ALIVE -> candidates.add(new Candidate(row, probe.handle()));
-                    case DEAD -> {
-                        boolean deleted = bindingStore.deleteByIdGuarded(row.id(), row.sessionId(),
-                            row.updatedAt());
-                        if (deleted) {
-                            emit("lazy_delete", row.sandboxId(),
-                                "sid=" + row.sessionId() + " reason=probe_404");
+            Sandbox handedOff = null;
+            try {
+                for (var row : live) {
+                    var probe = connector.probe(row.sandboxId());
+                    switch (probe.state()) {
+                        case ALIVE -> candidates.add(new Candidate(row, probe.handle()));
+                        case DEAD -> {
+                            boolean deleted = bindingStore.deleteByIdGuarded(row.id(), row.sessionId(),
+                                row.updatedAt());
+                            if (deleted) {
+                                emit("lazy_delete", row.sandboxId(),
+                                    "sid=" + row.sessionId() + " reason=probe_404");
+                            }
+                        }
+                        case UNKNOWN -> {
+                            log.warn("[sandbox-lifecycle] probe unknown, conservatively alive (sid={}, sandbox={})",
+                                row.sessionId(), row.sandboxId());
+                            candidates.add(new Candidate(row, null));
                         }
                     }
-                    case UNKNOWN -> {
-                        log.warn("[sandbox-lifecycle] probe unknown, conservatively alive (sid={}, sandbox={})",
-                            row.sessionId(), row.sandboxId());
-                        candidates.add(new Candidate(row, null));
+                }
+                int count = bindingStore.recomputeCount(userKey);
+                if (config.userQuota() <= 0 || count < config.userQuota()) {
+                    log.info("[sandbox-lifecycle] quota recomputed to {}, retry acquire (sid={}, user={})",
+                        count, sessionId, userKey);
+                    emit("quota_recompute", null, "user=" + userKey + " count=" + count);
+                    return null;
+                }
+                List<Candidate> idle = new ArrayList<>();
+                for (var c : candidates) {
+                    if (c.handle() != null && !busy(c.row())) {
+                        idle.add(c);
+                    }
+                }
+                if (idle.isEmpty()) {
+                    continue;
+                }
+                var victim = idle.stream()
+                    .min(Comparator.comparing(c -> c.row().expiresAt()))
+                    .orElseThrow();
+                boolean rebound = bindingStore.rebind(victim.row().id(), victim.row().sessionId(),
+                    sessionId, victim.row().updatedAt());
+                if (!rebound) {
+                    emit("rebind_lost", victim.row().sandboxId(), "sid=" + sessionId);
+                    if (bindingStore.findBySessionId(sessionId).isPresent()) {
+                        return null;
+                    }
+                    continue;
+                }
+                String renewedExpiresAt = null;
+                try {
+                    var renewResp = victim.handle().renew(Duration.ofSeconds(ttlSeconds()));
+                    if (renewResp != null && renewResp.getExpiresAt() != null) {
+                        renewedExpiresAt = renewResp.getExpiresAt().toString();
+                    }
+                } catch (Exception renewFail) {
+                    log.warn("[sandbox-lifecycle] victim renew failed (sandbox={}): {}",
+                        victim.row().sandboxId(), renewFail.getMessage());
+                }
+                if (renewedExpiresAt != null) {
+                    bindingStore.touchExpiresAt(victim.row().sandboxId(), renewedExpiresAt);
+                } else {
+                    bindingStore.heartbeat(victim.row().sandboxId());
+                }
+                OpenSandbox wrapped = reuseWrapper.wrap(victim.handle(), victim.row().sandboxId());
+                handedOff = victim.handle();
+                registry.acquireRef(victim.row().sandboxId(), sessionId, ttlSeconds(),
+                    renewer(victim.handle()));
+                emit("lru_reuse", victim.row().sandboxId(), "sid=" + sessionId
+                    + " victim_sid=" + victim.row().sessionId());
+                return wrapped;
+            } finally {
+                for (var c : candidates) {
+                    if (c.handle() != null && c.handle() != handedOff) {
+                        try {
+                            c.handle().close();
+                        } catch (Exception ignored) {
+                        }
                     }
                 }
             }
-            // b. 锚行锁内重算（不变量成立）→ 有额度回 ② 重试 CAS
-            int count = bindingStore.recomputeCount(userKey);
-            if (config.userQuota() <= 0 || count < config.userQuota()) {
-                log.info("[sandbox-lifecycle] quota recomputed to {}, retry acquire (sid={}, user={})",
-                    count, sessionId, userKey);
-                emit("quota_recompute", null, "user=" + userKey + " count=" + count);
-                return null;
-            }
-            // c. busy/idle 判定（双事实源）；仅句柄可用的行可作 victim（UNKNOWN 行不可连接）
-            List<Candidate> idle = new ArrayList<>();
-            for (var c : candidates) {
-                if (c.handle() != null && !busy(c.row())) {
-                    idle.add(c);
-                }
-            }
-            if (idle.isEmpty()) {
-                continue;   // 本轮全忙（可能是在途 touch 造成的瞬时态）：下一轮重试
-            }
-            // LRU = 距过期最近（执行中持续续期，expires_at 最小 ≈ 最久未使用）
-            var victim = idle.stream()
-                .min(Comparator.comparing(c -> c.row().expiresAt()))
-                .orElseThrow();
-            boolean rebound = bindingStore.rebind(victim.row().id(), victim.row().sessionId(),
-                sessionId, victim.row().updatedAt());
-            if (!rebound) {
-                // 他副本抢先，或受害会话在途 ① touch / P3 占位写先行提交（乐观校验拦截）→ 整个 ⑤ 重试
-                emit("rebind_lost", victim.row().sandboxId(), "sid=" + sessionId);
-                continue;
-            }
-            // renew 顶到当前 TTL + 服务端绝对 expiresAt 回填（binding_count 不变：同 user 内转移）
-            String expiresAt = serverNowPlusTtl();
-            try {
-                expiresAt = victim.handle().renew(Duration.ofSeconds(ttlSeconds()))
-                    .getExpiresAt().toString();
-            } catch (Exception renewFail) {
-                log.warn("[sandbox-lifecycle] victim renew failed (sandbox={}): {}",
-                    victim.row().sandboxId(), renewFail.getMessage());
-            }
-            bindingStore.touchExpiresAt(victim.row().sandboxId(), expiresAt);
-            registry.acquireRef(victim.row().sandboxId(), sessionId, ttlSeconds(),
-                renewer(victim.handle()));
-            emit("lru_reuse", victim.row().sandboxId(), "sid=" + sessionId
-                + " victim_sid=" + victim.row().sessionId());
-            return reuseWrapper.wrap(victim.handle(), victim.row().sandboxId());
         }
         // ⑤ 重试耗尽仍全忙 → 异常面（§4.6：SSE error / chat 预检 409）
         List<SandboxBindingStore.BindingRow> live =
@@ -583,7 +601,7 @@ public class SandboxLifecycleManager {
      */
     private String serverNowPlusTtl() {
         return java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
-            .format(java.time.LocalDateTime.now().plusSeconds(ttlSeconds()));
+            .format(java.time.LocalDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(ttlSeconds()));
     }
 
     /** 视图组装：confirm_holding 判定 + 保留窗剩余（§4.3 state 区分，前端卡片据此给建议） */
@@ -598,7 +616,7 @@ public class SandboxLifecycleManager {
                 if (pending.isPresent() && pending.get().createdAt() != null) {
                     confirmHolding = true;
                     holdExpires = java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME
-                        .format(pending.get().createdAt().atZone(java.time.ZoneId.systemDefault())
+                        .format(pending.get().createdAt().atZone(java.time.ZoneOffset.UTC)
                             .toLocalDateTime().plusMinutes(config.confirmHoldMinutes()));
                 }
             }

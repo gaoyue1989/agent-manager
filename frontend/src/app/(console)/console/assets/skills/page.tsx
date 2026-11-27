@@ -157,9 +157,62 @@ function SkillDetailDrawer({ ws, detail, onClose, writable, onChanged, setMsg }:
   onChanged: () => void; setMsg: (m: string) => void;
 }) {
   const [versions, setVersions] = useState<SkillVersionRec[]>(detail.versions);
+  const [editingVer, setEditingVer] = useState<SkillVersionRec | null>(null);
+  const [editMode, setEditMode] = useState<"zip" | "content">("content");
+  const [editContent, setEditContent] = useState("");
+  const [editChangelog, setEditChangelog] = useState("");
+  const [editFile, setEditFile] = useState<File | null>(null);
+  const [editLoading, setEditLoading] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editErr, setEditErr] = useState<string | null>(null);
   const { skill, referencingAgents } = detail;
   const reloadVersions = async () => {
     try { setVersions(await api.console.skillCenter.versions(ws, skill.id)); } catch { /* 保持现状 */ }
+  };
+  const openVersionEditor = async (v: SkillVersionRec, mode: "zip" | "content") => {
+    setEditingVer(v);
+    setEditMode(mode);
+    setEditChangelog(v.changelog || "");
+    setEditFile(null);
+    setEditErr(null);
+    if (mode === "content") {
+      setEditLoading(true);
+      try {
+        const res = await api.console.skillCenter.versionContent(ws, skill.id, v.id);
+        setEditContent(res.content || "");
+      } catch (e) {
+        setEditErr((e as Error).message);
+      } finally {
+        setEditLoading(false);
+      }
+    }
+  };
+  const saveVersionEdit = async () => {
+    if (!editingVer) return;
+    setEditSaving(true);
+    setEditErr(null);
+    try {
+      if (editMode === "zip") {
+        if (!editFile) throw new Error("请选择新的 zip 技能包");
+        const res = await api.console.skillCenter.uploadVersionZip(ws, skill.id, editingVer.id, editFile, editChangelog.trim() || undefined);
+        const warnNote = res.warnings?.length ? `（告警 ${res.warnings.length} 条：${res.warnings.join("；")}）` : "";
+        setMsg(`版本 ${editingVer.version} 已更新 zip 包${warnNote}`);
+      } else {
+        if (!editContent.trim()) throw new Error("SKILL.md 正文不能为空");
+        await api.console.skillCenter.updateVersionContent(ws, skill.id, editingVer.id, {
+          content: editContent,
+          changelog: editChangelog.trim() || undefined,
+        });
+        setMsg(`版本 ${editingVer.version} 内容已保存`);
+      }
+      setEditingVer(null);
+      await reloadVersions();
+      onChanged();
+    } catch (e) {
+      setEditErr((e as Error).message);
+    } finally {
+      setEditSaving(false);
+    }
   };
   const act = async (fn: () => Promise<unknown>, ok: string) => {
     try { await fn(); setMsg(ok); await reloadVersions(); onChanged(); }
@@ -201,13 +254,52 @@ function SkillDetailDrawer({ ws, detail, onClose, writable, onChanged, setMsg }:
                       {writable && (v.status === "published" || v.status === "offline") && (
                         <Btn sm kind="pri" onClick={() => { const nv = prompt(`基于 ${v.version} 创建新版本（语义化版本，回车默认 ${bumpPatch(v.version)}）`, bumpPatch(v.version)); if (nv) act(() => api.console.skillCenter.createVersion(ws, skill.id, { baseVersionId: v.id, version: nv, changelog: `基于 ${v.version} 派生` }), `新版本 ${nv} 已创建（草稿）`); }}>创建新版本</Btn>
                       )}
-                      {writable && (v.status === "draft") && <Btn sm kind="pri" onClick={() => act(() => api.console.skillCenter.versionAction(ws, skill.id, v.id, "publish"), `版本 ${v.version} 已发布`)} data-testid={`skill-publish-${v.version}`}>发布</Btn>}
+                      {writable && v.status === "draft" && (
+                        <>
+                          <Btn sm onClick={() => openVersionEditor(v, "zip")} data-testid={`skill-upload-zip-${v.version}`}>上传 zip</Btn>
+                          <Btn sm onClick={() => openVersionEditor(v, "content")} data-testid={`skill-edit-content-${v.version}`}>编辑内容</Btn>
+                          <Btn sm kind="pri" onClick={() => act(() => api.console.skillCenter.versionAction(ws, skill.id, v.id, "publish"), `版本 ${v.version} 已发布`)} data-testid={`skill-publish-${v.version}`}>发布</Btn>
+                        </>
+                      )}
                     </div></td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            {writable && <div className="mt-2 text-[11px] text-gray-400">Markdown 定义的技能可经「编辑」更新工作区草稿（列表行编辑入口）；zip 形态修正 = 基于发布版创建新版本。</div>}
+            {editingVer && writable && (
+              <div className="mt-3 space-y-2.5 rounded-lg border border-blue-200 bg-blue-50/40 p-3 text-xs" data-testid="skill-version-editor">
+                <div className="flex items-center justify-between">
+                  <b className="text-blue-900">
+                    {editMode === "zip" ? `上传新 zip 覆盖草稿 ${editingVer.version}` : `编辑草稿 ${editingVer.version} 内容（SKILL.md）`}
+                  </b>
+                  <Btn sm onClick={() => setEditingVer(null)}>取消</Btn>
+                </div>
+                {editErr && <div className="rounded border border-red-200 bg-red-50 px-2.5 py-1.5 text-red-700">{editErr}</div>}
+                {editMode === "zip" ? (
+                  <div>
+                    <input type="file" accept=".zip" onChange={(e) => setEditFile(e.target.files?.[0] ?? null)} data-testid="skill-version-zip-input"
+                      className="w-full rounded border border-gray-300 bg-white p-1.5 text-xs" />
+                    <div className="mt-1 text-[11px] text-gray-500">上传后将替换该草稿版本的技能包文件，已发布历史版本保持不可变。</div>
+                  </div>
+                ) : editLoading ? (
+                  <div className="py-3 text-center text-gray-400">正在加载 SKILL.md 内容…</div>
+                ) : (
+                  <textarea rows={10} value={editContent} onChange={(e) => setEditContent(e.target.value)} data-testid="skill-version-content-input"
+                    className="w-full rounded border border-gray-300 bg-white p-2 font-mono text-xs" placeholder="输入 SKILL.md 正文" />
+                )}
+                <div>
+                  <input value={editChangelog} onChange={(e) => setEditChangelog(e.target.value)} data-testid="skill-version-changelog-input"
+                    className="w-full rounded border border-gray-300 bg-white px-2 py-1.5 text-xs" placeholder="变更说明（可选）" />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Btn sm onClick={() => setEditingVer(null)}>取消</Btn>
+                  <Btn sm kind="pri" disabled={editSaving || editLoading} onClick={saveVersionEdit} data-testid="skill-version-save-btn">
+                    {editSaving ? "保存中…" : (editMode === "zip" ? "上传替换" : "保存草稿")}
+                  </Btn>
+                </div>
+              </div>
+            )}
+            {writable && <div className="mt-2 text-[11px] text-gray-400">正式版本不可变；点击「创建新版本」生成草稿后，可直接「上传 zip」替换整包或「编辑内容」修改 SKILL.md，再点击「发布」。</div>}
           </div>
 
           <div>

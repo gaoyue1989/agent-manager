@@ -57,6 +57,9 @@ public class SessionModelMiddleware implements MiddlewareBase {
     @Override
     public Flux<AgentEvent> onModelCall(Agent agent, RuntimeContext ctx, ModelCallInput input,
                                         Function<ModelCallInput, Flux<AgentEvent>> next) {
+        if (ctx != null && ctx.get(PresetAnswerMiddleware.PresetAnswer.class) != null) {
+            return next.apply(input);
+        }
         var target = resolveSessionModel(ctx);
         var fallback = modelCatalog != null ? modelCatalog.resolveFallback() : Optional.<Model>empty();
         if (target == null) {

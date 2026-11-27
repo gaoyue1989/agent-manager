@@ -206,14 +206,18 @@ func (f *FS) ExtractZipTo(rel string, zi *ZipInfo) (int, int64, string, error) {
 			src.Close()
 			return 0, 0, "", err
 		}
-		n, err := io.Copy(out, src)
+		n, err := io.Copy(out, io.LimitReader(src, MaxExtracted-total+1))
 		src.Close()
 		out.Close()
 		if err != nil {
 			return 0, 0, "", err
 		}
-		count++
 		total += n
+		if total > MaxExtracted {
+			_ = os.RemoveAll(dest)
+			return 0, 0, "", ErrExtractTooLarge
+		}
+		count++
 	}
 	return count, total, zi.Checksum, nil
 }
@@ -421,14 +425,18 @@ func (f *FS) WriteZipTo(rel string, zipData []byte) (int, int64, error) {
 			src.Close()
 			return 0, 0, err
 		}
-		n, err := io.Copy(out, src)
+		n, err := io.Copy(out, io.LimitReader(src, MaxExtracted-total+1))
 		src.Close()
 		out.Close()
 		if err != nil {
 			return 0, 0, err
 		}
-		count++
 		total += n
+		if total > MaxExtracted {
+			_ = os.RemoveAll(dest)
+			return 0, 0, ErrExtractTooLarge
+		}
+		count++
 	}
 	return count, total, nil
 }

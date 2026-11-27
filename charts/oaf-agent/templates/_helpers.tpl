@@ -79,6 +79,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else -}}
 {{- fail "ingress.mode 只能是 host 或 router" -}}
 {{- end -}}
+{{- if and (eq .Values.ingress.mode "router") (eq (include "oaf-agent.tlsEnabled" . | trim) "true") -}}
+{{- fail "ingress.mode=router 时不支持配置 ingress.tls（router 模式由共享路由器终止 TLS）" -}}
+{{- end -}}
 {{- if and (eq (include "oaf-agent.tlsEnabled" . | trim) "true") (not (include "oaf-agent.tlsSecret" .)) -}}
 {{- fail "ingress.tls.enabled=true 时 ingress.tls.secretName 必填（TLS 证书 Secret）" -}}
 {{- end -}}

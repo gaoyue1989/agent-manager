@@ -2476,7 +2476,7 @@ class OpenSandboxTest {
         bindFarmSession(sandbox, "sess-A");
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
-        verify(osb.commands()).run("readlink '" + FARM_STORE + "/CURRENT'");
+        verify(osb.commands()).run("readlink '" + FARM_STORE + "/CURRENT' && test -d '" + FARM_STORE + "/CURRENT'");
         verify(osb.commands(), never()).run(startsWith("test -d "));
         var converge = farmConvergeCommands(osb);
         assertEquals(1, converge.size(), "农场收敛为单条 exec");

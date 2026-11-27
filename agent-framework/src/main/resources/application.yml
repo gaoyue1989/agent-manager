@@ -105,7 +105,6 @@ agent:
     projection-enabled: ${SANDBOX_PROJECTION_ENABLED:true}
     guard-enabled: ${SANDBOX_GUARD_ENABLED:true}
     guard-lease-seconds: ${SANDBOX_GUARD_LEASE_SECONDS:900}
-    projection-fingerprint-cache-enabled: ${SANDBOX_PROJECTION_FINGERPRINT_CACHE:true}
     skill-revision-gate-enabled: ${SANDBOX_SKILL_REVISION_GATE:true}
     sync-snapshot-diff-enabled: ${SANDBOX_SYNC_SNAPSHOT_DIFF:true}
     # 包内基线跳过（P1-5）：容器技能与包内基线清单+大小一致时不回写 L4——L4 只存用户真实覆盖，
@@ -127,6 +126,14 @@ agent:
     # 平台表单可送达（平台 env 写路径空串=删除，置空送不出）；空串 = 直改 CM/Deployment
     # 场景。经池 extraEnv 覆盖 SKILLSYNC_STORE_DIR 时必须同值改本键
     skills-shared-store: ${SANDBOX_SKILLS_SHARED_STORE:/skills-store}
+    # 无镜像依赖降级（Push-to-Store，docs/design/sandbox-skills-sync-fallback-design-261127.md）：
+    # push = 标准镜像无 skills-syncd 或 egress 断网/错版时由服务端流式推入独立目录并复用软链农场；off = 回到 PR-4b 行为
+    skills-fallback-mode: ${SANDBOX_SKILLS_FALLBACK_MODE:push}
+    skills-fallback-store-dir: ${SANDBOX_SKILLS_FALLBACK_STORE_DIR:/tmp/.skills-store}
+    skills-fallback-max-bytes: ${SANDBOX_SKILLS_FALLBACK_MAX_BYTES:67108864}
+    skills-fallback-max-concurrency: ${SANDBOX_SKILLS_FALLBACK_MAX_CONCURRENCY:4}
+    skills-fallback-acquire-timeout-ms: ${SANDBOX_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS:5000}
+    skills-fallback-on-version-mismatch: ${SANDBOX_SKILLS_FALLBACK_ON_VERSION_MISMATCH:true}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}

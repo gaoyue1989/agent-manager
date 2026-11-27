@@ -76,6 +76,18 @@ func dropPlatformInjectedEnv(env map[string]string, secretKeys []string) (map[st
 	return env, out
 }
 
+func (c *Core) preserveLegacyOpenVikingEnv(oldPlain, plain map[string]string) {
+	if c.Viking != nil || plain[AgentMemoryProviderEnv] == MemoryProviderLocal {
+		return
+	}
+	if v := oldPlain[OpenVikingURLEnv]; v != "" {
+		plain[OpenVikingURLEnv] = v
+	}
+	if v := oldPlain[OpenVikingAccountEnv]; v != "" {
+		plain[OpenVikingAccountEnv] = v
+	}
+}
+
 // VikingAdmin OpenViking Admin API 客户端（root key 身份）。nil = 平台未启用 OpenViking。
 type VikingAdmin struct {
 	baseURL string

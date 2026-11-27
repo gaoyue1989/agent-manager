@@ -75,13 +75,20 @@ public class ScopedFingerprintStore {
      *
      * @return 现役 scope；槽缺失/不可用/未装配返回 null（未知，调用方不得据此清除本地信念）
      */
-    public String slotScope(String sandboxId) {
+    public record SlotEntry(String scope, String value) {}
+
+    public SlotEntry slotEntry(String sandboxId) {
         String slot = slot(sandboxId);
         if (slot == null) {
             return null;
         }
         int sep = slot.indexOf('|');
-        return sep < 0 ? null : slot.substring(0, sep);
+        return sep < 0 ? null : new SlotEntry(slot.substring(0, sep), slot.substring(sep + 1));
+    }
+
+    public String slotScope(String sandboxId) {
+        SlotEntry entry = slotEntry(sandboxId);
+        return entry == null ? null : entry.scope();
     }
 
     /**

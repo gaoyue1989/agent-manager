@@ -1,0 +1,126 @@
+# ==============================================================================
+# MCP Server 配置文件（mcp-configs/<server>/config.yaml 全量字段示例）
+# 说明：
+#   1. 由 agent-framework 的 McpToolRegistrar.java 在启动或 /admin/reload 时扫描加载
+#   2. 支持 ${ENV_VAR} 占位符从环境变量注入敏感 Token 或动态地址
+#   3. 同目录可放置 ActiveMCP.json（可选，用于通过 selectedTools 按工具粒度裁剪注册列表）
+# ==============================================================================
+
+# [可选] MCP 服务名称（仅用于日志与 /mcp 列表展示，注册名取自 AGENTS.md mcpServers[].server）
+server: example-server
+
+# [可选] 厂商/命名空间
+vendor: example-vendor
+
+# [可选] MCP 服务版本
+version: "1.0.0"
+
+# ------------------------------------------------------------------------------
+# 连接配置（【必需】缺失整段则该 server 不注册；openviking 合成 server 例外，支持 permissions-only）
+# 支持 sse（默认）/ streamableHttp / http（别名）/ stdio 四种传输方式
+# ------------------------------------------------------------------------------
+connection:
+  # [必填] 传输协议类型：
+  #   - sse            : Server-Sent Events（默认）
+  #   - streamableHttp : Streamable HTTP（新版 MCP 推荐远程协议）
+  #   - http           : 同 streamableHttp 别名
+  #   - stdio          : 本地子进程标准输入输出（需配置 command 与 args）
+  type: streamableHttp
+
+  # [远程协议必填] MCP 服务端点 URL（直接填写具体 URL，不支持 ${ENV_VAR} 占位符）
+  url: "http://example-mcp-server:8080/mcp"
+
+  # [stdio 协议必填] 启动命令与参数（远程协议可省略）
+  # command: "npx"
+  # args:
+  #   - "-y"
+  #   - "@example/mcp-server"
+
+  # [注意] connection.timeout 字段当前会被解析但不会生效；
+  #        实际 HTTP 超时由部署环境变量 AGENT_HTTP_*_TIMEOUT_SECONDS 控制。
+
+# ------------------------------------------------------------------------------
+# 认证配置（向远端 MCP Server 发起连接初始化与 tools/list 时携带的静态 Bearer 凭证）
+# ------------------------------------------------------------------------------
+auth:
+  # [可选] 静态 Bearer Token，将注入为 Authorization: Bearer <token>
+  # 强烈建议通过 ${ENV_VAR} 引用 Secret 环境变量，勿明文提交
+  token: "${EXAMPLE_MCP_TOKEN}"
+
+# ------------------------------------------------------------------------------
+# 用户身份与请求头透传配置（多租户 / 个人态 MCP 关键配置；stdio 传输会忽略 header 注入）
+# ------------------------------------------------------------------------------
+userHeaders:
+  # [可选] 注入到发往 MCP Server 的 HTTP Header 映射（右侧为取值源）：
+  #   - userId                   : 当前登录用户 ID（同时随 CallToolRequest._meta 下传）
+  #   - reqHeader:<小写头名>     : 从 chat/confirm/AG-UI 入站 HTTP 请求透传指定 Header 原值
+  #                                （平台 denylist 头如 cookie/x-forwarded-*/sec-* 会被自动剔除）
+  headers:
+    X-User-Id: userId
+    X-Trace-Id: "reqHeader:x-request-id"
+    X-Tenant-Id: "reqHeader:x-tenant-id"
+
+  # [可选] 自动注入到 MCP 工具调用 params.arguments 中的隐藏参数映射
+  # 适用于下游工具只从 arguments 取参数、且不希望由 LLM 自行填写的场景：
+  #   - 仅当工具 inputSchema 声明了该属性或允许追加时注入（args-win：显式参数优先，仅补缺）
+  #   - 缺值恒跳过，不触发 fail-closed；注入值恒为字符串
+  arguments:
+    operator_id: userId
+    tenant_id: "reqHeader:x-tenant-id"
+
+  # [可选] 当 userId 或指定 reqHeader 缺失时的处理策略（仅作用于 headers 节）：
+  #   - deny        : 拒绝本次工具调用并返回鉴权错误（默认，fail-closed）
+  #   - passthrough : 跳过缺失字段，继续透传调用（A2A/子 agent 无入站头场景建议配置）
+  on-missing: deny
+
+# ------------------------------------------------------------------------------
+# MCP 工具权限控制（与 AGENTS.md 中 config.permission 协同生效）
+# 评估顺序：Deny -> Ask -> Allow -> mode 兜底；MCP 显式规则优先于 AGENTS.md 同名声明
+# ------------------------------------------------------------------------------
+permissions:
+  # [可选] 是否强制将该 server 下所有工具以只读方式注册（默认 false）
+  # ⚠️ 注意：设为 true 会短路 HITL 人工确认，切勿与下方 ask 权限混用！
+  read_only: false
+
+  # [可选] 按 MCP 远端工具裸名逐项声明三态权限：allow（放行）| ask（人工确认）| deny（拒绝）
+  tools:
+    query_metrics: allow
+    export_report: ask
+    delete_resource: deny
+
+# ------------------------------------------------------------------------------
+# 工具结果直返配置（Direct Return）
+# 命中列表的工具执行成功后，SDK 直接短路 ReAct 循环，将工具输出原样作为最终回复返回前端
+# 失败 / DENIED / 被中断 / 空内容 / 与普通工具同批调用时不会短路，结果仍回喂模型
+# ------------------------------------------------------------------------------
+direct_return:
+  # [可选] 远端工具裸名列表（与 permissions 正交）
+  tools:
+    - export_report
+
+# ------------------------------------------------------------------------------
+# MCP Apps / UI 渲染配置（静态声明工具对应的前端交互卡片资源）
+# ------------------------------------------------------------------------------
+ui:
+  # [可选] 普通工具名 -> ui:// 资源 URI 映射（必须为 ui:// scheme）
+  tools:
+    render_dashboard: "ui://example-server/dashboard.html"
+
+  # [可选] 仅限前端卡片交互调用、对 LLM 隐藏（不注册进 Toolkit）的工具名 -> ui:// URI 映射
+  app_only:
+    refresh_widget_state: "ui://example-server/dashboard.html"
+
+  # [可选] 前端沙箱 iframe 渲染该 MCP UI 时允许放行的 CSP 域名白名单
+  csp:
+    connect_domains:
+      - "https://api.example.com"
+    resource_domains:
+      - "https://cdn.example.com"
+
+# ------------------------------------------------------------------------------
+# 启动依赖策略
+# ------------------------------------------------------------------------------
+startup:
+  # [可选] 默认 false（fail-soft：连接失败仅告警跳过，不影响 Agent 启动）；
+  #        设为 true 表示启动阶段强依赖该 MCP，连接失败则中止启动（fail-fast）
+  required: false

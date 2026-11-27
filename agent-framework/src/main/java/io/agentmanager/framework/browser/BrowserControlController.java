@@ -103,7 +103,7 @@ public class BrowserControlController {
             return Flux.just(errorFrame("control_store_unavailable: " + e.getMessage()));
         }
         var request = new ChatStreamController.ChatRequest(RESUME_MESSAGE, owner,
-            sid, null, null, null, null);
+            sid, null, null, null, null, null);
         log.info("[browser-control] release accepted, resuming agent turn (sid={})", sid);
         Flux<ServerSentEvent<String>> stream;
         try {

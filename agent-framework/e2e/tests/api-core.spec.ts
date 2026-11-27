@@ -1277,9 +1277,11 @@ test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
 // 合并语义（同名 L4 覆盖描述/独有补入/X-User-Id 头优先/删除回落）此前只有单测覆盖，
 // e2e HTTP 黑盒面零断言（grep skills/available|parse-refs 于 tests/ 零命中）。
 
-/** 写入用户 L4 技能主文件：description 承载 /available 合并视图的覆盖描述（l4Description 解析 frontmatter） */
-async function putL4(request: APIRequestContext, uid: string, name: string, description: string): Promise<APIResponse> {
-  const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
+/** 写入用户 L4 技能主文件：description/displayName 承载 /available 合并视图的覆盖值（l4Brief 解析 frontmatter） */
+async function putL4(request: APIRequestContext, uid: string, name: string, description: string,
+                     displayName?: string): Promise<APIResponse> {
+  const dn = displayName ? `displayName: ${displayName}\n` : '';
+  const content = `---\nname: ${name}\ndescription: ${description}\n${dn}---\n\n# ${name}\n`;
   return request.put(`/skills/users/${encodeURIComponent(name)}`, {
     headers: { 'X-User-Id': uid },
     data: { content }
@@ -1291,12 +1293,14 @@ const nameSorted = (arr: unknown) =>
   (arr as Array<Record<string, string>>).slice().sort((a, b) => (a.name < b.name ? -1 : 1));
 
 test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、Header 优先、删除回落', async ({ request }) => {
-  // 旧行为基线（不传 userId）：全局启用目录的 name+description 精简视图（SkillCatalogService.availableSkills()）
+  // 旧行为基线（不传 userId）：全局启用目录的 name+description+displayName 精简视图（SkillCatalogService.availableSkills()）
   const baseline = await (await request.get('/skills/available')).json() as Array<Record<string, string>>;
   expect(Array.isArray(baseline)).toBe(true);
-  for (const e of baseline) expect(Object.keys(e).sort()).toEqual(['description', 'name']);
+  for (const e of baseline) expect(Object.keys(e).sort()).toEqual(['description', 'displayName', 'name']);
   const baseDemo = baseline.find(e => e.name === 'demo-skill');
   expect(baseDemo, 'fixture 目录应含 demo-skill（fixtures/agent-config/skills）').toBeTruthy();
+  // displayName 取 SKILL.md frontmatter（中文显示名），未声明为空串
+  expect(baseDemo!.displayName).toBe('演示技能');
   // 空串 userId 等价不传（effectiveUserId blank → 全局目录）
   expect(nameSorted(await (await request.get('/skills/available?userId=')).json()))
     .toEqual(nameSorted(baseline));
@@ -1317,7 +1321,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
   const putBody = await putDemo.json() as Record<string, unknown>;
   expect(putBody.action).toBe('created');
   expect(Number(putBody.version)).toBeGreaterThan(0);
-  expect(((await (await putL4(request, uidA, l4Only, onlyMarker)).json()) as Record<string, unknown>).action).toBe('created');
+  expect(((await (await putL4(request, uidA, l4Only, onlyMarker, '独有中文名')).json()) as Record<string, unknown>).action).toBe('created');
   // uidB 写入必须显式断言成功：否则下方「X-User-Id 优先」的负向断言（hdr 不含 markerB）
   // 在 PUT 失败时自然成立，头部优先级实际未被行使（假绿窗口，SK1 注释所防的静默合入形态）
   const putB = await putL4(request, uidB, 'demo-skill', markerB);
@@ -1328,6 +1332,9 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
   const merged = await (await request.get(`/skills/available?userId=${encodeURIComponent(uidA)}`)).json() as Array<Record<string, string>>;
   expect(merged.find(e => e.name === 'demo-skill')?.description).toBe(markerA);
   expect(merged.find(e => e.name === l4Only)?.description).toBe(onlyMarker);
+  expect(merged.find(e => e.name === l4Only)?.displayName).toBe('独有中文名');
+  // displayName 与 description 同源覆盖：L4 SKILL.md 未声明 displayName → 空串（不混用全局基线）
+  expect(merged.find(e => e.name === 'demo-skill')?.displayName).toBe('');
 
   // X-User-Id 头优先于 ?userId=（网关注入登录态优先）：返回 A 的视图且不混入 B 的 L4
   const hdr = await (await request.get('/skills/available', { headers: { 'X-User-Id': uidA }, params: { userId: uidB } })).json() as Array<Record<string, string>>;
@@ -1832,6 +1839,145 @@ test('CX6 删除会话级联清理上下文行，不留孤儿', async () => {
   const own = await sessionContext(sid, BASE, U);
   expect(own.status).toBe(200);
   expect(own.body.totalChars).toBe(0);
+});
+
+test('PA1 新会话预置轮：首帧 session_created；答案逐字下发；零 token 且不触达真实模型；标题照常由标题模型生成', async ({ request }) => {
+  const answer = `今天共有三条要闻。\n1. PA1-ANSWER-${uniq()}\n2. 第二条`;
+  const question = `[E2E:plain]今日头条有哪些？ PA1-QUESTION-${uniq()}`;
+
+  const stream = chat({ presetTurn: { question, answer }, userId: U });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type, JSON.stringify(stream.terminal)).toBe('done');
+
+  const types = stream.frames.map(f => f.type);
+  expect(types[0]).toBe('session_created');
+  const sid = String((stream.frames[0] as Record<string, unknown>).session_id);
+  expect(types).toContain('AGENT_START');
+  expect(types).toContain('MODEL_CALL_START');
+  expect(types).toContain('AGENT_END');
+  expect(textOf(stream.frames)).toBe(answer);
+  const end = stream.frames.find(f => f.type === 'AGENT_END') as Record<string, unknown>;
+  expect(end.usage, '对本地预置模型的一次调用，token 用量为 0').toMatchObject({
+    input_tokens: 0, output_tokens: 0, total_tokens: 0, model_calls: 1 });
+
+  const titleCalls = await pollUntil(async () => (await llmStats()).calls
+    .filter(c => c.scenario !== 'background-synth' && JSON.stringify(c.dialogue ?? []).includes(question)),
+    calls => calls.length === 1, 15_000);
+  expect(titleCalls[0].roles).toEqual(['system', 'user']);
+  expect(String(titleCalls[0].systemContent)).not.toContain('## AgentStateStore Context');
+  expect(await agentTurnCalls('plain'), '预置轮不得触达真实模型').toEqual([]);
+
+  const traced = await pollUntil(async () => {
+    const res = await request.get(`/threads/${sid}/llm-calls`, { headers: userHeaders(U) });
+    return await res.json() as { calls: Array<{ request: { model: string }; response: { usage: { total_tokens: number } } }> };
+  }, body => body.calls.length === 1, 15_000);
+  expect(traced.calls[0].request.model, '服务端调用记录应标注为预置模型').toBe('preset-answer');
+  expect(traced.calls[0].response.usage.total_tokens).toBe(0);
+
+  const generated = await pollUntil(async () => {
+    const res = await request.get(`/threads?userId=${encodeURIComponent(U)}`);
+    const rows = await res.json() as Array<Record<string, unknown>>;
+    return rows.find(row => row.session_id === sid);
+  }, row => typeof row?.title === 'string' && row.title.length > 0);
+  expect(generated?.title, '标题应来自标题模型（mock 的 plain 夹具），而非问题首行回退').toBe('端到端链路畅通，测试正常');
+
+  const h = await history(sid, BASE, U);
+  const msgs = h.messages as Array<Record<string, unknown>>;
+  expect(msgs.map(m => m.role)).toEqual(['user', 'assistant']);
+  expect(msgs[0].content).toBe(question);
+  expect(msgs[1].content).toBe(answer);
+  expect(msgs[0]).not.toHaveProperty('preset');
+  expect(msgs[1]).not.toHaveProperty('preset');
+});
+
+test('PA2 预置问答即对话历史：后续真实提问的模型请求携带这组问答；history 为普通用户/助手消息', async () => {
+  const sid = sessionIdFor(`pa2-${uniq()}`);
+  const question = `[E2E:plain]今日头条有哪些？ PA2-Q-${uniq()}`;
+  const answer = `今天共有三条要闻：PA2-A-${uniq()}`;
+  const followUpText = '第二条要闻的细节是什么？';
+
+  const preset = chat({ presetTurn: { question, answer }, userId: U, sessionId: sid });
+  await waitTerminal(preset);
+  expect(preset.terminal?.type, JSON.stringify(preset.terminal)).toBe('done');
+
+  const followUp = chat({ message: followUpText, userId: U, sessionId: sid });
+  await waitTerminal(followUp);
+  expect(followUp.terminal?.type, JSON.stringify(followUp.terminal)).toBe('done');
+  expect(textOf(followUp.frames), '预置只作用于发起它的那一轮，后续轮次必须由真实模型作答')
+    .toBe('端到端链路畅通，测试正常。');
+
+  const calls = await pollUntil(() => agentTurnCalls('plain'), found => found.length === 1, 15_000);
+  expect(calls[0].dialogue).toEqual([
+    { role: 'user', text: question },
+    { role: 'assistant', text: answer },
+    { role: 'user', text: followUpText },
+  ]);
+
+  const h = await history(sid, BASE, U);
+  const msgs = h.messages as Array<Record<string, unknown>>;
+  expect(msgs.map(m => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+  expect(msgs[0].content).toBe(question);
+  expect(msgs[1].content).toBe(answer);
+  expect(msgs[1]).not.toHaveProperty('preset');
+
+  const conn = await openDb();
+  try {
+    const [rows] = await conn.query(
+      "SELECT role FROM session_message WHERE session_id LIKE CONCAT(?, ':%') ORDER BY id", [sid]);
+    expect((rows as Array<{ role: string }>).map(r => r.role),
+      '预置答案必须进入归档表且与对话顺序一致，否则历史合并会把它排到末尾').toEqual(['USER', 'ASSISTANT', 'USER', 'ASSISTANT']);
+  } finally { await conn.end(); }
+});
+
+test('PA3 参数校验：问题或答案空白、与 message 或 fileIds 并存均返回 error 帧；不启动轮次、不调模型、不认领会话', async () => {
+  const sid = sessionIdFor(`pa3-${uniq()}`);
+  const turn = { question: '今日头条有哪些？', answer: '今天共有三条要闻。' };
+  const rejected: Array<{ opts: Parameters<typeof chat>[0]; code: string }> = [
+    { opts: { presetTurn: { question: '  ', answer: turn.answer } }, code: 'preset_turn_invalid' },
+    { opts: { presetTurn: { question: turn.question, answer: '' } }, code: 'preset_turn_invalid' },
+    { opts: { presetTurn: turn, message: '你好' }, code: 'preset_turn_conflict' },
+    { opts: { presetTurn: turn, fileIds: ['f-pa3-not-exist'] }, code: 'preset_turn_conflict' },
+  ];
+  for (const { opts, code } of rejected) {
+    const stream = chat({ ...opts, userId: U, sessionId: sid });
+    await waitTerminal(stream);
+    expect(stream.terminal?.type, `${code}: ${JSON.stringify(stream.frames)}`).toBe('error');
+    expect(JSON.stringify(stream.terminal)).toContain(code);
+  }
+
+  expect((await llmStats()).calls.filter(c => c.scenario !== 'background-synth'),
+    '被拒的请求不得产生任何模型调用').toEqual([]);
+  const conn = await openDb();
+  try {
+    const [rows] = await conn.query('SELECT COUNT(*) c FROM session_user WHERE session_id = ?', [sid]);
+    expect(Number((rows as Array<{ c: number }>)[0].c), '被拒的请求不得认领会话').toBe(0);
+  } finally { await conn.end(); }
+});
+
+test('PA4 已有会话追加预置轮：历史按序追加；他人会话写入被归属校验拒绝', async () => {
+  const owner = `pa4-owner-${uniq()}`;
+  const intruder = `pa4-intruder-${uniq()}`;
+  const sid = sessionIdFor(`pa4-${uniq()}`);
+  const first = chat({ message: `[E2E:plain]你好 PA4-Q-${uniq()}`, userId: owner, sessionId: sid });
+  await waitTerminal(first);
+  const question = `补充一问：PA4-PRESET-${uniq()}`;
+  const answer = `补充一答：PA4-ANSWER-${uniq()}`;
+
+  const preset = chat({ presetTurn: { question, answer }, userId: owner, sessionId: sid });
+  await waitTerminal(preset);
+  expect(preset.terminal?.type, JSON.stringify(preset.terminal)).toBe('done');
+  expect(textOf(preset.frames)).toBe(answer);
+
+  const foreign = chat({ presetTurn: { question, answer }, userId: intruder, sessionId: sid });
+  await waitTerminal(foreign);
+  expect(foreign.terminal?.type).toBe('error');
+  expect(JSON.stringify(foreign.terminal)).toContain('thread_not_found');
+
+  const h = await history(sid, BASE, owner);
+  const msgs = h.messages as Array<Record<string, unknown>>;
+  expect(msgs.map(m => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+  expect(msgs[2].content).toBe(question);
+  expect(msgs[3].content).toBe(answer);
 });
 
 // ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------

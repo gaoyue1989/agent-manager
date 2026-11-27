@@ -46,6 +46,8 @@ export default {
     mode = 'sessions';
     sessions = [];
     messages = [];
+    recentCalls = [];
+    selectedTool = null;
     selectedSid = null;
   }
 };
@@ -91,6 +93,7 @@ function render() {
 function bindEvents() {
   document.getElementById('monModeSessions').addEventListener('click', () => setMode('sessions'));
   document.getElementById('monModeMessages').addEventListener('click', () => setMode('messages'));
+  document.getElementById('monModeTools').addEventListener('click', () => setMode('tools'));
   document.getElementById('monSearch').addEventListener('click', loadActiveList);
   document.getElementById('monReset').addEventListener('click', () => {
     document.getElementById('monUser').value = '';
@@ -100,6 +103,7 @@ function bindEvents() {
     document.getElementById('monTo').value = '';
     document.getElementById('monLimit').value = '100';
     document.getElementById('monProblem').checked = false;
+    selectedTool = null;
     if (mode !== 'sessions') {
       setMode('sessions');
     } else {
@@ -129,6 +133,7 @@ function setMode(next) {
   document.getElementById('monModeSessions').classList.toggle('active', mode === 'sessions');
   document.getElementById('monModeMessages').classList.toggle('active', mode === 'messages');
   document.getElementById('monModeTools').classList.toggle('active', mode === 'tools');
+  document.getElementById('monUser').style.display = mode === 'tools' ? 'none' : '';
   document.getElementById('monKeyword').style.display = mode === 'sessions' ? '' : 'none';
   document.getElementById('monContent').style.display = mode === 'messages' ? '' : 'none';
   document.getElementById('monProblemLabel').style.display = mode === 'sessions' ? '' : 'none';

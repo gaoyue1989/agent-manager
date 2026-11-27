@@ -63,7 +63,8 @@ public class SkillManageController {
 
     /**
      * 列出可用的 Skill 摘要（供前端 /Skill 提示使用）。
-     * 仅返回已启用 Skill 的 name + description，精简字段降低传输开销。
+     * 仅返回已启用 Skill 的 name + description + displayName（中文显示名，SKILL.md
+     * frontmatter 的 displayName 字段，缺省空串），精简字段降低传输开销。
      * 前端可在输入框中检测 / 符号后调用此接口展示候选列表。
      */
     @GetMapping("/available")

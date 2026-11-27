@@ -170,6 +170,7 @@ const server = http.createServer((req, res) => {
         model: reqBody.model ?? null,
         msgCount: messages.length,
         roles: messages.map(m => m.role),
+        dialogue: messages.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, text: textOfContent(m.content) })),
         systemContent,
         toolCallNames: messages.flatMap(m => (m.tool_calls ?? []).map(t => t?.function?.name)).filter(Boolean),
         hasImageBlock: JSON.stringify(messages).includes('"image_url"') || JSON.stringify(messages).includes('data:image'),

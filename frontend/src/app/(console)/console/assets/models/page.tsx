@@ -94,48 +94,49 @@ export default function ModelsPage() {
   const [conns, setConns] = useState<ModelConnectionView[]>([]);
   const [usage, setUsage] = useState<ModelConnUsageRow[]>([]);
   const [msg, setMsg] = useState("");
+  const [loadErr, setLoadErr] = useState("");
   const [drawer, setDrawer] = useState<{ open: boolean; editing: ModelConnectionView | null }>({ open: false, editing: null });
 
   const load = useCallback(async () => {
     try {
       setConns(await api.console.modelConnections.list(ws));
       setUsage(await api.console.modelConnections.usage(ws));
-      setMsg("");
-    } catch (e: any) { setMsg(`加载失败: ${e.message}`); }
+      setLoadErr("");
+    } catch (e: any) { setLoadErr(`加载失败: ${e.message}`); }
   }, [ws]);
   useEffect(() => { if (ws) load(); }, [ws, load]);
 
   const test = async (id: number) => {
     try {
       const r = await api.console.modelConnections.test(ws, id);
-      setMsg(r.ok ? `连通正常 · ${r.latencyMs}ms` : `测试失败: ${r.error ?? "unknown"}`);
       await load();
+      setMsg(r.ok ? `连通正常 · ${r.latencyMs}ms` : `测试失败: ${r.error ?? "unknown"}`);
     } catch (e: any) { setMsg(`测试失败: ${e.message}`); }
   };
   const remove = async (cn: ModelConnectionView) => {
     if (!confirm(`确认删除连接 ${cn.name}？（仍为某 Agent 默认连接时会被拒绝）`)) return;
-    try { await api.console.modelConnections.remove(ws, cn.id); setMsg("已删除"); await load(); }
+    try { await api.console.modelConnections.remove(ws, cn.id); await load(); setMsg("已删除"); }
     catch (e: any) { setMsg(`删除失败: ${e.message}`); }
   };
   const deliver = async (connId: number, serviceId: number) => {
     try {
       await api.console.modelConnections.deliver(ws, connId, serviceId);
-      setMsg("下发完成");
       await load();
+      setMsg("下发完成");
     } catch (e: any) { setMsg(`下发失败: ${e.message}`); }
   };
 
-  const closeDrawer = (m: string) => {
+  const closeDrawer = async (m: string) => {
     setDrawer({ open: false, editing: null });
+    await load();
     if (m) setMsg(m);
-    load();
   };
 
   return (
     <div data-testid="console-models">
       <PageHead title="模型连接" sub="工作空间级配置（对标 AgentCore 模型管理）：先配置、测试，创建 Agent 时勾选并下发至其 /models 接口；调试对话可会话级切换"
         actions={writable && <Btn kind="pri" testid="mc-create-btn" onClick={() => setDrawer({ open: true, editing: null })}>+ 新建模型连接</Btn>} />
-      {msg && <div data-testid="models-msg" className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      {(msg || loadErr) && <div data-testid="models-msg" className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg || loadErr}</div>}
 
       <div className="mb-2 mt-1 text-xs text-gray-400">已保存的模型连接（工作空间级）</div>
       <div className="overflow-x-auto">
