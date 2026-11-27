@@ -117,7 +117,7 @@ spec:
         - name: datasource
           configMap: { name: grafana-provision-datasource }
         - name: dashboards-provider
-          configMap: { name: grafana-provision-dashboard }
+          configMap: { name: grafana-provision-dashboard, items: [{ key: dashboard-provider.yaml, path: dashboard-provider.yaml }] }
         - name: dashboards
           configMap: { name: grafana-provision-dashboard, items: [{ key: tool-calls.json, path: tool-calls.json }] }
 ---

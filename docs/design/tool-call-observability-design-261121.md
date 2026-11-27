@@ -11,11 +11,11 @@
 | 数据 | 事实源 | 消费方 |
 |---|---|---|
 | 计数 / 趋势 / 失败率 | Prometheus 指标 `oaf_tool_calls_total{service, tool, result=success\|error}`（Micrometer `oaf.tool.calls`） | backend `internal/service/observability.go` PromQL 聚合 → 前端双面板；Grafana 预置仪表盘 |
+| 最近调用明细 / Debug 轻量统计 | 各 framework `tool_audit_log`（30 天保留） | framework `GET /debug/monitor/tools`（Monitor 页 + backend fan-out，一端点两消费方） |
 
 **service 标签归一化（真机验证修正）**：framework 进程内不知道平台 k8s 名，OAF slug 是 `{vendor}/{agentKey}`（如 `agentmanager/release-agent`），与 backend 选择器（DB k8s 名去 `oaf-` 前缀）无机械映射——归一化在采集层做：prometheus scrape 配置 `metric_relabel_configs` 把 service 改写为 k8s 名派生值，原 slug 保留到 `service_slug` 标签便于对照。SSOT = 发布链路 k8s 名。
 
 **计数口径补充**：PromQL 侧 = result 标签化计数器（终态调用；中断/在途不计）；SQL 侧（Monitor 端点）= TOOL_CALL_START 行（尝试口径）。二者对中断类调用略有差异，面板以 PromQL 为主。窗口计数用 `increase()`（Prometheus 外推估计口径，与 Grafana 同语义；稀疏序列有近似误差）。
-| 最近调用明细 / Debug 轻量统计 | 各 framework `tool_audit_log`（30 天保留） | framework `GET /debug/monitor/tools`（Monitor 页 + backend fan-out，一端点两消费方） |
 
 计数口径 = `TOOL_CALL_START` 行（调用尝试，含最终失败的调用）；失败 = `TOOL_RESULT_END` 行 `result_state='error'`（非 SUCCESS 终态一律 error 桶，与 Monitor 问题口径一致）。
 

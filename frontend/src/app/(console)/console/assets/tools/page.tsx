@@ -93,6 +93,7 @@ export default function ToolsPage() {
   const [draft, setDraft] = useState<Record<string, string> | null>(null);
   const [directDraft, setDirectDraft] = useState<string[] | null>(null);
   const [msg, setMsg] = useState("");
+  const [loadErr, setLoadErr] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const load = useCallback(async () => {
@@ -106,8 +107,8 @@ export default function ToolsPage() {
         if (found) return { kind: "connector", cn: found };
         return rows[0] ? { kind: "connector", cn: rows[0] } : { kind: "platform" };
       });
-      setMsg("");
-    } catch (e: any) { setMsg(`加载失败: ${e.message}`); }
+      setLoadErr("");
+    } catch (e: any) { setLoadErr(`加载失败: ${e.message}`); }
   }, [ws]);
   useEffect(() => {
     if (!ws) return;
@@ -119,8 +120,8 @@ export default function ToolsPage() {
   const verify = async (id: number) => {
     try {
       const res = await api.console.tools.verify(ws, id);
-      setMsg(res.ok ? `验证通过（${res.toolCount} 个工具 · ${res.latencyMs}ms）` : `验证失败: ${res.error ?? "unknown"}`);
       await load();
+      setMsg(res.ok ? `验证通过（${res.toolCount} 个工具 · ${res.latencyMs}ms）` : `验证失败: ${res.error ?? "unknown"}`);
     } catch (e: any) { setMsg(`验证失败: ${e.message}`); }
   };
   const remove = async (cn: McpConnectorView) => {
@@ -129,10 +130,10 @@ export default function ToolsPage() {
     catch (e: any) { setMsg(`删除失败: ${e.message}`); }
   };
 
-  const closeDrawer = (m: string) => {
+  const closeDrawer = async (m: string) => {
     setDrawerOpen(false);
+    await load();
     if (m) setMsg(m);
-    load();
   };
 
   const selCn = sel?.kind === "connector" ? sel.cn : null;
@@ -173,7 +174,7 @@ export default function ToolsPage() {
     <div data-testid="console-tools">
       <PageHead title="工具管理" sub="创建并维护 MCP 连接器配置（对标 AgentCore tools/create）；Agent 创建/更新时在资产配置步勾选，发布时注入生成包（mcpServers / mcp-configs/）"
         actions={writable && <Btn kind="pri" testid="tool-create-btn" onClick={() => setDrawerOpen(true)}>+ 新建 MCP 连接器</Btn>} />
-      {msg && <div data-testid="tools-msg" className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      {(msg || loadErr) && <div data-testid="tools-msg" className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg || loadErr}</div>}
 
       <div className="mb-2 mt-1 text-xs text-gray-400">已保存的连接器配置（工作空间级）</div>
       <table className="mb-5 w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="conn-list">

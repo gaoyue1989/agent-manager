@@ -62,7 +62,7 @@ export interface PlatformConfigView { groups: PlatformConfigGroup[]; updatedAt?:
 export interface ToolCallTotals { calls: number; errors: number; errorRate: number; toolKinds: number; serviceNum: number; }
 export interface ToolCallToolRow { tool: string; calls: number; errors: number; }
 export interface ToolCallServiceRow { service: string; name: string; status: string; calls: number; errors: number; hasData: boolean; }
-export interface ToolCallTrendPoint { bucket: string; calls: number; errors: number; }
+export interface ToolCallTrendPoint { bucket: string; timestamp?: string; calls: number; errors: number; }
 export interface ToolCallRecent { at: string; service: string; name: string; tool: string; sessionId: string; result: string; }
 export interface ToolCallStatsView {
   range: string;
