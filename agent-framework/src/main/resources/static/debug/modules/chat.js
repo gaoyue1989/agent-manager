@@ -39,6 +39,7 @@ function transport() {
   return (ctx && ctx.agui && ctx.state.getState('ui.protocol') === 'agui') ? ctx.agui : ctx.api;
 }
 let activeSubHandle = null;  // subscribe 返回的 handle（重连时使用）
+let resumeSyncTimer = null;
 
 // ★ durable-sse-plan：SSE 断连自动重连
 let lastEventId = 0;         // 当前 session 最新收到的 seq（用于 afterSeq 游标）
@@ -178,10 +179,16 @@ export default {
   },
 
   unmount() {
-    if (refreshTimer) clearInterval(refreshTimer);
-    if (thinkingTimer) clearInterval(thinkingTimer);
-    if (activeAbort) activeAbort.abort();
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
+    if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
+    if (activeAbort) { activeAbort.abort(); activeAbort = null; }
+    if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
     teardownAllAppHosts();
+    currentReply = null;
+    currentReplyId = null;
+    replyMap = {};
+    lastEventId = 0;
     pendingConfirm = null;
     pendingFiles = [];
     isStreaming = false;
@@ -502,17 +509,27 @@ async function loadThreads(force) {
   }
 }
 
+function syncActiveThreadItem(sessionId) {
+  if (!sidebarListEl) return;
+  sidebarListEl.querySelectorAll('.thread-item').forEach((el) => {
+    el.classList.toggle('active', Boolean(sessionId) && el.dataset.sid === sessionId);
+  });
+}
+
 async function selectThread(sessionId) {
   if (!sessionId) return;
-  // 切换会话：关闭上一会话的续传订阅，避免其事件串进当前视图
-  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } activeSubHandle = null; }
+  if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
+  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
+  if (activeAbort) { activeAbort.abort(); activeAbort = null; }
   ctx.state.setState('threads.current', sessionId);
+  syncActiveThreadItem(sessionId);
   document.getElementById('btnLlmCalls').disabled = false;
   restoreModelForSession(sessionId);
   updateConnBadge();
-  // 重置回放游标与当前回复：新会话从 0 开始（不回放旧会话事件），也避免沿用旧气泡
   lastEventId = 0;
   currentReplyId = null;
+  currentReply = null;
+  replyMap = {};
   reconnectAttempts = 0;
   // 先渲染 agent_state 历史（已完成 turn），再检测 turn 是否在跑并续传——
   // 两者此前并发会互相覆盖：历史渲染的 innerHTML='' 会清掉已到达的流式事件
@@ -588,18 +605,21 @@ async function tryResumeSSE(sessionId) {
           }
         },
         onEnd: () => {
-          clearInterval(resumeSyncId);
+          if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
           resetStreamingState();
           loadThreads();
         }
       });
 
-      // 定期同步 lastEventId
-      const resumeSyncId = setInterval(() => {
+      if (resumeSyncTimer) clearInterval(resumeSyncTimer);
+      resumeSyncTimer = setInterval(() => {
         if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) {
           lastEventId = activeSubHandle.lastEventId;
         }
-        if (!isStreaming) clearInterval(resumeSyncId);
+        if (!isStreaming && resumeSyncTimer) {
+          clearInterval(resumeSyncTimer);
+          resumeSyncTimer = null;
+        }
       }, 500);
     }
   } catch (e) {
@@ -1048,8 +1068,13 @@ function truncate(s, n) {
 // ---------- 流式回复构建（当前回复） ----------
 
 function ensureReply(replyId) {
-  if (currentReply && currentReply.replyId === replyId) return currentReply;
-  if (replyMap[replyId]) { currentReply = replyMap[replyId]; return currentReply; }
+  if (currentReply && currentReply.replyId === replyId && currentReply.contentEl && currentReply.contentEl.isConnected) {
+    return currentReply;
+  }
+  if (replyMap[replyId] && replyMap[replyId].contentEl && replyMap[replyId].contentEl.isConnected) {
+    currentReply = replyMap[replyId];
+    return currentReply;
+  }
   // 清理旧回复的 footer 计时
   const div = document.createElement('div');
   div.className = 'msg assistant';
