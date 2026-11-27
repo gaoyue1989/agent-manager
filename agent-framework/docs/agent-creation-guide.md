@@ -352,17 +352,24 @@ connection:                  # 【必需】缺整段 → 该 server 不注册
 auth:                        # 可选
   token: ${MCP_TOKEN}        # 支持 ${ENV_VAR} 替换 → Authorization: Bearer <token>
 
-userHeaders:                 # 可选，多租户按用户注入
+userHeaders:                 # 可选，多租户用户身份与入站头透传
   headers:
-    X-User-Id: userId        # header 名 → McpMeta key
+    X-User-Id: userId        # userId 或 reqHeader:<小写头名>
+    X-Trace-Id: "reqHeader:x-request-id"
+  arguments:                 # 可选，自动补缺注入到工具 params.arguments（仅补缺不覆盖显式传参）
+    operator_id: userId
   on-missing: deny           # deny（默认，fail-closed）| passthrough
 
 permissions:                 # 可选
-  read_only: true            # 强制只读注册 —— ⚠️ 会短路 HITL，见下
+  read_only: false           # 强制只读注册 —— ⚠️ 设为 true 会短路 HITL，切勿与 ask 混用
   tools:                     # 工具级三态，键 = 远端工具裸名
     get_weather: allow
     submit_report: ask
     delete_weather: deny
+
+direct_return:               # 可选，工具结果原样直返前端（短路 ReAct 循环，与 permissions 正交）
+  tools:
+    - export_weather_report
 
 ui:                          # 可选，MCP Apps 卡片
   tools:
@@ -371,6 +378,7 @@ ui:                          # 可选，MCP Apps 卡片
     confirm_form: "ui://approval/form.html"
   csp:
     connect_domains: ["https://api.example.com"]
+    resource_domains: ["https://cdn.example.com"]
 
 startup:                     # 可选
   required: true             # 默认 false = fail-soft（连不上只告警跳过）
@@ -391,7 +399,7 @@ startup:                     # 可选
 
 `enabled: false` 的工具**不会注册到 Toolkit**，模型根本看不到。
 
-> ⚠️ **绝不要在同一个 server 上同时开 `permissions.read_only: true` 或 `ui.app_only` 和 `ask` 权限。** 前两者会走 `registerReadOnly` 路径，`readOnly=true` 会短路 HITL，让人工确认**静默失效**——工具直接执行，不再询问。
+> ⚠️ **绝不要在同一个 server 上同时开 `permissions.read_only: true` 和 `ask` 权限。** `read_only: true` 会短路 HITL，让人工确认**静默失效**——工具直接执行，不再询问。
 
 ### 3.5 `plugins/`：Java SPI 工具插件（可选）
 
@@ -418,10 +426,11 @@ zip -r weather-agent.zip AGENTS.md skills mcp-configs
 
 ### 3.7 参考样例
 
-仓库里有三份可直接照抄的完整包：
+仓库里有四份可直接参考的完整包：
 
 | 样例 | 路径 | 覆盖了什么 |
 |---|---|---|
+| 全量配置参考示例 | `agent-framework/example/full-config-example/` | 含逐项中文注释的 `AGENTS.md`、MCP `config.yaml`、`ActiveMCP.json`、`SKILL.md` |
 | 发布助手 | `release-agent/` | 单 MCP + 技能 + 权限 mode |
 | E2E 测试包 | `agent-framework/e2e/fixtures/agent-config/` | 4 个 MCP server：`ask` 权限、`deny` 语义、工具子集过滤、UI 卡片 |
 | 审批 Demo | `agent-framework/example/approval-forms/agent-config/` | HITL 确认流的最小实现 |
@@ -517,8 +526,19 @@ config:
 | `AGENT_COMPACTION_KEEP_MESSAGES` | `10` | 压缩保留条数 |
 | `FILE_STORAGE_LOCAL_DIR` | `/data/files` | 本地文件存储目录 |
 | `FILE_EXTERNAL_URL_PREFIXES` | 空（禁用） | `present_url` 外部交付白名单，防 SSRF |
+| `AGENT_SESSION_CONTEXT_MAX_TOTAL_CHARS` | `30000` | 单会话 `POST /threads/{sid}/context` 资料总字符上限 |
+| `MANAGEMENT_SERVER_PORT` | `9091` | Actuator 独立运维端口（`health,metrics,prometheus`） |
 
-全量变量表见 [agent-framework-deploy.md](agent-framework-deploy.md) §4.1。
+**扩展能力（按需开启）**
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `SANDBOX_ENABLED` / `OPENSANDBOX_SERVER_URL` | `false` / — | OpenSandbox 沙箱开关与服务地址（默认 TTL 30 分钟，随 turn 刷新） |
+| `SANDBOX_SKILLS_SHARED_STORE` / `SANDBOX_SKILLS_FALLBACK_MODE` | `/skills-store` / `push` | 沙箱技能共享存储与无挂载镜像时的流式推送降级开关 |
+| `AGENT_MEMORY_PROVIDER` / `OPENVIKING_URL` | `local` / 空 | 切换 OpenViking 外部语义记忆（配套 `OVK_*` 参数） |
+| `AGENT_BROWSER_ENABLED` | `false` | 浏览器人工接管总开关（配套 `AGENT_BROWSER_*` 参数） |
+
+全量变量表见 [agent-framework-deploy.md](agent-framework-deploy.md) §4.1，带逐项注释模板见 [`.env.example`](../.env.example)。
 
 ### 4.4 换模型的三个途径
 
@@ -907,8 +927,8 @@ POST /admin/reload?scope=auto
 **⑤ 技能名 / `allowed-tools` 写法不对**
 `allowed-tools` 只认**空格分隔的字符串**；写成 YAML 列表或驼峰 `allowedTools` 会被静默忽略。技能名不满足 kebab 约束只打 WARNING 不阻断。
 
-**⑥ `SANDBOX_ENTRYPOINT` 环境变量不生效**
-`application.yml` 里没有对应占位符，只有 `@DefaultValue`。要覆盖得用 `AGENT_SANDBOX_ENTRYPOINT`（Spring 松弛绑定）。
+**⑥ `SANDBOX_ENTRYPOINT` 已支持直配**
+`application.yml` 已绑定 `agent.sandbox.entrypoint: ${SANDBOX_ENTRYPOINT:/opt/code-interpreter/code-interpreter.sh}`，直接配置 `SANDBOX_ENTRYPOINT`（逗号分隔）即可生效。
 
 ### 8.2 对话与流
 
