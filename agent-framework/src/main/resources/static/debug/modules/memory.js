@@ -8,9 +8,9 @@ export default {
     ctx = c;
     container.innerHTML = `
     <div class="module-page">
-      <div class="module-header"><h2>Memory</h2>
-        <span class="sub"><button class="btn small" id="btnReloadMemory">Reload</button></span></div>
-      <div class="module-scroll" id="memoryBody"><div class="empty">Loading...</div></div>
+      <div class="module-header"><h2>记忆</h2>
+        <span class="sub"><button class="btn small" id="btnReloadMemory">刷新</button></span></div>
+      <div class="module-scroll" id="memoryBody"><div class="empty">加载中...</div></div>
     </div>`;
     document.getElementById('btnReloadMemory').addEventListener('click', loadMemory);
     loadMemory();
@@ -24,7 +24,7 @@ async function loadMemory() {
     memoryData = (await ctx.api.getMemory()) || {};
   } catch (e) {
     if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
-    body.innerHTML = '<div class="empty error-text">Failed to load memory: ' + ctx.utils.esc(e.message) + '</div>';
+    body.innerHTML = '<div class="empty error-text">加载记忆失败：' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
 
@@ -34,29 +34,28 @@ async function loadMemory() {
   const entries = Object.entries(users);
 
   if (entries.length === 0) {
-    body.innerHTML = '<div class="empty">No memory stored yet. (agent_fs 中暂无 MEMORY.md / memory/ 文件)</div>';
+    body.innerHTML = '<div class="empty">暂无记忆数据（agent_fs 中暂无 MEMORY.md / memory/ 文件）</div>';
     return;
   }
 
   body.innerHTML = entries.map(([ns, user]) => {
     const files = user.files || [];
     let html = '<div class="panel">' +
-      '<div class="panel-header"><span class="title">👤 ' + ctx.utils.esc(ns) + '</span>' +
-      '<span class="count">' + files.length + ' file(s)</span></div>' +
+      '<div class="panel-header"><span class="title">' + ctx.utils.esc(ns) + '</span>' +
+      '<span class="count">' + files.length + ' 个文件</span></div>' +
       '<div class="panel-body">';
 
-    // 文件列表
     if (files.length) {
-      html += '<table class="data-table"><thead><tr><th>Path</th><th>Size</th><th>Updated</th><th></th></tr></thead><tbody>';
+      html += '<table class="data-table"><thead><tr><th>路径</th><th>大小</th><th>更新时间</th><th>操作</th></tr></thead><tbody>';
       for (const f of files) {
         html += '<tr><td class="mono">' + ctx.utils.esc(f.path) + '</td>' +
           '<td>' + ctx.utils.formatBytes(f.size) + '</td>' +
           '<td>' + ctx.utils.esc((f.updated_at || '').substring(0, 19)) + '</td>' +
-          '<td><button class="btn small memory-file-btn" data-ns="' + ctx.utils.esc(ns) + '" data-path="' + ctx.utils.esc(f.path) + '">View</button></td></tr>';
+          '<td><button class="btn small memory-file-btn" data-ns="' + ctx.utils.esc(ns) + '" data-path="' + ctx.utils.esc(f.path) + '">查看</button></td></tr>';
       }
       html += '</tbody></table>';
     } else {
-      html += '<div class="empty">No files</div>';
+      html += '<div class="empty">暂无文件</div>';
     }
     html += '</div></div>';
     return html;

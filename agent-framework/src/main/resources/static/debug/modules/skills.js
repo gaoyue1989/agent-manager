@@ -14,18 +14,18 @@ export default {
     container.innerHTML = `
     <div class="module-page">
       <div class="module-header">
-        <h2>📚 Skills</h2>
+        <h2>技能</h2>
         <span class="sub" id="skillsSummary"></span>
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
-          <label class="btn small accent upload-label" for="skillZipInput" title="上传 zip 格式的 Skill 包">
-            ⬆ 上传 Skill
+          <label class="btn small accent upload-label" id="skillUploadLabel" for="skillZipInput" title="上传 zip 格式的技能包">
+            上传技能
           </label>
           <input type="file" id="skillZipInput" accept=".zip" style="display:none" />
-          <button class="btn small" id="skillRefreshBtn" title="刷新列表">🔄</button>
+          <button class="btn small" id="skillRefreshBtn" title="刷新列表">刷新</button>
         </div>
       </div>
       <div class="module-scroll">
-        <div id="skillsBody"><div class="empty">Loading...</div></div>
+        <div id="skillsBody"><div class="empty">加载中...</div></div>
         <div id="userSkillsPanel"></div>
       </div>
     </div>`;
@@ -62,26 +62,40 @@ async function loadSkills() {
     skillData = (await ctx.api.getSkillsManage()) || [];
   } catch (e) {
     if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
-    body.innerHTML = '<div class="empty error-text">Failed to load skills: ' + ctx.utils.esc(e.message) + '</div>';
+    body.innerHTML = '<div class="empty error-text">加载技能失败：' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
   if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
 
   var enabled = skillData.filter(function(s) { return s.enabled !== false; }).length;
-  summary.textContent = skillData.length + ' skill(s), ' + enabled + ' enabled';
+  var anyReadOnly = skillData.some(function(s) { return s.readOnly === true || s.writable === false; });
+  summary.textContent = '共 ' + skillData.length + ' 个技能，' + enabled + ' 个已启用' + (anyReadOnly ? '（只读挂载）' : '');
+
+  var uploadLabel = document.getElementById('skillUploadLabel');
+  var uploadInput = document.getElementById('skillZipInput');
+  if (uploadLabel && uploadInput) {
+    uploadInput.disabled = anyReadOnly;
+    uploadLabel.style.opacity = anyReadOnly ? '0.45' : '';
+    uploadLabel.style.pointerEvents = anyReadOnly ? 'none' : '';
+    uploadLabel.title = anyReadOnly
+      ? '当前技能目录为只读挂载，不支持上传系统技能'
+      : '上传 zip 格式的技能包';
+  }
 
   if (skillData.length === 0) {
-    body.innerHTML = '<div class="empty">No skills. Click "⬆ 上传 Skill" to add one.</div>';
+    body.innerHTML = '<div class="empty">暂无技能，点击“上传技能”添加。</div>';
     return;
   }
 
   body.innerHTML = '<div class="info-grid">' + skillData.map(function(s, idx) {
+    var isReadOnly = s.readOnly === true || s.writable === false;
     var badges = [];
+    if (isReadOnly) badges.push('<span class="badge dim">只读</span>');
     if (s.source) badges.push('<span class="badge dim">' + ctx.utils.esc(s.source) + '</span>');
     if (s.version) badges.push('<span class="badge dim">v' + ctx.utils.esc(s.version) + '</span>');
-    if (s.dynamic) badges.push('<span class="badge green">dynamic</span>');
-    if (s.required) badges.push('<span class="badge yellow">required</span>');
-    if (s.declaredButMissing) badges.push('<span class="badge red">missing</span>');
+    if (s.dynamic) badges.push('<span class="badge green">动态</span>');
+    if (s.required) badges.push('<span class="badge yellow">必需</span>');
+    if (s.declaredButMissing) badges.push('<span class="badge red">缺失</span>');
 
     var enabledBadge = s.enabled !== false
       ? '<span class="badge green">启用</span>'
@@ -89,22 +103,24 @@ async function loadSkills() {
 
     return '<div class="panel skill-card' + (s.enabled === false ? ' disabled' : '') + '">' +
       '<div class="panel-header">' +
-        '<span class="title">📚 ' + ctx.utils.esc(s.name || '?') + '</span>' +
+        '<span class="title">' + ctx.utils.esc(s.name || '?') + '</span>' +
         '<span class="count">' + enabledBadge + ' ' + badges.join(' ') + '</span>' +
       '</div>' +
       '<div class="panel-body">' +
-        '<p style="color:var(--text-dim);font-size:11px">' + ctx.utils.esc(s.description || 'No description') + '</p>' +
+        '<p style="color:var(--text-dim);font-size:11px">' + ctx.utils.esc(s.description || '暂无描述') + '</p>' +
         '<div class="skill-actions">' +
           '<button class="btn small skill-toggle-btn" data-idx="' + idx + '">' +
-            (s.enabled !== false ? '⏸ 禁用' : '▶ 启用') +
+            (s.enabled !== false ? '禁用' : '启用') +
           '</button>' +
-          '<button class="btn small skill-detail-btn" data-idx="' + idx + '">👁 详情</button>' +
-          '<button class="btn small skill-edit-btn" data-idx="' + idx + '">✏ 编辑</button>' +
-          (s.declaredButMissing !== true
-            ? '<button class="btn small skill-download-btn" data-idx="' + idx + '">⬇ 下载</button>'
+          '<button class="btn small skill-detail-btn" data-idx="' + idx + '">详情</button>' +
+          (!isReadOnly
+            ? '<button class="btn small skill-edit-btn" data-idx="' + idx + '">编辑</button>'
             : '') +
-          (s.source === 'local-dynamic' || s.dynamic
-            ? '<button class="btn small danger skill-delete-btn" data-idx="' + idx + '">🗑 删除</button>'
+          (s.declaredButMissing !== true
+            ? '<button class="btn small skill-download-btn" data-idx="' + idx + '">下载</button>'
+            : '') +
+          (!isReadOnly && (s.source === 'local-dynamic' || s.dynamic)
+            ? '<button class="btn small danger skill-delete-btn" data-idx="' + idx + '">删除</button>'
             : '') +
         '</div>' +
       '</div></div>';
@@ -213,14 +229,14 @@ async function handleEdit(idx) {
 function showEditModal(name, content) {
   var modal = window.App.modal;
   modal.open(
-    '<h2>✏ 编辑 Skill: ' + ctx.utils.esc(name) + '</h2>' +
+    '<h2>编辑技能：' + ctx.utils.esc(name) + '</h2>' +
     '<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px">修改 SKILL.md 内容。保存后下轮推理自动生效。</p>' +
     '<textarea id="skillEditArea" class="skill-edit-area" spellcheck="false">' +
     ctx.utils.esc(content) +
     '</textarea>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">' +
     '<button class="btn" id="skillEditCancel">取消</button>' +
-    '<button class="btn primary" id="skillEditSave">💾 保存</button>' +
+    '<button class="btn primary" id="skillEditSave">保存</button>' +
     '</div>'
   );
 
@@ -243,7 +259,7 @@ function showEditModal(name, content) {
     } catch (err) {
       ctx.utils.toast('保存失败: ' + err.message, 'error');
       saveBtn.disabled = false;
-      saveBtn.textContent = '💾 保存';
+      saveBtn.textContent = '保存';
     }
   });
 }
@@ -261,7 +277,7 @@ function renderUserSkillsPanel() {
   panel.innerHTML =
     '<div class="panel">' +
       '<div class="panel-header">' +
-        '<span class="title">👤 用户技能（个人覆盖 L4）</span>' +
+        '<span class="title">用户技能（个人覆盖 L4）</span>' +
         '<span class="count" id="userSkillSummary"></span>' +
       '</div>' +
       '<div class="panel-body">' +
@@ -272,17 +288,17 @@ function renderUserSkillsPanel() {
           '<input id="userSkillUserInput" class="input" type="text" list="userSkillUserList" ' +
             'placeholder="userId" style="width:180px" spellcheck="false">' +
           '<datalist id="userSkillUserList"></datalist>' +
-          '<button class="btn small" id="userSkillLoadBtn">🔎 加载</button>' +
+          '<button class="btn small" id="userSkillLoadBtn">加载</button>' +
           '<input id="userSkillNameInput" class="input" type="text" placeholder="技能名" ' +
             'style="width:140px" spellcheck="false">' +
           '<button class="btn small primary" id="userSkillWriteBtn" ' +
-            'title="新建或覆盖该用户的 SKILL.md">✏ 写入/覆盖</button>' +
+            'title="新建或覆盖该用户的 SKILL.md">写入/覆盖</button>' +
           '<button class="btn small" id="userSkillSyncBtn" ' +
-            'title="把包内同名技能整目录下发为该用户个人版本">⬇ 从包内下发</button>' +
+            'title="把包内同名技能整目录下发为该用户个人版本">从包内下发</button>' +
           '<input id="userSkillZipInput" type="file" accept=".zip,application/zip" style="display:none">' +
           '<button class="btn small" id="userSkillZipBtn" ' +
             'title="上传 zip 包作为该用户个人技能（同名覆盖；图片/二进制等非文本文件会跳过并在结果中列出）">' +
-            '⬆ 上传 zip</button>' +
+            '上传 ZIP</button>' +
         '</div>' +
         '<div id="userSkillList"><div class="empty">选择或输入 userId 后点「加载」。</div></div>' +
       '</div>' +
@@ -578,7 +594,7 @@ function showUserSkillEditModal(userId, name, content, source) {
     } catch (err) {
       ctx.utils.toast('保存失败: ' + err.message, 'error');
       saveBtn.disabled = false;
-      saveBtn.textContent = '💾 保存';
+      saveBtn.textContent = '保存';
     }
   });
 }

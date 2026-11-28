@@ -115,6 +115,9 @@ public class SkillManageController {
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> upload(
             @RequestParam("file") MultipartFile file) {
+        if (manageService.isReadOnly()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载，不支持上传系统技能");
+        }
         if (file == null || file.isEmpty()) {
             return err(HttpStatus.BAD_REQUEST, "no_file", "请选择要上传的 zip 文件");
         }
@@ -152,6 +155,9 @@ public class SkillManageController {
         // 安全校验：防止路径注入
         if (name.contains("..") || name.contains("/") || name.contains("\\") || name.startsWith(".")) {
             return err(HttpStatus.BAD_REQUEST, "invalid_name", "无效的 Skill 名称");
+        }
+        if (manageService.isReadOnly()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载，不支持删除系统技能");
         }
         try {
             var deleted = manageService.deleteSkill(name);
@@ -250,6 +256,9 @@ public class SkillManageController {
         // 大小限制 100KB
         if (content.getBytes(StandardCharsets.UTF_8).length > 100 * 1024) {
             return err(HttpStatus.PAYLOAD_TOO_LARGE, "content_too_large", "SKILL.md 内容超过 100KB 限制");
+        }
+        if (manageService.isReadOnly()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载，不支持编辑系统技能");
         }
         try {
             manageService.writeSkillContent(name, content);

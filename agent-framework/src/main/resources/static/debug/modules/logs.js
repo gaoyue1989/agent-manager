@@ -8,16 +8,16 @@ export default {
     hasLoadedOnce = false;
     container.innerHTML = `
     <div class="module-page">
-      <div class="module-header"><h2>Logs</h2>
+      <div class="module-header"><h2>日志</h2>
         <select id="logLevel" class="input">
-          <option value="all">All</option>
+          <option value="all">全部</option>
           <option value="DEBUG">DEBUG</option>
           <option value="INFO">INFO</option>
           <option value="WARN">WARN</option>
           <option value="ERROR">ERROR</option>
         </select>
-        <span class="sub"><button class="btn small" id="btnReloadLogs">Refresh</button></span></div>
-      <div class="module-scroll" id="logsBody" style="padding:8px 0"><div class="empty">Loading...</div></div>
+        <span class="sub"><button class="btn small" id="btnReloadLogs">刷新</button></span></div>
+      <div class="module-scroll" id="logsBody" style="padding:8px 0"><div class="empty">加载中...</div></div>
     </div>`;
     document.getElementById('btnReloadLogs').addEventListener('click', () => loadLogs(true));
     document.getElementById('logLevel').addEventListener('change', () => loadLogs(true));
@@ -46,7 +46,7 @@ async function loadLogs(forceScroll) {
     if (!ctx) return;
     const logs = data.logs || [];
     if (logs.length === 0) {
-      body.innerHTML = '<div class="empty">No logs</div>';
+      body.innerHTML = '<div class="empty">暂无日志</div>';
       hasLoadedOnce = true;
       return;
     }
@@ -64,6 +64,6 @@ async function loadLogs(forceScroll) {
     }
   } catch (e) {
     if (!ctx) return;
-    body.innerHTML = '<div class="empty error-text">Failed to load logs: ' + ctx.utils.esc(e.message) + '</div>';
+    body.innerHTML = '<div class="empty error-text">加载日志失败：' + ctx.utils.esc(e.message) + '</div>';
   }
 }
