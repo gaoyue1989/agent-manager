@@ -592,6 +592,19 @@ type UpdateSkillInput struct {
 }
 
 // UpdateSkillDraft 更新 Markdown 工作区草稿（draft 版本不存在则创建）。
+func validateSkillMarkdownContent(skillName, content string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("%w: content is required", ErrInvalidForm)
+	}
+	if len(content) > 256<<10 || utf8.RuneCountInString(content) > 256<<10 {
+		return fmt.Errorf("%w: markdown content must be 1-256KB", ErrInvalidForm)
+	}
+	if fmName, _, ok := parseSkillFrontmatter(content); ok && fmName != "" && fmName != skillName {
+		return fmt.Errorf("%w: SKILL.md frontmatter name %q does not match skill name %q", ErrInvalidForm, fmName, skillName)
+	}
+	return nil
+}
+
 func (c *Core) UpdateSkillDraft(workspaceID, skillID uint, content string) error {
 	s, err := c.GetSkill(skillID)
 	if err != nil || s.WorkspaceID != workspaceID {
@@ -600,25 +613,23 @@ func (c *Core) UpdateSkillDraft(workspaceID, skillID uint, content string) error
 	if s.Source != "markdown" {
 		return fmt.Errorf("%w: only markdown-defined skills have editable draft content", ErrInvalidForm)
 	}
+	if err := validateSkillMarkdownContent(s.Name, content); err != nil {
+		return err
+	}
 	var draft store.SkillVersion
 	err = c.DB.Where("skill_id = ? AND status = ?", skillID, SkillVerDraft).First(&draft).Error
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		// 无 draft：基于最新版本号顺延创建
 		var latest store.SkillVersion
 		if err := c.DB.Where("skill_id = ?", skillID).Order("id DESC").First(&latest).Error; err != nil {
 			return err
 		}
-		// MySQL JSON 列拒绝空串（sqlite 宽松，单测曾掩盖——E2E 实测 500）：
-		// 新建草稿即落合法 JSON 默认值，随后 Update 覆盖 content_json。
 		draft = store.SkillVersion{SkillID: skillID, Version: nextVersion(latest.Version),
 			Status: SkillVerDraft, Changelog: "工作区草稿", CreatedBy: s.CreatedBy,
 			ContentJSON: mustJSON(map[string]string{"content": content}), FilesJSON: "[]"}
-		if err := c.DB.Create(&draft).Error; err != nil {
-			return err
-		}
+		return c.DB.Create(&draft).Error
 	}
 	if draft.StorageDir != "" {
 		_, err = c.UpdateSkillVersionContent(workspaceID, skillID, draft.ID, content, nil)
@@ -827,14 +838,8 @@ func (c *Core) UpdateSkillVersionContent(workspaceID, skillID, versionID uint, c
 	if v.Status != SkillVerDraft {
 		return nil, fmt.Errorf("%w: only draft versions can be modified", ErrInvalidForm)
 	}
-	if strings.TrimSpace(content) == "" {
-		return nil, fmt.Errorf("%w: content is required", ErrInvalidForm)
-	}
-	if utf8.RuneCountInString(content) > 256<<10 {
-		return nil, fmt.Errorf("%w: markdown content must be 1-256KB", ErrInvalidForm)
-	}
-	if fmName, _, ok := parseSkillFrontmatter(content); ok && fmName != "" && fmName != s.Name {
-		return nil, fmt.Errorf("%w: SKILL.md frontmatter name %q does not match skill name %q", ErrInvalidForm, fmName, s.Name)
+	if err := validateSkillMarkdownContent(s.Name, content); err != nil {
+		return nil, err
 	}
 	if v.StorageDir != "" {
 		existingZip, err := c.FS.ZipPackage(v.StorageDir)
@@ -947,7 +952,7 @@ func (c *Core) UploadSkillVersionZip(workspaceID, skillID, versionID uint, filen
 	}
 	sum := sha256.Sum256(normalized)
 	v.StorageDir = targetDir
-	v.ContentJSON = ""
+	v.ContentJSON = "{}"
 	v.Checksum = hex.EncodeToString(sum[:])
 	if filesInfo, ferr := c.skillVersionFiles(skillID, v.Version); ferr == nil {
 		v.FilesJSON = mustJSON(filesInfo)
