@@ -95,7 +95,11 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
                                         io.agentscope.core.middleware.ReasoningInput input,
                                         Function<io.agentscope.core.middleware.ReasoningInput, Flux<AgentEvent>> next) {
         ActingDenials.restoreSuppressedToolResults(RuntimeContext.resolveAgentState(ctx, agent), ctx);
-        return next.apply(input);
+        var restored = ActingDenials.restoreSuppressedMessages(input.messages(), ctx);
+        var effectiveInput = restored == input.messages()
+            ? input
+            : new io.agentscope.core.middleware.ReasoningInput(restored, input.tools(), input.options());
+        return next.apply(effectiveInput);
     }
 
     @Override

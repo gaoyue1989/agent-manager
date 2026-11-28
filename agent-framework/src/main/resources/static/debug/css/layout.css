@@ -461,6 +461,9 @@
 
 .panel-body { padding: 14px 16px; font-size: 13px; }
 
+.chat-mobile-close-btn { display: none; }
+.chat-sidebar-backdrop { display: none; }
+
 @media (max-width: 768px) {
   .mobile-menu-btn { display: inline-flex; }
   .sidebar {
@@ -503,6 +506,3 @@
   .header .agent-name { display: none; }
   .chat-header-bar h2 { max-width: 130px; }
 }
-
-.chat-mobile-close-btn { display: none; }
-.chat-sidebar-backdrop { display: none; }

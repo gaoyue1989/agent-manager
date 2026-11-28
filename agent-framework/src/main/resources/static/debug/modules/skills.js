@@ -58,17 +58,24 @@ function handleRefreshAll() {
 async function loadSkills() {
   const body = document.getElementById('skillsBody');
   const summary = document.getElementById('skillsSummary');
+  var dirReadOnly = false;
   try {
-    skillData = (await ctx.api.getSkillsManage()) || [];
+    if (typeof ctx.api.getSkillsManageWithMeta === 'function') {
+      var res = await ctx.api.getSkillsManageWithMeta();
+      skillData = (res && res.skills) || [];
+      dirReadOnly = !!(res && res.readOnly);
+    } else {
+      skillData = (await ctx.api.getSkillsManage()) || [];
+    }
   } catch (e) {
-    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
+    if (!ctx) return;
     body.innerHTML = '<div class="empty error-text">加载技能失败：' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
-  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
+  if (!ctx) return;
 
   var enabled = skillData.filter(function(s) { return s.enabled !== false; }).length;
-  var anyReadOnly = skillData.some(function(s) { return s.readOnly === true || s.writable === false; });
+  var anyReadOnly = dirReadOnly || skillData.some(function(s) { return s.readOnly === true || s.writable === false; });
   summary.textContent = '共 ' + skillData.length + ' 个技能，' + enabled + ' 个已启用' + (anyReadOnly ? '（只读挂载）' : '');
 
   var uploadLabel = document.getElementById('skillUploadLabel');
@@ -83,7 +90,9 @@ async function loadSkills() {
   }
 
   if (skillData.length === 0) {
-    body.innerHTML = '<div class="empty">暂无技能，点击“上传技能”添加。</div>';
+    body.innerHTML = anyReadOnly
+      ? '<div class="empty">暂无技能（当前技能目录为只读挂载）。</div>'
+      : '<div class="empty">暂无技能，点击“上传技能”添加。</div>';
     return;
   }
 

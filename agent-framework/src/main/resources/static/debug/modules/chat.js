@@ -497,11 +497,15 @@ async function bindSessionModel(sid, modelId) {
   }
 }
 
+let loadHistorySeq = 0;
+
 async function loadThreadHistory(sessionId) {
+  const seq = ++loadHistorySeq;
   messagesEl.innerHTML = '<div class="msg system">正在加载历史消息...</div>';
   renderer.resetAll();
   try {
     const data = await ctx.api.getThreadHistory(sessionId, uid());
+    if (seq !== loadHistorySeq || currentSessionId() !== sessionId) return;
     sidebar.setContextFromHistory(data.context || []);
     const msgs = data.messages || [];
     messagesEl.innerHTML = '';
@@ -538,7 +542,7 @@ async function loadThreadHistory(sessionId) {
       }
     }
   } catch (e) {
-    if (currentSessionId() !== sessionId) return;
+    if (seq !== loadHistorySeq || currentSessionId() !== sessionId) return;
     sidebar.setContextFromHistory([]);
     messagesEl.innerHTML = '<div class="msg system">历史消息加载失败</div>';
   }
@@ -786,6 +790,11 @@ function handleEvent(data) {
       renderer.renderConfirmCard(r, data);
       break;
     }
+    case 'TOOL_RESULT_DATA_DELTA':
+    case 'tool_result_data_delta': {
+      renderer.appendImageBlock(r, data);
+      break;
+    }
     case 'file_ready': {
       renderer.renderFileReadyCard(r, data);
       break;
@@ -949,7 +958,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
       reconnectAttempts = 0;
       syncLastEventIdFromHandles();
       if (evt.replyId || evt.turnId) currentReplyId = evt.replyId || evt.turnId;
-      if (evt.type === 'AGENT_END' || evt.type === 'cancelled') terminalReceived = true;
+      if (evt.type === 'AGENT_END' || evt.type === 'cancelled' || evt.type === 'permission_ask') terminalReceived = true;
       hideWaiting();
       handleEvent(evt);
     },
@@ -964,8 +973,12 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
       handleEvent({ type: 'error', error: e.message || String(e) });
       finishStream();
     },
-    onEnd: () => {
+    onEnd: (evt) => {
       if (currentSessionId() !== sid) return;
+      if (evt && evt.type === 'done') {
+        finishStream();
+        return;
+      }
       if (isStreaming && !terminalReceived && transport().subscribe && currentReplyId) {
         startReconnect();
         return;

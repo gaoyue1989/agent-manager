@@ -564,26 +564,86 @@ class SkillManageServiceTest {
     }
 
     @Test
-    void toggleSkillPersistsToWorkspaceFallbackWhenSkillsDirIsReadOnly825() throws Exception {
+    void toggleSkillPersistsToSharedDbAcrossReplicasWhenSkillsDirIsReadOnly829() throws Exception {
         var skillDir = skillsDir.resolve("sys-skill");
         Files.createDirectories(skillDir);
         Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: sys-skill\ndescription: sys\n---\n# Sys\n");
-        var wsDir = tempDir.resolve("workspace");
-        Files.createDirectories(wsDir);
-        var props = new AgentManagerProperties(null, null, null, tempDir.toString(), wsDir.toString(), null, null, null, null, null);
-        var service = new SkillManageService(props) {
+        var wsPodA = tempDir.resolve("pod-a-empty");
+        var wsPodB = tempDir.resolve("pod-b-empty");
+        Files.createDirectories(wsPodA);
+        Files.createDirectories(wsPodB);
+
+        var sharedRows = new java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>>();
+        javax.sql.DataSource sharedDs = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+        org.mockito.Mockito.when(sharedDs.getConnection()).thenAnswer(inv -> {
+            var conn = org.mockito.Mockito.mock(java.sql.Connection.class);
+            var stmt = org.mockito.Mockito.mock(java.sql.Statement.class);
+            org.mockito.Mockito.when(conn.createStatement()).thenReturn(stmt);
+            org.mockito.Mockito.when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(pi -> {
+                String sql = pi.getArgument(0, String.class);
+                var ps = org.mockito.Mockito.mock(java.sql.PreparedStatement.class);
+                var params = new String[4];
+                org.mockito.Mockito.doAnswer(a -> {
+                    params[a.getArgument(0, Integer.class)] = a.getArgument(1, String.class);
+                    return null;
+                }).when(ps).setString(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyString());
+                if (sql.startsWith("SELECT")) {
+                    org.mockito.Mockito.when(ps.executeQuery()).thenAnswer(qi -> {
+                        var list = new java.util.ArrayList<>(sharedRows.getOrDefault(params[1], java.util.Set.of()));
+                        var cursor = new int[]{-1};
+                        var rs = org.mockito.Mockito.mock(java.sql.ResultSet.class);
+                        org.mockito.Mockito.when(rs.next()).thenAnswer(ni -> ++cursor[0] < list.size());
+                        org.mockito.Mockito.when(rs.getString(1)).thenAnswer(gi -> list.get(cursor[0]));
+                        return rs;
+                    });
+                } else if (sql.startsWith("DELETE")) {
+                    org.mockito.Mockito.when(ps.executeUpdate()).thenAnswer(di -> {
+                        sharedRows.remove(params[1]);
+                        return 1;
+                    });
+                } else if (sql.startsWith("INSERT")) {
+                    org.mockito.Mockito.doAnswer(bi -> {
+                        sharedRows.computeIfAbsent(params[1], k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(params[2]);
+                        return null;
+                    }).when(ps).addBatch();
+                }
+                return ps;
+            });
+            return conn;
+        });
+
+        var propsA = new AgentManagerProperties(null, null, null, tempDir.toString(), wsPodA.toString(), null, null, null, null, null);
+        var propsB = new AgentManagerProperties(null, null, null, tempDir.toString(), wsPodB.toString(), null, null, null, null, null);
+        var podA = new SkillManageService(propsA, sharedDs, null) {
+            @Override
+            public boolean isSkillsDirWritable() {
+                return false;
+            }
+        };
+        var podB = new SkillManageService(propsB, sharedDs, null) {
             @Override
             public boolean isSkillsDirWritable() {
                 return false;
             }
         };
 
-        assertTrue(service.isReadOnly());
-        assertFalse(service.toggleSkill("sys-skill"));
-        assertTrue(Files.isRegularFile(wsDir.resolve(".skill-states.json")));
+        assertTrue(podA.isReadOnly());
+        assertTrue(podA.isToggleWritable());
+        assertFalse(podA.toggleSkill("sys-skill"));
+        assertFalse(Files.exists(wsPodA.resolve(".skill-states.json")));
+        assertFalse(Files.exists(wsPodB.resolve(".skill-states.json")));
         assertFalse(Files.exists(skillsDir.resolve(".skill-states.json")));
-        assertTrue(service.getDisabledSet().contains("sys-skill"));
-        assertTrue(service.toggleSkill("sys-skill"));
-        assertFalse(service.getDisabledSet().contains("sys-skill"));
+        assertTrue(podB.getDisabledSet().contains("sys-skill"));
+        assertTrue(podB.toggleSkill("sys-skill"));
+        assertFalse(podA.getDisabledSet().contains("sys-skill"));
+
+        var noDbPod = new SkillManageService(propsA, null, null) {
+            @Override
+            public boolean isSkillsDirWritable() {
+                return false;
+            }
+        };
+        assertFalse(noDbPod.isToggleWritable());
+        org.junit.jupiter.api.Assertions.assertThrows(IOException.class, () -> noDbPod.toggleSkill("sys-skill"));
     }
 }

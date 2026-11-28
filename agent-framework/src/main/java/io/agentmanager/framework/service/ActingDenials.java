@@ -222,6 +222,47 @@ public final class ActingDenials {
         }
     }
 
+    public static List<Msg> restoreSuppressedMessages(List<Msg> messages, RuntimeContext ctx) {
+        if (messages == null || messages.isEmpty() || ctx == null) {
+            return messages;
+        }
+        if (!(ctx.get(SUPPRESSED_DIRECT_RETURN_IDS_KEY) instanceof Set<?> rawSet) || rawSet.isEmpty()) {
+            return messages;
+        }
+        @SuppressWarnings("unchecked")
+        Set<String> suppressedIds = (Set<String>) rawSet;
+        boolean anyChanged = false;
+        List<Msg> result = new ArrayList<>(messages.size());
+        for (Msg msg : messages) {
+            Msg restored = restoreSuppressedMsg(msg, suppressedIds);
+            if (restored != msg) {
+                anyChanged = true;
+            }
+            result.add(restored);
+        }
+        return anyChanged ? result : messages;
+    }
+
+    private static Msg restoreSuppressedMsg(Msg msg, Set<String> suppressedIds) {
+        if (msg == null || msg.getContent() == null) {
+            return msg;
+        }
+        boolean changed = false;
+        List<ContentBlock> updated = new ArrayList<>(msg.getContent().size());
+        for (ContentBlock block : msg.getContent()) {
+            if (block instanceof ToolResultBlock tr
+                    && tr.getState() == ToolResultState.ERROR
+                    && tr.getId() != null
+                    && suppressedIds.contains(tr.getId())) {
+                updated.add(tr.withState(ToolResultState.SUCCESS));
+                changed = true;
+            } else {
+                updated.add(block);
+            }
+        }
+        return changed ? msg.withContent(updated) : msg;
+    }
+
     private static AgentEvent restoreSuppressedEndEvent(AgentEvent evt, Set<String> suppressedIds) {
         if (evt instanceof ToolResultEndEvent end
                 && end.getState() == ToolResultState.ERROR

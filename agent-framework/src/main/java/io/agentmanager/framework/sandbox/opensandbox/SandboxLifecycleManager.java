@@ -187,7 +187,12 @@ public class SandboxLifecycleManager {
                 return createUntracked(createDelegate);
             }
             if (existing != null) {
-                // touch 先行（终审 d2）：在 probe/connect 之前占住 updated_at，使他副本 ⑤c
+                if (existing.userKey() != null && !existing.userKey().equals(userKey)) {
+                    log.warn("[sandbox-lifecycle] cross-user sandbox binding reuse blocked (sid={}, owner={}, requester={})",
+                        sessionId, existing.userKey(), userKey);
+                    throw new SandboxException(SandboxErrorCode.WORKSPACE_START_ERROR, "acquire",
+                        "sandbox binding owner mismatch (sid=" + sessionId + ")", null);
+                }
                 // 的乐观校验能感知本会话「在途复用」——只写 updated_at（终审 R2）
                 boolean touched = bindingStore.touchOnReuse(existing.id(), sessionId);
                 if (touched) {

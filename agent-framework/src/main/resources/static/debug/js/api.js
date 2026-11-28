@@ -142,6 +142,18 @@ export const api = {
   getTools: (includeInternal = false) => get('/tools?includeInternal=' + includeInternal),
   getSkills: () => get('/skills'),
   getSkillsManage: () => get('/skills/manage'),
+  getSkillsManageWithMeta: async () => {
+    const r = await fetch(BASE + '/skills/manage');
+    if (!r.ok) throw await httpError(r);
+    const skills = await r.json();
+    const roHeader = r.headers.get('X-Skills-Read-Only');
+    const twHeader = r.headers.get('X-Skills-Toggle-Writable');
+    return {
+      skills: Array.isArray(skills) ? skills : [],
+      readOnly: roHeader === 'true',
+      toggleWritable: twHeader !== 'false'
+    };
+  },
   getAvailableSkills: (userId) => get('/skills/available' + (userId ? '?userId=' + encodeURIComponent(userId) : '')),
   parseSkillRefs: (message, userId) => get('/skills/parse-refs?message=' + encodeURIComponent(message)
     + (userId ? '&userId=' + encodeURIComponent(userId) : '')),
