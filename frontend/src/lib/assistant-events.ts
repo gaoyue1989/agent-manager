@@ -112,6 +112,21 @@ export interface HistoryAssistantMessage {
   blocks?: AssistantBlock[];
 }
 
+function hasUnsafePathSegments(p: string): boolean {
+  if (p.includes("\\") || /[\x00-\x1f\x7f]/.test(p)) return true;
+  const segs = p.split("/");
+  return segs.includes("..") || segs.includes(".");
+}
+
+function matchesAllowedFilePath(p: string): boolean {
+  const m = p.match(/^(?:\/agent\/[a-z0-9-]+)?\/files\/(.+)$/i);
+  if (!m) return false;
+  const tail = m[1];
+  const segs = tail.split("/").filter((s) => s.length > 0);
+  if (segs.length === 0) return false;
+  return segs.every((s) => s !== "." && s !== "..");
+}
+
 export function isSafeFileDownloadUrl(url: string | undefined | null): boolean {
   if (typeof url !== "string") return false;
   const trimmed = url.trim();
@@ -122,19 +137,22 @@ export function isSafeFileDownloadUrl(url: string | undefined | null): boolean {
   }
   if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
     const pathOnly = trimmed.split(/[?#]/, 1)[0];
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(pathOnly);
-    } catch {
-      return false;
+    if (hasUnsafePathSegments(pathOnly) || !matchesAllowedFilePath(pathOnly)) return false;
+    let cur = pathOnly;
+    for (let i = 0; i < 3; i++) {
+      let next: string;
+      try {
+        next = decodeURIComponent(cur);
+      } catch {
+        return false;
+      }
+      if (hasUnsafePathSegments(next) || !matchesAllowedFilePath(next)) return false;
+      if (next === cur) {
+        return true;
+      }
+      cur = next;
     }
-    if (decoded.includes("\\") || decoded.includes("\0")) return false;
-    if (pathOnly.split("/").includes("..") || decoded.split("/").includes("..")) return false;
-    return (
-      (/^\/files\/.+$/.test(pathOnly) && /^\/files\/.+$/.test(decoded)) ||
-      (/^\/agent\/[a-z0-9-]+\/files\/.+$/i.test(pathOnly) &&
-        /^\/agent\/[a-z0-9-]+\/files\/.+$/i.test(decoded))
-    );
+    return false;
   }
   return false;
 }
