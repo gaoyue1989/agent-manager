@@ -491,6 +491,18 @@
     box-shadow: var(--shadow-panel);
   }
   .chat-sidebar.mobile-open { transform: translateX(0); }
+  #sidebarToggle { display: none; }
+  .chat-mobile-close-btn { display: inline-flex; }
+  .chat-sidebar-backdrop.mobile-open {
+    display: block;
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, .45);
+    z-index: 45;
+  }
   .header .agent-name { display: none; }
   .chat-header-bar h2 { max-width: 130px; }
 }
+
+.chat-mobile-close-btn { display: none; }
+.chat-sidebar-backdrop { display: none; }
