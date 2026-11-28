@@ -97,10 +97,12 @@ public class SkillCatalogService {
             }
         }
 
-        // ③ 标记启停状态
+        boolean readOnly = manageService.isReadOnly();
         for (var entry : byName.values()) {
             var name = (String) entry.get("name");
             entry.put("enabled", !disabled.contains(name));
+            entry.put("readOnly", readOnly);
+            entry.put("writable", !readOnly);
         }
 
         return new ArrayList<>(byName.values());

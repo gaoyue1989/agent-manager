@@ -99,7 +99,7 @@ export function createChatComposer({ ctx, onSend, onStop }) {
     try {
       const uid = ctx.state.getState('ui.userId') || 'debug-user';
       const data = await ctx.api.getAvailableSkills(uid);
-      mentionSkills = (data && data.skills) || [];
+      mentionSkills = Array.isArray(data) ? data : (data && data.skills) || [];
     } catch (e) {
       mentionSkills = [];
     }
@@ -127,8 +127,9 @@ export function createChatComposer({ ctx, onSend, onStop }) {
     const q = query.toLowerCase();
     const filtered = mentionSkills.filter((s) => {
       if (!q) return true;
+      const label = s.displayName || s.alias || '';
       return (s.name && s.name.toLowerCase().includes(q)) ||
-        (s.alias && s.alias.toLowerCase().includes(q)) ||
+        (label && label.toLowerCase().includes(q)) ||
         (s.description && s.description.toLowerCase().includes(q));
     });
 
@@ -141,14 +142,15 @@ export function createChatComposer({ ctx, onSend, onStop }) {
     }
 
     mentionActiveIdx = 0;
-    mentionDropdown.innerHTML = filtered.map((s, idx) =>
-      '<div class="skill-mention-item' + (idx === 0 ? ' active' : '') + '" data-idx="' + idx + '">' +
+    mentionDropdown.innerHTML = filtered.map((s, idx) => {
+      const label = s.displayName || s.alias || '';
+      return '<div class="skill-mention-item' + (idx === 0 ? ' active' : '') + '" data-idx="' + idx + '">' +
         '<span class="sm-icon">' + icon('skills', 15) + '</span>' +
         '<span class="sm-name"><span class="sm-at">/</span>' + ctx.utils.esc(s.name) + '</span>' +
-        (s.alias ? '<span class="sm-alias">(' + ctx.utils.esc(s.alias) + ')</span>' : '') +
+        (label ? '<span class="sm-alias">(' + ctx.utils.esc(label) + ')</span>' : '') +
         '<span class="sm-desc">' + ctx.utils.esc(s.description || '') + '</span>' +
-      '</div>'
-    ).join('');
+      '</div>';
+    }).join('');
 
     mentionDropdown.querySelectorAll('.skill-mention-item').forEach((el, idx) => {
       el.addEventListener('mousedown', (e) => {

@@ -43,20 +43,45 @@ public class SkillManageService {
     private static final String STATES_FILE = ".skill-states.json";
 
     private final Path skillsDir;
+    private final Path fallbackStateFile;
 
     public SkillManageService(AgentManagerProperties props) {
         this.skillsDir = Path.of(props.resolvedConfigDir()).resolve("skills");
+        this.fallbackStateFile = Path.of(props.resolvedWorkspaceBaseDir()).resolve(STATES_FILE);
         try {
             Files.createDirectories(skillsDir);
         } catch (IOException e) {
             log.warn("Failed to create skills dir: {}", e.getMessage());
         }
-        log.info("SkillManageService initialized (skillsDir: {})", skillsDir);
+        log.info("SkillManageService initialized (skillsDir: {}, readOnly: {})", skillsDir, isReadOnly());
     }
 
-    /** 返回 skills 目录路径 */
     public Path getSkillsDir() {
         return skillsDir;
+    }
+
+    public boolean isSkillsDirWritable() {
+        Path target = skillsDir;
+        while (target != null && !Files.exists(target)) {
+            target = target.getParent();
+        }
+        if (target == null) {
+            return false;
+        }
+        if (!Files.isWritable(target)) {
+            return false;
+        }
+        try {
+            if (Files.getFileStore(target).isReadOnly()) {
+                return false;
+            }
+        } catch (IOException ignored) {
+        }
+        return true;
+    }
+
+    public boolean isReadOnly() {
+        return !isSkillsDirWritable();
     }
 
     // ========== 上传 ==========
@@ -359,8 +384,22 @@ public class SkillManageService {
 
     // ========== 启停状态持久化 ==========
 
+    private Path resolveStateFileForRead() {
+        var primary = skillsDir.resolve(STATES_FILE);
+        if (isReadOnly() && Files.isRegularFile(fallbackStateFile)) {
+            return fallbackStateFile;
+        }
+        if (Files.isRegularFile(primary)) {
+            return primary;
+        }
+        if (Files.isRegularFile(fallbackStateFile)) {
+            return fallbackStateFile;
+        }
+        return primary;
+    }
+
     private Set<String> loadDisabledSet() {
-        var stateFile = skillsDir.resolve(STATES_FILE);
+        var stateFile = resolveStateFileForRead();
         if (!Files.isRegularFile(stateFile)) {
             return new HashSet<>();
         }
@@ -408,10 +447,16 @@ public class SkillManageService {
     }
 
     private void saveDisabledSet(Set<String> disabled) throws IOException {
-        Files.createDirectories(skillsDir);
-        var stateFile = skillsDir.resolve(STATES_FILE);
         var json = MAPPER.writerWithDefaultPrettyPrinter()
             .writeValueAsString(new ArrayList<>(disabled));
-        Files.writeString(stateFile, json, StandardCharsets.UTF_8);
+        if (isSkillsDirWritable()) {
+            Files.createDirectories(skillsDir);
+            Files.writeString(skillsDir.resolve(STATES_FILE), json, StandardCharsets.UTF_8);
+            return;
+        }
+        if (fallbackStateFile.getParent() != null) {
+            Files.createDirectories(fallbackStateFile.getParent());
+        }
+        Files.writeString(fallbackStateFile, json, StandardCharsets.UTF_8);
     }
 }

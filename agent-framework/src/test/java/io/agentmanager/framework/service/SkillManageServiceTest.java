@@ -562,4 +562,28 @@ class SkillManageServiceTest {
         var content = service.readSkillContent("dup-skill");
         assertTrue(content.contains("CONTENT-A"), "must resolve lexicographically first canonical dir a-dir, got: " + content);
     }
+
+    @Test
+    void toggleSkillPersistsToWorkspaceFallbackWhenSkillsDirIsReadOnly825() throws Exception {
+        var skillDir = skillsDir.resolve("sys-skill");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: sys-skill\ndescription: sys\n---\n# Sys\n");
+        var wsDir = tempDir.resolve("workspace");
+        Files.createDirectories(wsDir);
+        var props = new AgentManagerProperties(null, null, null, tempDir.toString(), wsDir.toString(), null, null, null, null, null);
+        var service = new SkillManageService(props) {
+            @Override
+            public boolean isSkillsDirWritable() {
+                return false;
+            }
+        };
+
+        assertTrue(service.isReadOnly());
+        assertFalse(service.toggleSkill("sys-skill"));
+        assertTrue(Files.isRegularFile(wsDir.resolve(".skill-states.json")));
+        assertFalse(Files.exists(skillsDir.resolve(".skill-states.json")));
+        assertTrue(service.getDisabledSet().contains("sys-skill"));
+        assertTrue(service.toggleSkill("sys-skill"));
+        assertFalse(service.getDisabledSet().contains("sys-skill"));
+    }
 }
