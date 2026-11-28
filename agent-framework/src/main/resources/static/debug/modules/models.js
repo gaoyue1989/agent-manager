@@ -17,18 +17,18 @@ export default {
     ctx = c;
     container.innerHTML = `
     <div class="module-page">
-      <div class="module-header"><h2>Models</h2>
+      <div class="module-header"><h2>模型</h2>
         <span class="sub">
-          <button class="btn small" id="btnReloadModels">Reload</button>
-          <button class="btn small primary" id="btnAddModel">Add Model</button>
+          <button class="btn small" id="btnReloadModels">刷新</button>
+          <button class="btn small primary" id="btnAddModel">新增模型</button>
         </span></div>
       <div class="empty" style="text-align:left;padding:0 0 10px">
         会话可切换模型：系统模型来自 LLM_* 环境变量（只读）；托管模型存 model_config 表，保存即生效。
-        未显式选择模型的会话走「默认模型」——点任意模型行的 Set Default 设置，点系统模型行可回落系统默认。
+        未显式选择模型的会话走「默认模型」——点任意模型行的「设为默认」设置，点系统模型行可回落系统默认。
         删除被会话引用的模型后，该会话自动回落默认模型。
-        备用模型点托管模型行的 Set Fallback 设置（主模型重试耗尽后自动切换）；数据库未设置时回退 LLM_FALLBACK_MODEL_ID。
+        备用模型点托管模型行的「设为备用」设置（主模型重试耗尽后自动切换）；数据库未设置时回退 LLM_FALLBACK_MODEL_ID。
       </div>
-      <div class="module-scroll" id="modelsBody"><div class="empty">Loading...</div></div>
+      <div class="module-scroll" id="modelsBody"><div class="empty">加载中...</div></div>
     </div>`;
     document.getElementById('btnReloadModels').addEventListener('click', loadModels);
     document.getElementById('btnAddModel').addEventListener('click', () => openForm(null));
@@ -61,7 +61,7 @@ async function loadModels() {
     }));
   } catch (e) {
     if (!ctx) return; // 已切走：丢弃过期渲染
-    body.innerHTML = '<div class="empty error-text">Failed to load models: ' + ctx.utils.esc(e.message) + '</div>';
+    body.innerHTML = '<div class="empty error-text">加载模型失败：' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
   if (!ctx) return; // await 期间可能已 unmount
@@ -70,50 +70,49 @@ async function loadModels() {
 
 function renderTable(body) {
   if (models.length === 0) {
-    body.innerHTML = '<div class="empty">No models.</div>';
+    body.innerHTML = '<div class="empty">暂无模型。</div>';
     return;
   }
   let html = '';
-  // 备用模型提示：区分数据库配置与部署级 env；DB 配置可清除后回落 env
   html += '<div class="empty" style="text-align:left;padding:0 0 8px">备用模型：';
   if (!fallbackId) {
-    html += '未启用（点托管模型行的 Set Fallback 设置）';
+    html += '未启用（点托管模型行的「设为备用」设置）';
   } else {
     html += '<span class="mono">' + ctx.utils.esc(fallbackId) + '</span>'
       + (fallbackSource === 'env'
           ? '（来自 LLM_FALLBACK_MODEL_ID；设置备用可覆盖）'
-          : '（来源 db） <button class="btn small" data-act="clear-fallback">Clear</button>');
+          : '（来源 db） <button class="btn small" data-act="clear-fallback">清除</button>');
   }
   html += '</div>';
   html += '<table class="data-table"><thead><tr>'
-    + '<th>Name</th><th>Provider</th><th>Model ID</th><th>Base URL</th><th>API Key</th>'
-    + '<th>Sampling</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+    + '<th>名称</th><th>方言</th><th>模型 ID</th><th>接口地址</th><th>API Key</th>'
+    + '<th>采样参数</th><th>状态</th><th>操作</th></tr></thead><tbody>';
   for (const m of models) {
     const isSystem = m.source === 'system';
     html += '<tr>'
       + '<td>' + ctx.utils.esc(m.name)
-        + (isSystem ? ' <span class="badge dim">system</span>' : '')
-        + (m.is_default ? ' <span class="badge green">default</span>' : '')
-        + (m.is_fallback ? ' <span class="badge yellow">fallback</span>' : '') + '</td>'
+        + (isSystem ? ' <span class="badge dim">系统</span>' : '')
+        + (m.is_default ? ' <span class="badge green">默认</span>' : '')
+        + (m.is_fallback ? ' <span class="badge yellow">备用</span>' : '') + '</td>'
       + '<td><span class="badge dim" style="white-space:nowrap">' + ctx.utils.esc(m.provider || 'openai') + '</span></td>'
       + '<td class="mono">' + ctx.utils.esc(m.model_id) + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.base_url || '—') + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.api_key_masked || (isSystem ? '（env）' : '（系统密钥）')) + '</td>'
       + '<td class="mono">' + ctx.utils.esc(samplingText(m)) + '</td>'
       + '<td>' + (m.enabled === false
-          ? '<span class="badge red" style="white-space:nowrap">disabled</span>'
-          : '<span class="badge green" style="white-space:nowrap">enabled</span>') + '</td>'
+          ? '<span class="badge red" style="white-space:nowrap">禁用</span>'
+          : '<span class="badge green" style="white-space:nowrap">启用</span>') + '</td>'
       + '<td>'
-      + '<button class="btn small" data-act="test" data-id="' + ctx.utils.esc(m.id) + '">Test</button> '
+      + '<button class="btn small" data-act="test" data-id="' + ctx.utils.esc(m.id) + '">测试</button> '
       + (!m.is_default && (isSystem || m.enabled !== false)
-          ? '<button class="btn small primary" data-act="default" data-id="' + ctx.utils.esc(m.id) + '">Set Default</button> '
+          ? '<button class="btn small primary" data-act="default" data-id="' + ctx.utils.esc(m.id) + '">设为默认</button> '
           : '')
       + (!isSystem && !m.is_fallback && m.enabled !== false
-          ? '<button class="btn small" data-act="fallback" data-id="' + ctx.utils.esc(m.id) + '">Set Fallback</button> '
+          ? '<button class="btn small" data-act="fallback" data-id="' + ctx.utils.esc(m.id) + '">设为备用</button> '
           : '')
       + (isSystem ? ''
-          : '<button class="btn small" data-act="edit" data-id="' + ctx.utils.esc(m.id) + '">Edit</button> '
-            + '<button class="btn small danger" data-act="del" data-id="' + ctx.utils.esc(m.id) + '">Delete</button>')
+          : '<button class="btn small" data-act="edit" data-id="' + ctx.utils.esc(m.id) + '">编辑</button> '
+            + '<button class="btn small danger" data-act="del" data-id="' + ctx.utils.esc(m.id) + '">删除</button>')
       + '</td></tr>';
   }
   html += '</tbody></table>';
@@ -191,7 +190,7 @@ function samplingText(m) {
 /** 连接测试：真实发起一次最小 completion（后端 max_tokens=16） */
 async function testModel(model, btn) {
   btn.disabled = true;
-  btn.textContent = 'Testing...';
+  btn.textContent = '测试中...';
   try {
     const r = await ctx.api.testModel(model.id);
     const detail = r.ok
@@ -203,7 +202,7 @@ async function testModel(model, btn) {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = 'Test';
+      btn.textContent = '测试';
     }
   }
 }
@@ -257,7 +256,7 @@ async function openForm(existing) {
     ? PROVIDER_DIALECTS : PROVIDER_DIALECTS.concat([provider]);
 
   window.App.modal.open(
-    '<h2>' + (isEdit ? 'Edit Model' : 'Add Model') + '</h2>'
+    '<h2>' + (isEdit ? '编辑模型' : '新增模型') + '</h2>'
     + '<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px">'
     + '托管模型存 model_config 表，保存即生效（多副本 ≤30s 收敛）。未显式选择的会话走列表中的默认模型。</p>'
     + section('连接')

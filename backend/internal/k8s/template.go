@@ -411,6 +411,10 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 			}
 			switch path.Path {
 			case hostModeRootPath:
+				if *path.PathType != networkingv1.PathTypePrefix {
+					return fmt.Errorf("path %q pathType must stay %s, got %s",
+						path.Path, networkingv1.PathTypePrefix, *path.PathType)
+				}
 				// 归属唯一：Ingress 对象与服务一一对应，业务 backend 必须指向本服务。
 				// host 模式根路径直出：path 是不变量（Endpoint 固定派生为
 				// {scheme}://{K8sName}{suffix}/，若放开 path 会让落库地址与实际服务
@@ -421,6 +425,10 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 				}
 				found = true
 			case hostModeInternalPath, hostModeActuatorPath:
+				if *path.PathType != networkingv1.PathTypePrefix {
+					return fmt.Errorf("path %q pathType must stay %s, got %s",
+						path.Path, networkingv1.PathTypePrefix, *path.PathType)
+				}
 				// 内部路径排除表（objects.go hostModeInternalPath）：backend 恒为平台
 				// router（location / 恒 404），指回本服务等于排除形同虚设
 				if path.Backend.Service == nil || path.Backend.Service.Name != RouterServiceName ||

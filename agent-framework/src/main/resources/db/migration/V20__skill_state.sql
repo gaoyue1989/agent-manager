@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS skill_state (
+  agent_slug VARCHAR(128) NOT NULL,
+  skill_name VARCHAR(255) NOT NULL,
+  disabled   BOOLEAN      NOT NULL DEFAULT TRUE,
+  updated_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (agent_slug, skill_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

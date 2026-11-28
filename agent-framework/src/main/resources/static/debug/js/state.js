@@ -1,4 +1,4 @@
-/* ===== 全局状态管理 ===== */
+import { icon } from './icons.js';
 
 const state = {
   agent: {
@@ -13,11 +13,9 @@ const state = {
     current: (() => { try { return localStorage.getItem('debug-sid'); } catch (e) { return null; } })()
   },
   ui: {
-    streamMode: 'channel', // a2a | channel —— 默认 Channel：唯一对话入口，支持 durable SSE 刷新续传
+    streamMode: 'channel',
     isStreaming: false,
-    theme: null, // 'light' | 'dark' | null(跟随系统)
-    // 对话协议：native（/threads/* 自研词表，默认）| agui（/agui/* 官方 AG-UI 事件，
-    // 见 agui-native-parity-design §12.2；仅 debug 页提供，产品前端不暴露）
+    theme: null,
     protocol: (() => { try { return sessionStorage.getItem('debug-proto') || 'native'; } catch (e) { return 'native'; } })(),
     userId: (() => { try { return localStorage.getItem('debug-uid') || 'debug-user'; } catch (e) { return 'debug-user'; } })()
   }
@@ -37,17 +35,14 @@ export function setState(path, value) {
     return obj[key];
   }, state);
   target[last] = value;
-  // 会话 ID 持久化到 localStorage（刷新后恢复当前 session）
   if (path === 'threads.current') {
-    try { value ? localStorage.setItem('debug-sid', value) : localStorage.removeItem('debug-sid'); } catch (e) { /* ignore */ }
+    try { value ? localStorage.setItem('debug-sid', value) : localStorage.removeItem('debug-sid'); } catch (e) {}
   }
-  // userId 持久化到 localStorage
   if (path === 'ui.userId') {
-    try { value ? localStorage.setItem('debug-uid', value) : localStorage.removeItem('debug-uid'); } catch (e) { /* ignore */ }
+    try { value ? localStorage.setItem('debug-uid', value) : localStorage.removeItem('debug-uid'); } catch (e) {}
   }
-  // 对话协议持久化到 sessionStorage（按页签记忆；刷新保持，新页签回 native）
   if (path === 'ui.protocol') {
-    try { value ? sessionStorage.setItem('debug-proto', value) : sessionStorage.removeItem('debug-proto'); } catch (e) { /* ignore */ }
+    try { value ? sessionStorage.setItem('debug-proto', value) : sessionStorage.removeItem('debug-proto'); } catch (e) {}
   }
   notify(path, value);
 }
@@ -64,7 +59,6 @@ function notify(path, value) {
   (listeners[path] || []).forEach((cb) => cb(value));
 }
 
-/** 初始化时从后端加载基础信息（健康、Agent 名、工具、技能、MCP） */
 export async function loadAgentInfo() {
   try {
     const health = await window.App.api.getHealth();
@@ -78,19 +72,19 @@ export async function loadAgentInfo() {
     setState('agent.info', info);
     const nameEl = document.getElementById('agentName');
     if (nameEl) nameEl.textContent = info.agent || '';
-  } catch (e) { /* 忽略 */ }
+  } catch (e) {}
   try {
     const tools = await window.App.api.getTools();
     setState('agent.tools', tools);
-  } catch (e) { /* 忽略 */ }
+  } catch (e) {}
   try {
     const skills = await window.App.api.getSkills();
     setState('agent.skills', skills || []);
-  } catch (e) { /* 忽略 */ }
+  } catch (e) {}
   try {
     const mcps = await window.App.api.getMcpServers();
     setState('agent.mcpServers', mcps || []);
-  } catch (e) { /* 忽略 */ }
+  } catch (e) {}
 }
 
 function updateHeaderStatus(health) {
@@ -110,8 +104,6 @@ function setHeaderStatus(text, cls) {
   if (dot) dot.className = 'status-dot ' + (cls || '');
   if (txt) txt.textContent = text;
 }
-
-/* ---------- 主题切换（手动 > 系统自动） ---------- */
 
 export function initTheme() {
   const btn = document.getElementById('themeToggle');
@@ -138,7 +130,7 @@ function setTheme(theme) {
   document.documentElement.classList.remove('light', 'dark');
   if (theme === 'dark') document.documentElement.classList.add('dark');
   else if (theme === 'light') document.documentElement.classList.add('light');
-  try { localStorage.setItem('debug-theme', theme); } catch (e) { /* ignore */ }
+  try { localStorage.setItem('debug-theme', theme); } catch (e) {}
   setState('ui.theme', theme);
   syncThemeIcon();
 }
@@ -147,10 +139,10 @@ function syncThemeIcon() {
   const btn = document.getElementById('themeToggle');
   if (!btn) return;
   if (currentTheme() === 'dark') {
-    btn.textContent = '☀';
-    btn.title = '切换到浅色';
+    btn.innerHTML = icon('sun', 17);
+    btn.title = '切换到浅色模式';
   } else {
-    btn.textContent = '☾';
-    btn.title = '切换到深色';
+    btn.innerHTML = icon('moon', 17);
+    btn.title = '切换到深色模式';
   }
 }

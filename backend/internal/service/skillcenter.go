@@ -6,12 +6,15 @@
 package service
 
 import (
+	"path"
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"io"
 	"path/filepath"
 	"regexp"
@@ -236,23 +239,9 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 	if err != nil {
 		return nil, nil, err
 	}
-	// 读取全部条目（InspectSkillZip 已做 zip-slip/大小/条目数校验）
-	raw := map[string][]byte{}
-	for _, zf := range zi.Reader.File {
-		if zf.FileInfo().IsDir() {
-			continue
-		}
-		p := strings.Trim(zf.Name, "/")
-		rc, err := zf.Open()
-		if err != nil {
-			return nil, nil, err
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil, nil, err
-		}
-		raw[p] = data
+	raw, err := readZipEntriesBounded(zi.Reader, store.MaxExtracted, true)
+	if err != nil {
+		return nil, nil, err
 	}
 	// 布局归一（2026-10-20 / 2026-11-25）：真实技能包有多种形态，统一归一为包内 skills/<name>/ 结构：
 	//   A) skills/<name>/SKILL.md（OAF 包内技能目录风格）
@@ -280,6 +269,9 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 			continue
 		}
 		rel[p] = data
+	}
+	if _, ok := rel["SKILL.md"]; !ok {
+		return nil, nil, fmt.Errorf("%w: zip must contain SKILL.md", ErrInvalidForm)
 	}
 	// 技能名：表单 > 布局目录 > frontmatter > zip 文件名
 	if name == "" {
@@ -363,7 +355,11 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 	c.DB.Model(&store.SkillVersion{}).Where("id = ?", created.LatestVersionID).
 		Updates(map[string]interface{}{"storage_dir": ver.StorageDir, "checksum": ver.Checksum})
 	// 文件清单落 FilesJSON（含 sha256，供下载校验）
-	filesInfo, _ := c.skillVersionFiles(created.ID, ver.Version)
+	filesInfo, ferr := c.skillVersionFiles(created.ID, ver.Version)
+	if ferr != nil {
+		slog.Warn("skillcenter: failed to collect version files", "skillId", created.ID, "version", ver.Version, "err", ferr)
+		filesInfo = []SkillFileInfo{}
+	}
 	c.DB.Model(&store.SkillVersion{}).Where("id = ?", created.LatestVersionID).
 		Update("files_json", mustJSON(filesInfo))
 	return created, warnings, nil
@@ -372,7 +368,7 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 // skillZipJunk 压缩工具元数据条目（macOS 资源分叉 / Finder 元数据、Windows 缩略图缓存）：
 // 布局识别与落盘前剔除，否则一个 __MACOSX/ 目录就会让「唯一顶层目录」判定失效。
 func skillZipJunk(p string) bool {
-	if strings.HasPrefix(p, "__MACOSX/") {
+	if p == "__MACOSX" || strings.HasPrefix(p, "__MACOSX/") || strings.Contains(p, "/__MACOSX/") {
 		return true
 	}
 	base := p[strings.LastIndex(p, "/")+1:]
@@ -426,13 +422,22 @@ func resolveSkillZipLayout(raw map[string][]byte, wantName string) (prefix, layo
 
 // skillDirsUnderSkills 全部条目都在 skills/ 下时返回其一级目录名（升序）。
 func skillDirsUnderSkills(cur map[string][]byte) ([]string, bool) {
+	if _, ok := cur["skills/SKILL.md"]; ok {
+		return nil, false
+	}
 	set := map[string]bool{}
 	for p := range cur {
 		rest, ok := strings.CutPrefix(p, "skills/")
 		if !ok || rest == "" {
 			return nil, false
 		}
-		set[strings.SplitN(rest, "/", 2)[0]] = true
+		dir, _, hasSlash := strings.Cut(rest, "/")
+		if !hasSlash || dir == "" {
+			continue
+		}
+		if _, ok := cur["skills/"+dir+"/SKILL.md"]; ok {
+			set[dir] = true
+		}
 	}
 	dirs := make([]string, 0, len(set))
 	for d := range set {
@@ -587,6 +592,19 @@ type UpdateSkillInput struct {
 }
 
 // UpdateSkillDraft 更新 Markdown 工作区草稿（draft 版本不存在则创建）。
+func validateSkillMarkdownContent(skillName, content string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("%w: content is required", ErrInvalidForm)
+	}
+	if len(content) > 256<<10 || utf8.RuneCountInString(content) > 256<<10 {
+		return fmt.Errorf("%w: markdown content must be 1-256KB", ErrInvalidForm)
+	}
+	if fmName, _, ok := parseSkillFrontmatter(content); ok && fmName != "" && fmName != skillName {
+		return fmt.Errorf("%w: SKILL.md frontmatter name %q does not match skill name %q", ErrInvalidForm, fmName, skillName)
+	}
+	return nil
+}
+
 func (c *Core) UpdateSkillDraft(workspaceID, skillID uint, content string) error {
 	s, err := c.GetSkill(skillID)
 	if err != nil || s.WorkspaceID != workspaceID {
@@ -595,25 +613,27 @@ func (c *Core) UpdateSkillDraft(workspaceID, skillID uint, content string) error
 	if s.Source != "markdown" {
 		return fmt.Errorf("%w: only markdown-defined skills have editable draft content", ErrInvalidForm)
 	}
+	if err := validateSkillMarkdownContent(s.Name, content); err != nil {
+		return err
+	}
 	var draft store.SkillVersion
 	err = c.DB.Where("skill_id = ? AND status = ?", skillID, SkillVerDraft).First(&draft).Error
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		// 无 draft：基于最新版本号顺延创建
 		var latest store.SkillVersion
 		if err := c.DB.Where("skill_id = ?", skillID).Order("id DESC").First(&latest).Error; err != nil {
 			return err
 		}
-		// MySQL JSON 列拒绝空串（sqlite 宽松，单测曾掩盖——E2E 实测 500）：
-		// 新建草稿即落合法 JSON 默认值，随后 Update 覆盖 content_json。
 		draft = store.SkillVersion{SkillID: skillID, Version: nextVersion(latest.Version),
 			Status: SkillVerDraft, Changelog: "工作区草稿", CreatedBy: s.CreatedBy,
 			ContentJSON: mustJSON(map[string]string{"content": content}), FilesJSON: "[]"}
-		if err := c.DB.Create(&draft).Error; err != nil {
-			return err
-		}
+		return c.DB.Create(&draft).Error
+	}
+	if draft.StorageDir != "" {
+		_, err = c.UpdateSkillVersionContent(workspaceID, skillID, draft.ID, content, nil)
+		return err
 	}
 	return c.DB.Model(&draft).Update("content_json", mustJSON(map[string]string{"content": content})).Error
 }
@@ -781,6 +801,173 @@ func (c *Core) transitionSkillVersion(workspaceID, skillID, versionID uint, targ
 		c.DB.Model(s).Update("latest_version_id", v.ID)
 	}
 	return &v, nil
+}
+
+func (c *Core) GetSkillVersionContent(workspaceID, skillID, versionID uint) (string, error) {
+	s, err := c.GetSkill(skillID)
+	if err != nil || s.WorkspaceID != workspaceID {
+		return "", ErrNotFound
+	}
+	var v store.SkillVersion
+	if err := c.DB.First(&v, versionID).Error; err != nil || v.SkillID != skillID {
+		return "", ErrNotFound
+	}
+	if v.StorageDir != "" {
+		data, err := c.FS.ReadFile(v.StorageDir, "skills/"+s.Name+"/SKILL.md")
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	var content struct {
+		Content string `json:"content"`
+	}
+	_ = json.Unmarshal([]byte(v.ContentJSON), &content)
+	return content.Content, nil
+}
+
+func (c *Core) UpdateSkillVersionContent(workspaceID, skillID, versionID uint, content string, changelog *string) (*store.SkillVersion, error) {
+	s, err := c.GetSkill(skillID)
+	if err != nil || s.WorkspaceID != workspaceID {
+		return nil, ErrNotFound
+	}
+	var v store.SkillVersion
+	if err := c.DB.First(&v, versionID).Error; err != nil || v.SkillID != skillID {
+		return nil, ErrNotFound
+	}
+	if v.Status != SkillVerDraft {
+		return nil, fmt.Errorf("%w: only draft versions can be modified", ErrInvalidForm)
+	}
+	if err := validateSkillMarkdownContent(s.Name, content); err != nil {
+		return nil, err
+	}
+	if v.StorageDir != "" {
+		existingZip, err := c.FS.ZipPackage(v.StorageDir)
+		if err != nil {
+			return nil, err
+		}
+		zr, err := zip.NewReader(bytes.NewReader(existingZip), int64(len(existingZip)))
+		if err != nil {
+			return nil, err
+		}
+		files, err := readZipEntriesBounded(zr, store.MaxExtracted, false)
+		if err != nil {
+			return nil, err
+		}
+		files["skills/"+s.Name+"/SKILL.md"] = []byte(content)
+		normalized, err := buildZipBytes(files)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := c.FS.ReplaceZipTo(v.StorageDir, normalized); err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(normalized)
+		v.Checksum = hex.EncodeToString(sum[:])
+		if filesInfo, ferr := c.skillVersionFiles(skillID, v.Version); ferr == nil {
+			v.FilesJSON = mustJSON(filesInfo)
+		}
+	} else {
+		v.ContentJSON = mustJSON(map[string]string{"content": content})
+	}
+	if changelog != nil {
+		v.Changelog = strings.TrimSpace(*changelog)
+	}
+	if err := c.DB.Save(&v).Error; err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func (c *Core) UploadSkillVersionZip(workspaceID, skillID, versionID uint, filename string, r io.Reader, changelog string) (*store.SkillVersion, []string, error) {
+	s, err := c.GetSkill(skillID)
+	if err != nil || s.WorkspaceID != workspaceID {
+		return nil, nil, ErrNotFound
+	}
+	var v store.SkillVersion
+	if err := c.DB.First(&v, versionID).Error; err != nil || v.SkillID != skillID {
+		return nil, nil, ErrNotFound
+	}
+	if v.Status != SkillVerDraft {
+		return nil, nil, fmt.Errorf("%w: only draft versions can be modified", ErrInvalidForm)
+	}
+	zi, err := c.FS.InspectSkillZip(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := readZipEntriesBounded(zi.Reader, store.MaxExtracted, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	prefix, _, err := resolveSkillZipLayout(raw, s.Name)
+	if err != nil {
+		return nil, nil, err
+	}
+	rel := map[string][]byte{}
+	for fp, data := range raw {
+		if skillZipJunk(fp) {
+			continue
+		}
+		if prefix != "" {
+			if !strings.HasPrefix(fp, prefix) {
+				continue
+			}
+			fp = strings.TrimPrefix(fp, prefix)
+		}
+		if fp == "" {
+			continue
+		}
+		rel[fp] = data
+	}
+	if _, ok := rel["SKILL.md"]; !ok {
+		return nil, nil, fmt.Errorf("%w: zip must contain SKILL.md", ErrInvalidForm)
+	}
+	files := map[string][]byte{}
+	for fp, data := range rel {
+		files["skills/"+s.Name+"/"+fp] = data
+	}
+	paths := make([]string, 0, len(files))
+	for fp := range files {
+		paths = append(paths, fp)
+	}
+	sort.Strings(paths)
+	warnings := []string{}
+	for _, it := range checkSkillDirs(func(fp string) ([]byte, error) {
+		if data, ok := files[fp]; ok {
+			return data, nil
+		}
+		return nil, fmt.Errorf("not found: %s", fp)
+	}, paths) {
+		for _, iss := range it.Issues {
+			warnings = append(warnings, fmt.Sprintf("skill %q: %s", it.Name, iss))
+		}
+	}
+	normalized, err := buildZipBytes(files)
+	if err != nil {
+		return nil, nil, err
+	}
+	targetDir := fmt.Sprintf("skills/%d/%s", skillID, v.Version)
+	if _, _, err := c.FS.ReplaceZipTo(targetDir, normalized); err != nil {
+		return nil, nil, err
+	}
+	sum := sha256.Sum256(normalized)
+	v.StorageDir = targetDir
+	v.ContentJSON = "{}"
+	v.Checksum = hex.EncodeToString(sum[:])
+	if filesInfo, ferr := c.skillVersionFiles(skillID, v.Version); ferr == nil {
+		v.FilesJSON = mustJSON(filesInfo)
+	} else {
+		v.FilesJSON = "[]"
+	}
+	if strings.TrimSpace(changelog) != "" {
+		v.Changelog = strings.TrimSpace(changelog)
+	} else if filename != "" {
+		v.Changelog = "zip 技能包上传（" + filename + "）"
+	}
+	if err := c.DB.Save(&v).Error; err != nil {
+		return nil, nil, err
+	}
+	return &v, warnings, nil
 }
 
 // SkillVersionDownload 版本 zip 导出（zip 形态：PVC 打包；markdown 形态：拼 SKILL.md 结构）。
@@ -1016,3 +1203,40 @@ func (c *Core) SkillRefAgents(workspaceID uint, skillName string) []SkillRefAgen
 	}
 	return out
 }
+
+func readZipEntriesBounded(zr *zip.Reader, maxTotal int64, cleanPath bool) (map[string][]byte, error) {
+	raw := map[string][]byte{}
+	var total int64
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		key := zf.Name
+		if cleanPath {
+			key = path.Clean(strings.Trim(zf.Name, "/"))
+			if key == "." || key == "" || key == ".." || strings.HasPrefix(key, "../") {
+				continue
+			}
+		}
+		remaining := maxTotal - total
+		if remaining < 0 {
+			return nil, store.ErrExtractTooLarge
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(io.LimitReader(rc, remaining+1))
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > remaining {
+			return nil, store.ErrExtractTooLarge
+		}
+		total += int64(len(data))
+		raw[key] = data
+	}
+	return raw, nil
+}
+

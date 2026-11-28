@@ -32,7 +32,10 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
     static final String SUBPROTOCOL_BINARY = "binary";
     static final int CLOSE_SANDBOX_NOT_FOUND = 4404;
     static final int CLOSE_UPSTREAM_FAILED = 1011;
+    static final int CLOSE_MESSAGE_TOO_BIG = 1009;
     static final int MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+    static final int MAX_UPSTREAM_BINARY_BYTES = 16 * 1024 * 1024;
+    static final int MAX_UPSTREAM_TEXT_BYTES = 1024 * 1024;
 
     private final BrowserProperties props;
     private final SandboxConfig sandboxConfig;
@@ -151,6 +154,7 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
             new AtomicReference<>(CompletableFuture.completedFuture(null));
         private final java.io.ByteArrayOutputStream binaryFragment = new java.io.ByteArrayOutputStream();
         private final StringBuilder textFragment = new StringBuilder();
+        private int textFragmentBytes;
         private volatile WebSocket upstream;
         private volatile boolean closed;
 
@@ -175,10 +179,18 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
 
         @Override
         public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data, boolean last) {
-            webSocket.request(1);
+            if (closed) {
+                return null;
+            }
             byte[] chunk = new byte[data.remaining()];
             data.get(chunk);
             synchronized (binaryFragment) {
+                if (binaryFragment.size() + chunk.length > MAX_UPSTREAM_BINARY_BYTES) {
+                    binaryFragment.reset();
+                    closeUpstream();
+                    closeQuietly(downstream, CLOSE_MESSAGE_TOO_BIG, "upstream_binary_too_big");
+                    return null;
+                }
                 binaryFragment.write(chunk, 0, chunk.length);
                 if (last) {
                     byte[] payload = binaryFragment.toByteArray();
@@ -186,19 +198,38 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
                     sendDownstream(new BinaryMessage(payload));
                 }
             }
+            if (!closed) {
+                webSocket.request(1);
+            }
             return null;
         }
 
         @Override
         public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-            webSocket.request(1);
+            if (closed) {
+                return null;
+            }
+            String chunk = data.toString();
+            int chunkBytes = chunk.getBytes(StandardCharsets.UTF_8).length;
             synchronized (textFragment) {
-                textFragment.append(data);
+                if (textFragmentBytes + chunkBytes > MAX_UPSTREAM_TEXT_BYTES) {
+                    textFragment.setLength(0);
+                    textFragmentBytes = 0;
+                    closeUpstream();
+                    closeQuietly(downstream, CLOSE_MESSAGE_TOO_BIG, "upstream_text_too_big");
+                    return null;
+                }
+                textFragment.append(chunk);
+                textFragmentBytes += chunkBytes;
                 if (last) {
                     String payload = textFragment.toString();
                     textFragment.setLength(0);
+                    textFragmentBytes = 0;
                     sendDownstream(new TextMessage(payload));
                 }
+            }
+            if (!closed) {
+                webSocket.request(1);
             }
             return null;
         }
@@ -254,14 +285,18 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
 
         private void sendDownstream(org.springframework.web.socket.WebSocketMessage<?> message) {
             try {
-                if (downstream.isOpen()) {
-                    synchronized (downstream) {
-                        downstream.sendMessage(message);
-                    }
+                if (!downstream.isOpen()) {
+                    closeUpstream();
+                    return;
+                }
+                synchronized (downstream) {
+                    downstream.sendMessage(message);
                 }
             } catch (Exception e) {
                 log.warn("[browser-view] downstream send failed (sid={}): {}",
                     downstream.getId(), e.getMessage());
+                closeUpstream();
+                closeQuietly(downstream, CLOSE_UPSTREAM_FAILED, "downstream_send_failed");
             }
         }
 
@@ -275,6 +310,7 @@ public class BrowserViewWebSocketHandler extends AbstractWebSocketHandler implem
                 ws = this.upstream;
                 this.upstream = null;
             }
+            pipes.remove(downstream.getId(), this);
             if (ws == null) {
                 return;
             }

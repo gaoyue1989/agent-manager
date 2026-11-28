@@ -125,4 +125,27 @@ class SandboxConfigTest {
         assertEquals(Duration.ofSeconds(1), config.execdGraceShutdown());
         assertEquals("127.0.0.1:8090", config.opensandbox().serverUrl());
     }
+
+    @Test
+    void skillsFallbackDefaultsShouldBindPushModeAndGuards() {
+        var bound = new Binder(new MapConfigurationPropertySource(Map.of(
+            "agent.sandbox.enabled", "true")))
+            .bind("agent.sandbox", Bindable.of(SandboxConfig.class))
+            .get();
+        assertEquals("push", bound.skillsFallbackMode());
+        assertEquals("/tmp/.skills-store", bound.skillsFallbackStoreDir());
+        assertEquals(67108864L, bound.skillsFallbackMaxBytes());
+        assertEquals(4, bound.skillsFallbackMaxConcurrency());
+        assertEquals(5000L, bound.skillsFallbackAcquireTimeoutMs());
+        assertTrue(bound.skillsFallbackOnVersionMismatch());
+
+        var off = new Binder(new MapConfigurationPropertySource(Map.of(
+            "agent.sandbox.enabled", "true",
+            "agent.sandbox.skills-fallback-mode", "off",
+            "agent.sandbox.skills-fallback-on-version-mismatch", "false")))
+            .bind("agent.sandbox", Bindable.of(SandboxConfig.class))
+            .get();
+        assertEquals("off", off.skillsFallbackMode());
+        assertFalse(off.skillsFallbackOnVersionMismatch());
+    }
 }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -118,5 +119,60 @@ class TurnStopWatcherTest {
         // 交接后的新登记（执行态）：未命中停止 → false，turn_stop 行留执行态派发
         watcher.register("s1", "rid-h");
         assertFalse(watcher.unregisterRegistrationOnly("rid-h"));
+    }
+
+    @Test
+    void notifyLocalDeliversInterruptImmediatelyWithoutPoll() {
+        when(registry.interrupt("s-local", "r-local")).thenReturn(true);
+        watcher.register("s-local", "r-local");
+
+        watcher.notifyLocal("s-local", "r-local");
+
+        assertTrue(watcher.isStopRequested("r-local"));
+        verify(registry).interrupt("s-local", "r-local");
+    }
+
+    @Test
+    void onControlRegisteredDeliversDeferredStopImmediately() {
+        when(registry.interrupt("s-cold", "r-cold")).thenReturn(false, true);
+        watcher.register("s-cold", "r-cold");
+
+        watcher.notifyLocal("s-cold", "r-cold");
+        assertTrue(watcher.isStopRequested("r-cold"));
+
+        watcher.onControlRegistered("s-cold");
+
+        verify(registry, times(2)).interrupt("s-cold", "r-cold");
+    }
+
+    @Test
+    void notifyLocalBeforeRegisterHonorsLeaseHandoffWindow() {
+        when(registry.interrupt("s-handoff", "r-handoff")).thenReturn(true);
+
+        watcher.notifyLocal("s-handoff", "r-handoff");
+        watcher.register("s-handoff", "r-handoff");
+
+        assertTrue(watcher.isStopRequested("r-handoff"));
+        verify(registry).interrupt("s-handoff", "r-handoff");
+    }
+
+    @Test
+    void awaitStopWakesQueuedTurnImmediately() throws Exception {
+        watcher.registerQueued("s-q", "r-q");
+        long t0 = System.currentTimeMillis();
+        Thread.ofPlatform().daemon(true).start(() -> {
+            try {
+                Thread.sleep(30);
+            } catch (InterruptedException ignored) {
+            }
+            watcher.notifyLocal("s-q", "r-q");
+        });
+
+        boolean woke = watcher.awaitStop("r-q", 3000);
+        long elapsed = System.currentTimeMillis() - t0;
+
+        assertTrue(woke);
+        assertTrue(watcher.isStopRequested("r-q"));
+        assertTrue(elapsed < 1000, "expected fast wakeup, took " + elapsed + "ms");
     }
 }

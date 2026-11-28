@@ -84,19 +84,22 @@ func (f *FS) InspectZip(r io.Reader) (*ZipInfo, error) {
 		if err := validateEntry(zf); err != nil {
 			return nil, err
 		}
-		total += int64(zf.UncompressedSize64)
-		if total > MaxExtracted {
+		if zf.UncompressedSize64 > uint64(MaxExtracted) || uint64(total) > uint64(MaxExtracted)-zf.UncompressedSize64 {
 			return nil, ErrExtractTooLarge
 		}
+		total += int64(zf.UncompressedSize64)
 		if zf.Name == "AGENTS.md" {
 			rc, err := zf.Open()
 			if err != nil {
 				return nil, err
 			}
-			info.AgentsMD, err = io.ReadAll(rc)
+			info.AgentsMD, err = io.ReadAll(io.LimitReader(rc, MaxExtracted+1))
 			rc.Close()
 			if err != nil {
 				return nil, err
+			}
+			if int64(len(info.AgentsMD)) > MaxExtracted {
+				return nil, ErrExtractTooLarge
 			}
 		}
 		if !zf.FileInfo().IsDir() {
@@ -134,10 +137,10 @@ func (f *FS) InspectSkillZip(r io.Reader) (*ZipInfo, error) {
 		if err := validateEntry(zf); err != nil {
 			return nil, err
 		}
-		total += int64(zf.UncompressedSize64)
-		if total > MaxExtracted {
+		if zf.UncompressedSize64 > uint64(MaxExtracted) || uint64(total) > uint64(MaxExtracted)-zf.UncompressedSize64 {
 			return nil, ErrExtractTooLarge
 		}
+		total += int64(zf.UncompressedSize64)
 		if !zf.FileInfo().IsDir() {
 			info.FileCount++
 		}
@@ -151,6 +154,11 @@ func validateEntry(zf *zip.File) error {
 	name := zf.Name
 	if len(name) > 512 || zf.Mode()&os.ModeSymlink != 0 {
 		return ErrZipSlip
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == ".." {
+			return ErrZipSlip
+		}
 	}
 	clean := filepath.Clean(name)
 	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") ||
@@ -201,14 +209,18 @@ func (f *FS) ExtractZipTo(rel string, zi *ZipInfo) (int, int64, string, error) {
 			src.Close()
 			return 0, 0, "", err
 		}
-		n, err := io.Copy(out, src)
+		n, err := io.Copy(out, io.LimitReader(src, MaxExtracted-total+1))
 		src.Close()
 		out.Close()
 		if err != nil {
 			return 0, 0, "", err
 		}
-		count++
 		total += n
+		if total > MaxExtracted {
+			_ = os.RemoveAll(dest)
+			return 0, 0, "", ErrExtractTooLarge
+		}
+		count++
 	}
 	return count, total, zi.Checksum, nil
 }
@@ -311,8 +323,13 @@ func CleanSubPath(sub string) (string, error) {
 	if sub == "" {
 		return "", fmt.Errorf("%w: empty", ErrZipSlip)
 	}
-	if len(sub) > 512 || strings.Contains(sub, "\\") || strings.Contains(sub, "..") {
+	if len(sub) > 512 || strings.Contains(sub, "\\") {
 		return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+	}
+	for _, seg := range strings.Split(sub, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+		}
 	}
 	clean := strings.TrimPrefix(filepath.Clean("/"+sub), "/")
 	if clean == "" || clean == "." {
@@ -411,14 +428,59 @@ func (f *FS) WriteZipTo(rel string, zipData []byte) (int, int64, error) {
 			src.Close()
 			return 0, 0, err
 		}
-		n, err := io.Copy(out, src)
+		n, err := io.Copy(out, io.LimitReader(src, MaxExtracted-total+1))
 		src.Close()
 		out.Close()
 		if err != nil {
 			return 0, 0, err
 		}
-		count++
 		total += n
+		if total > MaxExtracted {
+			_ = os.RemoveAll(dest)
+			return 0, 0, ErrExtractTooLarge
+		}
+		count++
+	}
+	return count, total, nil
+}
+
+func (f *FS) ReplaceZipTo(rel string, zipData []byte) (int, int64, error) {
+	dest := f.PackageDir(rel)
+	parent := filepath.Dir(dest)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return 0, 0, err
+	}
+	tmpDir, err := os.MkdirTemp(parent, ".tmp-replace-*")
+	if err != nil {
+		return 0, 0, err
+	}
+	tmpRel, err := filepath.Rel(f.Root, tmpDir)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return 0, 0, err
+	}
+	count, total, err := f.WriteZipTo(tmpRel, zipData)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return 0, 0, err
+	}
+	var backupDir string
+	if _, statErr := os.Stat(dest); statErr == nil {
+		backupDir = dest + ".bak-" + filepath.Base(tmpDir)
+		if err := os.Rename(dest, backupDir); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			return 0, 0, err
+		}
+	}
+	if err := os.Rename(tmpDir, dest); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		if backupDir != "" {
+			_ = os.Rename(backupDir, dest)
+		}
+		return 0, 0, err
+	}
+	if backupDir != "" {
+		_ = os.RemoveAll(backupDir)
 	}
 	return count, total, nil
 }

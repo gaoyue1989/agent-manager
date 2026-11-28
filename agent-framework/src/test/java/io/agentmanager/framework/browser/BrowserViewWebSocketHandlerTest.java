@@ -6,7 +6,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -218,5 +221,76 @@ class BrowserViewWebSocketHandlerTest {
         pipesField.setAccessible(true);
         var pipesMap = (java.util.Map<?, ?>) pipesField.get(handler);
         assertTrue(pipesMap.isEmpty(), "pipes map must not leak after close-during-connect race");
+    }
+
+    @Test
+    void upstreamBinaryExceedingLimitShouldCloseWith1009AndNotRequestMore() throws Exception {
+        var upstream = mock(WebSocket.class);
+        var listener = new AtomicReference<WebSocket.Listener>();
+        setupPipe(upstream, listener);
+
+        var l = listener.get();
+        int halfOver = BrowserViewWebSocketHandler.MAX_UPSTREAM_BINARY_BYTES / 2 + 1;
+        l.onBinary(upstream, ByteBuffer.wrap(new byte[halfOver]), false);
+        verify(upstream).request(1);
+
+        l.onBinary(upstream, ByteBuffer.wrap(new byte[halfOver]), true);
+
+        verify(upstream).abort();
+        verify(session, never()).sendMessage(any());
+        var captor = ArgumentCaptor.forClass(CloseStatus.class);
+        verify(session).close(captor.capture());
+        assertEquals(BrowserViewWebSocketHandler.CLOSE_MESSAGE_TOO_BIG, captor.getValue().getCode());
+        verify(upstream).request(1);
+    }
+
+    @Test
+    void upstreamTextExceedingLimitShouldCloseWith1009AndNotRequestMore() throws Exception {
+        var upstream = mock(WebSocket.class);
+        var listener = new AtomicReference<WebSocket.Listener>();
+        setupPipe(upstream, listener);
+
+        var l = listener.get();
+        String chunk = "a".repeat(BrowserViewWebSocketHandler.MAX_UPSTREAM_TEXT_BYTES / 2 + 1);
+        l.onText(upstream, chunk, false);
+        verify(upstream).request(1);
+
+        l.onText(upstream, chunk, true);
+
+        verify(upstream).abort();
+        verify(session, never()).sendMessage(any());
+        var captor = ArgumentCaptor.forClass(CloseStatus.class);
+        verify(session).close(captor.capture());
+        assertEquals(BrowserViewWebSocketHandler.CLOSE_MESSAGE_TOO_BIG, captor.getValue().getCode());
+        verify(upstream).request(1);
+    }
+
+    @Test
+    void downstreamSendFailureShouldCloseUpstreamAndDownstreamAndStopRequesting() throws Exception {
+        var upstream = mock(WebSocket.class);
+        var listener = new AtomicReference<WebSocket.Listener>();
+        setupPipe(upstream, listener);
+        doThrow(new java.io.IOException("broken pipe")).when(session).sendMessage(any());
+
+        listener.get().onBinary(upstream, ByteBuffer.wrap("RFB".getBytes(StandardCharsets.UTF_8)), true);
+
+        verify(upstream).abort();
+        verify(upstream, never()).request(1);
+        var captor = ArgumentCaptor.forClass(CloseStatus.class);
+        verify(session).close(captor.capture());
+        assertEquals(BrowserViewWebSocketHandler.CLOSE_UPSTREAM_FAILED, captor.getValue().getCode());
+    }
+
+    @Test
+    void onBinaryShouldRequestNextFrameOnlyAfterSendDownstream() throws Exception {
+        var upstream = mock(WebSocket.class);
+        var listener = new AtomicReference<WebSocket.Listener>();
+        setupPipe(upstream, listener);
+
+        listener.get().onBinary(upstream, ByteBuffer.wrap("RFB".getBytes(StandardCharsets.UTF_8)), true);
+
+        var order = inOrder(session, upstream);
+        order.verify(session).sendMessage(any());
+        order.verify(upstream).request(1);
     }
 }

@@ -392,6 +392,34 @@ class SkillManageServiceTest {
     }
 
     @Test
+    void chineseParenthesesCanonicalNameShouldResolveAllOperations() throws IOException {
+        var service = createService();
+        writeMismatchedSkill("公文检查_内部_", "公文检查（内部）");
+
+        assertTrue(service.readSkillContent("公文检查（内部）").contains("公文检查（内部）"));
+
+        assertFalse(service.toggleSkill("公文检查（内部）"));
+        assertTrue(service.getDisabledSet().contains("公文检查（内部）"));
+        assertTrue(service.isDisabled("公文检查（内部）"));
+
+        assertTrue(service.deleteSkill("公文检查（内部）"));
+        assertFalse(Files.exists(skillsDir.resolve("公文检查_内部_")));
+        assertTrue(service.getDisabledSet().isEmpty());
+    }
+
+    @Test
+    void uploadSkillWithChineseParenthesesShouldKeepDirNameEqualToName() throws IOException {
+        var service = createService();
+        var zipBytes = createFlatZip("公文检查（内部）", "Chinese name", "1.0.0");
+
+        var name = service.uploadSkill(new ByteArrayInputStream(zipBytes), "gongwen.zip");
+
+        assertEquals("公文检查（内部）", name);
+        assertTrue(Files.isDirectory(skillsDir.resolve("公文检查（内部）")));
+        assertTrue(service.deleteSkill("公文检查（内部）"));
+    }
+
+    @Test
     void duplicateCanonicalNameShouldResolveByDirNameOrder() throws IOException {
         // issue #504 统一裁决：同规范名重复目录按目录名字典序首个命中（与 bundle 打包
         // 同口径，与文件系统扫描序无关；写入顺序与字典序相反以区分两种裁决）
@@ -503,5 +531,119 @@ class SkillManageServiceTest {
         service.deleteSkill("foo");
         assertFalse(Files.exists(dirA));
         assertTrue(Files.exists(dirFoo));
+    }
+
+    @Test
+    void toggleSkillShouldNotRemapCanonicalNameToCollidingPhysicalDir621() throws Exception {
+        var dirA = skillsDir.resolve("dirA");
+        Files.createDirectories(dirA);
+        Files.writeString(dirA.resolve("SKILL.md"), "---\nname: foo\ndescription: A\n---\n# Foo\n");
+        var dirFoo = skillsDir.resolve("foo");
+        Files.createDirectories(dirFoo);
+        Files.writeString(dirFoo.resolve("SKILL.md"), "---\nname: bar\ndescription: B\n---\n# Bar\n");
+
+        var service = createService();
+        service.toggleSkill("foo");
+        var disabled = service.getDisabledSet();
+        assertTrue(disabled.contains("foo"), "foo must be disabled");
+        assertFalse(disabled.contains("bar"), "bar must not be disabled");
+    }
+
+    @Test
+    void resolveSkillDirShouldMatchCanonicalDirIndexOnDuplicateCanonicalName629() throws Exception {
+        var dirA = skillsDir.resolve("a-dir");
+        Files.createDirectories(dirA);
+        Files.writeString(dirA.resolve("SKILL.md"), "---\nname: dup-skill\ndescription: A\n---\nCONTENT-A\n");
+        var dirDup = skillsDir.resolve("dup-skill");
+        Files.createDirectories(dirDup);
+        Files.writeString(dirDup.resolve("SKILL.md"), "---\nname: dup-skill\ndescription: D\n---\nCONTENT-DUP\n");
+
+        var service = createService();
+        var content = service.readSkillContent("dup-skill");
+        assertTrue(content.contains("CONTENT-A"), "must resolve lexicographically first canonical dir a-dir, got: " + content);
+    }
+
+    @Test
+    void toggleSkillPersistsToSharedDbAcrossReplicasWhenSkillsDirIsReadOnly829() throws Exception {
+        var skillDir = skillsDir.resolve("sys-skill");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: sys-skill\ndescription: sys\n---\n# Sys\n");
+        var wsPodA = tempDir.resolve("pod-a-empty");
+        var wsPodB = tempDir.resolve("pod-b-empty");
+        Files.createDirectories(wsPodA);
+        Files.createDirectories(wsPodB);
+
+        var sharedRows = new java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>>();
+        javax.sql.DataSource sharedDs = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+        org.mockito.Mockito.when(sharedDs.getConnection()).thenAnswer(inv -> {
+            var conn = org.mockito.Mockito.mock(java.sql.Connection.class);
+            var stmt = org.mockito.Mockito.mock(java.sql.Statement.class);
+            org.mockito.Mockito.when(conn.createStatement()).thenReturn(stmt);
+            org.mockito.Mockito.when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenAnswer(pi -> {
+                String sql = pi.getArgument(0, String.class);
+                var ps = org.mockito.Mockito.mock(java.sql.PreparedStatement.class);
+                var params = new String[4];
+                org.mockito.Mockito.doAnswer(a -> {
+                    params[a.getArgument(0, Integer.class)] = a.getArgument(1, String.class);
+                    return null;
+                }).when(ps).setString(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyString());
+                if (sql.startsWith("SELECT")) {
+                    org.mockito.Mockito.when(ps.executeQuery()).thenAnswer(qi -> {
+                        var list = new java.util.ArrayList<>(sharedRows.getOrDefault(params[1], java.util.Set.of()));
+                        var cursor = new int[]{-1};
+                        var rs = org.mockito.Mockito.mock(java.sql.ResultSet.class);
+                        org.mockito.Mockito.when(rs.next()).thenAnswer(ni -> ++cursor[0] < list.size());
+                        org.mockito.Mockito.when(rs.getString(1)).thenAnswer(gi -> list.get(cursor[0]));
+                        return rs;
+                    });
+                } else if (sql.startsWith("DELETE")) {
+                    org.mockito.Mockito.when(ps.executeUpdate()).thenAnswer(di -> {
+                        sharedRows.remove(params[1]);
+                        return 1;
+                    });
+                } else if (sql.startsWith("INSERT")) {
+                    org.mockito.Mockito.doAnswer(bi -> {
+                        sharedRows.computeIfAbsent(params[1], k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(params[2]);
+                        return null;
+                    }).when(ps).addBatch();
+                }
+                return ps;
+            });
+            return conn;
+        });
+
+        var propsA = new AgentManagerProperties(null, null, null, tempDir.toString(), wsPodA.toString(), null, null, null, null, null);
+        var propsB = new AgentManagerProperties(null, null, null, tempDir.toString(), wsPodB.toString(), null, null, null, null, null);
+        var podA = new SkillManageService(propsA, sharedDs, null) {
+            @Override
+            public boolean isSkillsDirWritable() {
+                return false;
+            }
+        };
+        var podB = new SkillManageService(propsB, sharedDs, null) {
+            @Override
+            public boolean isSkillsDirWritable() {
+                return false;
+            }
+        };
+
+        assertTrue(podA.isReadOnly());
+        assertTrue(podA.isToggleWritable());
+        assertFalse(podA.toggleSkill("sys-skill"));
+        assertFalse(Files.exists(wsPodA.resolve(".skill-states.json")));
+        assertFalse(Files.exists(wsPodB.resolve(".skill-states.json")));
+        assertFalse(Files.exists(skillsDir.resolve(".skill-states.json")));
+        assertTrue(podB.getDisabledSet().contains("sys-skill"));
+        assertTrue(podB.toggleSkill("sys-skill"));
+        assertFalse(podA.getDisabledSet().contains("sys-skill"));
+
+        var noDbPod = new SkillManageService(propsA, null, null) {
+            @Override
+            public boolean isSkillsDirWritable() {
+                return false;
+            }
+        };
+        assertFalse(noDbPod.isToggleWritable());
+        org.junit.jupiter.api.Assertions.assertThrows(IOException.class, () -> noDbPod.toggleSkill("sys-skill"));
     }
 }

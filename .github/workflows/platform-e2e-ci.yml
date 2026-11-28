@@ -36,6 +36,7 @@ jobs:
               - 'e2e/**'
               - '.github/actions/**'
               - '.github/workflows/platform-e2e-ci.yml'
+              - 'charts/oaf-platform/**'
       - name: 分片表守卫（模块漏登记分片即失败）
         run: bash e2e/console-split/run-all.sh --check-shards
 

@@ -486,7 +486,7 @@ class ConfirmControllerTest {
             eq("reply-ask"), any(), any(), any());
         // ask 即执行段结束：租约让出 + 会话关闭（closeSession → finishTurn；
         // 源流 complete 的幂等兜底会再走一次 endTurn，故 finishTurn 用 atLeastOnce）
-        verify(turnLeaseStore).release(eq("t1"), eq("tok-ask1"));
+        verify(turnLeaseStore, org.mockito.Mockito.timeout(2000)).release(eq("t1"), eq("tok-ask1"));
         verify(eventStore, atLeastOnce()).finishTurn("t1");
         // ask 帧本身已广播（EventBus 落库可见）
         assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("get_weather")),

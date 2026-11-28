@@ -24,6 +24,7 @@ import io.agentmanager.framework.config.ChatUiChannelProvider;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.ModelCatalog;
+import io.agentmanager.framework.service.PresetAnswerMiddleware.PresetAnswer;
 import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
@@ -37,6 +38,7 @@ import io.agentmanager.framework.service.TurnToolSummaryTracker;
 import io.agentmanager.framework.service.UiContextStore;
 import io.agentmanager.framework.service.UploadWorkspaceInjector;
 import io.agentmanager.framework.service.WorkspaceReader;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentEventType;
 import io.agentscope.core.event.RequireUserConfirmEvent;
@@ -305,9 +307,17 @@ public class ChatStreamController {
      *   "fileIds": [],                 // 可选
      *   "model": "01J8XK...",          // 可选，会话模型（GET /models 的 id；""/system = 回默认模型）
      *   "skills": ["refund", "order"], // 可选，本轮可用技能列表（缺省 = 全部；[] = 无技能）
-     *   "tools": ["query", "get_order"] // 可选，本轮可用工具列表（缺省 = 全部；[] = 仅内置）
+     *   "tools": ["query", "get_order"], // 可选，本轮可用工具列表（缺省 = 全部；[] = 仅内置）
+     *   "presetTurn": {                 // 可选，预置轮：question + answer 原样写入会话，不触达真实模型
+     *     "question": "总结今天的头条",
+     *     "answer": "今天共有三条要闻：……"
+     *   }
      * }
      * }</pre>
+     *
+     * <p>{@code presetTurn} 与非空 {@code message}/{@code fileIds} 互斥：本轮以 {@code question} 作用户消息、
+     * {@code answer} 作助手消息进入会话历史，不触达真实模型。
+     * 见 docs/design/preset-answer-turn-design-261126.md。
      *
      * <p>{@code skills} 仅对本轮生效（不落库、不跨轮沿用），白名单外的技能不出现在模型侧
      * {@code <available_skills>}、不可经 {@code load_skill_through_path} 加载、{@code /Skill}
@@ -342,21 +352,35 @@ public class ChatStreamController {
             : body.sessionId();
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
 
-        var message = body.message();
+        var presetTurn = body.presetTurn();
+        if (presetTurn != null) {
+            if (presetTurn.question() == null || presetTurn.question().isBlank()
+                    || presetTurn.answer() == null || presetTurn.answer().isBlank()) {
+                return Flux.just(errorSSE(sessionId,
+                    "preset_turn_invalid: presetTurn.question and presetTurn.answer are required"));
+            }
+            if ((body.message() != null && !body.message().isBlank())
+                    || (body.fileIds() != null && !body.fileIds().isEmpty())) {
+                return Flux.just(errorSSE(sessionId,
+                    "preset_turn_conflict: presetTurn cannot be combined with message or fileIds"));
+            }
+        }
+        var message = presetTurn != null ? presetTurn.question() : body.message();
         if ((message == null || message.isBlank()) && (body.fileIds() == null || body.fileIds().isEmpty())) {
             return Flux.just(errorSSE(sessionId, "message or fileIds is required"));
         }
 
         // 网关 Header 优先 > 请求体 userId > 默认 debug-user
-        var userId = (headerUserId != null && !headerUserId.isBlank())
+        var rawUserId = (headerUserId != null && !headerUserId.isBlank())
             ? headerUserId
-            : (body.userId() != null && !body.userId().isBlank()) ? body.userId() : "debug-user";
-        userId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+            : (body.userId() != null && !body.userId().isBlank()) ? body.userId() : null;
+        var userId = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(rawUserId);
 
-        log.info("[chat] start: sessionId={}, userId={}, isNew={}, messageLen={}, fileCount={}",
+        log.info("[chat] start: sessionId={}, userId={}, isNew={}, messageLen={}, fileCount={}, preset={}",
             sessionId, userId, isNewSession,
             message != null ? message.length() : 0,
-            body.fileIds() != null ? body.fileIds().size() : 0);
+            body.fileIds() != null ? body.fileIds().size() : 0,
+            presetTurn != null);
         // 本轮可用技能列表（仅本轮生效，不落库）：缺省 = 全部；[] = 无技能（§3）
         if (body.skills() != null) {
             log.info("[chat] skills: sid={}, count={}, names={}",
@@ -423,7 +447,7 @@ public class ChatStreamController {
         // UserQuotaExhaustedException → GlobalExceptionHandler 转 HTTP 409 + 结构化载荷
         // （前端配额错误卡）。预检 fail-open（存储异常放行）；绑定仍惰性（首次 exec 才
         // create/复用），exec 时的全量裁决是最终裁决。
-        if (sandboxLifecycle != null) {
+        if (sandboxLifecycle != null && presetTurn == null) {
             var quotaReject = sandboxLifecycle.precheck(finalUserId, finalSessionId);
             if (quotaReject != null) {
                 log.info("[chat] quota exhausted precheck reject: sessionId={}, user={}, bindings={}",
@@ -486,7 +510,11 @@ public class ChatStreamController {
                     return;
                 }
                 try {
-                    Thread.sleep(stopPollIntervalMs());
+                    if (turnStopWatcher != null) {
+                        turnStopWatcher.awaitStop(replyId, stopPollIntervalMs());
+                    } else {
+                        Thread.sleep(stopPollIntervalMs());
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     if (turnStopWatcher != null) {
@@ -585,7 +613,7 @@ public class ChatStreamController {
             // turn 开始注册（守卫线程/续期线程并发安全）：沙箱未 acquire 时注册先行落位，
             // 覆盖「LLM-only 长轮次在首次 exec 前无 call 引用」的续期盲区；终态注销只挂
             // endTurnAndCleanupBuckets（TurnFinalizer 终态），不挂 per-call stop()。
-            if (sandboxLifecycle != null) {
+            if (sandboxLifecycle != null && presetTurn == null) {
                 sandboxLifecycle.onTurnStart(finalSessionId);
             }
 
@@ -653,8 +681,9 @@ public class ChatStreamController {
 
                 // ===== 4. 构造消息 =====
                 // 注入 /Skill 引用（按 session userId 合并该用户 L4 个人技能；本轮白名单裁剪）
-                var processedMessage = skillInjectionService.injectSkillReferences(
-                    message, finalUserId, body.skills());
+                var processedMessage = presetTurn != null
+                    ? message
+                    : skillInjectionService.injectSkillReferences(message, finalUserId, body.skills());
 
                 // 上传文件准备（均须先行于 buildContentBlocks 的路径提示构造，保证提示路径
                 // 与磁盘实际一致）：bind-at-use 绑定 + workspace_path 预分配一体
@@ -683,14 +712,14 @@ public class ChatStreamController {
                 }
                 // 本轮技能白名单随本条用户消息下传（SkillFilterMiddleware 读取；仅本轮生效）。
                 // 显式空列表也要写入（= 无技能），因此只判 null 不判空
-                if (body.skills() != null) {
+                if (presetTurn == null && body.skills() != null) {
                     msgMeta.put(io.agentmanager.framework.service.SkillFilterMiddleware.METADATA_SKILLS_KEY,
                         body.skills());
                 }
                 // 本轮工具白名单随本条用户消息下传（ToolFilterMiddleware 读取，作用域限
                 // MCP+自定义、内置恒可见；session-tool-list-design §2）。仅本轮生效：
                 // 显式空列表也要写入（= 仅内置），因此只判 null 不判空
-                if (body.tools() != null) {
+                if (presetTurn == null && body.tools() != null) {
                     msgMeta.put(io.agentmanager.framework.service.ToolFilterMiddleware.METADATA_TOOLS_KEY,
                         body.tools());
                 }
@@ -766,9 +795,15 @@ public class ChatStreamController {
                 // withPeer 产出的正是 InboundMessage.dm(channelId, peerId.trim(), messages)——
                 // 同一条路由路径，仅多带 runtimeContext（网关身份字段仍由网关覆盖生效）。
                 // 透传头经 typed attribute 随行（turn 级存活、不持久化），middleware 合并进 McpMeta
+                var runtimeContext = forwardHeaders.toRuntimeContext();
+                if (presetTurn != null) {
+                    runtimeContext = RuntimeContext.builder(runtimeContext)
+                        .put(PresetAnswer.class, new PresetAnswer(presetTurn.answer()))
+                        .build();
+                }
                 var inbound = io.agentscope.harness.agent.gateway.channel.InboundMessage
                     .dm(currentChatChannel.channelId(), finalSessionId, messages)
-                    .withRuntimeContext(forwardHeaders.toRuntimeContext());
+                    .withRuntimeContext(runtimeContext);
                 currentChatChannel.dispatchStream(inbound)
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
@@ -1404,8 +1439,15 @@ public class ChatStreamController {
         return false;
     }
 
-    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId、model、skills、tools 可选 */
+    /**
+     * POST 请求体：message 或 fileIds 至少一项，或以 presetTurn 提交预置轮；
+     * userId、sessionId、model、skills、tools 可选。
+     */
     public record ChatRequest(String message, String userId, String sessionId, List<String> fileIds,
-                              String model, List<String> skills, List<String> tools) {
+                              String model, List<String> skills, List<String> tools,
+                              PresetTurn presetTurn) {
+
+        public record PresetTurn(String question, String answer) {
+        }
     }
 }

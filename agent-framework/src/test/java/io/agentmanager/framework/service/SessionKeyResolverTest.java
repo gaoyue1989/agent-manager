@@ -61,12 +61,21 @@ class SessionKeyResolverTest {
     }
 
     @Test
-    void directInvokeKeepsSessionIdAndVendorKey() {
-        var ctx = RuntimeContext.builder()
+    void directInvokeStripsConfiguredTenantPrefixOnly() {
+        var scoped = new SessionKeyResolver(store, "acme-test-agent");
+        var prefixed = RuntimeContext.builder()
             .sessionId("acme-test-agent__thread-1").userId("vendor-key").build();
+        assertEquals("thread-1", scoped.canonicalSessionId(prefixed));
+        assertEquals("vendor-key", scoped.realUserId(prefixed));
 
-        assertEquals("acme-test-agent__thread-1", resolver.canonicalSessionId(ctx));
-        assertEquals("vendor-key", resolver.realUserId(ctx));
+        var userDoubleUnderscore = RuntimeContext.builder()
+            .sessionId("proj__order-1").userId("u-1").build();
+        assertEquals("proj__order-1", scoped.canonicalSessionId(userDoubleUnderscore));
+        assertEquals("proj__order-1", resolver.canonicalSessionId(userDoubleUnderscore));
+
+        var emptySuffix = RuntimeContext.builder()
+            .sessionId("acme-test-agent__").userId("u-1").build();
+        assertEquals("acme-test-agent__", scoped.canonicalSessionId(emptySuffix));
     }
 
     @Test

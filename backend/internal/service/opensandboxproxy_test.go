@@ -1367,3 +1367,84 @@ func TestDeleteServiceProceedsWhenSandboxNotConfigured(t *testing.T) {
 		t.Fatal("deployment must be deleted after successful Delete")
 	}
 }
+
+func TestSandboxPoolExtraEnvAndCapacityGuard631(t *testing.T) {
+	for _, bad := range []SandboxPoolExtraEnv{
+		{Name: "SKILLSYNC_BASE_URL", Value: "ftp://invalid"},
+		{Name: "SKILLSYNC_INTERVAL", Value: "not-a-duration"},
+		{Name: "SKILLSYNC_STORE_DIR", Value: "relative/path"},
+	} {
+		if err := validateSandboxExtraEnv([]SandboxPoolExtraEnv{bad}); !errors.Is(err, ErrInvalidForm) {
+			t.Fatalf("expected ErrInvalidForm for %+v, got %v", bad, err)
+		}
+	}
+	if err := (SandboxCapacitySpec{PoolMin: 5, BufferMin: 5, BufferMax: 25, PoolMax: 25}).validate(); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm for poolMax > %d, got %v", maxSandboxPoolCapacity, err)
+	}
+}
+
+func TestMapSandboxUpstream(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       []byte
+		inErr      error
+		wantNil    bool
+		wantStatus int
+		wantSubstr string
+	}{
+		{name: "ok_200", status: 200, wantNil: true},
+		{name: "created_201", status: 201, wantNil: true},
+		{name: "network_err", inErr: errors.New("dial tcp refused"), wantStatus: 502, wantSubstr: "opensandbox 不可达"},
+		{name: "not_implemented_501", status: 501, wantStatus: 503, wantSubstr: "kubernetes runtime"},
+		{name: "unauthorized_401", status: 401, wantStatus: 502, wantSubstr: "API Key"},
+		{name: "not_found_404", status: 404, body: []byte("sandbox missing"), wantStatus: 404, wantSubstr: "sandbox missing"},
+		{name: "rate_limited_429", status: 429, body: []byte("too many"), wantStatus: 429, wantSubstr: "HTTP 429"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mapSandboxUpstream(tc.status, tc.body, tc.inErr)
+			if tc.wantNil {
+				if err != nil {
+					t.Fatalf("expected nil, got %v", err)
+				}
+				return
+			}
+			var ue *SandboxUpstreamError
+			if !errors.As(err, &ue) {
+				t.Fatalf("expected *SandboxUpstreamError, got %T (%v)", err, err)
+			}
+			if ue.Status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", ue.Status, tc.wantStatus)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(ue.Msg, tc.wantSubstr) {
+				t.Errorf("msg = %q, want substring %q", ue.Msg, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestValidateSandboxName(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{name: "valid_label", in: "pool-01", wantErr: false},
+		{name: "empty", in: "", wantErr: true},
+		{name: "path_traversal", in: "../etc", wantErr: true},
+		{name: "uppercase", in: "PoolA", wantErr: true},
+		{name: "slash", in: "a/b", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSandboxName(tc.in)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validateSandboxName(%q) = nil, want error", tc.in)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validateSandboxName(%q) unexpected error: %v", tc.in, err)
+			}
+		})
+	}
+}

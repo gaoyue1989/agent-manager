@@ -19,6 +19,7 @@ import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.ModelCatalog;
+import io.agentmanager.framework.service.PresetAnswerMiddleware.PresetAnswer;
 import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
@@ -175,7 +176,7 @@ class ChatStreamControllerTest {
 
     private List<String> collect(String sessionId, String message, String userId, List<String> fileIds) {
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null, null, null), null, null, null)
+                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
         return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
@@ -278,7 +279,7 @@ class ChatStreamControllerTest {
         requestHeaders.add("Authorization", "Bearer tok-abc");
         requestHeaders.add("Cookie", "sid=secret");
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null, null),
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null, null, null),
                 null, null, requestHeaders)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -303,7 +304,7 @@ class ChatStreamControllerTest {
         var requestHeaders = new org.springframework.http.HttpHeaders();
         requestHeaders.add("Authorization", "Bearer tok-abc");
         controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null, null),
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null, null, null),
                 null, null, requestHeaders)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -311,6 +312,134 @@ class ChatStreamControllerTest {
         verify(chatChannel).dispatchStream(captor.capture());
         assertNull(captor.getValue().runtimeContext().get(
             io.agentmanager.framework.mcp.ChatRequestHeaders.class));
+    }
+
+    private static final String PRESET_QUESTION = "今日头条有哪些？";
+    private static final String PRESET_ANSWER = "今天共有三条要闻。";
+
+    private static ChatStreamController.ChatRequest.PresetTurn presetTurn() {
+        return new ChatStreamController.ChatRequest.PresetTurn(PRESET_QUESTION, PRESET_ANSWER);
+    }
+
+    private static ChatStreamController.ChatRequest presetRequest(String sessionId, String message,
+            List<String> fileIds, ChatStreamController.ChatRequest.PresetTurn presetTurn) {
+        return new ChatStreamController.ChatRequest(message, "alice", sessionId, fileIds, null, null,
+            null, presetTurn);
+    }
+
+    private List<String> framesOf(ChatStreamController.ChatRequest request) {
+        var frames = controller.chat(request, null, null, null).map(f -> f.data()).collectList()
+            .block(Duration.ofSeconds(10));
+        return frames == null ? List.of() : frames;
+    }
+
+    private void assertPresetTurnRejected(String code, ChatStreamController.ChatRequest request) {
+        var frames = framesOf(request);
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("\"type\":\"error\"")
+                && f.contains(code)), "应返回 " + code + " 的 error 帧: " + frames);
+    }
+
+    private void assertNoTurnStarted() {
+        verify(chatChannel, never()).dispatchStream(any(InboundMessage.class));
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(turnLeaseStore, never()).tryAcquire(anyString());
+        verify(sessionTitleService, never()).generateAsync(any(), any(), any());
+    }
+
+    @Test
+    void presetTurnShouldCarryTheAnswerAndUseTheQuestionAsTheUserMessage() {
+        var sessionId = "test-user-preset";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-preset")));
+
+        var frames = framesOf(presetRequest(sessionId, "  ", List.of(), presetTurn()));
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("\"type\":\"AGENT_END\"")),
+            "预置轮应照常走完轮次: " + frames);
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        verify(chatChannel).dispatchStream(captor.capture());
+        var inbound = captor.getValue();
+        var preset = inbound.runtimeContext().get(PresetAnswer.class);
+        assertNotNull(preset, "预置答案应随 InboundMessage 的 runtimeContext 进 agent turn");
+        assertEquals(PRESET_ANSWER, preset.text());
+        assertEquals(1, inbound.messages().size());
+        assertEquals(PRESET_QUESTION, inbound.messages().get(0).getTextContent());
+        verify(sessionTitleService).generateAsync(sessionId, PRESET_QUESTION, "alice");
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-1");
+    }
+
+    @Test
+    void presetTurnOnNewSessionShouldEmitSessionCreatedFirstAndTitleTheSession() {
+        when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-preset")));
+
+        var frames = framesOf(presetRequest(null, null, null, presetTurn()));
+
+        assertFalse(frames.isEmpty(), "预置轮应有帧返回");
+        var matcher = SESSION_ID_FIELD.matcher(frames.get(0));
+        assertTrue(matcher.find(), "新会话首帧应为 session_created: " + frames);
+        verify(sessionTitleService).generateAsync(matcher.group(1), PRESET_QUESTION, "alice");
+        verify(sessionUserStore).upsert(matcher.group(1), "alice");
+    }
+
+    @Test
+    void presetTurnShouldKeepDeclaredForwardHeadersAlongsideTheAnswer() {
+        var sessionId = "test-user-preset-fwd";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        when(mcpToolRegistrar.getForwardHeaderNames()).thenReturn(Set.of("authorization"));
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-preset")));
+        var requestHeaders = new org.springframework.http.HttpHeaders();
+        requestHeaders.add("Authorization", "Bearer tok-abc");
+
+        controller.chat(presetRequest(sessionId, null, null, presetTurn()), null, null, requestHeaders)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        verify(chatChannel).dispatchStream(captor.capture());
+        var runtimeContext = captor.getValue().runtimeContext();
+        assertEquals(PRESET_ANSWER, runtimeContext.get(PresetAnswer.class).text());
+        assertEquals(Map.of("authorization", "Bearer tok-abc"),
+            runtimeContext.get(io.agentmanager.framework.mcp.ChatRequestHeaders.class).headers());
+    }
+
+    @Test
+    void turnWithoutPresetTurnShouldNotCarryPresetAnswer() {
+        var sessionId = "test-user-no-preset";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-1")));
+
+        collect(sessionId, "hello", "alice");
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        verify(chatChannel).dispatchStream(captor.capture());
+        assertNull(captor.getValue().runtimeContext().get(PresetAnswer.class));
+    }
+
+    @Test
+    void presetTurnWithBlankQuestionOrAnswerShouldBeRejectedBeforeTheTurnStarts() {
+        var invalid = List.of(
+            new ChatStreamController.ChatRequest.PresetTurn("  ", PRESET_ANSWER),
+            new ChatStreamController.ChatRequest.PresetTurn(null, PRESET_ANSWER),
+            new ChatStreamController.ChatRequest.PresetTurn(PRESET_QUESTION, ""),
+            new ChatStreamController.ChatRequest.PresetTurn(PRESET_QUESTION, " \n"));
+        for (var turn : invalid) {
+            assertPresetTurnRejected("preset_turn_invalid", presetRequest(null, null, null, turn));
+        }
+
+        assertNoTurnStarted();
+    }
+
+    @Test
+    void presetTurnCombinedWithMessageOrFileIdsShouldBeRejected() {
+        assertPresetTurnRejected("preset_turn_conflict", presetRequest(null, "hello", null, presetTurn()));
+        assertPresetTurnRejected("preset_turn_conflict",
+            presetRequest(null, null, List.of("f-1"), presetTurn()));
+
+        assertNoTurnStarted();
     }
 
     @Test
@@ -794,7 +923,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) d1, (AgentEvent) callEnd,
                 (AgentEvent) rDelta, (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -839,7 +968,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd,
                 (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -880,7 +1009,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -921,7 +1050,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null, null),
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null, null, null),
                 null, "/agent/demo/", null)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -961,7 +1090,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1007,7 +1136,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1061,7 +1190,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1096,7 +1225,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1130,7 +1259,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1171,7 +1300,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-412a")));
 
         controllerWithSandbox(true).chat(
-                new ChatStreamController.ChatRequest("分析文件", "alice", sessionId, List.of("f-412"), null, null, null),
+                new ChatStreamController.ChatRequest("分析文件", "alice", sessionId, List.of("f-412"), null, null, null, null),
                 null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -1283,7 +1412,7 @@ class ChatStreamControllerTest {
                 (AgentEvent) tcEnd,
                 (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("write secret", "bob", sessionId, null, null, null, null),
+        ctrl.chat(new ChatStreamController.ChatRequest("write secret", "bob", sessionId, null, null, null, null, null),
                 null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -1548,7 +1677,7 @@ class ChatStreamControllerTest {
         when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope", null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope", null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("unknown_model: nope")),
@@ -1566,7 +1695,7 @@ class ChatStreamControllerTest {
 
         // sessionId 缺省（新会话）+ model 显式指定
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2", null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2", null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1583,7 +1712,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m3")));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system", null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system", null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1711,7 +1840,7 @@ class ChatStreamControllerTest {
         when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null, null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1729,7 +1858,7 @@ class ChatStreamControllerTest {
         when(sessionUserStore.findUserIdBySession("u-1001")).thenReturn(null);
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "u-2002", "u-1001", null, null, null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "u-2002", "u-1001", null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1750,7 +1879,7 @@ class ChatStreamControllerTest {
             .thenReturn(reactor.core.publisher.Flux.just(end));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null, null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1863,7 +1992,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, List.of("a", "b"), null), null, null, null)
+                "hi", "alice", sessionId, null, null, List.of("a", "b"), null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
@@ -1883,7 +2012,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, List.of(), null), null, null, null)
+                "hi", "alice", sessionId, null, null, List.of(), null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
@@ -1902,7 +2031,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, null, null), null, null, null)
+                "hi", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
@@ -1922,7 +2051,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, null, List.of("query", "get_order")),
+                "hi", "alice", sessionId, null, null, null, List.of("query", "get_order"), null),
             null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -1942,7 +2071,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, null, List.of()), null, null, null)
+                "hi", "alice", sessionId, null, null, null, List.of(), null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
@@ -1961,7 +2090,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, null, null), null, null, null)
+                "hi", "alice", sessionId, null, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
@@ -1979,7 +2108,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, List.of("refund"), List.of("query")),
+                "hi", "alice", sessionId, null, null, List.of("refund"), List.of("query"), null),
             null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 

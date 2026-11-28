@@ -66,6 +66,7 @@ agent-framework/
 │   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
 │   │   │   │   ├── SessionContextStore.java       # session_context 表 (会话注入上下文唯一写入口: 认领/归属/预算裁决单事务, 按资料名覆盖)
 │   │   │   │   ├── SessionContextInjectionMiddleware.java # 每轮 onSystemPrompt 追加会话注入上下文 (order=0 落提示词尾部)
+│   │   │   │   ├── PresetAnswerMiddleware.java     # 预置一问一答轮次: 上下文带 PresetAnswer 时把本轮模型换成返回预置文本的本地模型 (会话模型路由之内、LLM 记录之外)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
@@ -178,6 +179,10 @@ invokeStream(message, threadId, userId) → Flux<Map>
 ### 3.6 会话上下文注入链路
 
 `POST /threads/{sid}/context` 把公告、头条等参考资料按会话持久化到 `session_context`（`SessionContextStore`，按资料名覆盖），每轮由 `SessionContextInjectionMiddleware` 在系统提示词组装期追加——它是 `onSystemPrompt` 管线的最后一个转换器，但 Harness 在管线之后还会追加静态块，所以注入段并不在最终提示词的绝对末尾。注入不调用模型，对下一轮生效，并刷新会话的保留时钟；上下文不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档。三个端点的归属裁决都在 `SessionContextStore` 内完成（写入与移除在事务内持锁，查询读取失败即 503），不走吞异常的 `SessionAccessGuard.ownedBy`。history 与会话详情以与 `messages` 平级的 `context[]` 返回，供控制台在会话顶部展示。设计与选型与否决记录见 [../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)。
+
+### 3.7 预置一问一答轮次
+
+`POST /threads/chat` 带 `presetTurn {question, answer}` 时，前端已生成好的一组问答作为一轮正常对话写入会话：`question` 充当本轮用户消息，`answer` 经 `RuntimeContext` 类型化属性随行，由 `PresetAnswerMiddleware` 把本轮模型换成返回预置文本的本地模型（`preset-answer`）——走 SDK 完整的模型调用路径，消息 id、事件流、落库、归档全部由既有逻辑处理，只是不触达真实模型。中间件必须注册在会话模型路由之内（否则路由会把预置模型换回真实模型）、LLM 调用记录之外（记录到的才是预置模型）。不要改成「中间件直接发文本事件」的短路：SDK 只在处理模型响应分片时给助手消息分配 id，短路边出来的答案没有 id，进不了归档表，history 合并会把它排到末尾（[preset-answer-turn-design-261126.md](../docs/design/preset-answer-turn-design-261126.md)）。
 
 ### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 
@@ -386,7 +391,15 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_PROJECTION_ENABLED` | `true` | | 工作区投影开关（issue #27）：关闭后每次 sandbox start 不再 hydrate 投影目录（AGENTS.md/skills 等），降低每轮对话沙箱同步开销；skills 依赖强的包不要关 |
 | `SANDBOX_GUARD_ENABLED` | `true` | | 沙箱并发执行守卫（issue #27，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 slot 的沙箱获取，消解并发 hydrate 互踩/端口竞态触发面；锁粒度跟随 slot（2026-10-21，`sessionGranularLocks` 与 `SANDBOX_SESSION_AGENT_ISOLATION` 同源联动）：隔离开启（默认）时锁键=隔离键原值（Channel=每会话一个 slot，同会话互斥由 turn_lease 裁决），关闭时经 session_user 反查真实 userId 组键；Redis 不可用时 fail-open |
 | `SANDBOX_GUARD_LEASE_SECONDS` | `900` | | 守卫租约 TTL（崩溃自愈） |
-| `SANDBOX_PROJECTION_FINGERPRINT_CACHE` | `true` | | 投影新鲜度检查 stat 指纹缓存：指纹未变跳过 `WorkspaceProjectionApplier.build()`（省每次 call 全量读+sha256+堆内 tar，实测 4.5MB 工作区 17.9ms→3.2ms）；关闭=逐次全量 build（sandbox-skill-sync-optimization-design ①） |
+| `SANDBOX_SYNC_SKIP_PACKAGE_BASELINE` | `true` | | 沙箱同步跳过包基线文件回写，避免只读技能/包文件重复落库 |
+| `SKILLSYNC_BUNDLE_CACHE_DIR` | 空 | | 本地技能包打包缓存目录（空则走默认临时目录） |
+| `SANDBOX_SKILLS_SHARED_STORE` | `/skills-store` | | 沙箱内共享只读技能挂载根路径；设为 `off` 可主动关闸以触发降级通道 |
+| `SANDBOX_SKILLS_FALLBACK_MODE` | `push` | | 共享存储缺失/不可用时的技能同步降级模式：`push`（经 OpenSandbox 二进制流式推送至沙箱 store）\| `off`（禁用降级） |
+| `SANDBOX_SKILLS_FALLBACK_STORE_DIR` | `/tmp/.skills-store` | | `push` 降级模式写入沙箱内的目标根目录 |
+| `SANDBOX_SKILLS_FALLBACK_MAX_BYTES` | `67108864` | | `push` 降级单次技能包体积上限（字节，默认 64MiB） |
+| `SANDBOX_SKILLS_FALLBACK_MAX_CONCURRENCY` | `4` | | `push` 降级单副本并发推送信号量上限 |
+| `SANDBOX_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS` | `5000` | | `push` 降级获取并发信号量的等待超时（毫秒） |
+| `SANDBOX_SKILLS_FALLBACK_ON_VERSION_MISMATCH` | `true` | | 共享存储存在但技能版本指纹不匹配时是否触发 `push` 降级 |
 | `SANDBOX_SKILL_REVISION_GATE` | `true` | | L4 物化 revision 门控：KV 技能集 `/.revision` 未变且本沙箱代已物化 → 跳过全量物化（1 次 get 替代 list+glob+逐文件读，实测 36.5ms→0.3ms）；关闭=每 acquire 全量（设计 ③） |
 | `SANDBOX_SYNC_SNAPSHOT_DIFF` | `true` | | 沙箱回写快照差分：回写按 manifest（path+size）只读与快照不一致的容器文件（实测 449ms→64ms）；已知盲点=同字节数原位内容漂移不回写（设计 §7 接受）；关闭=每次全量读（设计 ②′） |
 | `SANDBOX_RUNTIME_READ_THROUGH` | `false` | | 记忆混合读穿（first-reasoning-memory-readthrough-design §3.1）：true 时跳过 KV 运行时文件（MEMORY.md/memory/，≈24MB 级）预热注入——记忆探测由 exec 翻译层回落 KV 点查应答（`baseStore.get`，不走 search 前缀扫描），真实命令访问记忆路径（含 `python3 -c` edit 形态）时先补注入再执行（语义与预热注入等价，防「模型盲写部分内容覆盖 KV 记忆」丢数据链）；容器空文件≠缺失（`__EMPTY__` 不回落 KV）；关闭=预热注入旧行为。**灰度约束：须一次翻完所有副本**——读穿 Pod 会置位 Pod 级 `SkillSyncGate.lastRuntimeInjected`，旧代码 Pod 复用 gate 跳过注入且无 KV 回落（设计 §5.4） |
@@ -441,10 +454,20 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_BROWSER_VIEW_PORT` | `6080` | | 沙箱内实时画面端口（websockify） |
 | `AGENT_BROWSER_VIEW_PATH` | `/websockify` | | 沙箱内实时画面 WS 路径（VNC 代理上游 `ws://{沙箱端点}{view-path}`） |
 | `AGENT_BROWSER_VNC_TICKET_TTL_SECONDS` | `60` | | 一次性 VNC WS ticket 有效期（Redis key `brw:vnc:{ticket}`，握手 GETDEL 消费即销毁） |
-| `AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS` | 空 | | VNC WS 握手 Origin 白名单（逗号分隔，Spring `OriginPattern` 语法）；空 = 同源放行。禁止 `*`；TLS 入口终止或演示前端经代理跨源时必须显式配置 |
+| `AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS` | 空 | | VNC WS 握手 Origin 白名单（逗号分隔，Spring `OriginPattern` 语法）；空 = 同源放行。禁止无主机约束通配符（如 `*`、`https://*`、`https://*.*`）；TLS 入口终止或演示前端经代理跨源时必须显式配置 |
 | `AGENT_AGUI_*` | 见左 | | AG-UI 协议面（`/agui/runs` + 续传端点，`@ConditionalOnProperty` 装配）：`AGENT_AGUI_ENABLED`=`false` 总开关 / `AGENT_AGUI_EMIT_TOKEN_USAGE`=`true` / `AGENT_AGUI_EMIT_TOOL_CALL_ARGS`=`true` / `AGENT_AGUI_ENABLE_REASONING`=`true` / `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE`=`false`（application.yml `agent.agui` 段） |
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活共享缓存句柄，失联对句柄原地换芯（build+握手成功才 swap，存量会话免重注册自愈，issue #348）；缓存无句柄 compensate 补建；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
+| `AGENT_MEMORY_PROVIDER` | `local` | | 记忆后端提供方：`local`（本地/MySQL）\| `openviking`（OpenViking 语义记忆） |
+| `OPENVIKING_URL` | 空 | | OpenViking 服务地址（`AGENT_MEMORY_PROVIDER=openviking` 时配置） |
+| `OPENVIKING_ACCOUNT` | 空 | | OpenViking 租户/账号名 |
+| `OVK_ADMIN_KEY` | 空 | | OpenViking 管理员密钥（敏感键，走 Secret） |
+| `OVK_USER_SEED` | 空 | | OpenViking 用户 ID 派生种子 |
+| `OVK_SESSION_COMMIT` | `false` | | 是否异步归档会话消息到 OpenViking（与 `AGENT_MEMORY_ENABLED` 双开关门控） |
+| `OVK_MCP_SHARED_CONTEXT` | `false` | | 是否装配合成 `openviking` MCP 共享上下文工具 |
+| `OVK_SEARCH_TIMEOUT_MS` | `2000` | | OpenViking 检索超时（毫秒） |
+| `OVK_INJECT_CACHE_TTL_SECONDS` | `300` | | OpenViking 检索结果注入缓存 TTL（秒） |
+| `MANAGEMENT_SERVER_PORT` | `9091` | | Spring Boot Actuator 独立管理端口（暴露 `health,metrics,prometheus`） |
 
 > **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24；默认模型可配置，2026-10-22）**：`LLM_*` 是**系统模型**——
 > 未显式选择模型且未配置默认对话模型时的会话模型，同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**
@@ -506,7 +529,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
 | GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记）。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
-| GET | `/skills/available` | 可用技能摘要（name+description，供 /Skill 提示）。**按用户合并 L4**：`X-User-Id`（网关注入）或 `?userId=` 时并集该用户个人技能（同名以 L4 描述为准），无则仅全局目录。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
+| GET | `/skills/available` | 可用技能摘要（name+description+displayName，供 /Skill 提示；displayName 取 SKILL.md frontmatter 中文显示名，缺省空串）。**按用户合并 L4**：`X-User-Id`（网关注入）或 `?userId=` 时并集该用户个人技能（同名以 L4 的 description/displayName 为准），无则仅全局目录。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 | GET | `/skills/parse-refs` | 解析消息中的 /Skill 引用（`?message=`；同样按 `X-User-Id`/`?userId=` 合并 L4 校验）。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 | GET | `/skills/users` | **当前用户**（`X-User-Id` 头，缺失 400 `missing_user_id` / 非法 400 `invalid_user_id`）的个人技能列表：每项含 `description`（SKILL.md frontmatter）、`enabled`（启停状态）、`updatedAt`（该技能最晚 KV 写入时间，即更新时间）、`hasPackageBaseline`（删除后回落该包内技能）、`adminOverride`（带管理面写入栅栏）；另含 `tombstones`（已删除但标记仍在的技能）；枚举/标记读取失败 500，不降级为空 |
 | GET | `/skills/users/{name}` | 技能文件内容（?file= 相对路径，默认 SKILL.md；L4 优先，无覆盖回落包内基线，source=user/package；`files`/`version`/`hasUserOverride` 与 source 同源，`userOverrideExists` 表示该用户另有个人覆盖） |
@@ -532,14 +555,14 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐；顶层 `files[]` 与 SSE `file_ready` 同构：`type/file_id/file_name/mime_type/size/download_url` + 挂载键 `reply_id`，`download_url` 同口径带 `X-Forwarded-Prefix`；用户上传卡片另带 `origin=upload`）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId；顶层 `context[]` 为与 `messages` 平级的已注入会话上下文（控制台展示用，见下「会话上下文注入」） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录（记录键 = 规范 sid，由 `SessionKeyResolver` 从 RuntimeContext 反查——Channel 链路的 ctx.sessionId 是全进程共享的网关 gw-hash，见 issue #44） |
-| POST | `/threads/{sid}/context` | **会话上下文注入**（[../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)）：body `{key, title?, content}`，按资料名 `key` 覆盖（新建 201 / 覆盖 200）；**不调用模型**，对下一轮生效——每轮组装系统提示词时追加，不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档；全新会话由首次注入认领，注入刷新会话的保留时钟（视为会话活跃）；他人会话 404、会话合计超限 413 `context_budget_exceeded`、存储不可用 503 `storage_unavailable`；`title` 必须单行 |
+| POST | `/threads/{sid}/context` | **会话上下文注入**（[../docs/design/session-context-injection-design-261125.md](../docs/design/session-context-injection-design-261125.md)）：body `{key, title?, content}`，按资料名 `key` 覆盖（新建 201 / 覆盖 200）；**不调用模型**，对下一轮生效——每轮组装系统提示词时追加，不进 AgentState，因此不被上下文压缩、不进记忆 flush 与 OpenViking 会话归档；全新会话由首次注入认领，注入刷新会话的保留时钟（视为会话活跃）；他人会话 404、单会话条目超限（默认 50 条）413 `context_entry_limit_exceeded`、会话合计超限 413 `context_budget_exceeded`、存储不可用 503 `storage_unavailable`；`title` 必须单行 |
 | GET | `/threads/{sid}/context` | 列出会话已注入的上下文（默认不带正文，`?includeContent=true` 附带）；他人会话 404，归属读取失败 503 不放行 |
 | DELETE | `/threads/{sid}/context/{key}` | 移除指定资料名的上下文（未知 key 404 `context_not_found`）；归属在事务内持锁裁决 |
 | GET | `/threads/{sid}/subscribe` | SSE 断连续传：`afterSeq` 回放 + 按需拉取实时追赶（`Flux.generate`），支持 `replyId`（turn 信封 id）过滤；终态补 `done`、被抢占补 `interrupted`；排队 turn 由 `turn_intent` 暴露 turn id；索引丢失时单次重建 ZSET |
 | GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END / error / cancelled）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | POST | `/threads/{sid}/stop` | **单轮停止**（协作式中断，[docs/turn-stop-design.md](docs/turn-stop-design.md)）：写 `turn_stop`（reply_id 栅栏）→ 属主副本 1s 轮询 → `agent.interrupt(effectiveUserId, effectiveSessionId)`；202 已受理 / 404 无运行中 turn / 409 HITL 挂起或尚无事件（retryable）/ 503 关闭或存储不可用。终态帧 `cancelled`（排在 AGENT_END 前），history 标注 `stopped`；不撤销工具副作用、不强杀阻塞中的工具 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
-| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?, skills?, tools?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效；skills=本轮技能白名单（缺省=全部、`[]`=无技能、未知名忽略，仅本轮生效，per-call SkillFilter overlay；HITL 挂起时暂存 `confirm_context.skills_json`、confirm 恢复轮继承（issue #264）；A2A `message.metadata.skills` 同口径，旧客户端 `"a,b"` 逗号串归一为 List（issue #266））；tools=本轮工具白名单（session-tool-list-design §2：作用域限 MCP+自定义、内置恒可见，缺省=全部、`[]`=仅内置、未知名忽略、内置名 WARN 不生效，仅本轮生效不落库，ToolFilterMiddleware onReasoning 收敛 + onActing 兜底 DENY；裸名/全名 `mcp__{server}__{tool}` 皆可，可传清单见 `GET /tools` 的 `sessionTools`；A2A `message.metadata.tools` 同口径）） |
+| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?, skills?, tools?, presetTurn?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效；skills=本轮技能白名单（缺省=全部、`[]`=无技能、未知名忽略，仅本轮生效，per-call SkillFilter overlay；HITL 挂起时暂存 `confirm_context.skills_json`、confirm 恢复轮继承（issue #264）；A2A `message.metadata.skills` 同口径，旧客户端 `"a,b"` 逗号串归一为 List（issue #266））；tools=本轮工具白名单（session-tool-list-design §2：作用域限 MCP+自定义、内置恒可见，缺省=全部、`[]`=仅内置、未知名忽略、内置名 WARN 不生效，仅本轮生效不落库，ToolFilterMiddleware onReasoning 收敛 + onActing 兜底 DENY；裸名/全名 `mcp__{server}__{tool}` 皆可，可传清单见 `GET /tools` 的 `sessionTools`；A2A `message.metadata.tools` 同口径）；presetTurn={question, answer} 预置一问一答轮次（不触达真实模型，与 message/fileIds 互斥，见 3.7）） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复；`default_model`=默认对话模型 id，`fallback_model`/`fallback_source`=有效备用模型与来源 db/env/none） |
 | GET | `/models/{id}` | 模型详情（托管模型 key 掩码；系统模型只读视图） |
 | POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；采样参数可空：`reasoningEffort` 格式 `^[a-z0-9_]{1,16}$`、`frequencyPenalty` ∈[-2,2]、`provider` ∈方言枚举；重复 name 400） |
@@ -554,7 +577,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/threads/{sid}/browser/takeover` | 人工接管（body `{reason?}`）：先翻锁为 HUMAN，再复用协作式停止结束当前轮；返回 `{control, stop_outcome}` |
 | POST | `/threads/{sid}/browser/release` | 交还控制权（SSE）：翻锁为 AGENT 后经 `ChatStreamController.chat` 送固定续跑消息（要求先 `list_pages`/`take_snapshot` 重采样）；非 HUMAN 持有 → `not_taken_over` 错误帧 |
 | POST | `/threads/{sid}/browser/vnc-ticket` | 为会话所有者签发一次性 WS ticket（Redis TTL 缺省 60s，消费即销毁）；无归属 404、Redis 不可用 503 |
-| GET | `/threads/{sid}/browser/vnc?ticket=` | WebSocket 实时画面代理：握手只认一次性 ticket（`sid` 必须与路径一致且 claim 用户仍是归属者，冲突的 `X-User-Id` 拒绝；URL `?userId=` 不参与身份，issue #560）；Origin 缺省同源、可配白名单、禁止 `*`；上游=沙箱固定端口经 OpenSandbox server 代理（注入 `OPEN-SANDBOX-API-KEY`），双向透传 binary/text（4MB 上限、分片聚合、发送串行化） |
+| GET | `/threads/{sid}/browser/vnc?ticket=` | WebSocket 实时画面代理：握手只认一次性 ticket（`sid` 必须与路径一致且 claim 用户仍是归属者，冲突的 `X-User-Id` 拒绝；URL `?userId=` 不参与身份，issue #560）；Origin 缺省同源（经 `X-Forwarded-Proto`/`X-Forwarded-Host` 还原外部源）、可配白名单、禁止无主机约束通配符（如 `*`/`https://*`）；上游=沙箱固定端口经 OpenSandbox server 代理（注入 `OPEN-SANDBOX-API-KEY`），双向透传 binary/text（4MB 上限、分片聚合、发送串行化） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（?inline=1 内联） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |
@@ -657,8 +680,8 @@ mvn -o test  # 离线模式 (离线开发镜像内；2026-11-03 实跑同为 175
 
 | job | 内容 |
 |-----|------|
-| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / DR 结果直返 / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI + CX 会话上下文注入（必需检查） |
-| e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账/跨副本会话上下文 R7）+ U9（必需检查） |
+| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / DR 结果直返 / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI + CX 会话上下文注入 + PA 预置一问一答轮次（必需检查） |
+| e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账/跨副本会话上下文 R7/跨副本预置轮 R8）+ U9（必需检查） |
 | e2e-sandbox | X 组沙箱（api-sandbox，mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流）（必需检查） |
 | e2e-protocol-multi | P 组协议多副本（api-protocol-multi：lead×2 + member×2 共享 MySQL/Redis，委派链路跨副本正确性 + EventBus 跨副本对账 + A2A Job 同键收敛）（必需检查） |
 | e2e-agui | AG 组 AG-UI 协议面（api-agui，单实例 `AGENT_AGUI_ENABLED=true`：帧序/跨面可见/HITL interrupt+resume/断联续传；非必需） |

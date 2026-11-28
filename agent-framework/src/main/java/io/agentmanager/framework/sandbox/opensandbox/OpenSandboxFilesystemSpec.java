@@ -46,6 +46,13 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private volatile io.micrometer.core.instrument.MeterRegistry farmMeterRegistry;
     private boolean skillRevisionGateEnabled = true;
     private boolean syncSnapshotDiffEnabled = true;
+    private String skillsFallbackMode = OpenSandboxClientOptions.SKILLS_FALLBACK_MODE_OFF;
+    private String skillsFallbackStoreDir = OpenSandboxClientOptions.DEFAULT_SKILLS_FALLBACK_STORE_DIR;
+    private long skillsFallbackMaxBytes = OpenSandboxClientOptions.DEFAULT_SKILLS_FALLBACK_MAX_BYTES;
+    private int skillsFallbackMaxConcurrency = OpenSandboxClientOptions.DEFAULT_SKILLS_FALLBACK_MAX_CONCURRENCY;
+    private long skillsFallbackAcquireTimeoutMs = OpenSandboxClientOptions.DEFAULT_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS;
+    private boolean skillsFallbackOnVersionMismatch = true;
+    private volatile java.util.concurrent.Semaphore skillsFallbackSemaphore;
 
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
@@ -149,6 +156,7 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
 
     /** 投放模式分量（记账值 = {@code mode|指纹}）：软链农场收敛路径（D-10 稳态短路）。PR-4b 起 tar 模式已退役——存量 {@code tar|} 记账值经模式比对不匹配自然淘汰，无需迁移 */
     public static final String HYDRATE_MODE_FARM = "farm";
+    public static final String HYDRATE_MODE_PUSH = "push";
 
     /**
      * scoped 缓存指纹读取（稳态短路比对值）：Pod 级记录经单槽 scope 交叉核验（缺口④ + issue
@@ -179,11 +187,16 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             // 裁决值，≠请求 scope 即他副本已 prune 掉本 scope——权威否定本 Pod 陈旧两表（清除并
             // 返回 null 重收敛）。槽缺失/Redis 不可达=未知，fail-open 维持本 Pod 信念不清本地
             // （旧布局副本窗口内不写槽=维持存量行为）
-            var slotScope = sharedFingerprintStore.slotScope(sandboxId);
-            if (slotScope != null && !slotScope.equals(scope)) {
-                scopedSkillCacheFingerprints.remove(sandboxId + "|" + scope);
-                hydratedScopedScopes.remove(sandboxId, scope);
-                podLocal = null;
+            var entry = sharedFingerprintStore.slotEntry(sandboxId);
+            if (entry != null) {
+                if (!entry.scope().equals(scope)) {
+                    scopedSkillCacheFingerprints.remove(sandboxId + "|" + scope);
+                    hydratedScopedScopes.remove(sandboxId, scope);
+                    podLocal = null;
+                } else if (!entry.value().equals(podLocal)) {
+                    podLocal = entry.value();
+                    scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, podLocal);
+                }
             }
         }
         return podLocal != null && podLocal.startsWith(mode + "|")
@@ -396,7 +409,28 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .skillBundleService(skillBundleService)
             .farmMeterRegistry(farmMeterRegistry)
             .skillRevisionGateEnabled(skillRevisionGateEnabled)
-            .syncSnapshotDiffEnabled(syncSnapshotDiffEnabled);
+            .syncSnapshotDiffEnabled(syncSnapshotDiffEnabled)
+            .skillsFallbackMode(skillsFallbackMode)
+            .skillsFallbackStoreDir(skillsFallbackStoreDir)
+            .skillsFallbackMaxBytes(skillsFallbackMaxBytes)
+            .skillsFallbackMaxConcurrency(skillsFallbackMaxConcurrency)
+            .skillsFallbackAcquireTimeoutMs(skillsFallbackAcquireTimeoutMs)
+            .skillsFallbackOnVersionMismatch(skillsFallbackOnVersionMismatch)
+            .skillsFallbackSemaphore(resolveSkillsFallbackSemaphore());
+    }
+
+    private java.util.concurrent.Semaphore resolveSkillsFallbackSemaphore() {
+        var sem = skillsFallbackSemaphore;
+        if (sem == null) {
+            synchronized (this) {
+                sem = skillsFallbackSemaphore;
+                if (sem == null) {
+                    sem = new java.util.concurrent.Semaphore(Math.max(1, skillsFallbackMaxConcurrency));
+                    skillsFallbackSemaphore = sem;
+                }
+            }
+        }
+        return sem;
     }
 
     @Override
@@ -456,6 +490,41 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
 
     public OpenSandboxFilesystemSpec farmMeterRegistry(io.micrometer.core.instrument.MeterRegistry registry) {
         this.farmMeterRegistry = registry;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsFallbackMode(String mode) {
+        this.skillsFallbackMode = mode;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsFallbackStoreDir(String dir) {
+        this.skillsFallbackStoreDir = dir;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsFallbackMaxBytes(long maxBytes) {
+        this.skillsFallbackMaxBytes = maxBytes;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsFallbackMaxConcurrency(int maxConcurrency) {
+        this.skillsFallbackMaxConcurrency = maxConcurrency;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsFallbackAcquireTimeoutMs(long timeoutMs) {
+        this.skillsFallbackAcquireTimeoutMs = timeoutMs;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsFallbackOnVersionMismatch(boolean enabled) {
+        this.skillsFallbackOnVersionMismatch = enabled;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsFallbackSemaphore(java.util.concurrent.Semaphore semaphore) {
+        this.skillsFallbackSemaphore = semaphore;
         return this;
     }
 

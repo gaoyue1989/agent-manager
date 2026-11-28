@@ -63,4 +63,30 @@ class OpenSandboxClientOptionsTest {
             .apiKey("k");
         assertInstanceOf(OpenSandboxClient.class, options.createClient());
     }
+
+    @Test
+    void skillsFallbackOptionsShouldValidateModeAndStoreDir() {
+        var options = new OpenSandboxClientOptions();
+        assertEquals("off", options.getSkillsFallbackMode());
+        assertEquals("/tmp/.skills-store", options.getSkillsFallbackStoreDir());
+        assertEquals(64L * 1024 * 1024, options.getSkillsFallbackMaxBytes());
+        assertEquals(4, options.getSkillsFallbackMaxConcurrency());
+        assertEquals(5000L, options.getSkillsFallbackAcquireTimeoutMs());
+        assertTrue(options.isSkillsFallbackOnVersionMismatch());
+
+        assertTrue(OpenSandboxClientOptions.skillsFallbackPushEnabled("push"));
+        assertTrue(OpenSandboxClientOptions.skillsFallbackPushEnabled(" PUSH "));
+        assertFalse(OpenSandboxClientOptions.skillsFallbackPushEnabled("off"));
+        assertFalse(OpenSandboxClientOptions.skillsFallbackPushEnabled(""));
+        assertFalse(OpenSandboxClientOptions.skillsFallbackPushEnabled(null));
+
+        assertTrue(OpenSandboxClientOptions.isValidFallbackStoreDir("/tmp/.skills-store"));
+        assertTrue(OpenSandboxClientOptions.isValidFallbackStoreDir("/var/cache/skills_v1"));
+        assertFalse(OpenSandboxClientOptions.isValidFallbackStoreDir("/"));
+        assertFalse(OpenSandboxClientOptions.isValidFallbackStoreDir("/tmp/.skills-store/"));
+        assertFalse(OpenSandboxClientOptions.isValidFallbackStoreDir("relative/path"));
+        assertFalse(OpenSandboxClientOptions.isValidFallbackStoreDir("/tmp/../etc"));
+        assertFalse(OpenSandboxClientOptions.isValidFallbackStoreDir("/tmp/bad dir"));
+        assertFalse(OpenSandboxClientOptions.isValidFallbackStoreDir("/tmp/a'b"));
+    }
 }

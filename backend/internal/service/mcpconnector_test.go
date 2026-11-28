@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"agent-manager/backend/internal/store"
@@ -89,6 +90,9 @@ func TestMcpConnectorPermissionEntryValidation(t *testing.T) {
 // TestMcpConnectorVerifyErrorLifecycle verify 失败路径写 lastVerifyError（512 字符截断、
 // 多字节按 rune 数截断）；复验成功路径清空。
 func TestMcpConnectorVerifyErrorLifecycle(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
 	c, _, done := newTestCore(t)
 	defer done()
 	ws := seedWs(t, c, "ws-375b", "验证错误空间")
@@ -244,5 +248,174 @@ func TestMcpConnectorDirectReturnDefaultsAndLegacyNull(t *testing.T) {
 	}
 	if len(legacy) != 1 || legacy[0].DirectReturn != "" {
 		t.Fatalf("legacy row directReturn: %+v", legacy)
+	}
+}
+
+func TestMcpListToolsBlocksLoopbackAndMetadata(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = false
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	blocked := []string{
+		"http://127.0.0.1:8080/mcp",
+		"http://localhost:8080/mcp",
+		"http://[::1]:8080/mcp",
+		"http://169.254.169.254/latest/meta-data",
+		"http://[fe80::1]/mcp",
+	}
+	for _, u := range blocked {
+		_, _, err := mcpListTools(u, "", 5)
+		if err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Fatalf("url %q should be blocked, got %v", u, err)
+		}
+	}
+}
+
+func TestMcpListToolsDoesNotFollowRedirect(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	var targetHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redir.Close()
+
+	_, _, err := mcpListTools(redir.URL, "", 5)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("expected HTTP 302 error without following redirect, got %v", err)
+	}
+	if atomic.LoadInt32(&targetHits) != 0 {
+		t.Fatalf("redirect target must not be contacted, hits=%d", targetHits)
+	}
+}
+
+func TestMcpConnectorPermissionsNormalizeAndUpdateValidation(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Slug: "ws-mcp-norm", Name: "ws-mcp-norm"}
+	if err := c.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name:        "blank-tool",
+		Endpoint:    "http://mcp.local/sse",
+		Permissions: json.RawMessage(`{"tools":{"   ":"allow"}}`),
+	}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("whitespace tool name should fail with ErrInvalidForm, got %v", err)
+	}
+
+	v, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name:         "norm-null",
+		Endpoint:     "http://mcp.local/sse",
+		Permissions:  json.RawMessage("null"),
+		DirectReturn: json.RawMessage("null"),
+	})
+	if err != nil {
+		t.Fatalf("create with null permissions: %v", err)
+	}
+	if v.Permissions != "{}" || v.DirectReturn != "{}" {
+		t.Fatalf("expected {} normalized, got perm=%q dr=%q", v.Permissions, v.DirectReturn)
+	}
+
+	if err := c.DB.Model(&store.McpConnector{}).Where("id = ?", v.ID).Update("status", "verified").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	badTransport := "grpc"
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{Transport: &badTransport}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("invalid transport should fail, got %v", err)
+	}
+	badEndpoint := "ftp://bad.local"
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{Endpoint: &badEndpoint}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("invalid endpoint should fail, got %v", err)
+	}
+	longName := strings.Repeat("a", 65)
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{Name: &longName}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("overlong name should fail, got %v", err)
+	}
+
+	newTok := "tok-2"
+	nullPerm := json.RawMessage("null")
+	updated, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{
+		AuthToken:   &newTok,
+		Permissions: &nullPerm,
+	})
+	if err != nil {
+		t.Fatalf("update token + null perm: %v", err)
+	}
+	if updated.Status != "unverified" {
+		t.Fatalf("updating authToken must reset status to unverified, got %q", updated.Status)
+	}
+	if updated.Permissions != "{}" {
+		t.Fatalf("updating null permissions must normalize to {}, got %q", updated.Permissions)
+	}
+}
+
+func TestMcpConnectorAuthTypeResetAndNoTokenLeakWhenNone(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Slug: "ws-mcp-auth", Name: "ws-mcp-auth"}
+	if err := c.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var seenAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	}))
+	defer srv.Close()
+
+	v, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name:      "auth-conn",
+		Endpoint:  srv.URL,
+		AuthType:  "bearer",
+		AuthToken: "secret-tok",
+		ToolScope: json.RawMessage("null"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if v.ToolScope != `{"mode":"all"}` {
+		t.Fatalf("toolScope null should normalize, got %q", v.ToolScope)
+	}
+
+	badAuth := "basic"
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{AuthType: &badAuth}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("invalid authType should fail, got %v", err)
+	}
+
+	if err := c.DB.Model(&store.McpConnector{}).Where("id = ?", v.ID).Update("status", "verified").Error; err != nil {
+		t.Fatal(err)
+	}
+	noneAuth := "none"
+	updated, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{AuthType: &noneAuth})
+	if err != nil {
+		t.Fatalf("update to none: %v", err)
+	}
+	if updated.Status != "unverified" || updated.AuthToken != "" {
+		t.Fatalf("switching authType to none must reset status & clear token, got status=%q tok=%q", updated.Status, updated.AuthToken)
+	}
+
+	if err := c.DB.Model(&store.McpConnector{}).Where("id = ?", v.ID).Updates(map[string]any{"auth_type": "none", "auth_token": "legacy-tok"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, _ = c.VerifyMcpConnector(ws.ID, v.ID)
+	if seenAuth != "" {
+		t.Fatalf("authType=none must not send Authorization header, got %q", seenAuth)
 	}
 }

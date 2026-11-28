@@ -39,7 +39,7 @@ public class GlobalExceptionHandler {
         long max = e.getMaxUploadSize();
         var limit = max > 0 ? (max / 1024 / 1024) + "MB" : "服务端配置值";
         body.put("message", "上传文件大小超过限制（单文件上限 " + limit + "），请压缩后重试");
-        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(body);
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
@@ -49,7 +49,7 @@ public class GlobalExceptionHandler {
         body.put("error", "bad_request");
         body.put("message", e.getMessage() != null && !e.getMessage().isBlank()
             ? e.getMessage() : "请求参数不合法");
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 
     @ExceptionHandler(IllegalStateException.class)
@@ -59,7 +59,7 @@ public class GlobalExceptionHandler {
         body.put("error", "conflict");
         body.put("message", e.getMessage() != null && !e.getMessage().isBlank()
             ? e.getMessage() : "操作状态冲突，请稍后重试");
-        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+        return ResponseEntity.status(HttpStatus.CONFLICT).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 
     /**
@@ -74,7 +74,7 @@ public class GlobalExceptionHandler {
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "request_rejected");
         body.put("message", e.getReason() != null ? e.getReason() : e.getStatusCode().toString());
-        return ResponseEntity.status(e.getStatusCode()).body(body);
+        return ResponseEntity.status(e.getStatusCode()).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 
     /**
@@ -90,7 +90,7 @@ public class GlobalExceptionHandler {
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "not_found");
         body.put("message", "请求的资源不存在: " + e.getResourcePath());
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 
     /**
@@ -130,6 +130,6 @@ public class GlobalExceptionHandler {
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "internal_error");
         body.put("message", "服务器内部错误，请稍后重试");
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
     }
 }

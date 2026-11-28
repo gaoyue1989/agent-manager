@@ -8,7 +8,6 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/layout.css">
 <link rel="stylesheet" href="css/components.css">
-<!-- Markdown 渲染依赖（内联 vendor，避免 CDN 外网依赖）：hljs 主体→9 种语言→marked→DOMPurify -->
 <link rel="stylesheet" href="vendor/highlight.min.css">
 <script src="vendor/highlight.min.js"></script>
 <script src="vendor/lang/java.min.js"></script>
@@ -23,7 +22,6 @@
 <script src="vendor/marked.min.js"></script>
 <script src="vendor/purify.min.js"></script>
 <script>
-  // 主题初始化（localStorage 手动覆盖 > 系统自动），避免闪烁
   (function () {
     var t = 'debug-theme';
     var saved = null;
@@ -40,21 +38,24 @@
 <div class="app">
   <header class="header">
     <div class="header-left">
+      <button id="mobileMenuBtn" class="icon-btn mobile-menu-btn" title="菜单"></button>
+      <button id="sidebarToggle" class="icon-btn" title="展开/收起侧边栏"></button>
       <h1>Agent Debug Console</h1>
       <span id="agentName" class="agent-name">...</span>
     </div>
     <div class="header-right">
       <span id="statusDot" class="status-dot warn"></span>
-      <span id="statusText" class="status-text">connecting...</span>
+      <span id="statusText" class="status-text">连接中...</span>
       <span id="checkpointStatus" class="status-text"></span>
-      <a id="monitorLink" class="theme-toggle" href="../monitor/" title="运营监控（独立页）">📊</a>
-      <button id="themeToggle" class="theme-toggle" title="切换明暗主题">●</button>
+      <a id="monitorLink" class="theme-toggle" href="../monitor/" title="运营监控（独立页）"></a>
+      <button id="themeToggle" class="theme-toggle" title="切换明暗主题"></button>
     </div>
   </header>
   <div class="main">
+    <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
     <nav class="sidebar" id="sidebar"></nav>
     <main class="content" id="module-content">
-      <div class="module-loading">Loading module...</div>
+      <div class="module-loading">正在加载模块...</div>
     </main>
   </div>
 </div>

@@ -32,14 +32,15 @@ export default function AgentDetailPage() {
   const tab = params.get("tab") ?? "overview";
   const [detail, setDetail] = useState<ServiceDetail | null>(null);
   const [msg, setMsg] = useState("");
+  const [loadErr, setLoadErr] = useState("");
   // 删除确认后置位：暂停页面级 5s 轮询（徽标/Pod 表/时间线同一 detail 状态派生），
   // 避免删除进行中打出 agentDetail 404（issue #377；#376 起 SSOT 派生）
   const [deleting, setDeleting] = useState(false);
   const writable = wsRole === "owner" || wsRole === "admin";
 
   const load = useCallback(async () => {
-    try { setDetail(await api.console.agentDetail(ws, sid)); setMsg(""); }
-    catch (e: any) { setMsg(`加载失败: ${e.message}`); }
+    try { setDetail(await api.console.agentDetail(ws, sid)); setLoadErr(""); }
+    catch (e: any) { setLoadErr(`加载失败: ${e.message}`); }
   }, [ws, sid]);
   // 非法 ID（NaN/0/负数）直接进错误态（issue #152：曾既不请求也不置错误，永久「加载中…」）
   const invalidId = !Number.isInteger(sid) || sid <= 0;
@@ -56,8 +57,8 @@ export default function AgentDetailPage() {
   const act = async (action: "publish" | "unpublish" | "republish" | "register", okMsg: string) => {
     try {
       await api.console.agentAction(ws, sid, action);
-      setMsg(okMsg);
       await load();
+      setMsg(okMsg);
     } catch (e: any) { setMsg(`操作失败: ${e.message}`); }
   };
   const remove = async () => {
@@ -72,7 +73,7 @@ export default function AgentDetailPage() {
       Agent 不存在：非法 ID（{String(id)}）
     </div>
   );
-  if (msg && !detail) return <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>;
+  if ((msg || loadErr) && !detail) return <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg || loadErr}</div>;
   if (!detail) return <p className="text-sm text-gray-400">加载中…</p>;
 
   const model = (() => { try { return JSON.parse(detail.envJson || "{}")["LLM_MODEL"] || "—"; } catch { return "—"; } })();
@@ -105,7 +106,7 @@ export default function AgentDetailPage() {
           {writable && detail.status !== "stopped" && <Btn kind="danger" onClick={() => act("unpublish", "已下线")}>下线</Btn>}
           {writable && <Btn kind="danger" onClick={remove}>删除</Btn>}
         </>} />
-      {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      {(msg || loadErr) && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg || loadErr}</div>}
 
       <div className="mb-4 flex gap-0.5 overflow-x-auto border-b border-gray-200" data-testid="detail-tabs">
         {TABS.map((t) => (

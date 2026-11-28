@@ -242,6 +242,9 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("package %d: %w", req.PackageID, err)
 	}
+	if req.WorkspaceID != 0 && pkg.WorkspaceID != 0 && pkg.WorkspaceID != req.WorkspaceID {
+		return nil, ErrNotFound
+	}
 
 	k8sName := k8s.DeriveK8sName(orStr(req.K8sNameBase, req.Name), pkg.Slug)
 	k8sName, err = c.uniqName(k8sName)
@@ -270,8 +273,17 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// 之外的值）零影响；需要注入 poolRef 时预留 1 个 env 键位。
 	poolRef := strings.TrimSpace(plain["SANDBOX_POOL_REF"])
 	managedPool := req.ProvisionSandboxPool && (poolRef == "" || poolRef == k8sName+sandboxPoolServiceSuffix)
-	if managedPool && poolRef == "" && len(plain)+len(secret) >= MaxEnvKeys {
-		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret)+1, MaxEnvKeys)
+	extraKeys := 0
+	if managedPool && poolRef == "" {
+		if _, cfgErr := c.sandboxProxyConfig(); cfgErr == nil {
+			extraKeys++
+		}
+	}
+	if c.Viking != nil && strings.TrimSpace(plain["AGENT_MEMORY_PROVIDER"]) == "" {
+		extraKeys++
+	}
+	if totalKeys := countUserEnvKeys(plain, secret) + extraKeys; totalKeys > MaxEnvKeys {
+		return nil, fmt.Errorf("too many env keys: %d (max %d)", totalKeys, MaxEnvKeys)
 	}
 	params := applySpec(c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath), req.Spec)
 	params.EnvSecret = secret
@@ -513,7 +525,7 @@ func (c *Core) asyncWaitAndRegister(id uint) {
 // 旧 env_json 中的存量敏感键自动迁入服务 Secret（设计 §3.6 防丢失规则）。
 func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*store.ServiceEntity, error) {
 	env, secretKeys = dropPlatformInjectedEnv(env, secretKeys)
-	if err := ValidateEnv(env); err != nil {
+	if err := validateEnvForMerge(env); err != nil {
 		return nil, err
 	}
 	if err := validateSecretKeys(secretKeys); err != nil {
@@ -541,8 +553,8 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	// 会话隔离派生重跑（issue #385，与 Republish 同理）：全量覆盖语义下未回传派生键
 	// 时不得让 Pod 回退共享库；缺失或等于平台默认才派生，显式值零影响。
 	c.applyIsolationEnv(svc.K8sName, plain, secret)
-	if len(plain)+len(secret) > MaxEnvKeys {
-		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
+	if n := countUserEnvKeys(plain, secret); n > MaxEnvKeys {
+		return nil, fmt.Errorf("too many env keys: %d (max %d)", n, MaxEnvKeys)
 	}
 	// OpenViking 派生幂等重跑（provider 切换经 UpdateEnv 时的补装入口；已供给则零外呼）。
 	// 落库前（apply/重启/DB 回写）任一失败按 created 回滚本次新建账户（issue #475，
@@ -551,6 +563,7 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if err != nil {
 		return nil, err
 	}
+	c.preserveLegacyOpenVikingEnv(oldPlain, plain)
 	created, err := c.applyOpenVikingEnv(svc.K8sName, pkg, plain, secret)
 	if err != nil {
 		c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)
@@ -564,15 +577,23 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
 	params.EnvSecret = secret
 	if err := c.applyServiceEnvObjects(params); err != nil {
-		_ = c.applyServiceEnvObjects(oldParams)
-		rollback(err)
+		if restoreErr := c.applyServiceEnvObjects(oldParams); restoreErr != nil {
+			log.Printf("[openviking] ERROR: K8s env rollback failed for svc=%s (account=%s): %v; keeping OpenViking account",
+				svc.K8sName, VikingAccountID(svc.K8sName), restoreErr)
+		} else {
+			rollback(err)
+		}
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := c.K8s.RestartDeployment(ctx, c.Cfg.Namespace, svc.K8sName); err != nil {
-		_ = c.applyServiceEnvObjects(oldParams)
-		rollback(err)
+		if restoreErr := c.applyServiceEnvObjects(oldParams); restoreErr != nil {
+			log.Printf("[openviking] ERROR: K8s env rollback failed for svc=%s (account=%s): %v; keeping OpenViking account",
+				svc.K8sName, VikingAccountID(svc.K8sName), restoreErr)
+		} else {
+			rollback(err)
+		}
 		return nil, err
 	}
 	// DB 先于 transition：若顺序颠倒，DB 写失败会留下 deploying 且无 goroutine 推进，
@@ -600,8 +621,9 @@ type RepublishOptions struct {
 	PublicEndpoint *bool             // 对外入口开关
 	// ProvisionSandboxPool 编辑表单显式开启沙箱 → 自动 ensure {k8sName}-pool 并注入
 	// SANDBOX_POOL_REF（编辑链路只确保存在，容量沿用池现状/缺省）
-	ProvisionSandboxPool bool
-	Actor                uint // 审计用操作者（0 = 系统）
+	ProvisionSandboxPool bool                                                              `json:"-"`
+	Actor                uint                                                              `json:"-"`
+	EnvTransform         func(oldPlain, oldSecret map[string]string) (map[string]string, []string) `json:"-"`
 }
 
 // applySpec 将规格档直译进 ObjectParams resources（limits 同值，决议 4）。
@@ -626,9 +648,12 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	}
 	env := oldPlain
 	var secretKeys []string
+	if opt.EnvTransform != nil {
+		opt.Env, opt.SecretKeys = opt.EnvTransform(oldPlain, oldSecret)
+	}
 	if opt.Env != nil {
 		opt.Env, opt.SecretKeys = dropPlatformInjectedEnv(opt.Env, opt.SecretKeys)
-		if err := ValidateEnv(opt.Env); err != nil {
+		if err := validateEnvForMerge(opt.Env); err != nil {
 			return nil, err
 		}
 		if err := validateSecretKeys(opt.SecretKeys); err != nil {
@@ -638,24 +663,19 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		secretKeys = opt.SecretKeys
 	}
 	plain, secret := resolveEnvMerge(oldPlain, oldSecret, env, secretKeys)
-	// 出口兜底：空值永不进入 CM/env_json/env_secret_json（设计 §3.3，与 Publish 同语义）
 	dropEmptyEnv(plain)
 	dropEmptyEnv(secret)
-	// 会话隔离派生重跑（issue #385）：Republish 是 env 重建出口，派生键可能在上游被
-	// 平台默认预填覆盖回共享值（UpdateAgent 的 buildPublishEnv 预填 CHECKPOINT_JDBC_URL
-	// 平台默认再全量合并）——Pod 滚动重启后即回连共享库，会话跨服务串列。与 Publish
-	// 同语义：缺失或等于平台默认才派生，派生键原样/用户显式值零影响。
 	c.applyIsolationEnv(svc.K8sName, plain, secret)
-	// 自动沙箱池（编辑表单显式开启沙箱）：显式自定义池名零影响；需要注入 poolRef 时
-	// 预留 1 个 env 键位。
 	poolRef := strings.TrimSpace(plain["SANDBOX_POOL_REF"])
 	managedPool := opt.ProvisionSandboxPool && (poolRef == "" || poolRef == svc.K8sName+sandboxPoolServiceSuffix)
 	extraPoolKeys := 0
 	if managedPool && poolRef == "" {
-		extraPoolKeys = 1
+		if _, cfgErr := c.sandboxProxyConfig(); cfgErr == nil {
+			extraPoolKeys = 1
+		}
 	}
-	if len(plain)+len(secret)+extraPoolKeys > MaxEnvKeys {
-		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret)+extraPoolKeys, MaxEnvKeys)
+	if n := countUserEnvKeys(plain, secret) + extraPoolKeys; n > MaxEnvKeys {
+		return nil, fmt.Errorf("too many env keys: %d (max %d)", n, MaxEnvKeys)
 	}
 
 	newPkgID := svc.PackageID
@@ -664,6 +684,9 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		p, err := c.Packages.Get(*opt.PackageID)
 		if err != nil {
 			return nil, err
+		}
+		if p.WorkspaceID != 0 && p.WorkspaceID != svc.WorkspaceID {
+			return nil, ErrNotFound
 		}
 		newPkgID = *opt.PackageID
 		newPkg = p
@@ -702,6 +725,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		}
 		newPkg = p
 	}
+	c.preserveLegacyOpenVikingEnv(oldPlain, plain)
 	created, err := c.applyOpenVikingEnv(svc.K8sName, newPkg, plain, secret)
 	if err != nil {
 		c.rollbackProvision(VikingAccountID(svc.K8sName), created, err)

@@ -224,9 +224,14 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
     /** 异步 append 一批消息（单 worker 保序；realUser 反查每批一次；任何异常只告警） */
     private void appendBatch(String userId, String sessionId, String slot, List<PendingAppend> batch) {
         try {
-            var lookupKey = SessionKeyNamespace.isGatewaySessionId(sessionId) ? userId : sessionId;
+            boolean isGateway = SessionKeyNamespace.isGatewaySessionId(sessionId);
+            var lookupKey = isGateway ? userId : sessionId;
             String realUser = sessionUserStore.findUserIdBySession(lookupKey);
-            if (realUser == null || realUser.isBlank()) {
+            if (realUser == null || realUser.isBlank() || SessionUserStore.PLACEHOLDER_USER.equals(realUser)) {
+                if (isGateway || userId == null || userId.isBlank()
+                        || SessionUserStore.PLACEHOLDER_USER.equals(userId)) {
+                    return;
+                }
                 realUser = userId;
             }
             for (var pending : batch) {

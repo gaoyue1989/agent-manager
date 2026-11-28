@@ -22,20 +22,19 @@ import java.util.regex.Pattern;
  */
 public final class SessionKeyNamespace {
 
-    private static final String USER_IDENTITY_PREFIX = "u-";
+    private static final Pattern USER_IDENTITY = Pattern.compile("^u-\\d+$");
     private static final String GATEWAY_SESSION_PREFIX = "gw-";
     private static final Pattern GATEWAY_SESSION = Pattern.compile("^gw-[0-9a-f]{12}$");
 
     private SessionKeyNamespace() {
     }
 
-    /** 用户身份命名空间的值（u-* 或匿名 debug-user） */
     public static boolean isUserIdentity(String value) {
         return value != null && isUserIdentityLowerCase(value.toLowerCase(java.util.Locale.ROOT));
     }
 
     private static boolean isUserIdentityLowerCase(String lowered) {
-        return lowered.startsWith(USER_IDENTITY_PREFIX)
+        return USER_IDENTITY.matcher(lowered).matches()
             || SessionAccessGuard.ANONYMOUS_USER.equals(lowered);
     }
 

@@ -2,6 +2,8 @@ package io.agentmanager.framework.service;
 
 import org.springframework.stereotype.Component;
 
+import io.agentmanager.framework.util.PathSafe;
+
 /**
  * 会话归属裁决（issue #158，IDOR 修复）：所有按 sessionId 操作的端点
  * （history / 详情 / 删除 / PATCH / llm-calls / subscribe / status / confirm / chat）
@@ -36,9 +38,17 @@ public class SessionAccessGuard {
         this.sessionUserStore = sessionUserStore;
     }
 
+    public static String normalizeRequester(String headerUserId) {
+        if (headerUserId == null || headerUserId.isBlank()) {
+            return ANONYMOUS_USER;
+        }
+        var sanitized = PathSafe.sanitize(headerUserId);
+        return SessionUserStore.PLACEHOLDER_USER.equals(sanitized) ? ANONYMOUS_USER : sanitized;
+    }
+
     /** 解析请求者身份：头优先，缺省回落匿名调试身份 */
     public String resolveRequester(String headerUserId) {
-        return (headerUserId == null || headerUserId.isBlank()) ? ANONYMOUS_USER : headerUserId;
+        return normalizeRequester(headerUserId);
     }
 
     /** 实例便捷方法：当前装配的 store 上做归属裁决 */
@@ -56,7 +66,10 @@ public class SessionAccessGuard {
         if (SessionKeyNamespace.isReservedSessionId(sessionId)) {
             return false;
         }
-        var requester = (headerUserId == null || headerUserId.isBlank()) ? ANONYMOUS_USER : headerUserId;
+        var requester = normalizeRequester(headerUserId);
+        if (!sessionId.equals(requester) && store.existsAsUserId(sessionId)) {
+            return false;
+        }
         return isOwner(store.findUserIdBySession(sessionId), requester);
     }
 
@@ -81,7 +94,10 @@ public class SessionAccessGuard {
         if (SessionKeyNamespace.isReservedSessionId(sessionId)) {
             return null;
         }
-        var requester = (headerUserId == null || headerUserId.isBlank()) ? ANONYMOUS_USER : headerUserId;
+        var requester = normalizeRequester(headerUserId);
+        if (!sessionId.equals(requester) && store.existsAsUserId(sessionId)) {
+            return null;
+        }
         var owner = store.findUserIdBySession(sessionId);
         if (owner == null || SessionUserStore.PLACEHOLDER_USER.equals(owner) || !owner.equals(requester)) {
             return null;

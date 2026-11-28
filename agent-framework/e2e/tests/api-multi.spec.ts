@@ -125,6 +125,37 @@ test('R7 跨副本会话上下文：A 副本注入 → B 副本对话的系统�
   expect(context[0].content).toBe(mark);
 });
 
+test('R8 跨副本预置轮：A 副本写入一问一答 → B 副本历史可见，后续提问的模型请求携带这组问答', async () => {
+  const sid = sessionIdFor(`r8-${uniq()}`);
+  const question = `[E2E:plain]今日头条有哪些？ R8-Q-${uniq()}`;
+  const answer = `今天共有三条要闻：R8-A-${uniq()}`;
+  const followUpText = '第二条要闻的细节是什么？';
+  await llmReset();
+
+  const preset = chat({ presetTurn: { question, answer }, userId: U(), sessionId: sid, base: REPLICA_A });
+  await waitTerminal(preset);
+  expect(preset.terminal?.type, JSON.stringify(preset.terminal)).toBe('done');
+
+  const seen = await history(sid, REPLICA_B, U());
+  const seenMsgs = seen.messages as Array<Record<string, unknown>>;
+  expect(seenMsgs.map(m => m.role)).toEqual(['user', 'assistant']);
+  expect(seenMsgs[0].content).toBe(question);
+  expect(seenMsgs[1].content).toBe(answer);
+
+  const followUp = chat({ message: followUpText, userId: U(), sessionId: sid, base: REPLICA_B });
+  await waitTerminal(followUp);
+  expect(followUp.terminal?.type, JSON.stringify(followUp.terminal)).toBe('done');
+  expect(textOf(followUp.frames), '预置只作用于发起它的那一轮，后续轮次必须由真实模型作答')
+    .toBe('端到端链路畅通，测试正常。');
+  const calls = await pollUntil(async () => (await llmStats()).calls
+    .filter(c => String(c.systemContent).includes('## AgentStateStore Context')), found => found.length === 1, 15_000);
+  expect(calls[0].dialogue).toEqual([
+    { role: 'user', text: question },
+    { role: 'assistant', text: answer },
+    { role: 'user', text: followUpText },
+  ]);
+});
+
 // ---------- STP2：停止请求跨副本投递（turn-stop-design §9 建议 1，PR #203） ----------
 // 架构强约束 2 的核心语义：任意请求可落任意副本裁决。停止写 turn_stop 表后由**属主副本**
 // 轮询派发——B 直发的 stop 必须让 A 上的流中断。此链路此前在必需门禁 e2e-multi 零覆盖

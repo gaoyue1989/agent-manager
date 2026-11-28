@@ -25,7 +25,7 @@ const BASE = window.location.pathname.replace(/\/(?:debug|monitor)\/?.*$/, '') |
 /** 当前 run 的 toolCallId → interruptId 映射（HITL resume[] 回传用；run 开始时清空） */
 let interruptIdMap = {};
 
-async function sseRequest(path, { method, body, headers, onEvent, onError, onEnd, onWaiting }) {
+function sseRequest(path, { method, body, headers, onEvent, onError, onEnd, onWaiting }) {
   const controller = new AbortController();
   let lastEventId = 0;
   const connect = async () => {
@@ -212,7 +212,7 @@ export const agui = {
   },
 
   /** 同 api.confirmStream 签名：results（native 形态）→ resume[] 恢复流 */
-  confirmStream: (sessionId, results, { onEvent, onError, userId } = {}) => {
+  confirmStream: (sessionId, results, { onEvent, onError, onEnd, userId } = {}) => {
     return sseRequest('/agui/runs', {
       body: {
         threadId: sessionId,
@@ -221,7 +221,7 @@ export const agui = {
         resume: buildResume(results)
       },
       headers: userId ? { 'X-User-Id': userId } : {},
-      onEvent, onError
+      onEvent, onError, onEnd
     });
   }
 };

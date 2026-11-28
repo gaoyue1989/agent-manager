@@ -45,6 +45,9 @@ public class SessionStreamController {
     private final io.agentmanager.framework.service.SessionUserStore sessionUserStore;
     private final io.agentmanager.framework.service.TurnIntentStore turnIntentStore;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.service.TurnStopStore turnStopStore;
+
     public SessionStreamController(AgentRuntimeService runtimeService,
                                    TurnLeaseStore turnLeaseStore,
                                    SessionEventStore eventStore,
@@ -188,14 +191,34 @@ public class SessionStreamController {
             replyId = "";
         }
 
+        boolean stopping = false;
+        if ("working".equals(state) && turnStopStore != null) {
+            var stopReq = turnStopStore.find(sessionId);
+            if (stopReq != null && stopReq.replyId() != null) {
+                String activeEventReplyId = probe.running()
+                        && latestEvent != null
+                        && !SessionEventTailer.isTerminalType(latestEvent.type())
+                        && latestEvent.replyId() != null
+                    ? latestEvent.replyId()
+                    : "";
+                stopping = (!replyId.isBlank() && replyId.equals(stopReq.replyId()))
+                    || (!activeEventReplyId.isBlank() && activeEventReplyId.equals(stopReq.replyId()));
+            }
+        }
+
         return ResponseEntity.ok(Map.of(
             "session_id", sessionId,
             "state", state,
+            "stopping", stopping,
             "latest_event_seq", latestEvent != null ? latestEvent.seq() : 0,
             "reply_id", replyId,
             "pending_confirm", pendingConfirm != null ? pendingConfirm : "",
             "error", intent != null && intent.failed() && intent.error() != null
                 ? intent.error() : ""
         ));
+    }
+
+    void setTurnStopStore(io.agentmanager.framework.service.TurnStopStore turnStopStore) {
+        this.turnStopStore = turnStopStore;
     }
 }

@@ -1,131 +1,138 @@
-/* ===== Chat 模块：官方对齐渲染 + 单次流 SSE / A2A 双模式 ===== */
-
-import { McpAppHost, buildToolResult } from '../js/mcp-app-host.js';
+import { icon } from '../js/icons.js';
+import { createChatSidebar } from './chat-sidebar.js';
+import { createChatRenderer } from './chat-renderer.js';
+import { createChatComposer } from './chat-composer.js';
 
 let ctx = null;
-let messagesEl = null;       // msg 容器（居中列）
-let inputEl = null;
-let sendBtn = null;
-let stopBtn = null;   // 独立停止按钮：流式期间显示；sendBtn 保持禁用（e2e U2 契约）
-let sidebarListEl = null;
+let messagesEl = null;
 let connBadgeEl = null;
-let uploadBtn = null;
-let fileInput = null;
-let uploadPreview = null;
-let uploadFiles = null;
 let uidInput = null;
 let modelSelect = null;
-let protoSelect = null;     // 模型切换下拉框
-
-// /Skill 提及状态
-let mentionDropdown = null;
-let mentionSkills = [];       // 缓存的可用 Skill 列表
-let mentionActiveIdx = -1;    // 当前高亮索引
-let mentionTriggerPos = -1;   // / 符号在 textarea 中的位置
-let mentionVisible = false;
-
-// 文件上传状态
-let pendingFiles = [];       // 待上传的文件列表 [{file, fileId, status}]
+let protoSelect = null;
+let toolsPopover = null;
+let sidebar = null;
+let renderer = null;
+let composer = null;
 
 let isStreaming = false;
-let activeAbort = null;      // 单次流/A2A 的 abort 控制器
-let activeChatHandle = null; // sendChat 返回的 handle（含 close/lastEventId）
-let stopSlowTimer = null;    // 服务端停止「已受理但仍未终态」的提示定时器
+let activeAbort = null;
+let activeChatHandle = null;
+let activeSubHandle = null;
+let stopSlowTimer = null;
+let reconnectTimer = null;
+let stopConfirmPending = false;
+let resumeSyncTimer = null;
+let activeSyncTimer = null;
+let refreshTimer = null;
+let stoppingBuffer = [];
 
-// 对话协议分流（agui-native-parity-design §12.2 L2）：native=api.js（/threads/* 自研词表），
-// agui=js/agui.js（/agui/* 官方事件，翻译为 native 词表喂同一渲染器）。签名同构，
-// 调用点仅此一行差别；开关默认 native，仅 debug 页提供。
+let lastEventId = 0;
+let currentReplyId = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_BASE_DELAY = 1000;
+
+let currentReply = null;
+let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
+
 function transport() {
   return (ctx && ctx.agui && ctx.state.getState('ui.protocol') === 'agui') ? ctx.agui : ctx.api;
 }
-let activeSubHandle = null;  // subscribe 返回的 handle（重连时使用）
 
-// ★ durable-sse-plan：SSE 断连自动重连
-let lastEventId = 0;         // 当前 session 最新收到的 seq（用于 afterSeq 游标）
-let currentReplyId = null;   // 当前 turn 的 replyId（subscribe 过滤用）
-let reconnectAttempts = 0;   // 重连尝试次数（指数退避）
-const MAX_RECONNECT_ATTEMPTS = 10;
-const RECONNECT_BASE_DELAY = 1000; // 1s
+function uid() {
+  return (ctx && ctx.state.getState('ui.userId')) || 'debug-user';
+}
 
-let refreshTimer = null;
-let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
+function currentSessionId() {
+  return ctx ? ctx.state.getState('threads.current') : null;
+}
 
-// 当前回复构建器（按 replyId 区分多 run）
-let currentReply = null;
-const replyMap = {};          // replyId -> builder
-let pendingToolCalls = {};    // tcId -> {name, argsRaw, args, resultRaw, state}
-let thinkingTimer = null;
+function currentThreadTitle() {
+  const sid = currentSessionId();
+  if (!sid) return '对话';
+  const list = ctx.state.getState('threads.list') || [];
+  const t = list.find((x) => x && x.session_id === sid);
+  return (t && t.title && t.title.trim()) ? t.title.trim() : sid;
+}
 
-// 远程子 agent 调用面板（Agent Protocol 远程委派：agent_spawn → 远端 /tasks → 事件回流）。
-// SSE 帧带 source 标注（AgentEventSseSerializer 序列化 SDK tagRemoteForwardedEvent 打标）
-// 即为远端转发事件：路由进对应面板嵌套展示，不进主回复流（否则会撕裂气泡/误触发收尾）。
-let remotePanels = {};        // spawn 工具行 tcId -> panel
-let activeRemotePanel = null; // 当前接收转发事件的 panel（force_sync 串行委派下单活跃）
-let lastRemotePanel = null;   // 最近一个面板：subagent_exposed 晚于结果收口时仍能落 footer
-const remoteToolOwner = {};   // 远端工具 tcId -> panel（摘要/预览帧无 source，按归属路由）
-
-// HITL 待确认状态：permission_ask 事件 → 渲染确认卡片，等待批量决策
-let pendingConfirm = null;    // {replyId, calls: [{tool_call_id, name, input}], cardEl}
-
-// MCP Apps 卡片宿主单例：tcId -> McpAppHost（AGENT_END 时 teardown，iframe 保留静态渲染）
-const appHosts = {};          // tcId -> McpAppHost
-
-// 渲染器映射表（内置工具名 → 官方渲染样式）
-const RENDERERS = {
-  bash: 'bash', shell: 'bash', exec_command: 'bash',
-  read_file: 'read', read: 'read',
-  write_file: 'write', write: 'write',
-  edit_file: 'edit', edit: 'edit',
-  glob_files: 'glob', glob: 'glob',
-  grep_files: 'grep', grep: 'grep'
-};
-
-function render() {
+function renderTemplate() {
   return `
   <div class="chat-module">
+    <div id="chatSidebarBackdrop" class="chat-sidebar-backdrop"></div>
     <div class="chat-sidebar">
       <div class="chat-sidebar-header">
-        <span class="cs-title">Sessions</span>
-        <button id="btnNewThread" class="btn small" title="New thread">＋</button>
+        <span class="cs-title">会话列表</span>
+        <div style="display:flex;align-items:center;gap:4px">
+          <button id="btnNewThread" class="btn small ghost" title="新建会话"></button>
+          <button id="btnCloseMobileSessions" class="btn small ghost chat-mobile-close-btn" title="关闭">✕</button>
+        </div>
+      </div>
+      <div class="chat-sidebar-search">
+        <input id="threadSearch" class="input" type="search" placeholder="搜索会话...">
       </div>
       <div class="chat-sidebar-list" id="threadList">
-        <div class="empty">Loading...</div>
+        <div class="empty">加载中...</div>
       </div>
     </div>
     <div class="chat-main">
-      <div class="module-header">
-        <h2 id="chatTitle">Chat</h2>
-        <span class="sub" id="connBadge"></span>
-        <div style="margin-left:auto"></div>
-        <label class="uid-label" title="用户标识，同 userId 共享 workspace 和 memory">User&nbsp;<input id="uidInput" class="input uid-input" type="text" spellcheck="false"></label>
-        <label class="uid-label" title="会话模型：切换当前会话使用的模型">Model&nbsp;<select id="modelSelect" class="input uid-input" style="cursor:pointer"></select></label>
-        <div class="seg">
-          <button id="modeA2A">A2A</button>
-          <button id="modeChannel" class="active">Channel</button>
+      <div class="chat-header-bar">
+        <button id="btnMobileSessions" class="icon-btn chat-mobile-sessions-btn" title="会话列表"></button>
+        <h2 id="chatTitle">对话</h2>
+        <span class="status-text" id="connBadge"></span>
+        <div class="chat-header-right">
+          <input id="uidInput" class="input uid-input" style="width:96px" type="text" spellcheck="false" title="用户标识（同用户共享工作区与记忆）">
+          <select id="modelSelect" class="input uid-input" title="当前会话模型"></select>
+          <div class="seg">
+            <button id="modeA2A">A2A</button>
+            <button id="modeChannel" class="active">Channel</button>
+          </div>
+          <button id="btnContextToggle" class="btn small ghost" title="会话上下文注入">
+            <span id="ctxIconSlot"></span>
+            <span>上下文</span>
+            <span class="badge accent ctx-count" style="display:none"></span>
+          </button>
+          <div class="chat-tools-wrap">
+            <button id="btnDebugTools" class="btn small" title="更多调试工具">
+              <span id="toolsIconSlot"></span>
+              <span>更多</span>
+            </button>
+            <div id="chatToolsPopover" class="chat-tools-popover">
+              <div class="popover-row">
+                <span>对话协议</span>
+                <select id="protoSelect" class="input">
+                  <option value="native">native</option>
+                  <option value="agui">AG-UI</option>
+                </select>
+              </div>
+              <div class="popover-actions">
+                <button id="btnBrowserToggle" class="btn small accent">浏览器接管</button>
+                <button id="btnLlmCalls" class="btn small" disabled>LLM 调用</button>
+                <button id="btnSysPrompt" class="btn small">系统提示词</button>
+                <button id="btnCard" class="btn small">Agent 卡片</button>
+              </div>
+            </div>
+          </div>
         </div>
-        <label class="uid-label" title="对话协议：native=/threads 自研词表；agui=官方 AG-UI 事件（/agui/*）">Proto&nbsp;<select id="protoSelect" class="input uid-input" style="cursor:pointer">
-          <option value="native">native</option>
-          <option value="agui">AG-UI</option>
-        </select></label>
-        <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
-        <button id="btnSysPrompt" class="btn small">System Prompt</button>
-        <button id="btnCard" class="btn small">Card</button>
       </div>
+      <div id="browserControlBar" class="browser-bar"></div>
+      <div id="contextDrawer" class="context-drawer"></div>
       <div class="chat-messages" id="chatMessages">
         <div class="chat-messages-inner" id="chatInner"></div>
         <button id="scrollDown" class="scroll-down-btn" title="回到底部">↓</button>
       </div>
       <div class="chat-input">
-        <div class="chat-input-pill" style="position:relative">
-          <button id="uploadBtn" class="btn upload-btn" title="上传文件">📎</button>
-          <input type="file" id="fileInput" multiple accept="image/*,text/plain,text/markdown,text/csv,application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt" style="display: none">
-          <textarea id="chatInput" rows="1" placeholder="Type your message... (/ 提及 Skill，Enter 发送，Shift+Enter 换行)"></textarea>
-          <button id="sendBtn" class="btn primary">Send</button>
-          <button id="stopBtn" class="btn danger" style="display:none">Stop</button>
+        <div class="chat-composer-card">
+          <div id="uploadPreview" class="upload-preview" style="display:none">
+            <div class="upload-files" id="uploadFiles"></div>
+          </div>
+          <div class="chat-input-pill">
+            <button id="uploadBtn" class="upload-btn" title="上传附件"></button>
+            <input type="file" id="fileInput" multiple accept="image/*,text/plain,text/markdown,text/csv,application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt" style="display:none">
+            <textarea id="chatInput" rows="1" placeholder="输入消息...（/ 提及技能，Enter 发送，Shift+Enter 换行）"></textarea>
+            <button id="sendBtn" class="btn primary">发送</button>
+            <button id="stopBtn" class="btn danger" style="display:none">停止</button>
+          </div>
           <div id="skillMentionDropdown" class="skill-mention-dropdown"></div>
-        </div>
-        <div id="uploadPreview" class="upload-preview" style="display: none;">
-          <div class="upload-files" id="uploadFiles"></div>
         </div>
       </div>
     </div>
@@ -135,265 +142,137 @@ function render() {
 export default {
   mount(container, c) {
     ctx = c;
-    container.innerHTML = render();
+    container.innerHTML = renderTemplate();
     messagesEl = document.getElementById('chatInner');
-    inputEl = document.getElementById('chatInput');
-    sendBtn = document.getElementById('sendBtn');
-    stopBtn = document.getElementById('stopBtn');
-    stopBtn.addEventListener('click', () => stop());
-    sidebarListEl = document.getElementById('threadList');
     connBadgeEl = document.getElementById('connBadge');
-    uploadBtn = document.getElementById('uploadBtn');
-    fileInput = document.getElementById('fileInput');
-    uploadPreview = document.getElementById('uploadPreview');
-    uploadFiles = document.getElementById('uploadFiles');
     uidInput = document.getElementById('uidInput');
-    uidInput.value = ctx.state.getState('ui.userId') || 'debug-user';
     modelSelect = document.getElementById('modelSelect');
-    modelSelect.addEventListener('change', onModelChange);
     protoSelect = document.getElementById('protoSelect');
+    toolsPopover = document.getElementById('chatToolsPopover');
+
+    const ctxIcon = document.getElementById('ctxIconSlot');
+    if (ctxIcon) ctxIcon.innerHTML = icon('layers', 14);
+    const toolsIcon = document.getElementById('toolsIconSlot');
+    if (toolsIcon) toolsIcon.innerHTML = icon('sliders', 14);
+
+    uidInput.value = uid();
     protoSelect.value = ctx.state.getState('ui.protocol') || 'native';
-    protoSelect.addEventListener('change', () => {
-      ctx.state.setState('ui.protocol', protoSelect.value);
-      ctx.utils.toast('对话协议: ' + protoSelect.value + '（下一轮发送生效）', 'info');
+
+    sidebar = createChatSidebar({
+      ctx,
+      onSelectThread: (sid) => selectThread(sid),
+      onNewThread: () => newThread(),
+      onThreadDeleted: (sid) => {
+        if (currentSessionId() === sid) newThread();
+        loadThreads(true);
+      },
+      onThreadRenamed: (sid, title) => {
+        const list = (ctx.state.getState('threads.list') || [])
+          .map((t) => (t && t.session_id === sid ? { ...t, title } : t));
+        ctx.state.setState('threads.list', list);
+        sidebar.renderList(list);
+        if (currentSessionId() === sid) updateHeaderTitle();
+      },
+      onBrowserRelease: (sid, onDone) => releaseBrowserAndStream(sid, onDone)
     });
+
+    renderer = createChatRenderer({
+      ctx,
+      getMessagesEl: () => messagesEl,
+      scrollToBottom,
+      getCurrentSessionId: () => currentSessionId(),
+      getUserId: () => uid(),
+      onSubmitConfirm: (calls, approved) => submitConfirm(calls, approved)
+    });
+
+    composer = createChatComposer({
+      ctx,
+      onSend: () => sendMessage(),
+      onStop: () => stop()
+    });
+
+    sidebar.mount(container);
+    composer.mount(container);
+    bindHeaderEvents();
     updateConnBadge();
 
-    // /Skill 提及
-    mentionDropdown = document.getElementById('skillMentionDropdown');
-    loadAvailableSkills();
-
-    bindEvents();
-    messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
+    messagesEl.innerHTML = '<div class="chat-greeting">今天有什么可以帮您？</div>';
     loadModels();
     loadThreads();
-    // 刷新恢复：localStorage 中若有当前会话，自动选中并加载历史；
-    // 若该 turn 仍在执行，selectThread → tryResumeSSE 会自动续传实时输出。
     const restoredSid = currentSessionId();
-    if (restoredSid) {
-      selectThread(restoredSid);
-    }
-    refreshTimer = setInterval(loadThreads, 30000);
+    if (restoredSid) selectThread(restoredSid);
+
+    refreshTimer = setInterval(() => loadThreads(), 30000);
     subscribeScroll();
   },
 
   unmount() {
-    if (refreshTimer) clearInterval(refreshTimer);
-    if (thinkingTimer) clearInterval(thinkingTimer);
-    if (activeAbort) activeAbort.abort();
-    teardownAllAppHosts();
-    pendingConfirm = null;
-    pendingFiles = [];
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
+    if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+    clearTimeout(stopSlowTimer);
+    if (activeAbort) { activeAbort.abort(); activeAbort = null; }
+    if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) {} activeChatHandle = null; }
+    if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
+    if (renderer) renderer.resetAll();
+    document.removeEventListener('click', closePopoverOutside);
+    currentReply = null;
+    currentReplyId = null;
+    lastEventId = 0;
+    stoppingBuffer = [];
     isStreaming = false;
   }
 };
 
-function bindEvents() {
-  sendBtn.addEventListener('click', () => sendMessage());
-  inputEl.addEventListener('keydown', (e) => {
-    // /Skill 提及：键盘导航
-    if (mentionVisible) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        mentionActiveIdx = Math.min(mentionActiveIdx + 1, mentionSkills.length - 1);
-        renderMentionDropdown();
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        mentionActiveIdx = Math.max(mentionActiveIdx - 1, 0);
-        renderMentionDropdown();
-        return;
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault();
-        if (mentionActiveIdx >= 0 && mentionActiveIdx < mentionSkills.length) {
-          selectMentionSkill(mentionSkills[mentionActiveIdx]);
-        }
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        hideMentionDropdown();
-        return;
-      }
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-    autoGrow();
+function closePopoverOutside(e) {
+  if (!toolsPopover || !toolsPopover.classList.contains('open')) return;
+  if (e.target.closest('.chat-tools-wrap')) return;
+  toolsPopover.classList.remove('open');
+}
+
+function bindHeaderEvents() {
+  document.getElementById('btnDebugTools').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (toolsPopover) toolsPopover.classList.toggle('open');
   });
-  inputEl.addEventListener('input', () => {
-    autoGrow();
-    handleMentionInput();
+  document.addEventListener('click', closePopoverOutside);
+
+  modelSelect.addEventListener('change', onModelChange);
+
+  protoSelect.addEventListener('change', () => {
+    ctx.state.setState('ui.protocol', protoSelect.value);
+    ctx.utils.toast('对话协议已切换为 ' + protoSelect.value + '（下一轮生效）', 'info');
   });
-  // 点击外部关闭下拉
-  document.addEventListener('click', (e) => {
-    if (mentionVisible && !inputEl.contains(e.target) && !mentionDropdown.contains(e.target)) {
-      hideMentionDropdown();
-    }
-  });
-  document.getElementById('btnNewThread').addEventListener('click', newThread);
-  document.getElementById('btnLlmCalls').addEventListener('click', showLlmCalls);
-  document.getElementById('btnSysPrompt').addEventListener('click', showSystemPrompt);
-  document.getElementById('btnCard').addEventListener('click', showAgentCard);
 
   document.getElementById('modeA2A').addEventListener('click', () => setStreamMode('a2a'));
   document.getElementById('modeChannel').addEventListener('click', () => setStreamMode('channel'));
 
-  // 文件上传事件
-  uploadBtn.addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', handleFileSelect);
-
-  // userId 输入事件：实时保存到 state + localStorage，刷新 session 列表
-  uidInput.addEventListener('input', () => {
-    const v = uidInput.value.trim() || 'debug-user';
-    ctx.state.setState('ui.userId', v);
-    updateConnBadge();
-    loadThreads();
-    loadAvailableSkills();   // userId 变化 → 重新拉取该用户的 / 候选（含 L4）
-  });
-  uidInput.addEventListener('blur', () => {
-    // 失焦时确保非空
-    if (!uidInput.value.trim()) uidInput.value = 'debug-user';
-  });
-}
-
-function autoGrow() {
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
-}
-
-// ---------- /Skill 提及 ----------
-
-async function loadAvailableSkills() {
-  try {
-    // 带上当前 userId：后端会合并该用户的 L4 个人技能到 / 候选（网关场景由 X-User-Id 注入）
-    const uid = ctx.state.getState('ui.userId') || 'debug-user';
-    mentionSkills = (await ctx.api.getAvailableSkills(uid)) || [];
-  } catch (e) {
-    mentionSkills = [];
-  }
-}
-
-function handleMentionInput() {
-  const val = inputEl.value;
-  const cursorPos = inputEl.selectionStart;
-
-  // 查找光标前最近的 / 符号（同一行内）
-  const textBeforeCursor = val.substring(0, cursorPos);
-  const lastSlashIdx = textBeforeCursor.lastIndexOf('/');
-  if (lastSlashIdx < 0) { hideMentionDropdown(); return; }
-
-  // / 前面不能是单词字符、":" 或 "/"（避免匹配 URL https://host/path、Unix 路径等；中文允许）
-  if (lastSlashIdx > 0 && /[\w:.\/]/.test(val[lastSlashIdx - 1])) {
-    hideMentionDropdown();
-    return;
-  }
-
-  // 提取 / 后的查询文本
-  const afterSlash = textBeforeCursor.substring(lastSlashIdx + 1);
-  // 查询到空格或换行为止
-  const spaceMatch = afterSlash.match(/[\s\u00A0]/);
-  const query = spaceMatch ? afterSlash.substring(0, spaceMatch.index) : afterSlash;
-
-  // 如果已经输入了空格，则关闭下拉（用户已完成输入）
-  if (spaceMatch && spaceMatch.index === 0) { hideMentionDropdown(); return; }
-
-  mentionTriggerPos = lastSlashIdx;
-
-  // 过滤匹配的 Skill
-  const lowerQuery = query.toLowerCase();
-  const filtered = mentionSkills.filter(s => {
-    const name = (s.name || '').toLowerCase();
-    const desc = (s.description || '').toLowerCase();
-    return name.includes(lowerQuery) || desc.includes(lowerQuery);
+  uidInput.addEventListener('change', () => {
+    const val = (uidInput.value || '').trim() || 'debug-user';
+    uidInput.value = val;
+    ctx.state.setState('ui.userId', val);
+    ctx.state.setState('threads.current', null);
+    newThread();
+    loadThreads(true);
+    composer.loadAvailableSkills();
   });
 
-  if (filtered.length === 0 && query.length > 0) {
-    hideMentionDropdown();
-    return;
-  }
-
-  mentionSkills = filtered.length > 0 ? filtered : mentionSkills;
-  mentionActiveIdx = 0;
-  renderMentionDropdown(query);
-}
-
-function renderMentionDropdown(query) {
-  if (!mentionDropdown) return;
-  if (mentionSkills.length === 0) {
-    mentionDropdown.innerHTML = '<div class="skill-mention-empty">没有可用的 Skill</div>';
-    mentionDropdown.classList.add('visible');
-    mentionVisible = true;
-    return;
-  }
-
-  mentionDropdown.innerHTML = mentionSkills.map((s, idx) => {
-    const name = s.name || '?';
-    const desc = s.description || '';
-    const isActive = idx === mentionActiveIdx;
-    return '<div class="skill-mention-item' + (isActive ? ' active' : '') + '" data-idx="' + idx + '">' +
-      '<span class="sm-icon">📚</span>' +
-      '<span class="sm-name"><span class="sm-at">/</span>' + ctx.utils.esc(name) + '</span>' +
-      '<span class="sm-desc">' + ctx.utils.esc(desc.substring(0, 60)) + '</span>' +
-      '</div>';
-  }).join('');
-
-  mentionDropdown.querySelectorAll('.skill-mention-item').forEach(el => {
-    el.addEventListener('mousedown', (e) => {
-      e.preventDefault(); // 阻止失焦
-      const idx = parseInt(el.dataset.idx, 10);
-      if (idx >= 0 && idx < mentionSkills.length) {
-        selectMentionSkill(mentionSkills[idx]);
-      }
-    });
-    el.addEventListener('mouseenter', () => {
-      mentionActiveIdx = parseInt(el.dataset.idx, 10);
-      el.parentElement.querySelectorAll('.skill-mention-item').forEach((c, i) => {
-        c.classList.toggle('active', i === mentionActiveIdx);
-      });
-    });
+  document.getElementById('btnBrowserToggle').addEventListener('click', () => {
+    if (toolsPopover) toolsPopover.classList.remove('open');
+    sidebar.probeBrowserState();
   });
-
-  mentionDropdown.classList.add('visible');
-  mentionVisible = true;
-}
-
-function selectMentionSkill(skill) {
-  const name = skill.name || '';
-  if (!name) return;
-
-  const val = inputEl.value;
-  const cursorPos = inputEl.selectionStart;
-
-  // 找到触发 / 的位置
-  const textBeforeCursor = val.substring(0, cursorPos);
-  const slashPos = textBeforeCursor.lastIndexOf('/');
-
-  // 替换 /query 为 /SkillName + 空格
-  const before = val.substring(0, slashPos);
-  const after = val.substring(cursorPos);
-  const insertion = '/' + name + ' ';
-  inputEl.value = before + insertion + after;
-
-  // 设置光标到插入文本之后
-  const newCursorPos = slashPos + insertion.length;
-  inputEl.setSelectionRange(newCursorPos, newCursorPos);
-  inputEl.focus();
-
-  hideMentionDropdown();
-  autoGrow();
-}
-
-function hideMentionDropdown() {
-  if (mentionDropdown) {
-    mentionDropdown.classList.remove('visible');
-  }
-  mentionVisible = false;
-  mentionActiveIdx = -1;
-  mentionTriggerPos = -1;
+  document.getElementById('btnLlmCalls').addEventListener('click', () => {
+    if (toolsPopover) toolsPopover.classList.remove('open');
+    showLlmCalls();
+  });
+  document.getElementById('btnSysPrompt').addEventListener('click', () => {
+    if (toolsPopover) toolsPopover.classList.remove('open');
+    showSystemPrompt();
+  });
+  document.getElementById('btnCard').addEventListener('click', () => {
+    if (toolsPopover) toolsPopover.classList.remove('open');
+    showAgentCard();
+  });
 }
 
 function setStreamMode(mode) {
@@ -405,47 +284,25 @@ function setStreamMode(mode) {
 
 function updateConnBadge() {
   if (!connBadgeEl) return;
-  const mode = ctx.state.getState('ui.streamMode');
-  const sid = currentSessionId();
-  const uid = ctx.state.getState('ui.userId') || 'debug-user';
-  const bits = [mode === 'a2a' ? 'A2A' : 'Channel'];
-  bits.push('单次流');
-  if (uid !== 'debug-user') bits.push(uid);
-  if (sid) bits.push(currentThreadTitle() || sid.split('_').pop());
-  connBadgeEl.textContent = bits.join(' · ');
-  // 标题同步到主区头部（无标题时回落 Chat）
-  const titleEl = document.getElementById('chatTitle');
-  if (titleEl) titleEl.textContent = (sid && currentThreadTitle()) || 'Chat';
+  const mode = ctx.state.getState('ui.streamMode') || 'channel';
+  connBadgeEl.textContent = mode === 'a2a' ? 'A2A' : 'Channel';
 }
 
-/** 当前会话的展示名：title（后端生成/重命名）优先，回退 thread_id / session_id */
-function currentThreadTitle() {
-  const sid = currentSessionId();
-  if (!sid) return '';
-  const list = ctx.state.getState('threads.list') || [];
-  const t = list.find((x) => x && x.session_id === sid);
-  if (!t) return '';
-  return (t.title || '').trim() || t.thread_id || sid;
+function updateHeaderTitle(connecting = false) {
+  const el = document.getElementById('chatTitle');
+  if (!el) return;
+  const title = currentThreadTitle();
+  el.textContent = connecting ? title + ' · 运行中' : title;
+  el.title = title;
 }
-
-function currentSessionId() {
-  return ctx.state.getState('threads.current');
-}
-
-function setConnecting(elId, on) {
-  const el = document.getElementById(elId);
-  if (el) el.classList.toggle('shimmer', on);
-}
-
-// ---------- 消息滚动 ----------
 
 function subscribeScroll() {
   const scroller = document.getElementById('chatMessages');
   const btn = document.getElementById('scrollDown');
   if (!scroller || !btn) return;
   scroller.addEventListener('scroll', () => {
-    const dist = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    btn.classList.toggle('visible', dist > 120);
+    const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    btn.classList.toggle('visible', gap > 120);
   });
   btn.addEventListener('click', () => scrollToBottom(true));
 }
@@ -453,1424 +310,467 @@ function subscribeScroll() {
 function scrollToBottom(force) {
   const scroller = document.getElementById('chatMessages');
   if (!scroller) return;
-  if (force) {
-    ctx.utils.scrollBottom(scroller);
-    return;
-  }
-  const dist = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-  if (dist < 200) ctx.utils.scrollBottom(scroller);
+  const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  if (force || gap < 140) scroller.scrollTop = scroller.scrollHeight;
 }
 
-// ---------- Threads ----------
-
-async function loadThreads(force) {
+async function loadThreads() {
   try {
-    const uid = ctx.state.getState('ui.userId') || 'debug-user';
-    // ★ 优先使用服务端 userId 过滤（session_user 表），不再依赖 session_id 前缀匹配
-    const threads = await ctx.api.getThreads(uid);
-    ctx.state.setState('threads.list', threads);
-    const sorted = (threads || []).slice().sort((a, b) =>
-      String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
-    if (!sidebarListEl) return;
-    if (sorted.length === 0) {
-      sidebarListEl.innerHTML = '<div class="empty">No sessions yet</div>';
-    } else {
-      sidebarListEl.innerHTML = sorted.map((t) => {
-        const cur = currentSessionId();
-        const tid = t.session_id;
-        const generated = (t.title || '').trim();
-        const title = generated || t.thread_id || tid;
-        return '<div class="thread-item' + (tid === cur ? ' active' : '') + '" data-sid="' +
-          ctx.utils.esc(tid) + '"><span class="tid">' + ctx.utils.esc(title) +
-          '</span><span class="meta">' + ctx.utils.esc((t.updated_at || '').substring(5, 16).replace('T', ' ')) +
-          '</span></div>';
-      }).join('');
+    const list = (await ctx.api.getThreads(uid())) || [];
+    ctx.state.setState('threads.list', list);
+    sidebar.renderList(list);
+    if (currentSessionId()) {
+      updateHeaderTitle(isStreaming);
+      restoreModelForSession(currentSessionId());
     }
-    sidebarListEl.querySelectorAll('.thread-item').forEach((el) => {
-      el.addEventListener('click', () => selectThread(el.dataset.sid));
-    });
-    // 列表加载后同步顶栏标题（后端异步生成的标题会随本轮 loadThreads 出现）
-    updateConnBadge();
-    // 同步当前会话的模型选择（后端可能已通过 PATCH 更新了 model 绑定）
-    const cur = currentSessionId();
-    if (cur) restoreModelForSession(cur);
-  } catch (e) {
-    if (force) ctx.utils.toast('Failed to load threads: ' + e.message, 'error');
+  } catch (e) {}
+}
+
+function cleanupSessionStreams() {
+  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
+  if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) {} activeChatHandle = null; }
+  if (activeAbort) { try { activeAbort.abort(); } catch (e) {} activeAbort = null; }
+  if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
+  if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (stopSlowTimer) { clearTimeout(stopSlowTimer); stopSlowTimer = null; }
+  if (currentReply) {
+    renderer.finishReply(currentReply.replyId);
+    currentReply = null;
   }
+  currentReplyId = null;
+  lastEventId = 0;
+  reconnectAttempts = 0;
+  stopConfirmPending = false;
+  stoppingBuffer = [];
+  resetStreamingState();
 }
 
 async function selectThread(sessionId) {
   if (!sessionId) return;
-  // 切换会话：关闭上一会话的续传订阅，避免其事件串进当前视图
-  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } activeSubHandle = null; }
+  cleanupSessionStreams();
   ctx.state.setState('threads.current', sessionId);
-  document.getElementById('btnLlmCalls').disabled = false;
+  sidebar.renderList(ctx.state.getState('threads.list') || []);
+  sidebar.hideBrowserBar();
+  updateHeaderTitle(false);
   restoreModelForSession(sessionId);
-  updateConnBadge();
-  // 重置回放游标与当前回复：新会话从 0 开始（不回放旧会话事件），也避免沿用旧气泡
-  lastEventId = 0;
-  currentReplyId = null;
-  reconnectAttempts = 0;
-  // 先渲染 agent_state 历史（已完成 turn），再检测 turn 是否在跑并续传——
-  // 两者此前并发会互相覆盖：历史渲染的 innerHTML='' 会清掉已到达的流式事件
+  const llmBtn = document.getElementById('btnLlmCalls');
+  if (llmBtn) llmBtn.disabled = false;
   await loadThreadHistory(sessionId);
-  // ★ durable-sse-plan：刷新恢复——检测 turn 状态，若仍在执行则自动 subscribe 续传
-  tryResumeSSE(sessionId);
+  if (currentSessionId() !== sessionId) return;
+  await tryResumeSSE(sessionId);
 }
 
-/** ★ durable-sse-plan §4.3：页面刷新后检测 turn 状态，自动续传 */
 async function tryResumeSSE(sessionId) {
-  // 会话端点按 X-User-Id 校验归属（issue #158），调试页带选中 userId
-  const uid = ctx.state.getState('ui.userId') || 'debug-user';
   try {
-    const status = await ctx.api.getStatus(sessionId, uid);
-    // 排队超时/建立失败：本轮没有事件可回放，直接展示失败原因（不打开订阅）
+    const status = await ctx.api.getStatus(sessionId, uid());
+    if (currentSessionId() !== sessionId) return;
+    if (!status || status.state === 'idle' || status.state === 'completed') return;
     if (status.state === 'failed') {
-      ensureReply('failed-' + Date.now());
       handleEvent({ type: 'error', error: status.error || 'turn failed' });
-      loadThreads();
       return;
     }
-    // ★ interrupted 也走订阅（与 startReconnect 的分支保持一致）：观察者路径会先回放已落库的
-    // 部分输出，再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
-    // 若落入不订阅的分支，刷新/切换线程后既看不到中断提示，服务端的 interrupted 帧
-    // 也永远到不了前端——Task 10 的提示文案「可刷新页面查看最新状态」就成了空头承诺。
     if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
-      console.log('[durable-sse] resuming SSE for working session:', sessionId);
-      enterStreamingUi();
       currentReplyId = status.reply_id || null;
-      // 刻意**不**把游标重置为 latest_event_seq：刷新后客户端从 0 开始，
-      // 应从头回放当前 turn 的全部事件（replyId 过滤保证只回放本 turn，不重复历史）；
-      // 若跳到最新 seq，则会丢掉本 turn 已产出的前半段输出，只剩后续事件流。
-      // 断线重连时 lastEventId 已由 resumeSyncId 推进，这里保持不变即续传。
-      // 例外：拿不到 replyId 时无法按 turn 过滤，只能退化为从最新 seq 续传，避免整场会话重放。
-      if (!currentReplyId) lastEventId = status.latest_event_seq || 0;
+      lastEventId = currentReplyId ? 0 : (status.latest_event_seq || 0);
       reconnectAttempts = 0;
-
-      // 如果正在等待确认，渲染 HITL 卡片
-      if (status.state === 'waiting_confirm' && status.pending_confirm) {
-        const r = currentReply || ensureReply(currentReplyId || 'resume-' + Date.now());
-        renderConfirmCard(r, status.pending_confirm);
-      }
-
-      // 中断态必须先落地一个回复气泡：服务端补发的 interrupted 帧不携带 replyId
-      // （见 SessionEventTailer.interruptedSSE），而 handleEvent 在 currentReply 为空时
-      // 会直接丢弃该帧——刷新后 currentReply 必然是空的（loadThreadHistory 不设置它），
-      // 于是提示渲染不出来，用户只看到"有部分输出、然后什么都没有"。
-      // 与上面 waiting_confirm 分支同一手法。
-      if (status.state === 'interrupted') {
-        ensureReply(currentReplyId || 'interrupted-' + Date.now());
-      }
-
-      // 订阅续传
-      activeSubHandle = transport().subscribe(sessionId, {
-        afterSeq: lastEventId,
-        replyId: currentReplyId,
-        userId: uid,
-        onEvent: (evt) => {
-          reconnectAttempts = 0;
-          // turnId 是服务端信封 id（subscribe?replyId= 的过滤口径）；帧内 replyId 是 SDK
-          // 事件级 id，两者不同。仅有 turnId 时才用它更新续传游标。
-          if (evt.turnId) currentReplyId = evt.turnId;
-          else if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
-          else if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
-          handleEvent(evt);
-        },
-        onError: (e) => {
-          console.warn('[durable-sse] resume subscribe error:', e.message);
-          if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      stopConfirmPending = false;
+      enterStreamingUi();
+      if (status.stopping) enterStoppingUi();
+      const subscribeResume = (afterSeq) => {
+        if (currentSessionId() !== sessionId) return;
+        if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} }
+        activeSubHandle = transport().subscribe(sessionId, {
+          afterSeq,
+          replyId: currentReplyId,
+          userId: uid(),
+          onEvent: (evt) => {
+            if (currentSessionId() !== sessionId) return;
+            reconnectAttempts = 0;
+            syncLastEventIdFromHandles();
+            if (evt.replyId || evt.turnId) currentReplyId = evt.replyId || evt.turnId;
+            handleEvent(evt);
+          },
+          onError: () => {
+            if (currentSessionId() !== sessionId || !isStreaming) {
+              resetStreamingState();
+              return;
+            }
+            syncLastEventIdFromHandles();
+            if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+              handleEvent({ type: 'error', error: '连接已断开，重连次数已达上限，请刷新页面' });
+              resetStreamingState();
+              return;
+            }
             const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts), 30000);
             reconnectAttempts++;
-            setTimeout(() => tryResumeSSE(sessionId), delay);
+            reconnectTimer = setTimeout(() => subscribeResume(lastEventId), delay);
+          },
+          onEnd: () => {
+            if (currentReply) {
+              renderer.finishReply(currentReply.replyId);
+              currentReply = null;
+            }
+            resetStreamingState();
           }
-        },
-        onEnd: () => {
-          clearInterval(resumeSyncId);
-          resetStreamingState();
-          loadThreads();
-        }
-      });
-
-      // 定期同步 lastEventId
-      const resumeSyncId = setInterval(() => {
-        if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) {
-          lastEventId = activeSubHandle.lastEventId;
-        }
-        if (!isStreaming) clearInterval(resumeSyncId);
-      }, 500);
+        });
+      };
+      subscribeResume(lastEventId);
     }
-  } catch (e) {
-    console.warn('[durable-sse] status check failed, skipping resume:', e.message);
-  }
+  } catch (e) {}
 }
 
 function newThread() {
+  cleanupSessionStreams();
   ctx.state.setState('threads.current', null);
-  teardownAllAppHosts();
-  pendingToolCalls = {};
-  pendingConfirm = null;
-  currentReply = null;
-  messagesEl.innerHTML = '<div class="msg system">New thread started</div>';
-  document.getElementById('btnLlmCalls').disabled = true;
-  // 新建会话重置为默认模型
+  renderer.resetAll();
+  sidebar.hideBrowserBar();
+  sidebar.setContextFromHistory([]);
+  sidebar.renderList(ctx.state.getState('threads.list') || []);
+  updateHeaderTitle(false);
   if (modelSelect) modelSelect.value = 'system';
-  updateConnBadge();
+  const llmBtn = document.getElementById('btnLlmCalls');
+  if (llmBtn) llmBtn.disabled = true;
+  messagesEl.innerHTML = '<div class="chat-greeting">今天有什么可以帮您？</div>';
+  composer.focus();
 }
-
-// ---------- 模型切换 ----------
 
 async function loadModels() {
   if (!modelSelect) return;
   try {
     const data = await ctx.api.getModels(false);
-    const list = (data && data.models) || [];
-    // 保留 system 默认项 + 启用的托管模型；默认模型可能是托管模型（debug 页 Models 可设置），
-    // value 仍用 "system" 表示「不绑定、跟随默认」，仅标签展示实际默认模型名。
-    const enabled = list.filter((m) => m.enabled !== false);
-    const defaultId = (data && data.default_model) || 'system';
-    const defaultModel = list.find((m) => m.id === defaultId);
-    const defaultLabel = defaultId === 'system'
-      ? 'System Default'
-      : 'Default（' + (defaultModel ? defaultModel.name : defaultId) + '）';
-    modelSelect.innerHTML = '<option value="system">' + ctx.utils.esc(defaultLabel) + '</option>'
-      + enabled.filter((m) => m.id !== 'system').map((m) =>
-        '<option value="' + ctx.utils.esc(m.id) + '">' + ctx.utils.esc(m.name) + '</option>'
-      ).join('');
+    const items = Array.isArray(data) ? data : (data.models || []);
+    const hasSystem = items.some((m) => (m.id || m.name) === 'system');
+    let html = hasSystem ? '' : '<option value="system">默认模型</option>';
+    for (const m of items) {
+            const id = m.id || m.name;
+      const label = (m.name || id) + (m.is_default ? ' ★' : '');
+      html += '<option value="' + ctx.utils.esc(id) + '">' + ctx.utils.esc(label) + '</option>';
+    }
+    modelSelect.innerHTML = html;
+    if (currentSessionId()) restoreModelForSession(currentSessionId());
   } catch (e) {
-    // 模型接口不可用时静默降级（兼容旧版后端）
-    console.warn('[chat] loadModels failed:', e.message);
+    modelSelect.innerHTML = '<option value="system">默认模型</option>';
   }
 }
 
-/** 切换模型：PATCH /threads/{sid} 持久化到 session_user.model（失败回滚下拉框） */
 async function onModelChange() {
   const sid = currentSessionId();
-  const previous = currentSessionModel();
   const target = modelSelect.value;
+  if (!sid) return;
+  const prev = currentSessionModel();
   const ok = await bindSessionModel(sid, target);
   if (!ok) {
-    modelSelect.value = previous;
+    modelSelect.value = prev;
     return;
   }
-  // 同步 threads.list 快照（修 #43）：restoreModelForSession/currentSessionModel 以该
-  // 列表为数据源，PATCH 成功后不更新的话，30s 内切走再切回会回显旧绑定
   const list = (ctx.state.getState('threads.list') || [])
-    .map((t) => (t && t.session_id === sid) ? { ...t, model: target } : t);
+    .map((t) => (t && t.session_id === sid ? { ...t, model: target === 'system' ? '' : target } : t));
   ctx.state.setState('threads.list', list);
+  sidebar.renderList(list);
 }
 
-/** 当前会话的已绑定模型（下拉框当前值），用于切换失败时回滚 */
 function currentSessionModel() {
   const sid = currentSessionId();
-  if (!sid || !modelSelect) return 'system';
+  if (!sid) return 'system';
   const list = ctx.state.getState('threads.list') || [];
   const t = list.find((x) => x && x.session_id === sid);
   return (t && t.model) || 'system';
 }
 
-/** 从 thread 列表数据恢复当前会话的模型选择 */
 function restoreModelForSession(sessionId) {
   if (!modelSelect) return;
   const list = ctx.state.getState('threads.list') || [];
   const t = list.find((x) => x && x.session_id === sessionId);
   const bound = (t && t.model) || 'system';
-  // 绑定模型可能已被删除（此时服务端回落默认），下拉框无对应 option 会显示空白：
-  // 统一回落到 system，使界面与服务端实际生效的模型保持一致
   const exists = Array.from(modelSelect.options).some((o) => o.value === bound);
   modelSelect.value = exists ? bound : 'system';
 }
 
-// ---------- 历史加载 ----------
+async function bindSessionModel(sid, modelId) {
+  try {
+    await ctx.api.patchThread(sid, { model: modelId }, uid());
+    return true;
+  } catch (e) {
+    ctx.utils.toast('模型切换失败: ' + e.message, 'error');
+    return false;
+  }
+}
+
+let loadHistorySeq = 0;
 
 async function loadThreadHistory(sessionId) {
-  messagesEl.innerHTML = '<div class="msg system">Loading history...</div>';
-  teardownAllAppHosts();
-  pendingToolCalls = {};
+  const seq = ++loadHistorySeq;
+  messagesEl.innerHTML = '<div class="msg system">正在加载历史消息...</div>';
+  renderer.resetAll();
   try {
-    const data = await ctx.api.getThreadHistory(sessionId,
-      ctx.state.getState('ui.userId') || 'debug-user');
+    const data = await ctx.api.getThreadHistory(sessionId, uid());
+    if (seq !== loadHistorySeq || currentSessionId() !== sessionId) return;
+    sidebar.setContextFromHistory(data.context || []);
     const msgs = data.messages || [];
     messagesEl.innerHTML = '';
     if (msgs.length === 0) {
-      messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
+      messagesEl.innerHTML = '<div class="msg system">该会话暂无历史消息</div>';
       return;
     }
-    // Track reply_id → contentEl mapping for file card distribution
     const replyToContent = new Map();
     let lastAssistantEl = null;
     let lastAssistantContentEl = null;
     for (const m of msgs) {
-      if (m.role === 'compaction') addCompactionDivider(m.content || '');
+      if (m.role === 'compaction') renderer.addCompactionDivider(m.content || '');
       else if (m.role === 'user') {
-        const userMsgEl = addMessage('user', m.content || '');
-        // 用户上传文件卡片：挂回对应的用户气泡（后端按用户消息 metadata 的 file_ids 关联）
-        for (const f of (m.files || [])) {
-          renderFileReadyCard({ contentEl: userMsgEl }, f);
-        }
-      }
-      else if (m.role === 'assistant' || m.role === 'agent') {
-        // blocks 由后端按 Msg.content 块序给出（旧数据无此字段 → 退回旧布局）
-        const refs = addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks);
+        const userMsgEl = renderer.addMessage('user', m.content || '');
+        for (const f of (m.files || [])) renderer.renderFileReadyCard({ contentEl: userMsgEl }, f);
+      } else if (m.role === 'assistant' || m.role === 'agent') {
+        const isDirectHist = m.generate_reason === 'TOOL_RETURN_DIRECT' || m.generateReason === 'TOOL_RETURN_DIRECT';
+        const refs = renderer.addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks, { directReturn: isDirectHist });
         lastAssistantEl = refs.msgEl;
         lastAssistantContentEl = refs.contentEl;
-        // 用户主动停止的轮次（POST /threads/{sid}/stop）：history 带 stopped 标记，
-        // 内容已被后端本地化为「（本次回复已被用户停止）」，这里补一个状态徽标
-        if (m.stopped) refs.msgEl.appendChild(renderStoppedBadge());
-        if (m.reply_id) {
-          replyToContent.set(m.reply_id, refs.contentEl);
-        }
+        if (m.stopped) refs.msgEl.appendChild(renderer.renderStoppedBadge());
+        if (m.reply_id) replyToContent.set(m.reply_id, refs.contentEl);
       }
     }
-    // Restore file download cards from history — distribute by reply_id
-    const files = data.files || [];
-    if (files.length > 0) {
-      for (const f of files) {
-        let targetContentEl = null;
-        if (f.reply_id && replyToContent.has(f.reply_id)) {
-          targetContentEl = replyToContent.get(f.reply_id);
-        } else {
-          // Fallback: attach to last assistant message
-          targetContentEl = lastAssistantContentEl;
-        }
-        if (targetContentEl) {
-          renderFileReadyCard({ contentEl: targetContentEl }, f);
-        }
-      }
+    for (const f of (data.files || [])) {
+      const target = (f.reply_id && replyToContent.has(f.reply_id)) ? replyToContent.get(f.reply_id) : lastAssistantContentEl;
+      if (target) renderer.renderFileReadyCard({ contentEl: target }, f);
     }
-    // Restore pending HITL confirm card
     const pc = data.pendingConfirm;
     if (pc && lastAssistantEl) {
       const toolCalls = pc.tool_calls || pc.tools || [];
       if (toolCalls.length > 0) {
-        const fakeReply = {
-          replyId: pc.reply_id,
-          contentEl: lastAssistantContentEl
-        };
-        renderConfirmCard(fakeReply, { tool_calls: toolCalls });
+        renderer.renderConfirmCard({ replyId: pc.reply_id, contentEl: lastAssistantContentEl }, { tool_calls: toolCalls });
       }
     }
   } catch (e) {
-    messagesEl.innerHTML = '<div class="msg system">Failed to load history</div>';
+    if (seq !== loadHistorySeq || currentSessionId() !== sessionId) return;
+    sidebar.setContextFromHistory([]);
+    messagesEl.innerHTML = '<div class="msg system">历史消息加载失败</div>';
   }
 }
 
-// ---------- 消息渲染（官方对齐） ----------
-
-/** 已停止徽标：用户主动停止的轮次（history 的 stopped 字段），与实时 cancelled 帧同语义 */
-function renderStoppedBadge() {
-  const el = document.createElement('div');
-  el.className = 'msg-stopped';
-  el.textContent = '已停止';
-  el.title = '本次回复由用户主动停止（已执行的工具调用不会回滚）';
-  return el;
+function isStoppingUi() {
+  const stopBtn = composer && composer.getStopBtn();
+  return Boolean(stopBtn && stopBtn.dataset.stopping === '1');
 }
 
-/** 压缩分隔条：role=compaction 的合成项（docs/session-history-archive-design.md §7.3），
- *  折叠卡样式——摘要正文 Markdown 渲染，默认收起不打断回放流 */
-function addCompactionDivider(summary) {
-  const el = document.createElement('div');
-  el.className = 'msg system';
-  const details = document.createElement('details');
-  details.className = 'compaction-divider';
-  const summaryEl = document.createElement('summary');
-  summaryEl.textContent = '上下文已压缩 · 早期消息已归档（点开查看压缩摘要）';
-  const body = document.createElement('div');
-  body.className = 'compaction-summary';
-  body.innerHTML = renderMarkdown(summary || '');
-  details.appendChild(summaryEl);
-  details.appendChild(body);
-  el.appendChild(details);
-  messagesEl.appendChild(el);
-  scrollToBottom(false);
-  return el;
-}
-
-function addMessage(role, content) {
-  const msg = document.createElement('div');
-  msg.className = 'msg ' + role;
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
-
-  // 用户消息：高亮 /Skill 引用（前置字符保留；URL/路径里的 / 不误伤）
-  if (role === 'user') {
-    var displayContent = ctx.utils.esc(content);
-    displayContent = displayContent.replace(/(?<![\w:.\/])\/([\w\u4e00-\u9fff.\-]+)/g,
-      '<span class="skill-mention-tag">/$1</span>');
-    bubble.innerHTML = displayContent;
-  } else {
-    writeMarkdown(bubble, renderMarkdown(content));
+function enterStreamingUi() {
+  isStreaming = true;
+  const sendBtn = composer.getSendBtn();
+  if (sendBtn) {
+    sendBtn.disabled = true;
+    sendBtn.textContent = '发送';
+    sendBtn.classList.remove('danger');
   }
-
-  msg.appendChild(bubble);
-  messagesEl.appendChild(msg);
-  scrollToBottom(false);
-  return msg;
+  showStopButton();
 }
 
-// Markdown 渲染：marked 解析 GFM（表格/任务列表/删除线/链接识别），DOMPurify 净化（禁 <script>/event handler）
-// 围栏代码块 ```lang…``` 输出 <pre><code class="language-lang hljs"> 由 hljs 高亮
-function renderMarkdown(text) {
-  if (text == null) return '';
-  const raw = window.marked.parse(String(text), { gfm: true, breaks: true });
-  return window.DOMPurify.sanitize(raw, { ADD_ATTR: ['class', 'target', 'rel'] });
+function showStopButton() {
+  const stopBtn = composer.getStopBtn();
+  if (!stopBtn) return;
+  stopBtn.style.display = '';
+  stopBtn.disabled = false;
+  stopBtn.textContent = '停止';
+  delete stopBtn.dataset.stopping;
 }
 
-/** 流式时把 markdown HTML 写入 el，并对每个 <pre><code> 块增量跑一次 hljs（自动跳过未闭合块） */
-function writeMarkdown(el, html) {
-  el.innerHTML = html;
-  if (window.hljs) {
-    el.querySelectorAll('pre code').forEach((c) => {
-      try { window.hljs.highlightElement(c); } catch (e) { /* 语言不支持时忽略 */ }
-    });
-  }
+function hideStopButton() {
+  const stopBtn = composer.getStopBtn();
+  if (!stopBtn) return;
+  stopBtn.style.display = 'none';
+  stopBtn.disabled = false;
+  stopBtn.textContent = '停止';
+  delete stopBtn.dataset.stopping;
 }
 
-/** 历史 assistant 消息：按 blocks 块序分段渲染（文本气泡与工具组按真实发生顺序交错）；
- *  无 blocks 的旧数据退回「工具组在上、文本在下」旧布局
- *  @returns {{ msgEl: HTMLElement, contentEl: HTMLElement }} 元素引用，供历史回放时追加卡片 */
-function addAssistantHistory(content, toolCalls, blocks) {
-  const msg = document.createElement('div');
-  msg.className = 'msg assistant';
-  const callOf = (tc) => ({
-    type: 'tool_call',
-    name: tc.name,
-    summary: tc.summary,
-    argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
-    resultText: null,
-    state: 'success'
-  });
-  const appendBubble = (text) => {
-    const bubbleEl = document.createElement('div');
-    bubbleEl.className = 'msg-bubble';
-    writeMarkdown(bubbleEl, renderMarkdown(text));
-    msg.appendChild(bubbleEl);
-  };
-  if (Array.isArray(blocks) && blocks.length > 0) {
-    // 块序即发生序：相邻 tool 块收进同一组，文本块独立成气泡（与实时流分段规则一致）
-    let group = null;
-    const flushGroup = () => {
-      if (group) {
-        msg.insertAdjacentHTML('beforeend', renderToolGroupBlock(group));
-        group = null;
-      }
-    };
-    for (const b of blocks) {
-      if (b && b.type === 'text' && b.text) {
-        flushGroup();
-        appendBubble(b.text);
-      } else if (b && b.type === 'tool') {
-        const tc = (toolCalls || []).find((c) => b.id && c.id === b.id) || {};
-        group = group || [];
-        group.push(callOf(tc));
-      }
-    }
-    flushGroup();
-  } else {
-    if ((toolCalls || []).length > 0) {
-      msg.insertAdjacentHTML('beforeend', renderToolGroupBlock((toolCalls || []).map(callOf)));
-    }
-    if (content) appendBubble(content);
-  }
-  // 卡片统一挂到消息末尾（实时流 contentEl 同语义）：文本气泡之后、互不嵌套
-  messagesEl.appendChild(msg);
-  scrollToBottom(false);
-  return { msgEl: msg, contentEl: msg };
+function enterStoppingUi() {
+  const stopBtn = composer.getStopBtn();
+  if (!stopBtn) return;
+  stopBtn.style.display = '';
+  stopBtn.dataset.stopping = '1';
+  stopBtn.textContent = '停止中...';
+  stopBtn.disabled = true;
 }
 
-/** 工具分组块（默认折叠） */
-function renderToolGroupBlock(calls) {
-  const summary = summarizeToolCalls(calls);
-  let rowsHtml = calls.map((c) => renderToolRow(c)).join('');
-  return '<div class="tool-group">' +
-    '<div class="tool-group-header" onclick="window.App.toolGroupToggle(this)">' +
-    '<span class="tg-arrow">▶</span><span>' + ctx.utils.esc(summary.title) + '</span>' +
-    (summary.ins || summary.del ? '<span class="diff-stats"><span class="ins">+' + summary.ins + '</span><span class="del">-' + summary.del + '</span></span>' : '') +
-    '</div>' +
-    '<div class="tool-group-body">' + rowsHtml + '</div>' +
-    '</div>';
-}
-
-function summarizeToolCalls(calls) {
-  const cats = { bash: 0, read: 0, edit: 0, search: 0, todo: 0, mcp: 0 };
-  let ins = 0, del = 0;
-  for (const c of calls) {
-    const name = c.name || '';
-    if (/^(bash|sh|shell)/.test(name)) cats.bash++;
-    else if (/^(read|read_file)/.test(name)) cats.read++;
-    else if (/^(write|write_file|edit|edit_file)/.test(name)) cats.edit++;
-    else if (/^(grep|glob)/.test(name)) cats.search++;
-    else if (/^(task|plan)/.test(name)) cats.todo++;
-    else if (/^mcp__/.test(name)) cats.mcp++;
-  }
-  const parts = [];
-  if (cats.bash) parts.push(cats.bash + ' Bash');
-  if (cats.read) parts.push(cats.read + ' Read');
-  if (cats.edit) parts.push(cats.edit + ' Edit');
-  if (cats.search) parts.push(cats.search + ' Search');
-  if (cats.todo) parts.push(cats.todo + ' Todo');
-  if (cats.mcp) parts.push(cats.mcp + ' MCP');
-  const title = parts.length > 0 ? parts.join(' · ') : 'Call ' + calls.length + ' tools';
-  return { title, ins, del };
-}
-
-/** 工具行（专用渲染器 + 状态图标 + chevron） */
-function renderToolRow(call) {
-  // 渲染器选择始终依据原始工具名（summary 可能是中文，无法用于选择专用 body）
-  const r = RENDERERS[String(call.name || '').split('__').pop()] || 'default';
-  let headerLabel = call.name || 'tool';
-  let headerArg = '';
-  if (call.summary) {
-    // 后端已给出人可读摘要（含关键参数），优先展示，避免再拼一遍参数
-    headerLabel = call.summary;
-  } else if (r === 'read' || r === 'write' || r === 'edit') {
-    headerArg = extractFilePath(call.argsText) || '';
-  } else if (r === 'bash') {
-    headerLabel = 'Bash';
-    headerArg = extractCommand(call.argsText) || '';
-  } else if (r === 'glob' || r === 'grep') {
-    headerLabel = r === 'glob' ? 'Glob' : 'Grep';
-    headerArg = extractPattern(call.argsText) || '';
-  }
-  const stateIcon = ctx.utils.toolStateIcon(call.state);
-  const body = renderToolBody(r, call);
-  return '<div class="tool-call-row" onclick="window.App.toolRowToggle(this)">' +
-    '<span class="tc-name">' + ctx.utils.esc(headerLabel) + '</span>' +
-    (headerArg ? '<span class="tc-arg">' + ctx.utils.esc(headerArg) + '</span>' : '') +
-    '<span class="tc-state">' + stateIcon + '</span>' +
-    (body ? '<span class="tc-toggle">▶</span>' : '') +
-    '</div>' +
-    (body ? '<div class="tool-call-body"><div class="tc-inner">' + body + '</div></div>' : '');
-}
-
-function extractFilePath(argsText) {
-  try {
-    const o = JSON.parse(argsText || '{}');
-    return o.file_path || o.path || o.file || '';
-  } catch { return ''; }
-}
-function extractCommand(argsText) {
-  try {
-    const o = JSON.parse(argsText || '{}');
-    return o.cmd || o.command || o.script || '';
-  } catch { return argsText || ''; }
-}
-function extractPattern(argsText) {
-  try {
-    const o = JSON.parse(argsText || '{}');
-    return o.pattern || o.patterns || o.glob || '';
-  } catch { return argsText || ''; }
-}
-
-function renderToolBody(kind, call) {
-  switch (kind) {
-    case 'bash':
-      if (call.resultText) return '<div class="tc-label">Output</div><div class="tc-bash-output">' + ctx.utils.esc(truncate(call.resultText, 4000)) + '</div>';
-      return call.resultText === null ? '<span class="tc-running">Running…</span>' : '';
-    case 'read': {
-      let html = '';
-      if (call.argsText) html += '<div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(call.argsText) + '</pre>';
-      if (call.resultText) html += '<div class="tc-label">Content</div><pre>' + ctx.utils.esc(truncate(call.resultText, 4000)) + '</pre>';
-      return html;
-    }
-    case 'edit':
-    case 'write':
-      if (call.argsText) {
-        let args = call.argsText;
-        const file = extractFilePath(args);
-        const content = (() => { try { return JSON.parse(args || '{}').content || ''; } catch { return ''; } })();
-        if (file || content) {
-          return '<div class="tc-label">' + (kind === 'edit' ? 'Edit' : 'Write') + '</div>' +
-            (file ? '<pre>' + ctx.utils.esc(file) + '</pre>' : '') +
-            (content ? '<pre class="diff-view"><span class="d-add">+' + ctx.utils.esc(content.split('\n')[0] || '') + '</span></pre>' : '') +
-            (call.resultText ? '<div class="tc-label">Result</div><pre>' + ctx.utils.esc(truncate(call.resultText, 2000)) + '</pre>' : '');
-        }
-      }
-      return defaultToolBody(call);
-    case 'glob':
-    case 'grep':
-      return defaultToolBody(call);
-    default:
-      return defaultToolBody(call);
-  }
-}
-
-function defaultToolBody(call) {
-  let html = '';
-  if (call.argsText) html += '<div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(call.argsText) + '</pre>';
-  if (call.resultText) html += '<div class="tc-label">Result</div><pre>' + ctx.utils.esc(truncate(call.resultText, 4000)) + '</pre>';
-  if (!html && call.resultText === null) html = '<span class="tc-running">Running…</span>';
-  return html;
-}
-
-function truncate(s, n) {
-  return s.length > n ? s.substring(0, n) + '…' : s;
-}
-
-// ---------- 流式回复构建（当前回复） ----------
-
-function ensureReply(replyId) {
-  if (currentReply && currentReply.replyId === replyId) return currentReply;
-  if (replyMap[replyId]) { currentReply = replyMap[replyId]; return currentReply; }
-  // 清理旧回复的 footer 计时
-  const div = document.createElement('div');
-  div.className = 'msg assistant';
-  div.innerHTML = '<div class="msg-bubble-content"></div><div class="msg-footer"><span class="badge" data-footer></span></div>';
-  messagesEl.appendChild(div);
-  const r = {
-    replyId,
-    thinking: '',
-    thinkingActive: false,
-    toolCalls: {},     // tcId -> call
-    // 段落尾指针：contentEl 内的段落（思考块/文本气泡/工具组/卡片）按事件到达顺序排列，
-    // 连续同类段落合并进同一段——tailText 是末尾文本气泡，tailTools 是末尾工具组
-    tailTextEl: null,
-    tailText: '',
-    tailTools: null,
-    elapsedStart: Date.now(),
-    usage: { input: 0, cached: 0, output: 0 },
-    serverUsage: null,
-    serverElapsedMs: null,
-    modelCalls: 0,
-    activeThinkingEl: null,
-    footerBadge: div.querySelector('[data-footer]'),
-    contentEl: div.querySelector('.msg-bubble-content')
-  };
-  replyMap[replyId] = r;
-  currentReply = r;
-  startFooterTimer(r);
-  return r;
-}
-
-function startFooterTimer(r) {
-  if (thinkingTimer) clearInterval(thinkingTimer);
-  thinkingTimer = setInterval(() => {
-    // 仅 tick 当前活跃回复
-    if (currentReply && currentReply.replyId === r.replyId) updateReplyFooter(r, true);
-  }, 1000);
-}
-
-function updateReplyFooter(r, running) {
-  if (!r.footerBadge) return;
-  const useServer = !running && r.serverElapsedMs != null;
-  const u = useServer && r.serverUsage ? r.serverUsage
-    : { input_tokens: r.usage.input, cached_tokens: r.usage.cached, output_tokens: r.usage.output, model_calls: r.modelCalls };
-  const secs = useServer ? r.serverElapsedMs / 1000 : (Date.now() - r.elapsedStart) / 1000;
-  r.footerBadge.innerHTML =
-    ctx.utils.msgStateIcon(running) +
-    ' <span' + (useServer ? ' title="服务端计时"' : '') + '>' + ctx.utils.formatDuration(secs) + '</span>' +
-    (u.input_tokens || u.output_tokens
-      ? ' <span>↑' + (u.input_tokens || 0)
-          + (u.cached_tokens ? ' ⚡' + u.cached_tokens + ' 缓存' : '')
-          + ' ↓' + (u.output_tokens || 0) + '</span>' : '') +
-    (u.total_tokens ? ' · ' + u.total_tokens + ' total' : '') +
-    (u.model_calls > 0 ? ' · ' + u.model_calls + ' calls' : '');
-}
-
-function finishReply(replyId) {
-  const r = replyId ? (replyMap[replyId] || null) : currentReply;
-  if (r) {
-    r.thinkingActive = false;
-    closeTextTail(r); // 末段文本的光标随回复终结移除
-    updateReplyFooter(r, false);
-  }
-  if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
-}
-
-// ---------- 思维链 ----------
-
-/** 收尾文本段：光标随段终结移除（分段后各段独立存在，不清理会永久闪烁） */
-function closeTextTail(r) {
-  if (r.tailTextEl) {
-    const cur = r.tailTextEl.querySelector('.cursor');
-    if (cur) cur.remove();
-  }
-  r.tailTextEl = null;
-  r.tailText = '';
-}
-
-function ensureThinking(r) {
-  // 思考是独立段落：开始新思考意味着上一段文本/工具组收尾，后续内容按到达顺序另起一段
-  closeTextTail(r);
-  r.tailTools = null;
-  if (!r.activeThinkingEl) {
-    const el = document.createElement('div');
-    el.className = 'thinking-block';
-    el.innerHTML = '<div class="thinking-header shimmer" onclick="window.App.thinkingToggle(this)">' +
-      '<span class="thinking-label">thinking…</span><span class="thinking-toggle">▼</span></div>' +
-      '<div class="thinking-body"><pre class="thinking-content"></pre></div>';
-    r.contentEl.appendChild(el);
-    r.activeThinkingEl = el;
-    (function timer(div, start) {
-      const lbl = div.querySelector('.thinking-label');
-      const iv = setInterval(() => {
-        if (div.isConnected) lbl.textContent = 'thinking for ' + ctx.utils.formatDuration((Date.now() - start) / 1000);
-        else clearInterval(iv);
-      }, 1000);
-      // 挂在元素上，endThinking 收尾时清除（修 #64：否则「定格」标签一秒内被覆写回计时）
-      el._thinkingTimer = iv;
-    })(el, Date.now());
-  }
-  return r.activeThinkingEl;
-}
-
-function appendThinkingDelta(r, delta) {
-  r.thinking += delta;
-  ensureThinking(r);
-  const pre = r.activeThinkingEl.querySelector('.thinking-content');
-  if (pre) pre.textContent = r.thinking;
-  scrollToBottom(false);
-}
-
-function endThinking(r) {
-  r.thinkingActive = false;
-  if (r.activeThinkingEl) {
-    if (r.activeThinkingEl._thinkingTimer) {
-      clearInterval(r.activeThinkingEl._thinkingTimer);
-      r.activeThinkingEl._thinkingTimer = null;
-    }
-    const lbl = r.activeThinkingEl.querySelector('.thinking-label');
-    if (lbl) lbl.textContent = 'thinking (' + r.thinking.length + ' chars)';
-    r.activeThinkingEl.querySelector('.thinking-body').classList.remove('open');
-    r.activeThinkingEl = null;
-  }
-}
-
-// ---------- 工具流式渲染 ----------
-
-/** 末尾文本气泡：不存在就新开一段。工具组/思考块插入过即视为上一段文本完结，
- *  之后的文本另起一条气泡——模型的开场白因此能留在它那批工具步骤的上方 */
-function ensureTextBubble(r) {
-  if (!r.tailTextEl) {
-    r.tailTools = null; // 文本段开始：前面连续的工具调用收成一个组，之后的工具另起一组
-    const el = document.createElement('div');
-    el.className = 'msg-bubble';
-    r.contentEl.appendChild(el);
-    r.tailTextEl = el;
-    r.tailText = '';
-  }
-  return r.tailTextEl;
-}
-
-/** 文本增量渲染（主回复与远程面板共用）：Markdown 写入后追加光标节点
- *  ——cursor span 在 sanitize 之外，不参与解析，避免被吞；按段独立 innerHTML 重写，
- *  段落之间互不覆盖工具组/卡片 */
-function appendTextDelta(r, delta) {
-  endThinking(r);
-  const el = ensureTextBubble(r);
-  r.tailText += delta;
-  writeMarkdown(el, renderMarkdown(r.tailText));
-  const cur = document.createElement('span');
-  cur.className = 'cursor';
-  el.appendChild(cur);
-}
-
-/** 末尾工具组：连续的工具调用合并进同一组；文本/思考段落插入后即收尾，之后的工具另起一组 */
-function ensureToolGroupEl(r) {
-  if (!r.tailTools) {
-    closeTextTail(r);
-    const wrap = document.createElement('div');
-    wrap.className = 'tool-group';
-    wrap.innerHTML = '<div class="tool-group-header" onclick="window.App.toolGroupToggle(this)">' +
-      '<span class="tg-arrow">▶</span><span class="tg-title"></span></div>' +
-      '<div class="tool-group-body"></div>';
-    r.contentEl.appendChild(wrap);
-    r.tailTools = {
-      bodyEl: wrap.querySelector('.tool-group-body'),
-      titleEl: wrap.querySelector('.tg-title'),
-      tcIds: []
-    };
-  }
-  return r.tailTools;
-}
-
-function onToolCallStart(r, tcId, name) {
-  if (!pendingToolCalls[tcId]) pendingToolCalls[tcId] = { name, argsRaw: '', argsText: '', resultRaw: null, state: null };
-  if (r.toolCalls[tcId]) return; // 已存在
-  const tc = pendingToolCalls[tcId];
-  r.toolCalls[tcId] = tc;
-  endThinking(r); // 行动开始：思考段收尾（标签定格，不再计时）
-  const g = ensureToolGroupEl(r);
-  tc.group = g; // 行归属组：结果/摘要晚于下一段文本时仍能找到正确的组重建
-  g.tcIds.push(tcId);
-  const rowEl = document.createElement('div');
-  rowEl.className = 'tool-call-row shimmer';
-  rowEl.dataset.tcid = tcId;
-  rowEl.innerHTML = '<span class="tc-name">' + ctx.utils.esc(name) + '</span>' +
-    '<span class="tc-state">' + ctx.utils.toolStateIcon('running') + '</span>' +
-    '<span class="tc-toggle">▶</span>';
-  rowEl.addEventListener('click', () => window.App.toolRowToggle(rowEl));
-  g.bodyEl.appendChild(rowEl);
-  updateToolGroupTitle(r, g);
-  // 远程委派开始：开远程调用面板承接后续转发事件。仅限顶层回复（r.replyId 存在）——
-  // 嵌套委派（修 #70）时 r 是面板视图对象，创建 replyId=undefined 的孙面板会抢占
-  // activeRemotePanel，其后所有远端转发事件被 routeRemoteEvent 的 replyId 校验静默
-  // 丢弃，子面板冻死；嵌套 spawn 降级为面板内普通工具行展示
-  if (name === 'agent_spawn' && r.replyId) ensureRemotePanel(r, tcId);
-  scrollToBottom(false);
-}
-
-function onToolCallDelta(r, tcId, delta) {
-  const tc = pendingToolCalls[tcId];
-  if (!tc) return;
-  tc.argsRaw = (tc.argsRaw || '') + delta;
-  try { tc.argsText = JSON.stringify(JSON.parse(tc.argsRaw), null, 2); }
-  catch { tc.argsText = tc.argsRaw; }
-  const rowEl = findToolRowEl(r, tcId);
-  if (rowEl) rowEl.classList.remove('shimmer');
-  updateToolGroupTitle(r, tc.group);
-  // spawn 入参流式到达：同步远程面板头（agent 名/任务文本）
-  syncRemotePanelArgs(remotePanels[tcId], tc.argsRaw);
-}
-
-function onToolCallEnd(r, tcId) {
-  const tc = pendingToolCalls[tcId];
-  const rowEl = findToolRowEl(r, tcId);
-  if (rowEl) rowEl.classList.remove('shimmer');
-  updateToolGroupTitle(r, tc && tc.group);
-}
-
-/** 行全局查找：行归属各自的组，不假设它在末尾组里 */
-function findToolRowEl(r, tcId) {
-  return r.contentEl ? r.contentEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
-}
-
-function onToolCallSummary(r, tcId, summary, toolName) {
-  if (!tcId || !summary) return;
-  const tc = pendingToolCalls[tcId] || (toolName ? {
-    name: toolName, argsRaw: '', argsText: '', resultRaw: null, state: null
-  } : null);
-  if (tc) {
-    pendingToolCalls[tcId] = tc;
-    tc.summary = summary;
-  }
-  let rowEl = findToolRowEl(r, tcId);
-  // confirm-stream 会创建新的回复容器，但恢复段不会重发 TOOL_CALL_START。
-  // 摘要帧因此可能是当前回复里该 toolCallId 的首个可见事件：补建行后再更新标题。
-  if (!rowEl) {
-    onToolCallStart(r, tcId, toolName || (tc && tc.name) || 'tool');
-    rowEl = findToolRowEl(r, tcId);
-  }
-  const nameEl = rowEl ? rowEl.querySelector('.tc-name') : null;
-  if (nameEl) nameEl.textContent = summary;
-  const g = (tc && tc.group) || r.tailTools;
-  rebuildToolRows(r, g);
-  updateToolGroupTitle(r, g);
-}
-
-function onToolResultPreview(r, tcId, preview) {
-  if (!tcId || !preview) return;
-  const tc = pendingToolCalls[tcId];
-  // 已有完整结果文本时保留原文，预览只作兜底（展开查看仍以真实结果为准）
-  if (tc && tc.resultRaw == null) tc.resultRaw = preview;
-}
-
-function onToolResultStart(r, tcId) {
-  const tc = pendingToolCalls[tcId] || (pendingToolCalls[tcId] = { name: '', argsRaw: '', argsText: '', resultRaw: null, state: null });
-  tc.resultRaw = '';
-}
-
-function onToolResultDelta(r, tcId, delta) {
-  const tc = pendingToolCalls[tcId];
-  if (tc) tc.resultRaw = (tc.resultRaw || '') + delta;
-}
-
-function onToolResultEnd(r, tcId, state) {
-  const tc = pendingToolCalls[tcId];
-  if (tc) tc.state = state;
-  const g = (tc && tc.group) || r.tailTools;
-  rebuildToolRows(r, g);
-  updateToolGroupTitle(r, g);
-}
-
-function rebuildToolRows(r, g) {
-  g = g || r.tailTools;
-  if (!g) return;
-  g.bodyEl.innerHTML = g.tcIds.map((tcId) => {
-    const tc = r.toolCalls[tcId] || {};
-    return renderToolRow({
-      name: tc.name,
-      summary: tc.summary,
-      argsText: tc.argsText,
-      resultText: tc.resultRaw == null ? (tc.state == null ? null : '') : tc.resultRaw,
-      state: tc.state || 'running'
-    });
-  }).join('');
-  scrollToBottom(false);
-}
-
-function updateToolGroupTitle(r, g) {
-  g = g || r.tailTools;
-  if (!g || !g.titleEl) return;
-  const calls = g.tcIds.map((id) => r.toolCalls[id] || {}).filter((c) => c.name);
-  if (calls.length === 0) return;
-  const summary = summarizeToolCalls(calls);
-  g.titleEl.textContent = summary.title;
-}
-
-// ---------- 远程子 agent 调用面板（Agent Protocol 远程委派可视化） ----------
-
-/**
- * spawn 调用开始 → 开远程调用面板。面板独立成段嵌在当前回复内容流（spawn 工具行之后），
- * 远端子 agent 回流的思考/文本/工具调用经 routeRemoteEvent 嵌套展示在面板内。
- */
-function ensureRemotePanel(r, spawnTcId) {
-  if (remotePanels[spawnTcId]) return remotePanels[spawnTcId];
-  const el = document.createElement('div');
-  el.className = 'remote-call open';
-  el.innerHTML =
-    '<div class="rc-header" onclick="window.App.remoteCallToggle(this)">' +
-      '<span class="rc-icon">🛰</span>' +
-      '<span class="rc-agent">远程 Agent</span>' +
-      '<span class="rc-status running">调用中</span>' +
-      '<span class="rc-arrow">▶</span>' +
-    '</div>' +
-    '<div class="rc-body">' +
-      '<div class="rc-task" style="display:none"></div>' +
-      '<div class="rc-events"></div>' +
-      '<div class="rc-footer" style="display:none"></div>' +
-    '</div>';
-  r.contentEl.appendChild(el);
-  r.tailTools = null; // 面板独立成段：后续 lead 工具调用另起新组，不与 spawn 行混排
-  const p = {
-    tcId: spawnTcId,
-    replyId: r.replyId,
-    el,
-    agentEl: el.querySelector('.rc-agent'),
-    statusEl: el.querySelector('.rc-status'),
-    taskEl: el.querySelector('.rc-task'),
-    eventsEl: el.querySelector('.rc-events'),
-    footerEl: el.querySelector('.rc-footer'),
-    agent: '',
-    taskDone: false,
-    done: false,
-    // 复用主回复渲染助手的视图对象（形状与 reply builder 一致：contentEl/tail*/toolCalls/…）
-    view: {
-      contentEl: el.querySelector('.rc-events'),
-      tailTextEl: null,
-      tailText: '',
-      tailTools: null,
-      toolCalls: {},
-      thinking: '',
-      thinkingActive: false,
-      activeThinkingEl: null
-    }
-  };
-  remotePanels[spawnTcId] = p;
-  activeRemotePanel = p;
-  lastRemotePanel = p;
-  scrollToBottom(false);
-  return p;
-}
-
-/** 远端转发事件路由：复用主回复的思考/文本/工具行渲染，嵌套展示进活跃面板 */
-function routeRemoteEvent(r, data) {
-  const p = activeRemotePanel;
-  if (!p || p.replyId !== r.replyId) return; // 无活跃面板时丢弃（正常时序下 spawn START 先到）
-  const rv = p.view;
-  switch (data.type) {
-    case 'THINKING_BLOCK_DELTA': appendThinkingDelta(rv, data.delta || ''); break;
-    case 'THINKING_BLOCK_END': endThinking(rv); break;
-    case 'TEXT_BLOCK_DELTA': appendTextDelta(rv, data.delta || ''); scrollToBottom(false); break;
-    case 'TOOL_CALL_START':
-      onToolCallStart(rv, data.toolCallId, data.toolName);
-      remoteToolOwner[data.toolCallId] = p;
-      break;
-    case 'TOOL_CALL_DELTA': onToolCallDelta(rv, data.toolCallId, data.delta); break;
-    case 'TOOL_CALL_END': onToolCallEnd(rv, data.toolCallId); break;
-    case 'TOOL_RESULT_START': onToolResultStart(rv, data.toolCallId); break;
-    case 'TOOL_RESULT_TEXT_DELTA': onToolResultDelta(rv, data.toolCallId, data.delta); break;
-    case 'TOOL_RESULT_END': onToolResultEnd(rv, data.toolCallId, data.state); break;
-    default: break; // MODEL_CALL_* 等远端帧不进面板（usage 只累计 lead 自身，避免混计）
-  }
-}
-
-function remotePanelStatus(p, text, cls) {
-  if (!p) return;
-  p.statusEl.textContent = text;
-  p.statusEl.className = 'rc-status ' + (cls || '');
-}
-
-function showRemoteFooter(p, text) {
-  if (!p || !text) return;
-  p.footerEl.style.display = '';
-  p.footerEl.textContent = text;
-}
-
-/** 远端工具摘要/预览帧（合成帧无 source，按 tcId 归属路由）：更新面板内对应工具行 */
-function onRemoteToolSummary(p, tcId, summary) {
-  if (p && summary) onToolCallSummary(p.view, tcId, summary);
-}
-function onRemoteToolPreview(p, tcId, preview) {
-  if (p && preview) onToolResultPreview(p.view, tcId, preview);
-}
-
-/** spawn 入参增量同步到面板头（agent_id/task 到达即展示，不等调用收口；
- *  兼容未闭合的流式 JSON 片段，task 多行时只显示首行、完整文本进 title 悬浮） */
-function syncRemotePanelArgs(p, argsRaw) {
-  if (!p || !argsRaw) return;
-  const mAgent = argsRaw.match(/"agent_id"\s*:\s*"([^"]+)"/);
-  if (mAgent && mAgent[1] !== p.agent) {
-    p.agent = mAgent[1];
-    p.agentEl.textContent = p.agent;
-  }
-  if (!p.taskDone) {
-    const mFull = argsRaw.match(/"task"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    const mPart = !mFull && argsRaw.match(/"task"\s*:\s*"((?:[^"\\]|\\.)*)$/);
-    const captured = mFull ? mFull[1] : (mPart ? mPart[1] : null);
-    if (captured != null) {
-      let task = captured;
-      try { task = JSON.parse('"' + captured + '"'); } catch (e) { /* 转义序列未到齐时用原文 */ }
-      const text = String(task);
-      p.taskEl.textContent = '任务：' + text.split('\n')[0];
-      p.taskEl.title = text;
-      p.taskEl.style.display = '';
-      if (mFull) p.taskDone = true;
-    }
-  }
-}
-
-// ---------- 文件下载卡片（file_ready） ----------
-
-/** 渲染 Agent 产出文件下载卡片（file-upload-download-plan §8.3） */
-function renderFileReadyCard(r, data) {
-  const fileId = data.file_id;
-  const fileName = data.file_name || 'file';
-  const mimeType = data.mime_type || 'application/octet-stream';
-  const size = data.size || 0;
-  // 服务端已知外部前缀（X-Forwarded-Prefix）时下发含前缀的完整路径（以 BASE 开头），
-  // 直接用；旧服务端/直连发 /files/{id} 根相对路径时由 BASE 补前缀（兼容两种形态）
-  const rawUrl = data.download_url || ('/files/' + fileId);
-  const downloadUrl = rawUrl.startsWith(ctx.api.BASE) ? rawUrl : ctx.api.BASE + rawUrl;
-
-  // 根据文件类型选图标
-  const icon = mimeType.startsWith('image/') ? '🖼️'
-    : mimeType.startsWith('text/') ? '📄'
-    : mimeType === 'application/pdf' ? '📕'
-    : mimeType.startsWith('application/vnd.openxmlformats-officedocument.spreadsheetml') ? '📊'
-    : mimeType.startsWith('application/vnd.openxmlformats-officedocument') ? '📝'
-    : mimeType === 'application/zip' ? '📦'
-    : '📎';
-
-  const isUpload = data.origin === 'upload';
-  const card = document.createElement('div');
-  card.className = 'file-ready-card' + (isUpload ? ' upload-card' : '');
-  card.innerHTML =
-    '<div class="file-ready-info">' +
-      '<span class="file-ready-icon">' + icon + '</span>' +
-      '<div class="file-ready-meta">' +
-        '<span class="file-ready-name">' + ctx.utils.esc(fileName) + '</span>' +
-        '<span class="file-ready-size">' + (isUpload ? '上传 · ' : '') + formatFileSize(size) + '</span>' +
-      '</div>' +
-    '</div>' +
-    '<a class="btn small file-ready-download" href="' + ctx.utils.esc(downloadUrl) +
-      '" download="' + ctx.utils.esc(fileName) + '" target="_blank" rel="noopener">⬇ 下载</a>';
-
-  // 挂载到回复气泡内部末尾（contentEl 内），与工具组同级，保证多个文件卡片按顺序排列
-  const container = r.contentEl;
-  container.appendChild(card);
-  scrollToBottom(true);
-}
-
-// ---------- HITL 确认卡片 ----------
-
-/** 渲染权限确认卡片：批量展示待确认工具（名称 + 参数），Approve 全部 / Reject 全部 */
-function renderConfirmCard(r, data) {
-  if (pendingConfirm) dismissConfirmCard(); // 新 ASK 覆盖旧卡片（同 session 新 ASK 场景）
-  const calls = data.tool_calls || [];
-  if (calls.length === 0) return;
-
-  const card = document.createElement('div');
-  card.className = 'confirm-card';
-  const rows = calls.map((c) => {
-    let inputHtml = '';
-    const input = c.input;
-    if (input && typeof input === 'object') {
-      inputHtml = '<pre>' + ctx.utils.esc(JSON.stringify(input, null, 2)) + '</pre>';
-    } else if (input) {
-      inputHtml = '<pre>' + ctx.utils.esc(String(input)) + '</pre>';
-    }
-    return '<div class="confirm-tool">' +
-      '<div class="confirm-tool-name">' + ctx.utils.esc(c.name || 'tool') + '</div>' +
-      '<div class="confirm-tool-id">' + ctx.utils.esc(c.tool_call_id || '') + '</div>' +
-      (inputHtml ? '<div class="confirm-tool-input">' + inputHtml + '</div>' : '') +
-      '</div>';
-  }).join('');
-
-  card.innerHTML =
-    '<div class="confirm-card-header">' +
-      '<span class="confirm-title">⚠ 等待确认</span>' +
-      '<span class="confirm-sub">工具调用需人工批准</span>' +
-    '</div>' +
-    '<div class="confirm-tools">' + rows + '</div>' +
-    '<div class="confirm-actions">' +
-      '<button class="btn danger small" data-act="reject">Reject all</button>' +
-      '<button class="btn primary small" data-act="approve">Approve all</button>' +
-    '</div>';
-
-  card.querySelector('[data-act="approve"]').addEventListener('click', () =>
-    submitConfirm(calls, true));
-  card.querySelector('[data-act="reject"]').addEventListener('click', () =>
-    submitConfirm(calls, false));
-
-  // 卡片作为独立段落挂在回复内容末尾（工具组之后），确认后由 dismissConfirmCard 移除
-  r.contentEl.appendChild(card);
-  pendingConfirm = { replyId: r.replyId, calls, cardEl: card };
-  scrollToBottom(true);
-}
-
-/** 移除当前确认卡片（确认已提交 / 新 ASK 覆盖） */
-function dismissConfirmCard() {
-  if (pendingConfirm && pendingConfirm.cardEl && pendingConfirm.cardEl.isConnected) {
-    pendingConfirm.cardEl.remove();
-  }
-  pendingConfirm = null;
-}
-
-/** 批量提交确认决策：results = [{tool_call_id, confirmed, accept_rule:false}] */
-async function submitConfirm(calls, approved) {
-  if (!pendingConfirm) return;
-  const results = calls.map((c) => ({
-    tool_call_id: c.tool_call_id,
-    confirmed: approved,
-    accept_rule: false
-  }));
-  const sid = currentSessionId();
-  if (!sid) {
-    ctx.utils.toast('No active session, cannot confirm', 'error');
-    return;
-  }
-
-  // 标记卡片为处理中（防重复点击）
-  pendingConfirm.cardEl.classList.add('processing');
-  pendingConfirm.cardEl.querySelectorAll('button').forEach((b) => (b.disabled = true));
-  pendingConfirm.cardEl.querySelector('.confirm-title').textContent = '处理中…';
-
-  // 保存当前卡片引用：confirm-stream 可能返回新 permission_ask 创建新卡片，
-  // finally 只应移除本次确认的卡片，不误清新卡片
-  const myCard = pendingConfirm.cardEl;
-
-  try {
-    // 单次流：原流已无后续事件（恢复是新调用），关闭原连接改走 confirm-stream 渲染
-    if (activeAbort) { try { activeAbort.abort(); } catch (e) { /* ignore */ } }
-    isStreaming = true;
-    await consumeConfirmStream(sid, results, true);
-    isStreaming = false;
-    loadThreads();
-  } catch (e) {
-    ctx.utils.toast('Confirm failed: ' + e.message, 'error');
-    if (pendingConfirm && pendingConfirm.cardEl === myCard) {
-      myCard.querySelectorAll('button').forEach((b) => (b.disabled = false));
-      myCard.querySelector('.confirm-title').textContent = '⚠ 等待确认';
-    }
-  } finally {
-    // 只移除本次确认的卡片（confirm-stream 返回新 permission_ask 时已创建新卡片）
-    if (pendingConfirm && pendingConfirm.cardEl === myCard) {
-      dismissConfirmCard();
-    }
-  }
-}
-
-/** 消费确认后事件流（render=true 时事件直接渲染；false 时仅触发恢复，事件经总线回流） */
-function consumeConfirmStream(sid, results, render) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (err) => {
-      if (settled) return;
-      settled = true;
-      if (err) reject(err); else resolve();
-    };
-
-    // 确保有回复上下文：confirm-stream 事件可能没有 replyId，
-    // 需要预先创建回复容器以接收 TEXT_BLOCK_DELTA 等事件
-    if (render) {
-      // 始终创建新回复：confirm-stream 是新的执行段，不应追加到旧回复
-      const replyId = 'confirm-' + Date.now();
-      currentReply = null; // 清除旧引用，确保 ensureReply 创建新回复
-      ensureReply(replyId);
-    }
-
-    transport().confirmStream(sid, results, {
-      userId: ctx.state.getState('ui.userId') || 'debug-user',
-      onEvent: (data) => {
-        if (render) handleEvent(data);
-        if (data.type === 'error') finish(new Error(data.error || 'confirm-stream error'));
-        if (data.type === 'done') finish();
-      },
-      onError: (e) => finish(e)
-    });
-    // 兜底超时（正常流以 done 帧收尾）
-    setTimeout(() => finish(), 30000);
-  });
-}
-
-// ---------- MCP Apps 卡片（阶段二，见 mcp-apps-extension-plan.md §5.1） ----------
-
-/** 渲染 MCP App 交互式卡片：占位卡片 → 异步拉资源 → 沙箱 iframe 挂载 */
-function renderMcpAppCard(r, data) {
-  const tcId = data.toolCallId;
-  const toolName = data.toolName || 'mcp-app';
-  const ui = data.ui || {};   // {resourceUri, server}
-  if (!pendingToolCalls[tcId]) {
-    pendingToolCalls[tcId] = { name: toolName, argsRaw: '', argsText: '', resultRaw: null, state: null };
-  }
-
-  const card = document.createElement('div');
-  card.className = 'mcp-apps-container open';
-  card.innerHTML =
-    '<div class="mcp-apps-header">' +
-      '<span class="app-label">MCP App</span>' +
-      '<span class="app-name">' + ctx.utils.esc(toolName) + '</span>' +
-      '<span class="app-uri">' + ctx.utils.esc(ui.resourceUri || '') + '</span>' +
-      '<span class="tc-toggle">▶</span>' +
-    '</div>' +
-    '<div class="mcp-apps-body"><div class="mcp-apps-loading">加载中…</div></div>';
-  card.querySelector('.mcp-apps-header').addEventListener('click', () => card.classList.toggle('open'));
-  // 挂载到回复内容容器末尾：文本按段渲染后各段独立重写，卡片不会被文本覆盖
-  const anchor = r.contentEl;
-  anchor.appendChild(card);
-  const bodyEl = card.querySelector('.mcp-apps-body');
-
-  const host = new McpAppHost({
-    tcId,
-    server: ui.server,
-    resourceUri: ui.resourceUri,
-    toolName,
-    callbacks: {
-      // 卡片 tools/call 触发 ask 工具：403 needsConfirm → 卡片外确认卡片，Approve 后重试（5.1.3）
-      needsConfirm: (call) => renderAppConfirmCard(call),
-      log: (level, msg) => console.log('[mcp-app:' + tcId + '] ' + level + ':', msg)
-    }
-  });
-  appHosts[tcId] = host;
-  mountAppCard(host, bodyEl);
-  scrollToBottom(false);
-}
-
-/** 异步挂载：拉取资源 → 沙箱 iframe；失败显示错误 + 重试 */
-async function mountAppCard(host, bodyEl) {
-  try {
-    await host.mount(bodyEl);
-  } catch (e) {
-    bodyEl.innerHTML =
-      '<div class="mcp-apps-error">' + ctx.utils.esc(e.message || '资源加载失败') + '</div>' +
-      '<div><button class="btn small" data-retry>重试</button></div>';
-    const retry = bodyEl.querySelector('[data-retry]');
-    if (retry) retry.addEventListener('click', () => {
-      bodyEl.innerHTML = '<div class="mcp-apps-loading">加载中…</div>';
-      mountAppCard(host, bodyEl);
-    });
+function flushStoppingBuffer() {
+  if (!stoppingBuffer.length || !currentReply) return;
+  const buffered = stoppingBuffer;
+  stoppingBuffer = [];
+  for (const item of buffered) {
+    if (item.type === 'TEXT_BLOCK_DELTA') renderer.appendTextDelta(currentReply, item.delta);
+    else if (item.type === 'THINKING_BLOCK_DELTA') renderer.appendThinkingDelta(currentReply, item.delta);
   }
   scrollToBottom(false);
 }
 
-/** 卡片 tools/call 确认流：Approve/Reject 单工具决策（复用 .confirm-card 样式，上传确认重试下载） */
-function renderAppConfirmCard(call) {
-  return new Promise((resolve) => {
-    const card = document.createElement('div');
-    card.className = 'confirm-card';
-    card.innerHTML =
-      '<div class="confirm-card-header">' +
-        '<span class="confirm-title">⚠ 等待确认</span>' +
-        '<span class="confirm-sub">MCP App 工具调用需人工批准</span>' +
-      '</div>' +
-      '<div class="confirm-tools"><div class="confirm-tool">' +
-        '<div class="confirm-tool-name">' + ctx.utils.esc(call.name || 'tool') + '</div>' +
-        '<div class="confirm-tool-input"><pre>' + ctx.utils.esc(JSON.stringify(call.arguments || {}, null, 2)) + '</pre></div>' +
-      '</div></div>' +
-      '<div class="confirm-actions">' +
-        '<button class="btn danger small" data-act="reject">Reject</button>' +
-        '<button class="btn primary small" data-act="approve">Approve</button>' +
-      '</div>';
-    const settle = (ok) => {
-      try { card.remove(); } catch (e) { /* ignore */ }
-      resolve(ok);
-    };
-    card.querySelector('[data-act="approve"]').addEventListener('click', () => settle(true));
-    card.querySelector('[data-act="reject"]').addEventListener('click', () => settle(false));
-    const anchor = currentReply ? currentReply.contentEl : messagesEl;
-    if (anchor) anchor.appendChild(card);
-    scrollToBottom(true);
-  });
-}
-
-/** 回复结束 / 线程切换：通知各卡片 teardown（iframe 保留静态渲染），清理单例 */
-function teardownAllAppHosts() {
-  for (const key of Object.keys(appHosts)) {
-    try { appHosts[key].teardown('reply-completed'); } catch (e) { /* ignore */ }
-    delete appHosts[key];
+function resetStreamingState() {
+  isStreaming = false;
+  const sendBtn = composer && composer.getSendBtn();
+  if (sendBtn) {
+    sendBtn.disabled = false;
+    sendBtn.textContent = '发送';
+    sendBtn.classList.remove('danger');
   }
+  hideStopButton();
+  clearTimeout(stopSlowTimer);
+  if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+  stoppingBuffer = [];
+  activeChatHandle = null;
+  activeSubHandle = null;
 }
-
-/** 工具参数解析：SSE 增量拼接的原始 JSON → 对象（供 tool-input 下发） */
-function parseToolArgs(argsRaw) {
-  if (!argsRaw) return {};
-  try { return JSON.parse(argsRaw); } catch (e) { return {}; }
-}
-
-// ---------- 事件处理（统一入口） ----------
-// SDK 语义：AGENT_START/END 是 agent 级 replyId，内部 block 事件（TEXT/THINKING/TOOL/MODEL）
-// 是 model 调用级 replyId（不同 id）。因此以 AGENT_START/END 为消息生命周期，
-// block 事件统一归入当前 agent 回复，不按 block replyId 另建气泡。
 
 function handleEvent(data) {
-  // 远端转发事件（SSE 帧带 source）：只影响「远程调用面板」，绝不能触碰主回复生命周期
-  // ——转发的 AGENT_START/AGENT_END 携带远端自己的 replyId，若走下方通用处理会另开
-  // 气泡、提前 finishReply（后端收尾 guard 同理，见 AgentEventSseSerializer#isRemoteForwarded）
   const isRemote = !!data.source;
-  // agent 生命周期事件：切换/收尾当前回复
   if (data.type === 'AGENT_START') {
     if (isRemote) {
-      remotePanelStatus(activeRemotePanel, '子任务运行中', 'running');
+      renderer.remotePanelStatus(renderer.getActiveRemotePanel(), 'Running', 'running');
       return;
     }
-    const rr = ensureReply(data.replyId || 'reply-' + Date.now());
-    // 新回合开始：上一回合的面板登记失效（重连回放时 spawn TOOL_CALL_START 会重建面板）
-    remotePanels = {};
-    activeRemotePanel = null;
-    Object.keys(remoteToolOwner).forEach((k) => delete remoteToolOwner[k]);
-    setConnecting('chatTitle', true);
-    enterStreamingUi();
+    currentReply = renderer.ensureReply(data.replyId || 'reply-' + Date.now());
+    renderer.resetTurnRemote();
+    updateHeaderTitle(true);
+    if (!isStoppingUi()) enterStreamingUi();
+    else { isStreaming = true; composer.getSendBtn().disabled = true; }
     usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
-    // MCP Apps：新回合开始 → 清理上一回合卡片（保留当前回合可交互）
-    teardownAllAppHosts();
     return;
   }
   if (data.type === 'AGENT_END') {
     if (isRemote) {
-      remotePanelStatus(activeRemotePanel, '子任务完成', 'done');
+      renderer.remotePanelStatus(renderer.getActiveRemotePanel(), 'Done', 'done');
       return;
     }
     if (currentReply) {
       if (data.usage) currentReply.serverUsage = data.usage;
       if (data.elapsed_ms != null) currentReply.serverElapsedMs = data.elapsed_ms;
     }
-    finishReply(currentReply ? currentReply.replyId : null);
+    if (stoppingBuffer.length > 0) flushStoppingBuffer();
+    stopConfirmPending = false;
+    renderer.finishReply(currentReply ? currentReply.replyId : null);
     currentReply = null;
-    isStreaming = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-    sendBtn.classList.remove('danger');
-    hideStopButton();
-    clearTimeout(stopSlowTimer);
-    setConnecting('chatTitle', false);
+    resetStreamingState();
+    updateHeaderTitle(false);
     scrollToBottom(true);
     loadThreads();
-    // 标题由后端异步生成（可能晚于 AGENT_END），稍后再刷一次列表以显示生成的标题
     setTimeout(() => { if (currentSessionId()) loadThreads(); }, 4000);
     return;
   }
 
-  // block 事件：归入当前 agent 回复（无活跃回复时用自身 replyId 兜底占位）
-  const r = currentReply || (data.replyId ? ensureReply(data.replyId) : null);
+  if (data.type === 'interrupted') {
+    const el = document.createElement('div');
+    el.className = 'msg system';
+    el.textContent = data.message || 'Interrupted';
+    messagesEl.appendChild(el);
+    scrollToBottom(true);
+    return;
+  }
+  if (data.type === 'error') {
+    const el = document.createElement('div');
+    el.className = 'msg system error-text';
+    el.textContent = 'Error: ' + (data.error || data.message || 'unknown error');
+    messagesEl.appendChild(el);
+    scrollToBottom(true);
+    return;
+  }
+
+  const r = currentReply || (data.replyId ? renderer.ensureReply(data.replyId) : null);
   if (!r) return;
   if (isRemote) {
-    routeRemoteEvent(r, data);
+    renderer.routeRemoteEvent(r, data);
     return;
   }
 
   switch (data.type) {
     case 'TEXT_BLOCK_DELTA': {
-      if (r) {
-        appendTextDelta(r, data.delta || '');
+      const isDirect = Boolean(
+        data.directReturn ||
+        data.generateReason === 'TOOL_RETURN_DIRECT' ||
+        data.generate_reason === 'TOOL_RETURN_DIRECT'
+      );
+      if (stopConfirmPending) {
+        stoppingBuffer.push({ type: 'TEXT_BLOCK_DELTA', delta: data.delta || '', directReturn: isDirect, toolName: data.toolName || data.tool });
+        break;
       }
+      renderer.appendTextDelta(r, data.delta || '', {
+        directReturn: isDirect,
+        toolName: data.toolName || data.tool
+      });
       scrollToBottom(false);
       break;
     }
+    case 'TOOL_RETURN_DIRECT': {
+      const txt = data.content || data.text || data.delta || '';
+      if (txt) {
+        renderer.appendTextDelta(r, txt, { directReturn: true, toolName: data.toolName || data.name });
+        scrollToBottom(false);
+      }
+      break;
+    }
     case 'THINKING_BLOCK_DELTA': {
-      if (r) appendThinkingDelta(r, data.delta || '');
+      if (stopConfirmPending) {
+        stoppingBuffer.push({ type: 'THINKING_BLOCK_DELTA', delta: data.delta || '' });
+        break;
+      }
+      renderer.appendThinkingDelta(r, data.delta || '');
       break;
     }
     case 'THINKING_BLOCK_END': {
-      if (r) endThinking(r);
+      renderer.endThinking(r);
       break;
     }
     case 'TOOL_CALL_START': {
-      if (r) {
-        // MCP Apps：工具带 ui 元数据 → 渲染交互式卡片（不走普通工具行）
-        if (data.ui && data.ui.resourceUri) {
-          renderMcpAppCard(r, data);
-        } else {
-          onToolCallStart(r, data.toolCallId, data.toolName);
-        }
-      }
+      if (data.ui && data.ui.resourceUri) renderer.renderMcpAppCard(r, data);
+      else renderer.onToolCallStart(r, data.toolCallId, data.toolName, { directReturn: !!data.directReturn });
       break;
     }
     case 'TOOL_CALL_DELTA': {
-      if (r) onToolCallDelta(r, data.toolCallId, data.delta);
+      renderer.onToolCallDelta(r, data.toolCallId, data.delta);
       break;
     }
     case 'TOOL_CALL_END': {
-      if (r) onToolCallEnd(r, data.toolCallId);
+      renderer.onToolCallEnd(r, data.toolCallId);
       break;
     }
     case 'TOOL_RESULT_START': {
-      if (r) onToolResultStart(r, data.toolCallId);
+      renderer.onToolResultStart(r, data.toolCallId);
       break;
     }
     case 'TOOL_RESULT_TEXT_DELTA': {
-      if (r) onToolResultDelta(r, data.toolCallId, data.delta);
+      renderer.onToolResultDelta(r, data.toolCallId, data.delta);
       break;
     }
     case 'TOOL_RESULT_END': {
-      if (r) {
-        // MCP Apps：结果到达 → 通知卡片（tool-input 完整参数 → tool-result），按规范顺序下发
-        const host = appHosts[data.toolCallId];
-        if (host) {
-          const tc = pendingToolCalls[data.toolCallId] || {};
-          host.sendToolInput(parseToolArgs(tc.argsRaw));
-          host.sendToolResult(buildToolResult(tc.resultRaw, data.state));
-        } else {
-          onToolResultEnd(r, data.toolCallId, data.state);
-        }
-        // spawn 调用收口：远程面板定格终态并停止接收转发事件（结果预览随后落 footer）
-        const sp = remotePanels[data.toolCallId];
-        if (sp) {
-          remotePanelStatus(sp, data.state === 'SUCCESS' ? '已完成' : '失败',
-            data.state === 'SUCCESS' ? 'done' : 'error');
-          sp.done = true;
-          if (activeRemotePanel === sp) activeRemotePanel = null;
-        }
+      const host = renderer.getAppHost(data.toolCallId);
+      if (host) {
+        const tc = renderer.getPendingToolCall(data.toolCallId) || {};
+        host.sendToolInput(renderer.parseToolArgs(tc.argsRaw));
+        host.sendToolResult(renderer.buildToolResult(tc.resultRaw, data.state));
+      } else {
+        renderer.onToolResultEnd(r, data.toolCallId, data.state, { directReturn: !!data.directReturn });
       }
+      renderer.finishRemoteSpawn(data.toolCallId, data.state);
       break;
     }
     case 'tool_call_summary': {
-      // 远端工具的摘要帧（合成帧无 source，按 tcId 归属路由进面板）
-      if (remoteToolOwner[data.toolCallId]) {
-        onRemoteToolSummary(remoteToolOwner[data.toolCallId], data.toolCallId, data.summary);
-        break;
-      }
-      // 后端已拼好 delta 参数并解析出关键字段：直接把工具行标题换成「创建 x.js 408行」
-      if (r) onToolCallSummary(r, data.toolCallId, data.summary, data.toolName);
+      const owner = renderer.getRemoteToolOwner(data.toolCallId);
+      if (owner) renderer.onRemoteToolSummary(owner, data.toolCallId, data.summary);
+      else renderer.onToolCallSummary(r, data.toolCallId, data.summary, data.toolName);
       break;
     }
     case 'tool_result_preview': {
-      // 远端工具的预览帧同理按归属路由
-      if (remoteToolOwner[data.toolCallId]) {
-        onRemoteToolPreview(remoteToolOwner[data.toolCallId], data.toolCallId, data.preview);
-        break;
-      }
-      // 「输出 …」：结果首行（失败时为终态文案）；spawn 的预览同时落远程面板 footer
-      if (r) {
-        onToolResultPreview(r, data.toolCallId, data.preview);
-        const sp = remotePanels[data.toolCallId];
-        if (sp && data.preview) showRemoteFooter(sp, '结果：' + data.preview);
+      const owner = renderer.getRemoteToolOwner(data.toolCallId);
+      if (owner) renderer.onRemoteToolPreview(owner, data.toolCallId, data.preview);
+      else {
+        renderer.onToolResultPreview(r, data.toolCallId, data.preview);
+        const sp = renderer.getRemotePanel(data.toolCallId);
+        if (sp && data.preview) renderer.showRemoteFooter(sp, data.preview);
       }
       break;
     }
     case 'subagent_exposed': {
-      // 子 agent 调用收口（AgentSpawnTool 结果返回时后端合成）：面板定格终态标记
-      const sp = activeRemotePanel || lastRemotePanel;
-      if (sp) {
-        const who = data.agent_id || data.label || data.subagent_id || '子 Agent';
-        sp.done = true;
-        remotePanelStatus(sp, '子任务完成', 'done');
-        showRemoteFooter(sp, '✔ ' + who + ' 子任务已返回');
-        if (activeRemotePanel === sp) activeRemotePanel = null;
-      }
+      renderer.finishSubagentExposed(data);
       break;
     }
     case 'MODEL_CALL_START': {
-      if (r) r.modelCalls++;
+      r.modelCalls++;
       break;
     }
     case 'MODEL_CALL_END': {
@@ -1880,378 +780,100 @@ function handleEvent(data) {
         usageAccumulator.output_tokens += data.outputTokens || 0;
         usageAccumulator.total_tokens += data.totalTokens || 0;
         usageAccumulator.call_count++;
-        if (r) {
-          r.usage.input = usageAccumulator.input_tokens;
-          r.usage.cached = usageAccumulator.cached_tokens;
-          r.usage.output = usageAccumulator.output_tokens;
-        }
+        r.usage.input = usageAccumulator.input_tokens;
+        r.usage.cached = usageAccumulator.cached_tokens;
+        r.usage.output = usageAccumulator.output_tokens;
       }
-      break;
-    }
-    case 'AGENT_END': {
-      // 已在函数顶部统一处理（agent 级生命周期）
       break;
     }
     case 'permission_ask': {
-      // HITL：工具调用被 ASK 拦截，渲染确认卡片（批量决策，见 hitl-permission-plan.md 8.3）
-      // permission_ask 通常跟随 AGENT_START 同 replyId；异常时并入当前回复兜底
-      const rr = r || ensureReply(data.replyId || 'perm-' + Date.now());
-      renderConfirmCard(rr, data);
+      renderer.renderConfirmCard(r, data);
+      break;
+    }
+    case 'TOOL_RESULT_DATA_DELTA':
+    case 'tool_result_data_delta': {
+      renderer.appendImageBlock(r, data);
       break;
     }
     case 'file_ready': {
-      // Agent 产出文件：渲染下载卡片（file-upload-download-plan §8.3）
-      // 兜底：AGENT_END 后到达或 currentReply 为 null 时，用 replyId 或占位 id 确保卡片仍渲染
-      const fr = r || ensureReply(data.replyId || 'file-' + Date.now());
-      renderFileReadyCard(fr, data);
-      break;
-    }
-    case 'user_confirm_result': {
-      // P2：恢复事件标记卡片已处理（当前确认后由提交逻辑直接移除卡片）
-      break;
-    }
-    case 'error': {
-      isStreaming = false;
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Send';
-      sendBtn.classList.remove('danger');
-      hideStopButton();
-        clearTimeout(stopSlowTimer);
-      if (r) {
-        const err = document.createElement('div');
-        err.className = 'msg system';
-        err.style.color = 'var(--red)';
-        err.textContent = 'Error: ' + (data.error || 'Unknown');
-        messagesEl.appendChild(err);
-      }
-      break;
-    }
-    case 'interrupted': {
-      // 执行副本崩溃/被抢占：服务端回放完已落库事件后补发的终止帧（不携带 replyId）
-      isStreaming = false;
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Send';
-      sendBtn.classList.remove('danger');
-      hideStopButton();
-        clearTimeout(stopSlowTimer);
-      if (r) {
-        finishReply(r.replyId);
-        const itr = document.createElement('div');
-        itr.className = 'msg system';
-        itr.style.color = 'var(--red)';
-        itr.textContent = '执行已中断：执行该任务的副本失去响应，本次回复可能不完整。可刷新页面查看最新状态，或重新发送消息。';
-        messagesEl.appendChild(itr);
-      }
+      renderer.renderFileReadyCard(r, data);
       break;
     }
     case 'cancelled': {
-      // 用户主动停止（POST /threads/{sid}/stop → 服务端协作式中断后的合成终态帧）。
-      // AGENT_END 紧随其后，这里只负责及时复位按钮与提示，避免等收尾帧。
-      isStreaming = false;
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Send';
-      sendBtn.classList.remove('danger');
-      hideStopButton();
-        clearTimeout(stopSlowTimer);
-      if (r) {
-        // 观察者路径可能在 cancelled（终态）后直接收流、不补 AGENT_END：主动关掉文本光标
-        finishReply(r.replyId);
-      }
-      // 排队 turn 被停止时还没有回复气泡（无 AGENT_START），提示同样要显示
-      const st = document.createElement('div');
-      st.className = 'msg system';
-      st.style.color = 'var(--yellow)';
-      st.textContent = '已停止本次回复（已执行的工具调用不会回滚）。';
-      messagesEl.appendChild(st);
+      if (stoppingBuffer.length > 0) flushStoppingBuffer();
+      stopConfirmPending = false;
+      renderer.endThinking(r);
+      r.msgEl.appendChild(renderer.renderStoppedBadge());
+      break;
+    }
+    case 'interrupted': {
+      const el = document.createElement('div');
+      el.className = 'msg system';
+      el.textContent = data.message || 'Interrupted';
+      messagesEl.appendChild(el);
+      break;
+    }
+    case 'error': {
+      const el = document.createElement('div');
+      el.className = 'msg system error-text';
+      el.textContent = 'Error: ' + (data.error || data.message || 'unknown error');
+      messagesEl.appendChild(el);
       scrollToBottom(true);
       break;
     }
-    default:
-      break;
   }
 }
-
-// ---------- 发送 ----------
-
-// ---------- 文件上传 ----------
-
-function handleFileSelect(e) {
-  const files = Array.from(e.target.files);
-  if (files.length === 0) return;
-
-  for (const file of files) {
-    pendingFiles.push({ file, fileId: null, status: 'pending' });
-  }
-  renderUploadPreview();
-  fileInput.value = ''; // 重置 input 以便再次选择同一文件
-}
-
-function renderUploadPreview() {
-  if (pendingFiles.length === 0) {
-    uploadPreview.style.display = 'none';
-    return;
-  }
-
-  uploadPreview.style.display = 'block';
-  uploadFiles.innerHTML = pendingFiles.map((item, index) => {
-    const file = item.file;
-    const statusIcon = item.status === 'uploading' ? '⏳' : 
-                      item.status === 'uploaded' ? '✅' : 
-                      item.status === 'error' ? '❌' : '📎';
-    return `<div class="upload-file-item" data-index="${index}">
-      <span class="file-icon">${statusIcon}</span>
-      <span class="file-name" title="${file.name}">${file.name}</span>
-      <span class="file-size">(${formatFileSize(file.size)})</span>
-      <button class="btn small remove-file" data-index="${index}" title="移除">✕</button>
-    </div>`;
-  }).join('');
-
-  // 绑定移除按钮事件
-  uploadFiles.querySelectorAll('.remove-file').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const index = parseInt(e.target.dataset.index);
-      pendingFiles.splice(index, 1);
-      renderUploadPreview();
-    });
-  });
-}
-
-function formatFileSize(bytes) {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-}
-
-async function uploadPendingFiles() {
-  const filesToUpload = pendingFiles.filter(item => item.status === 'pending');
-  if (filesToUpload.length === 0) return [];
-
-  const uploadedIds = [];
-  for (const item of filesToUpload) {
-    item.status = 'uploading';
-    renderUploadPreview();
-    try {
-      const uid = ctx.state.getState('ui.userId') || 'debug-user';
-      const result = await ctx.api.uploadFile(item.file, uid, currentSessionId());
-      item.fileId = result.file_id;
-      item.status = 'uploaded';
-      uploadedIds.push(result.file_id);
-    } catch (e) {
-      item.status = 'error';
-      // 不自动重试，标记为失败并提示用户可手动移除
-      ctx.utils.toast('文件上传失败（已跳过）: ' + item.file.name + ' — ' + e.message, 'error');
-    }
-    renderUploadPreview();
-  }
-
-  // 清除已上传和失败的文件（失败文件不自动重试，发送后清除）
-  pendingFiles = pendingFiles.filter(item => item.status === 'pending');
-  renderUploadPreview();
-
-  return uploadedIds;
-}
-
-// ---------- 发送消息 ----------
 
 async function sendMessage() {
-  if (isStreaming) { stop(); return; }
-  const text = inputEl.value.trim();
-  if (!text && pendingFiles.length === 0) return;
+  if (isStreaming) return;
+  const text = composer.getValue();
+  if (!text && !composer.hasPendingFiles()) return;
 
   let sid = currentSessionId();
+  const isNew = !sid;
   if (!sid) {
-    const uid = ctx.state.getState('ui.userId') || 'debug-user';
-    sid = uid + '_' + Date.now().toString(36);
+    sid = 'debug-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
     ctx.state.setState('threads.current', sid);
-    document.getElementById('btnLlmCalls').disabled = false;
-    updateConnBadge();
+    updateHeaderTitle(false);
+    const llmBtn = document.getElementById('btnLlmCalls');
+    if (llmBtn) llmBtn.disabled = false;
   }
 
-  // 上传文件
-  const fileIds = await uploadPendingFiles();
+  const selectedModel = modelSelect ? modelSelect.value : 'system';
+  const mode = ctx.state.getState('ui.streamMode') || 'channel';
+  if (mode === 'a2a' && selectedModel && selectedModel !== 'system') {
+    const ok = await bindSessionModel(sid, selectedModel);
+    if (!ok) return;
+  }
 
-  inputEl.value = '';
-  inputEl.style.height = 'auto';
-  inputEl.focus();
-  hideMentionDropdown();
-  addMessage('user', text);
+  let fileIds = [];
+  if (composer.hasPendingFiles()) {
+    try {
+      fileIds = await composer.uploadPendingFiles(sid);
+    } catch (e) {
+      return;
+    }
+  }
 
-  // 异步刷新可用 Skill 列表（下次 @ 触发时使用最新数据）
-  loadAvailableSkills();
+  composer.clearValue();
+  const greeting = messagesEl.querySelector('.chat-greeting');
+  if (greeting) greeting.remove();
+  renderer.addMessage('user', text || '(attachments)');
 
-  const mode = ctx.state.getState('ui.streamMode');
-  const model = (modelSelect && modelSelect.value !== 'system') ? modelSelect.value : '';
-
-  if (mode === 'channel') {
-    // Channel 链路：model 随请求体下发，后端在 turn 起始处绑定
-    await sendChannelSingleStream(text, sid, fileIds, model);
+  if (mode === 'a2a') {
+    await sendA2AStream(text, sid);
   } else {
-    // A2A 模式不支持文件上传，提示用户切换到 Channel 模式
-    if (fileIds && fileIds.length > 0) {
-      ctx.utils.toast('A2A 模式不支持文件上传，已自动切换到 Channel 模式', 'warn');
-      setStreamMode('channel');
-      await sendChannelSingleStream(text, sid, fileIds, model);
-    } else {
-      // A2A 链路无 model 入参（ChatRequest.model 仅存在于 /threads/chat，
-      // 见 docs/session-model-switch-design.md §5.5），只能靠 session_user.model 绑定路由，
-      // 故发送前先 PATCH 落库；新会话此刻 sid 已在客户端生成，可直接绑定。
-      // PATCH 失败（如模型刚被禁用 400 model_disabled）不得照发消息——否则消息以
-      // 服务端旧绑定/回落模型发出，而下拉框仍显示所选模型，恰是本设计要消灭的
-      // 「界面显示与服务端绑定不一致」形态（修 #43）
-      const bound = await bindSessionModel(sid, model || 'system');
-      if (!bound) {
-        ctx.utils.toast('模型绑定失败，消息未发送——请重选模型', 'error');
-        return;
-      }
-      await sendA2AStream(text, sid);
-    }
+    await sendChannelSingleStream(text, sid, fileIds, selectedModel !== 'system' ? selectedModel : null);
   }
 }
 
-/**
- * PATCH 会话模型绑定。返回是否成功——失败时下拉框回滚，
- * 避免界面显示的模型与服务端实际绑定不一致。
- */
-async function bindSessionModel(sid, modelId) {
-  if (!sid) return true;
-  try {
-    const resp = await fetch(ctx.api.BASE + '/threads/' + encodeURIComponent(sid), {
-      method: 'PATCH',
-      headers: Object.assign({ 'Content-Type': 'application/json' },
-        // 归属校验（issue #158）：带选中 userId（网关场景由 X-User-Id 注入，直连场景取输入框）
-        { 'X-User-Id': ctx.state.getState('ui.userId') || 'debug-user' }),
-      body: JSON.stringify({ model: modelId })
-    });
-    if (!resp.ok) {
-      let msg = 'HTTP ' + resp.status;
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch (e) { /* 非 JSON 响应保留状态码 */ }
-      throw new Error(msg);
-    }
-    return true;
-  } catch (e) {
-    ctx.utils.toast('模型切换失败: ' + e.message, 'error');
-    return false;
-  }
-}
-
-/**
- * Stop 按钮：Channel 链路（native 协议）先请求服务端协作式中止
- * （POST /threads/{sid}/stop），保持 SSE 打开等待 cancelled 终态帧；
- * A2A / AG-UI 链路或服务端明确不可停止时才退回本地断流。
- * 断流本身不杀任务（durable-sse 不变量），仅服务端停止才会真正中止后续推理/工具调度。
- */
-function stop() {
-  const sid = currentSessionId();
-  const mode = ctx.state.getState('ui.streamMode');
-  const protocol = ctx.state.getState('ui.protocol');
-  if (isStreaming && sid && mode === 'channel' && protocol !== 'agui') {
-    if (!stopBtn) { localStop(); return; }
-    if (stopBtn.dataset.stopping === '1') return; // 已在停止中（幂等）
-    stopBtn.dataset.stopping = '1';
-    // 立即反馈（不等服务端往返）；失败路径由 localStop() 复位
-    stopBtn.textContent = 'Stopping...';
-    stopBtn.disabled = true;
-    const uid = ctx.state.getState('ui.userId') || 'debug-user';
-    requestServerStop(sid, uid).then(() => {
-      clearTimeout(stopSlowTimer);
-      stopSlowTimer = setTimeout(() => {
-        if (isStreaming) {
-          ctx.utils.toast('停止请求已受理；正在执行的工具调用不会被强制中断，返回后即停止', 'warn');
-        }
-      }, 10000);
-    }).catch((err) => {
-      delete stopBtn.dataset.stopping;
-      if (err && err.status === 503) {
-        ctx.utils.toast('服务端停止能力不可用，已仅断开本地连接（任务仍会在后台继续）', 'warn');
-      } else if (err && err.status === 409) {
-        ctx.utils.toast(err.message || '当前状态无法停止（请先处理待确认操作）', 'warn');
-      } else if (!err || err.status !== 404) {
-        // 404 = 没有运行中的 turn（可能刚好结束）：静默退回断流
-        ctx.utils.toast('停止请求失败: ' + ((err && err.message) || '未知错误'), 'error');
-      }
-      localStop();
-    });
-    return;
-  }
-  if (isStreaming && mode === 'channel' && protocol === 'agui') {
-    ctx.utils.toast('AG-UI 模式暂不支持服务端停止，已仅断开本地连接（任务会在后台继续）', 'warn');
-  } else if (isStreaming && mode !== 'channel') {
-    ctx.utils.toast('A2A 模式暂不支持服务端停止，已仅断开本地连接（任务会在后台继续）', 'warn');
-  }
-  localStop();
-}
-
-/** 服务端停止（409 turn_not_ready：本轮尚无事件 → 短重试） */
-async function requestServerStop(sid, uid, attempt = 0) {
-  try {
-    await ctx.api.stopThread(sid, uid);
-  } catch (e) {
-    if (e && e.status === 409 && attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      return requestServerStop(sid, uid, attempt + 1);
-    }
-    throw e;
-  }
-}
-
-/** 仅断开本地连接（旧行为：agent 后台继续，可用 /subscribe 续传） */
-function localStop() {
-  if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) { /* ignore */ } }
-  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } }
-  if (activeAbort) {
-    try { activeAbort.abort(); } catch (e) { /* ignore */ }
-  }
-  // 无条件复位：服务端拒绝停止（4xx/5xx）时按钮文案已先改成 Stopping...
-  activeAbort = null;
-  resetStreamingState();
-}
-
-/** 进入流式态：sendBtn 禁用（保持既有门禁契约），单独显示可点击的 Stop 按钮 */
-function enterStreamingUi() {
-  isStreaming = true;
-  sendBtn.disabled = true;
-  sendBtn.textContent = 'Send';
-  sendBtn.classList.remove('danger');
-  showStopButton();
-}
-
-/** 显示 Stop 按钮（每次进入流式/重连恢复时复位为可点） */
-function showStopButton() {
-  if (!stopBtn) return;
-  stopBtn.style.display = '';
-  stopBtn.disabled = false;
-  stopBtn.textContent = 'Stop';
-  delete stopBtn.dataset.stopping;
-}
-
-/** 隐藏 Stop 按钮（终态/停止失败/重置时；隐藏后 sendBtn 恢复可点） */
-function hideStopButton() {
-  if (!stopBtn) return;
-  stopBtn.style.display = 'none';
-  stopBtn.disabled = false;
-  stopBtn.textContent = 'Stop';
-  delete stopBtn.dataset.stopping;
-}
-
-// ★ durable-sse-plan：重置流式状态
-function resetStreamingState() {
-  isStreaming = false;
-  sendBtn.disabled = false;
-  sendBtn.textContent = 'Send';
-  sendBtn.classList.remove('danger');
-  hideStopButton();
-  clearTimeout(stopSlowTimer);
-  activeChatHandle = null;
-  activeSubHandle = null;
+function syncLastEventIdFromHandles() {
+  if (activeChatHandle && activeChatHandle.lastEventId > lastEventId) lastEventId = activeChatHandle.lastEventId;
+  if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) lastEventId = activeSubHandle.lastEventId;
 }
 
 async function sendChannelSingleStream(text, sid, fileIds, model) {
-  // durable-sse-plan 改造版：
-  // 1. POST /chat → 事件经 EventBus 广播，SSE 断连不影响 agent 执行
-  // 2. SSE 断连后自动通过 GET /subscribe 重连续传
-  // 3. 全程心跳（EventBus），防 Nginx/CDN 超时
   enterStreamingUi();
-
   let waitingSince = null;
   let waitingEl = null;
   const showWaiting = () => {
@@ -2263,347 +885,304 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
       scrollToBottom(false);
     }
     const secs = Math.round((Date.now() - waitingSince) / 1000);
-    waitingEl.textContent = '排队等待中... (已等待 ' + secs + 's，其他任务执行完毕后将自动开始)';
+    waitingEl.textContent = '排队等待中...（已等待 ' + secs + 's）';
   };
   const hideWaiting = () => { if (waitingEl) { waitingEl.remove(); waitingEl = null; } };
+  const finishStream = () => {
+    hideWaiting();
+    if (currentReply) {
+      renderer.finishReply(currentReply.replyId);
+      currentReply = null;
+    }
+    resetStreamingState();
+    updateHeaderTitle(false);
+    loadThreads();
+  };
 
-  // ★ 重连逻辑：SSE 断连后通过 subscribe 续传
+  const subscribeWithReconnect = (sessionId, afterSeq, replyId) => {
+    if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} }
+    activeSubHandle = transport().subscribe(sessionId, {
+      afterSeq,
+      replyId,
+      userId: uid(),
+      onEvent: (evt) => {
+        reconnectAttempts = 0;
+        syncLastEventIdFromHandles();
+        hideWaiting();
+        handleEvent(evt);
+      },
+      onError: () => startReconnect(),
+      onEnd: () => finishStream()
+    });
+  };
+
   const startReconnect = () => {
+    syncLastEventIdFromHandles();
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      handleEvent({ type: 'error', error: '连接断开，重连失败已达上限，请刷新页面' });
+      handleEvent({ type: 'error', error: '连接已断开，重连次数已达上限，请刷新页面' });
+      finishStream();
       return;
     }
     const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts), 30000);
     reconnectAttempts++;
-    console.log(`[durable-sse] reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}), afterSeq=${lastEventId}`);
-    setTimeout(() => {
-      // 先查状态，确认 turn 是否仍在执行
-      ctx.api.getStatus(sid, ctx.state.getState('ui.userId') || 'debug-user').then(status => {
-        // ★ interrupted 也走订阅：观察者路径会先回放已落库的部分输出（用户能看到确实产出的内容），
-        // 再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
-        // 若落入下面的 else 分支，用户只会看到一个没有任何内容的 AGENT_END，无从得知执行已中断。
+    reconnectTimer = setTimeout(() => {
+      if (currentSessionId() !== sid || !isStreaming) return;
+      ctx.api.getStatus(sid, uid()).then((status) => {
+        if (currentSessionId() !== sid || !isStreaming) return;
         if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
           currentReplyId = status.reply_id || currentReplyId;
+          if (status.stopping) enterStoppingUi();
           subscribeWithReconnect(sid, lastEventId, currentReplyId);
         } else if (status.state === 'failed') {
-          // 排队超时/建立失败：本轮没有事件可回放，直接展示失败原因
-          currentReply = currentReply || ensureReply('failed-' + Date.now());
           handleEvent({ type: 'error', error: status.error || 'turn failed' });
           finishStream();
-        } else if (status.state === 'completed') {
-          // turn 已完成，回放剩余事件后结束
-          replayAndClose(sid, lastEventId, currentReplyId);
         } else {
-          // idle 或异常，直接结束
-          handleEvent({ type: 'AGENT_END', replyId: currentReplyId });
           finishStream();
         }
       }).catch(() => {
-        // status 查询失败也尝试重连
-        subscribeWithReconnect(sid, lastEventId, currentReplyId);
+        if (currentSessionId() === sid && isStreaming) subscribeWithReconnect(sid, lastEventId, currentReplyId);
       });
     }, delay);
   };
 
-  // ★ 通过 GET /subscribe 重连续传
-  const subscribeWithReconnect = (sessionId, afterSeq, replyId) => {
-    if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } }
-    activeSubHandle = transport().subscribe(sessionId, {
-      afterSeq,
-      replyId,
-      userId: ctx.state.getState('ui.userId') || 'debug-user',
-      onEvent: (evt) => {
-        reconnectAttempts = 0; // 收到事件说明连接正常，重置计数
-        hideWaiting();
-        handleEvent(evt);
-      },
-      onError: (e) => {
-        console.warn('[durable-sse] subscribe error:', e.message);
-        startReconnect();
-      },
-      onEnd: (evt) => {
-        // 流正常结束（done 帧或 AGENT_END 后 EventBus close）
-        finishStream();
-      }
-    });
-  };
-
-  // ★ 回放历史 + done 帧后关闭（turn 已完成场景）
-  const replayAndClose = (sessionId, afterSeq, replyId) => {
-    activeSubHandle = transport().subscribe(sessionId, {
-      afterSeq,
-      replyId,
-      userId: ctx.state.getState('ui.userId') || 'debug-user',
-      onEvent: (evt) => {
-        hideWaiting();
-        handleEvent(evt);
-      },
-      onError: () => { /* 回放失败也结束 */ },
-      onEnd: () => {
-        finishStream();
-      }
-    });
-  };
-
-  // ★ 发起 POST /chat
   reconnectAttempts = 0;
-  const uid = ctx.state.getState('ui.userId') || 'debug-user';
-  activeChatHandle = transport().sendChat(sid, text, uid, fileIds, {
+  let terminalReceived = false;
+  activeChatHandle = transport().sendChat(sid, text, uid(), fileIds, {
     model,
     onWaiting: () => {
       if (!waitingSince) waitingSince = Date.now();
       showWaiting();
     },
     onEvent: (evt) => {
+      if (currentSessionId() !== sid) return;
       reconnectAttempts = 0;
+      syncLastEventIdFromHandles();
+      if (evt.replyId || evt.turnId) currentReplyId = evt.replyId || evt.turnId;
+      if (evt.type === 'AGENT_END' || evt.type === 'cancelled' || evt.type === 'permission_ask') terminalReceived = true;
       hideWaiting();
-      // 追踪续传用的 turn id：优先服务端信封 turnId（subscribe?replyId= 的过滤口径），
-      // 老服务端无该字段时退回 AGENT_START 的 SDK replyId。
-      if (evt.turnId) currentReplyId = evt.turnId;
-      else if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
-      else if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
       handleEvent(evt);
     },
     onError: (e) => {
       hideWaiting();
-      // ★ 核心变化：SSE 断连不代表 agent 失败，尝试重连
-      if (isStreaming) {
-        console.warn('[durable-sse] chat SSE disconnected, will try reconnect:', e.message);
+      if (currentSessionId() !== sid) return;
+      const isHttpErr = e && typeof e.status === 'number' && e.status >= 400 && e.status < 500;
+      if (isStreaming && !terminalReceived && !isHttpErr && transport().subscribe) {
         startReconnect();
-      } else {
-        const r = currentReply || ensureReply('single');
-        handleEvent({ type: 'error', error: e.message, replyId: r.replyId });
+        return;
       }
+      handleEvent({ type: 'error', error: e.message || String(e) });
+      finishStream();
     },
-    onEnd: () => {
-      // ★ 需要判断是自然结束还是断连
-      // 自然结束：AGENT_END 事件已触发，isStreaming=false
-      // 断连：isStreaming 仍为 true，需要重连
-      if (isStreaming && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        console.log('[durable-sse] stream ended unexpectedly, attempting reconnect');
-        startReconnect();
-      } else {
-        hideWaiting();
-        loadThreads();
+    onEnd: (evt) => {
+      if (currentSessionId() !== sid) return;
+      if (evt && evt.type === 'done') {
+        finishStream();
+        return;
       }
+      if (isStreaming && !terminalReceived && transport().subscribe && currentReplyId) {
+        startReconnect();
+        return;
+      }
+      finishStream();
     }
   });
-
-  // 同步 lastEventId
-  const syncId = setInterval(() => {
-    if (activeChatHandle) lastEventId = activeChatHandle.lastEventId;
-    if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) {
-      lastEventId = activeSubHandle.lastEventId;
-    }
-  }, 500);
-
-  // 当流真正结束时的清理（替代覆写全局函数的方式）
-  const finishStream = () => {
-    clearInterval(syncId);
-    resetStreamingState();
-    loadThreads();
-  };
-
-  try { await new Promise((resolve) => setTimeout(resolve, 0)); }
-  catch (e) { /* ignore */ }
 }
-// A2A message/stream（标准帧，工具仅工具名，无回填）
+
 async function sendA2AStream(text, sid) {
   enterStreamingUi();
-  const abortController = new AbortController();
-  activeAbort = abortController;
-
-  // 新建一条 A2A 回复（标准帧不携带 replyId，用占位 id）
-  const replyId = 'a2a-' + Date.now().toString(36);
-  const r = ensureReply(replyId);
-  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
-
   try {
-    const resp = await fetch(ctx.api.BASE + '/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'message/stream',
-        params: { message: { role: 'user', parts: [{ text }], metadata: { userId: ctx.state.getState('ui.userId') || 'debug-user', sessionId: sid } } },
-        id: 'stream-' + Date.now()
-      }),
-      signal: abortController.signal
-    });
-    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        const dataStr = line.slice(5).trim();
-        if (!dataStr || dataStr === '[DONE]') continue;
-        try {
-          handleFrame(JSON.parse(dataStr), replyId);
-        } catch (e) { /* ignore */ }
-      }
-    }
+    const reply = await ctx.api.sendA2A(text, { userId: uid(), sessionId: sid });
+    renderer.addMessage('assistant', reply || '(empty response)');
   } catch (e) {
-    if (e.name !== 'AbortError') {
-      handleEvent({ type: 'error', error: e.message, replyId });
-    }
+    handleEvent({ type: 'error', error: e.message || String(e) });
   } finally {
-    isStreaming = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-    sendBtn.classList.remove('danger');
-    hideStopButton();
-    activeAbort = null;
-    finishReply(replyId);
+    resetStreamingState();
     loadThreads();
   }
 }
 
-/** A2A 帧 → 事件（标准帧忠实呈现：工具仅工具名 + 状态） */
-function handleFrame(frame, replyId) {
-  const result = frame.result;
-  if (!result) {
-    if (frame.error) handleEvent({ type: 'error', error: frame.error.message || 'A2A error', replyId });
+function releaseBrowserAndStream(sid, onDone) {
+  if (isStreaming) {
+    ctx.utils.toast('请等待当前回复结束后再交还控制权', 'warn');
     return;
   }
-  const kind = result.kind;
-  if (kind === 'artifact-update') {
-    const artifact = result.artifact || {};
-    const parts = artifact.parts || [];
-    for (const p of parts) {
-      const blockType = (p.metadata && p.metadata._agentscope_block_type) || 'text';
-      if (p.kind === 'data') {
-        const toolName = (p.metadata && p.metadata._agentscope_tool_name) || '';
-        const tcId = (p.metadata && p.metadata._agentscope_tool_call_id) || '';
-        if (toolName && toolName !== '__fragment__' && tcId) {
-          // 标准帧：仅工具名（无参数/结果）
-          handleEvent({ type: 'TOOL_CALL_START', toolCallId: tcId, toolName, replyId });
-          handleEvent({ type: 'TOOL_CALL_END', toolCallId: tcId, toolName, replyId });
-          handleEvent({ type: 'TOOL_RESULT_END', toolCallId: tcId, toolName: toolName, state: 'success', replyId });
-        }
-        continue;
+  enterStreamingUi();
+  activeChatHandle = ctx.api.releaseBrowserStream(sid, uid(), {
+    onEvent: (evt) => handleEvent(evt),
+    onError: (e) => {
+      handleEvent({ type: 'error', error: e.message || String(e) });
+      resetStreamingState();
+      if (onDone) onDone();
+    },
+    onEnd: () => {
+      if (currentReply) {
+        renderer.finishReply(currentReply.replyId);
+        currentReply = null;
       }
-      if (p.kind !== 'text') continue;
-      const text = p.text || '';
-      if (blockType === 'thinking') {
-        handleEvent({ type: 'THINKING_BLOCK_DELTA', delta: text, replyId });
-      } else {
-        handleEvent({ type: 'TEXT_BLOCK_DELTA', delta: text, replyId });
-      }
+      resetStreamingState();
+      updateHeaderTitle(false);
+      if (onDone) onDone();
     }
-  } else if (kind === 'status-update') {
-    if (result.final === true || result.state === 'completed') {
-      handleEvent({ type: 'AGENT_END', replyId });
+  });
+}
+
+async function submitConfirm(calls, approved) {
+  const sid = currentSessionId();
+  if (!sid) return;
+  const myCard = renderer.getPendingConfirmCard();
+  const results = calls.map((c) => ({
+    tool_call_id: c.tool_call_id || c.id,
+    confirmed: !!approved,
+    accept_rule: false
+  }));
+  enterStreamingUi();
+  const replyId = 'confirm-' + Date.now();
+  currentReply = renderer.ensureReply(replyId);
+  let failed = false;
+  try {
+    const t = transport();
+    const confirmFn = (t && typeof t.confirmStream === 'function') ? t.confirmStream : ctx.api.confirmStream;
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (err) => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err); else resolve();
+      };
+      activeSubHandle = confirmFn(sid, results, {
+        userId: uid(),
+        onEvent: (evt) => {
+          if (evt.type === 'done') { done(); return; }
+          if (evt.type === 'error') { handleEvent(evt); done(new Error(evt.error || 'confirm error')); return; }
+          handleEvent(evt);
+          if (evt.type === 'AGENT_END') done();
+        },
+        onError: (e) => done(e),
+        onEnd: () => done()
+      });
+    });
+    renderer.dismissConfirmCard(myCard);
+  } catch (e) {
+    failed = true;
+    renderer.restoreConfirmCard(myCard);
+    ctx.utils.toast('确认提交失败: ' + e.message, 'error');
+  } finally {
+    if (currentReply) {
+      renderer.finishReply(currentReply.replyId);
+      currentReply = null;
     }
-  } else if (kind === 'message') {
-    const parts = result.parts || [];
-    const texts = parts.filter((p) => p.kind === 'text').map((p) => p.text || '');
-    handleEvent({ type: 'TEXT_BLOCK_DELTA', delta: texts.join(''), replyId });
-    if (result.metadata) {
-      const usage = result.metadata[Object.keys(result.metadata)[0]];
-      if (usage && usage._chat_usage) {
-        handleEvent({
-          type: 'MODEL_CALL_END',
-          inputTokens: usage._chat_usage.inputTokens,
-          outputTokens: usage._chat_usage.outputTokens,
-          totalTokens: usage._chat_usage.totalTokens,
-          replyId
-        });
-      }
-    }
-    handleEvent({ type: 'AGENT_END', replyId });
+    resetStreamingState();
+    if (!failed) loadThreads();
   }
 }
 
-// ---------- 弹窗功能 ----------
+function stop() {
+  const sid = currentSessionId();
+  const mode = ctx.state.getState('ui.streamMode');
+  const protocol = ctx.state.getState('ui.protocol');
+  const stopBtn = composer.getStopBtn();
+  if (isStreaming && sid && mode === 'channel' && protocol !== 'agui') {
+    if (!stopBtn) { localStop(); return; }
+    if (stopBtn.dataset.stopping === '1') return;
+    stopBtn.dataset.stopping = '1';
+    stopBtn.textContent = '停止中...';
+    stopBtn.disabled = true;
+    stopConfirmPending = true;
+    requestServerStop(sid, uid()).then(() => {
+      stopConfirmPending = false;
+      clearTimeout(stopSlowTimer);
+      stopSlowTimer = setTimeout(() => {
+        if (isStreaming) ctx.utils.toast('已受理停止请求，正在等待运行中的工具返回', 'warn');
+      }, 10000);
+    }).catch((err) => {
+      stopConfirmPending = false;
+      if (err && err.status === 409 && !isRetryableStopError(err)) {
+        showStopButton();
+        flushStoppingBuffer();
+        ctx.utils.toast(err.message || '当前状态无法停止，请先处理待确认项', 'warn');
+        return;
+      }
+      delete stopBtn.dataset.stopping;
+      if (stoppingBuffer.length > 0) flushStoppingBuffer();
+      if (!err || err.status !== 404) {
+        ctx.utils.toast('停止请求失败: ' + ((err && err.message) || '未知错误'), 'warn');
+      }
+      localStop();
+    });
+    return;
+  }
+  localStop();
+}
+
+function isRetryableStopError(e) {
+  if (!e || e.status !== 409) return false;
+  if (e.retryable === true || (e.data && e.data.retryable === true)) return true;
+  if (e.code === 'turn_not_ready' || (e.data && e.data.error === 'turn_not_ready')) return true;
+  return String(e.message || '').includes('turn_not_ready');
+}
+
+async function requestServerStop(sid, userId, attempt = 0) {
+  try {
+    await ctx.api.stopThread(sid, userId);
+  } catch (e) {
+    if (isRetryableStopError(e) && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 400));
+      return requestServerStop(sid, userId, attempt + 1);
+    }
+    throw e;
+  }
+}
+
+function localStop() {
+  if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) {} }
+  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} }
+  if (activeAbort) { try { activeAbort.abort(); } catch (e) {} activeAbort = null; }
+  resetStreamingState();
+}
 
 async function showLlmCalls() {
   const sid = currentSessionId();
   if (!sid) return;
   try {
-    const data = await ctx.api.getLlmCalls(sid, ctx.state.getState('ui.userId') || 'debug-user');
-    const calls = data.calls || [];
-    let html = '<h2>LLM Calls — ' + ctx.utils.esc(sid) + '</h2>';
+    const data = await ctx.api.getLlmCalls(sid, uid());
+    const calls = Array.isArray(data) ? data : (data.calls || []);
     if (calls.length === 0) {
-      html += '<p class="empty">No LLM calls recorded for this thread yet.</p>';
-    } else {
-      html += '<p style="color:var(--text-dim);font-size:11px;margin-bottom:10px">' + calls.length + ' call(s)</p>';
+      ctx.modal.open('<h2>LLM 调用记录</h2><div class="empty">当前会话暂无 LLM 调用记录</div>');
+      return;
     }
-    for (let i = 0; i < calls.length; i++) {
-      const c = calls[i];
-      const req = c.request || {};
-      const res = c.response || {};
-      const msgs = req.messages || [];
-      const model = req.model || 'unknown';
-      const usage = res.usage || {};
-      const content = res.content || '';
-      const toolCalls = res.tool_calls || [];
-      html += '<div class="llm-call-entry" id="llm-entry-' + i + '">' +
-        '<div class="llm-call-header" onclick="window.App.toggleLlmCall(' + i + ')">' +
-        '<span class="lc-index">#' + (i + 1) + '</span><span class="lc-model">' + ctx.utils.esc(model) + '</span>';
-      if (usage.total_tokens) html += '<span class="lc-usage">' + usage.total_tokens + ' tokens</span>';
-      if (c.response && c.response.duration_ms != null) {
-        html += '<span class="lc-usage">⏱ ' + ctx.utils.formatDuration(c.response.duration_ms / 1000) + '</span>';
-      }
-      html += '<span class="lc-toggle">▼</span></div><div class="llm-call-body">';
-      html += '<div class="lc-section"><div class="lc-label">Request (' + msgs.length + ' messages)</div>';
-      for (const m of msgs) {
-        const role = m.role || 'unknown';
-        const ctext = m.content || '';
-        const display = ctext.length > 500 ? ctext.substring(0, 500) + '...' : ctext;
-        html += '<div class="lc-msg ' + ctx.utils.esc(role) + '"><span class="lc-role">' + ctx.utils.esc(role.toUpperCase()) + '</span>' +
-          '<span class="lc-content">' + ctx.utils.esc(display) + '</span></div>';
-      }
-      html += '</div>';
-      if (content || toolCalls.length > 0) {
-        html += '<div class="lc-section"><div class="lc-label">Response</div>';
-        if (content) html += '<div class="lc-pre">' + ctx.utils.esc(content) + '</div>';
-        for (const tc of toolCalls) {
-          html += '<div class="lc-pre">Tool: ' + ctx.utils.esc(tc.name || '') + '\nArgs: ' +
-            ctx.utils.esc(JSON.stringify(tc.args || {}, null, 2)) + '</div>';
-        }
-        html += '</div>';
-      }
-      html += '</div></div>';
-    }
-    ctx.modal.open(html);
+    const html = calls.map((c, idx) => {
+      const u = c.usage || {};
+      return '<div class="llm-call-entry" id="llm-entry-' + idx + '">' +
+        '<div class="llm-call-header" onclick="window.App.toggleLlmCall(' + idx + ')">' +
+          '<span class="lc-index">#' + (idx + 1) + '</span>' +
+          '<span class="lc-model">' + ctx.utils.esc(c.model || '') + '</span>' +
+          '<span class="lc-usage">' + (u.input_tokens || 0) + '↓ ' + (u.output_tokens || 0) + '↑</span>' +
+          '<span class="lc-toggle">▾</span>' +
+        '</div>' +
+        '<div class="llm-call-body"><pre class="lc-pre">' + ctx.utils.esc(JSON.stringify(c, null, 2)) + '</pre></div>' +
+      '</div>';
+    }).join('');
+    ctx.modal.open('<h2>LLM 调用记录 (' + calls.length + ')</h2>' + html);
   } catch (e) {
-    ctx.utils.toast('Failed to load LLM calls: ' + e.message, 'error');
+    ctx.utils.toast('加载 LLM 调用记录失败: ' + e.message, 'error');
   }
 }
 
 async function showSystemPrompt() {
   try {
     const data = await ctx.api.getSystemPrompt();
-    const base = data.base_prompt || '';
-    const full = data.system_prompt || '';
-    const extra = full.substring(base.length);
-    let html = '<h2>System Prompt</h2>';
-    if (extra) {
-      html += '<div style="margin-bottom:10px"><div class="lc-label" style="margin-bottom:4px">Base (from AGENTS.md)</div>' +
-        '<pre style="max-height:200px;overflow-y:auto">' + ctx.utils.esc(base) + '</pre></div>';
-      html += '<div><div class="lc-label" style="margin-bottom:4px">Auto-generated (Skills & MCP Context)</div>' +
-        '<pre style="max-height:200px;overflow-y:auto">' + ctx.utils.esc(extra) + '</pre></div>';
-    } else {
-      html += '<pre style="max-height:60vh;overflow-y:auto">' + ctx.utils.esc(full) + '</pre>';
-    }
-    ctx.modal.open(html);
+    const text = typeof data === 'string' ? data : (data.system_prompt || data.prompt || JSON.stringify(data, null, 2));
+    ctx.utils.showTextModal('系统提示词', text);
   } catch (e) {
-    ctx.utils.toast('Failed to load system prompt: ' + e.message, 'error');
+    ctx.utils.toast('加载系统提示词失败: ' + e.message, 'error');
   }
 }
 
 async function showAgentCard() {
   try {
-    const card = await ctx.api.getAgentCard();
-    ctx.utils.showJsonModal(card.name || 'Agent Card', card);
+    const data = await ctx.api.getAgentCard();
+    ctx.utils.showJsonModal('Agent 卡片', data);
   } catch (e) {
-    ctx.utils.toast('Failed: ' + e.message, 'error');
+    ctx.utils.toast('加载 Agent 卡片失败: ' + e.message, 'error');
   }
 }

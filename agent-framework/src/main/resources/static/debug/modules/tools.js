@@ -1,41 +1,97 @@
-/* ===== Tools 模块：MCP / 内置工具分类展示 ===== */
-
 let ctx = null;
+let lastData = null;
+let searchQuery = '';
 
 export default {
   mount(container, c) {
     ctx = c;
+    searchQuery = '';
     container.innerHTML = `
     <div class="module-page">
-      <div class="module-header"><h2>Tools</h2><span class="sub" id="toolsSummary"></span></div>
-      <div class="module-scroll" id="toolsBody"><div class="empty">Loading...</div></div>
+      <div class="module-header">
+        <h2>工具列表</h2>
+        <div class="tool-filter-bar">
+          <input id="toolsSearch" class="input" type="search" placeholder="按名称、服务或标签筛选工具..." style="width:240px">
+        </div>
+        <span class="sub" id="toolsSummary"></span>
+      </div>
+      <div class="module-scroll" id="toolsBody"><div class="empty">加载中...</div></div>
     </div>`;
+    document.getElementById('toolsSearch').addEventListener('input', (e) => {
+      searchQuery = (e.target.value || '').trim().toLowerCase();
+      renderTools();
+    });
     loadTools();
   },
-  unmount() { ctx = null; }
+  unmount() {
+    ctx = null;
+    lastData = null;
+  }
 };
 
 async function loadTools() {
   const body = document.getElementById('toolsBody');
-  let data;
   try {
-    data = await ctx.api.getTools(true);
+    lastData = await ctx.api.getTools(true);
   } catch (e) {
-    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
-    body.innerHTML = '<div class="empty error-text">Failed to load tools: ' + ctx.utils.esc(e.message) + '</div>';
+    if (!ctx) return;
+    body.innerHTML = '<div class="empty error-text">加载工具列表失败: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
-  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
-  const tools = data.tools || [];
-  const mcpTools = tools.filter((t) => t.category === 'mcp');
-  const internalTools = tools.filter((t) => t.category === 'internal');
+  if (!ctx) return;
+  renderTools();
+}
 
+function matchesFilter(tool) {
+  if (!searchQuery) return true;
+  const hay = [
+    tool.name,
+    tool.fullName,
+    tool.server,
+    tool.description,
+    tool.directReturn ? 'direct return 直返' : '',
+    tool.uiResourceUri ? 'mcp app ui mcp 界面' : '',
+    tool.appOnly ? 'app only 仅卡片可调' : '',
+    (tool.sessionControllable === false && !tool.appOnly) ? 'always on 始终启用' : ''
+  ].filter(Boolean).join(' ').toLowerCase();
+  return hay.includes(searchQuery);
+}
+
+function renderBadges(t) {
+  const badges = [];
+  if (t.directReturn) badges.push('<span class="badge accent">直返</span>');
+  if (t.uiResourceUri) badges.push('<span class="badge green" title="' + ctx.utils.esc(t.uiResourceUri) + '">MCP 界面</span>');
+  if (t.appOnly) badges.push('<span class="badge yellow">仅卡片可调</span>');
+  if (t.sessionControllable === false && !t.appOnly) badges.push('<span class="badge dim">始终启用</span>');
+  return badges.join('');
+}
+
+function renderToolCard(t) {
+  return '<div class="tool-item-card">' +
+    '<div class="tool-item-head">' +
+      '<span class="tool-item-name" title="' + ctx.utils.esc(t.fullName || t.name) + '">' + ctx.utils.esc(t.name) + '</span>' +
+      renderBadges(t) +
+    '</div>' +
+    (t.description ? '<div class="tool-item-desc">' + ctx.utils.esc(t.description) + '</div>' : '') +
+  '</div>';
+}
+
+function renderTools() {
+  const body = document.getElementById('toolsBody');
+  if (!body || !lastData) return;
+
+  const tools = lastData.tools || [];
+  const sdkInternal = lastData.sdkInternal || [];
+  const mcpTools = tools.filter((t) => t.category === 'mcp' && matchesFilter(t));
+  const internalTools = tools.filter((t) => t.category !== 'mcp' && matchesFilter(t));
+  const filteredSdk = sdkInternal.filter(matchesFilter);
+
+  const totalAll = tools.length + sdkInternal.length;
   document.getElementById('toolsSummary').textContent =
-    tools.length + ' total (' + internalTools.length + ' internal / ' + mcpTools.length + ' mcp)';
+    totalAll + ' total (' + mcpTools.length + ' mcp · ' + internalTools.length + ' custom · ' + filteredSdk.length + ' sdk)';
 
   let html = '';
 
-  // MCP 工具（按 server 分组）
   if (mcpTools.length > 0) {
     const grouped = {};
     mcpTools.forEach((t) => {
@@ -43,34 +99,25 @@ async function loadTools() {
       if (!grouped[server]) grouped[server] = [];
       grouped[server].push(t);
     });
-
-    html += '<div class="panel"><div class="panel-header"><span class="title">MCP Tools</span><span class="count">' + mcpTools.length + '</span></div><div class="panel-body">';
+    html += '<div class="panel"><div class="panel-header"><span class="title">MCP 业务工具</span><span class="count">' + mcpTools.length + '</span></div><div class="panel-body">';
     for (const [server, serverTools] of Object.entries(grouped)) {
-      html += '<div style="margin:6px 0"><strong style="color:var(--accent)">🔌 ' + ctx.utils.esc(server) + '</strong>' +
-        '<span class="badge dim" style="margin-left:6px">' + serverTools.length + ' tools</span></div>';
-      html += '<div style="padding-left:12px">' +
-        serverTools.map((t) => '<span class="badge" title="' + ctx.utils.esc(t.description || '') + '">' + ctx.utils.esc(t.name) + '</span>').join('') +
-        '</div>';
+      html += '<div style="margin:8px 0 6px;display:flex;align-items:center;gap:8px">' +
+        '<strong style="color:var(--accent);font-family:var(--mono)">' + ctx.utils.esc(server) + '</strong>' +
+        '<span class="badge dim">' + serverTools.length + '</span></div>' +
+        '<div class="tool-item-grid" style="margin-bottom:12px">' + serverTools.map(renderToolCard).join('') + '</div>';
     }
     html += '</div></div>';
   }
 
-  // 内置工具
   if (internalTools.length > 0) {
-    html += renderSection('Built-in Tools', internalTools.length, internalTools.map((t) => ({
-      name: t.name, badge: ''
-    })));
+    html += '<div class="panel"><div class="panel-header"><span class="title">自定义内置工具</span><span class="count">' + internalTools.length + '</span></div>' +
+      '<div class="panel-body"><div class="tool-item-grid">' + internalTools.map(renderToolCard).join('') + '</div></div></div>';
   }
 
-  body.innerHTML = html || '<div class="empty">No tools</div>';
-}
+  if (filteredSdk.length > 0) {
+    html += '<div class="panel"><div class="panel-header"><span class="title">SDK 内置工具</span><span class="count">' + filteredSdk.length + '</span></div>' +
+      '<div class="panel-body"><div class="tool-item-grid">' + filteredSdk.map(renderToolCard).join('') + '</div></div></div>';
+  }
 
-function renderSection(title, count, items) {
-  return '<div class="panel"><div class="panel-header"><span class="title">' + title + '</span>' +
-    '<span class="count">' + count + '</span></div><div class="panel-body">' +
-    (items.length
-      ? items.map((i) => '<div class="list-item"><span class="name">' + ctx.utils.esc(i.name) + '</span>' +
-        (i.badge || '') + '<span class="meta"></span></div>').join('')
-      : '<div class="empty">None</div>') +
-    '</div></div>';
+  body.innerHTML = html || '<div class="empty">' + (searchQuery ? '无匹配工具' : '暂无工具') + '</div>';
 }

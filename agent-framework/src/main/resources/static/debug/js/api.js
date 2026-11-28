@@ -1,21 +1,18 @@
-/* ===== API 客户端：统一封装后端端点 ===== */
-
-// 静态页部署在 /debug/ 或独立监控页 /monitor/ 下（可能带 ingress 前缀如 /agent/{name}），
-// 剥掉页面目录段得到外部前缀作为 API 基址；直连部署时为空串。
 const BASE = window.location.pathname.replace(/\/(?:debug|monitor)\/?.*$/, '') || '';
 
-/**
- * 统一构造 HTTP 错误：优先透出后端 body.message（not_found / invalid_user_id / 中文原因等），
- * 并把 HTTP 状态挂到 err.status 上——调用方需要按状态分流（如只有 404 才回落到“新建”）。
- */
 async function httpError(resp, path) {
   let msg = 'HTTP ' + resp.status + ' ' + path;
+  let data = null;
   try {
-    const j = await resp.json();
-    if (j && j.message) msg = j.message;
-  } catch (e) { /* 非 JSON 响应：保留 HTTP 状态文案 */ }
+    data = await resp.json();
+    if (data && data.message) msg = data.message;
+    else if (data && data.error) msg = data.note ? (data.error + ' (' + data.note + ')') : data.error;
+  } catch (e) {}
   const err = new Error(msg);
   err.status = resp.status;
+  err.code = data && data.error ? data.error : null;
+  err.retryable = Boolean(data && data.retryable === true);
+  err.data = data;
   return err;
 }
 
@@ -61,34 +58,109 @@ async function patch(path, body, headers) {
   return resp.json();
 }
 
-/** 用户技能管理面：用户身份走 X-User-Id 头（网关注入登录态；调试页用选中 userId 填充该头） */
 function userHeader(userId) {
   return userId ? { 'X-User-Id': userId } : {};
+}
+
+function consumeSsePost(path, body, headers, { onEvent, onWaiting, onError, onEnd } = {}) {
+  const controller = new AbortController();
+  let lastEventId = 0;
+  const connect = async () => {
+    let resp;
+    try {
+      resp = await fetch(BASE + path, {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}),
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal
+      });
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      if (onError) onError(e);
+      return;
+    }
+    if (!resp.ok || !resp.body) {
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const j = await resp.json();
+        if (j && (j.message || j.error)) msg = j.message || j.error;
+      } catch (e) {}
+      if (onError) onError(new Error(msg));
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let active = true;
+    try {
+      while (active) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (controller.signal.aborted) { active = false; break; }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('id:')) {
+            const idVal = parseInt(line.slice(3).trim(), 10);
+            if (!isNaN(idVal) && idVal > lastEventId) lastEventId = idVal;
+            continue;
+          }
+          if (!line.startsWith('data:')) continue;
+          const dataStr = line.slice(5).trim();
+          if (!dataStr) continue;
+          let evt;
+          try { evt = JSON.parse(dataStr); } catch (e) { continue; }
+          if (evt.type === 'done') { active = false; if (onEnd) onEnd(evt); return; }
+          if (evt.type === 'error') { active = false; if (onError) onError(new Error(evt.error || evt.message || 'stream error')); return; }
+          if (evt.type === 'waiting') { if (onWaiting) onWaiting(evt); continue; }
+          if (onEvent) onEvent(evt);
+        }
+      }
+    } catch (e) {
+      active = false;
+      if (!controller.signal.aborted && onError) onError(e);
+    } finally {
+      if (active && !controller.signal.aborted && onEnd) onEnd();
+    }
+  };
+  connect();
+  return {
+    close: () => controller.abort(),
+    get lastEventId() { return lastEventId; }
+  };
 }
 
 export const api = {
   BASE,
 
-  // 基础信息
   getInfo: () => get('/'),
   getHealth: () => get('/health'),
   getAgentCard: () => get('/.well-known/agent-card.json'),
   getSystemPrompt: () => get('/system-prompt'),
 
-  // 工具 / 技能 / MCP
   getTools: (includeInternal = false) => get('/tools?includeInternal=' + includeInternal),
   getSkills: () => get('/skills'),
   getSkillsManage: () => get('/skills/manage'),
+  getSkillsManageWithMeta: async () => {
+    const r = await fetch(BASE + '/skills/manage');
+    if (!r.ok) throw await httpError(r);
+    const skills = await r.json();
+    const roHeader = r.headers.get('X-Skills-Read-Only');
+    const twHeader = r.headers.get('X-Skills-Toggle-Writable');
+    return {
+      skills: Array.isArray(skills) ? skills : [],
+      readOnly: roHeader === 'true',
+      toggleWritable: twHeader !== 'false'
+    };
+  },
   getAvailableSkills: (userId) => get('/skills/available' + (userId ? '?userId=' + encodeURIComponent(userId) : '')),
   parseSkillRefs: (message, userId) => get('/skills/parse-refs?message=' + encodeURIComponent(message)
     + (userId ? '&userId=' + encodeURIComponent(userId) : '')),
   uploadSkill: async (file) => {
     const formData = new FormData();
     formData.append('file', file);
-    const resp = await fetch(BASE + '/skills/upload', {
-      method: 'POST',
-      body: formData
-    });
+    const resp = await fetch(BASE + '/skills/upload', { method: 'POST', body: formData });
     if (!resp.ok) throw await httpError(resp, '/skills/upload');
     return resp.json();
   },
@@ -104,7 +176,6 @@ export const api = {
   getMcpServers: () => get('/mcp'),
   getMetadata: (includeDetails = false) => get('/metadata?includeDetails=' + includeDetails),
 
-  // 模型（会话可切换：系统模型只读 + 托管模型 CRUD，见 docs/session-model-switch-design.md）
   getModels: (all = false) => get('/models' + (all ? '?all=true' : '')),
   getModel: (id) => get('/models/' + encodeURIComponent(id)),
   createModel: (body) => post('/models', body),
@@ -114,13 +185,10 @@ export const api = {
   setFallbackModel: (id) => put('/models/' + encodeURIComponent(id) + '/fallback', {}),
   testModel: (id) => post('/models/' + encodeURIComponent(id) + '/test', {}),
 
-  // 用户技能（L4 个人覆盖，agent_fs KV：agents/{agent}/users/{uid}/skills）
-  // 用户身份走 X-User-Id 头（网关注入）；索引：/debug/user-skills；明细/上传/下载：/skills/users/*
   getUserSkillUsers: () => get('/debug/user-skills'),
   getUserSkills: (userId) => get('/skills/users', userHeader(userId)),
   getUserSkill: (userId, name, file) =>
-    get('/skills/users/' + encodeURIComponent(name) + (file ? '?file=' + encodeURIComponent(file) : ''),
-      userHeader(userId)),
+    get('/skills/users/' + encodeURIComponent(name) + (file ? '?file=' + encodeURIComponent(file) : ''), userHeader(userId)),
   putUserSkill: (userId, name, content) =>
     put('/skills/users/' + encodeURIComponent(name), { content }, userHeader(userId)),
   uploadUserSkillZip: async (userId, file) => {
@@ -135,45 +203,54 @@ export const api = {
     return resp.json();
   },
   downloadUserSkillZip: async (userId, name) => {
-    const resp = await fetch(BASE + '/skills/users/' + encodeURIComponent(name) + '/download',
-      { headers: userHeader(userId) });
+    const resp = await fetch(BASE + '/skills/users/' + encodeURIComponent(name) + '/download', { headers: userHeader(userId) });
     if (!resp.ok) throw await httpError(resp, '/skills/users/' + name + '/download');
     return resp.blob();
   },
-  deleteUserSkill: (userId, name) =>
-    del('/skills/users/' + encodeURIComponent(name), userHeader(userId)),
-  toggleUserSkill: (userId, name) =>
-    put('/skills/users/' + encodeURIComponent(name) + '/toggle', {}, userHeader(userId)),
+  deleteUserSkill: (userId, name) => del('/skills/users/' + encodeURIComponent(name), userHeader(userId)),
+  toggleUserSkill: (userId, name) => put('/skills/users/' + encodeURIComponent(name) + '/toggle', {}, userHeader(userId)),
   syncUserSkillFromPackage: (userId, name) =>
     post('/skills/users/' + encodeURIComponent(name) + '/sync-from-package', {}, userHeader(userId)),
 
-  // 调试数据
   getEnvConfig: () => get('/debug/config/env'),
   getOafConfig: () => get('/debug/config/oaf'),
+  getReloadStatus: () => get('/admin/reload'),
+  triggerReload: (scope = 'auto', server) => {
+    let url = '/admin/reload?scope=' + encodeURIComponent(scope);
+    if (server) url += '&server=' + encodeURIComponent(server);
+    return post(url, {});
+  },
   getDatabaseStatus: () => get('/debug/database/status'),
   getMemory: () => get('/debug/memory'),
   getWorkspace: () => get('/debug/workspace'),
   getSandbox: () => get('/debug/sandbox'),
   getSandboxBindings: () => get('/debug/sandbox-bindings'),
+  updateSandboxEnv: (userId, sessionId, env) => put('/sandbox/env', { userId, sessionId, env }),
   getLogs: (level = 'all', limit = 100) => get('/debug/logs?level=' + level + '&limit=' + limit),
-  // 会话读取走归属用户身份（issue #158：/threads/{sid} 端点按 X-User-Id 校验归属，
-  // 调试页以选中 userId 填充该头，与网关注入行为一致）
+
   getThreads: (userId) => get('/threads' + (userId ? '?userId=' + encodeURIComponent(userId) : ''), userHeader(userId)),
+  patchThread: (sessionId, body, userId) => patch('/threads/' + encodeURIComponent(sessionId), body, userHeader(userId)),
+  deleteThread: (sessionId, userId) => del('/threads/' + encodeURIComponent(sessionId), userHeader(userId)),
   getThreadHistory: (sessionId, userId, opts = {}) => {
     const qs = opts && opts.limit ? '?limit=' + encodeURIComponent(opts.limit) : '';
     return get('/threads/' + encodeURIComponent(sessionId) + '/history' + qs, userHeader(userId));
   },
-  getLlmCalls: (sessionId, userId) =>
-    get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls', userHeader(userId)),
-  /**
-   * 停止当前运行中的 turn（协作式中断，docs/turn-stop-design.md）。
-   * 202 = 已受理（等待 cancelled 终态帧）；404 = 无运行中 turn；409 = HITL 挂起/尚未
-   * 产出事件（后者的 retryable=true）；503 = 停止能力不可用。
-   */
-  stopThread: (sessionId, userId) =>
-    post('/threads/' + encodeURIComponent(sessionId) + '/stop', {}, userHeader(userId)),
+  getLlmCalls: (sessionId, userId) => get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls', userHeader(userId)),
+  stopThread: (sessionId, userId) => post('/threads/' + encodeURIComponent(sessionId) + '/stop', {}, userHeader(userId)),
 
-  // 运营监控（跨用户会话列表 + 使用概览，供调试页 Monitor 面板）
+  getThreadContext: (sessionId, userId, includeContent = true) =>
+    get('/threads/' + encodeURIComponent(sessionId) + '/context?includeContent=' + (includeContent ? 'true' : 'false'), userHeader(userId)),
+  injectThreadContext: (sessionId, body, userId) =>
+    post('/threads/' + encodeURIComponent(sessionId) + '/context', body, userHeader(userId)),
+  deleteThreadContext: (sessionId, key, userId) =>
+    del('/threads/' + encodeURIComponent(sessionId) + '/context/' + encodeURIComponent(key), userHeader(userId)),
+
+  getBrowserState: (sessionId, userId) => get('/threads/' + encodeURIComponent(sessionId) + '/browser', userHeader(userId)),
+  takeoverBrowser: (sessionId, reason, userId) =>
+    post('/threads/' + encodeURIComponent(sessionId) + '/browser/takeover', reason ? { reason } : {}, userHeader(userId)),
+  releaseBrowserStream: (sessionId, userId, handlers = {}) =>
+    consumeSsePost('/threads/' + encodeURIComponent(sessionId) + '/browser/release', {}, userHeader(userId), handlers),
+
   getMonitorOverview: () => get('/debug/monitor/overview'),
   getMonitorTools: (limit = 50) => get('/debug/monitor/tools?limit=' + limit),
   getMonitorSessions: (params = {}) => {
@@ -183,7 +260,6 @@ export const api = {
       .join('&');
     return get('/debug/monitor/sessions' + (qs ? '?' + qs : ''));
   },
-  // 对话日志（消息粒度 + 正文模糊检索，issue #206）
   getMonitorMessages: (params = {}) => {
     const qs = Object.entries(params)
       .filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -192,85 +268,13 @@ export const api = {
     return get('/debug/monitor/messages' + (qs ? '?' + qs : ''));
   },
 
-  // 单次流对话（durable-sse-plan 改造版：POST /chat 事件经 EventBus 广播）
-  // 返回 { close(), lastEventId } 供重连使用
-  // 排队等待期间后端发 waiting 帧；结束发 done 帧；异常发 error 帧
   sendChat: (sessionId, message, userId, fileIds, { model, onEvent, onWaiting, onError, onEnd } = {}) => {
-    const path = '/threads/chat';
-    const controller = new AbortController();
-    // 追踪 SSE lastEventId（对应 session_event.seq），用于断连重连
-    let lastEventId = 0;
-    const connect = async () => {
-      let resp;
-      try {
-        const body = { message, userId: userId || 'debug-user', sessionId };
-        if (model) body.model = model;
-        if (fileIds && fileIds.length > 0) {
-          body.fileIds = fileIds;
-        }
-        resp = await fetch(BASE + path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: controller.signal
-        });
-      } catch (e) {
-        if (controller.signal.aborted) return;
-        if (onError) onError(e);
-        return;
-      }
-      if (!resp.ok || !resp.body) {
-        let msg = 'HTTP ' + resp.status;
-        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch (e) {}
-        if (onError) onError(new Error(msg));
-        return;
-      }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let active = true;
-      try {
-        while (active) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (controller.signal.aborted) { active = false; break; }
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            // 解析 SSE id: 字段（对应 session_event.seq）
-            if (line.startsWith('id:')) {
-              const idVal = parseInt(line.slice(3).trim(), 10);
-              if (!isNaN(idVal) && idVal > lastEventId) lastEventId = idVal;
-              continue;
-            }
-            if (!line.startsWith('data:')) continue;
-            const dataStr = line.slice(5).trim();
-            if (!dataStr) continue;
-            let evt;
-            try { evt = JSON.parse(dataStr); } catch (e) { continue; }
-            console.log('[SSE/sendChat]', JSON.stringify(evt, null, 2));
-            if (evt.type === 'done') { if (onEnd) onEnd(evt); continue; }
-            if (evt.type === 'error') { if (onError) onError(new Error(evt.error)); continue; }
-            if (evt.type === 'waiting') { if (onWaiting) onWaiting(evt); continue; }
-            if (onEvent) onEvent(evt);
-          }
-        }
-      } catch (e) {
-        if (!controller.signal.aborted && onError) onError(e);
-      } finally {
-        if (active && onEnd) onEnd();
-      }
-    };
-    connect();
-    return {
-      close: () => controller.abort(),
-      get lastEventId() { return lastEventId; }
-    };
+    const body = { message, userId: userId || 'debug-user', sessionId };
+    if (model) body.model = model;
+    if (fileIds && fileIds.length > 0) body.fileIds = fileIds;
+    return consumeSsePost('/threads/chat', body, {}, { onEvent, onWaiting, onError, onEnd });
   },
 
-  // ★ 新增：GET /subscribe — SSE 重连续传（durable-sse-plan §4.2）
-  // 返回 { close(), lastEventId } 供后续重连使用
   subscribe: (sessionId, { afterSeq, replyId, userId, onEvent, onError, onEnd } = {}) => {
     const path = '/threads/' + encodeURIComponent(sessionId) + '/subscribe';
     const controller = new AbortController();
@@ -293,8 +297,8 @@ export const api = {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let terminated = false;      // 已由 done/error 帧显式终结，避免重复回调
-      let closedByServer = false;  // 服务端主动关流（未发 done 帧，如 interrupted 之后）
+      let terminated = false;
+      let closedByServer = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -314,7 +318,6 @@ export const api = {
             if (!dataStr) continue;
             let evt;
             try { evt = JSON.parse(dataStr); } catch (e) { continue; }
-            console.log('[SSE/subscribe]', JSON.stringify(evt, null, 2));
             if (evt.type === 'done') { terminated = true; if (onEnd) onEnd(evt); return; }
             if (evt.type === 'error') { terminated = true; if (onError) onError(new Error(evt.error)); return; }
             if (onEvent) onEvent(evt);
@@ -323,8 +326,6 @@ export const api = {
       } catch (e) {
         if (!controller.signal.aborted && onError) onError(e);
       } finally {
-        // 服务端主动关流不会走 done 分支（interrupted 帧之后即如此）；
-        // 若不在 finally 补发 onEnd，订阅者永远等不到结束回调——sendChat 本就有此保证。
         if (closedByServer && !terminated && onEnd) onEnd();
       }
     };
@@ -335,16 +336,12 @@ export const api = {
     };
   },
 
-  // ★ 新增：GET /status — 查询 turn 状态（durable-sse-plan §4.3）
-  getStatus: (sessionId, userId) =>
-    get('/threads/' + encodeURIComponent(sessionId) + '/status', userHeader(userId)),
+  getStatus: (sessionId, userId) => get('/threads/' + encodeURIComponent(sessionId) + '/status', userHeader(userId)),
 
-  // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）  // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）
   confirmToolCall: (sessionId, results, userId) =>
     post('/threads/' + encodeURIComponent(sessionId) + '/confirm', { results }, userHeader(userId)),
 
-  // HITL 确认后事件流（SSE；恢复为新执行段，后端先 acquire turn 租约，排队/冲突以 error 帧返回）
-  confirmStream: (sessionId, results, { onEvent, onError, userId } = {}) => {
+  confirmStream: (sessionId, results, { onEvent, onError, onEnd, userId } = {}) => {
     const path = '/threads/' + encodeURIComponent(sessionId) + '/confirm-stream';
     const controller = new AbortController();
     const connect = async () => {
@@ -361,15 +358,19 @@ export const api = {
         if (onError) onError(e);
         return;
       }
-      if (!resp.ok || !resp.body) { if (onError) onError(new Error('HTTP ' + resp.status)); return; }
+      if (!resp.ok || !resp.body) {
+        if (onError) onError(await httpError(resp, path));
+        return;
+      }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let terminated = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          if (controller.signal.aborted) break;
+          if (controller.signal.aborted) { terminated = true; break; }
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
@@ -379,24 +380,28 @@ export const api = {
             if (!dataStr) continue;
             try {
               const parsed = JSON.parse(dataStr);
-              console.log('[SSE/confirmStream]', JSON.stringify(parsed, null, 2));
               if (onEvent) onEvent(parsed);
-            } catch (e) { /* 忽略解析错误 */ }
+              if (parsed.type === 'done' || parsed.type === 'error') {
+                terminated = true;
+                return;
+              }
+            } catch (e) {}
           }
         }
       } catch (e) {
+        terminated = true;
         if (!controller.signal.aborted && onError) onError(e);
+      } finally {
+        if (!terminated && !controller.signal.aborted && onEnd) onEnd();
       }
     };
     connect();
     return {
       close() { controller.abort(); },
-      /** 等待 HTTP 响应头（连接建立） */
       ready: Promise.resolve()
     };
   },
 
-  // MCP Apps（阶段一/二端点，见 mcp-apps-extension-plan.md 4.4）
   readMcpUiResource: (server, uri) =>
     get('/mcp/' + encodeURIComponent(server) + '/resources/ui?uri=' + encodeURIComponent(uri)),
   listMcpUiResources: (server) => get('/mcp/' + encodeURIComponent(server) + '/resources'),
@@ -406,27 +411,20 @@ export const api = {
   updateUiContext: (sessionId, content, structuredContent) =>
     post('/mcp/ui-context', { sessionId, content, structuredContent }),
 
-  // 文件上传
   uploadFile: async (file, userId, sessionId) => {
     const formData = new FormData();
     formData.append('file', file);
     if (userId) formData.append('userId', userId);
     if (sessionId) formData.append('sessionId', sessionId);
-
-    const resp = await fetch(BASE + '/files/upload', {
-      method: 'POST',
-      body: formData
-    });
+    const resp = await fetch(BASE + '/files/upload', { method: 'POST', body: formData });
     if (!resp.ok) throw await httpError(resp, '/files/upload');
     return resp.json();
   },
 
-  // A2A 同步调用（转发 SDK，userId/sessionId 写入 message.metadata）
   sendA2A: async (text, { userId, sessionId, metadata } = {}) => {
     const msgMetadata = { ...(metadata || {}) };
     if (userId) msgMetadata.userId = userId;
     if (sessionId) msgMetadata.sessionId = sessionId;
-
     const resp = await fetch(BASE + '/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -441,13 +439,10 @@ export const api = {
       })
     });
     const data = await resp.json();
-    // 兼容 SDK 返回: result 可能为 Task 或 Message
     const result = data.result;
     if (result && result.parts) {
-      // 标准 Message: {kind:"message", role:"agent", parts:[{kind:"text",text}]}
       return result.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('');
     }
-    // 兼容旧格式简化 Task: {id, status, result:{message:{parts}}}
     const msg = result && result.result && result.result.message;
     if (msg && msg.parts) {
       return msg.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('');

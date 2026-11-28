@@ -341,10 +341,11 @@ public final class SkillZipSupport {
      * 同一规范名对齐，否则按提示词路径访问 404。
      *
      * <p>回落目录名：SKILL.md 缺失 / 无 frontmatter / 无 name / 解析抛异常（二进制 SKILL.md，
-     * {@link #extractSkillName} 契约）；以及规范名非白名单（{@link #isShellSafeSegment}，issue
-     * #501——与 SkillsFarm 链名防线同规则，规范名进 tar rel 与容器命令拼接，不得改写名字，
-     * 改写会再次与 SDK 渲染口径错位）。管理面禁用集与寻址键同为规范名口径（SkillManageService
-     * 读取时归一化，issue #480）。
+     * {@link #extractSkillName} 契约）；以及规范名不是合法标识（含 {@code /}、{@code \}、
+     * 控制字符、空白，或以 {@code .} 开头、含 {@code ..}）——这是路径与标识安全底线，不是
+     * shell 字符白名单。规范名的 shell 安全性由消费端 {@link #isShellSafeSegment} 单独判定，
+     * 不再改写寻址键（issue #501 的回落会让中文标点名与目录名分裂，管理面寻址 404）。
+     * 管理面禁用集与寻址键同为规范名口径（SkillManageService 读取时归一化，issue #480）。
      */
     public static String canonicalSkillName(Path skillDir) {
         var dirName = skillDir.getFileName().toString();
@@ -354,40 +355,66 @@ public final class SkillZipSupport {
         } catch (IOException | RuntimeException e) {
             return dirName;
         }
-        if (frontmatter == null || frontmatter.isBlank()) {
-            return dirName;
-        }
-        return isShellSafeSegment(frontmatter) ? frontmatter : dirName;
+        return isCanonicalName(frontmatter) ? frontmatter : dirName;
     }
 
-    /** 技能名白名单字符集（字母/数字/下划线/中文/点/连字符），sanitize 与 shell-safe 判定同源 */
-    private static final String SKILL_NAME_CHARS = "\\w\\u4e00-\\u9fff.\\-";
+    /** 名称能否作为单个路径段：非空、非 {@code .}/{@code ..}、不含路径分隔符与控制字符 */
+    private static boolean isPathSegment(String name) {
+        if (name == null || name.isBlank() || name.equals(".") || name.equals("..")) {
+            return false;
+        }
+        for (int i = 0; i < name.length(); i++) {
+            var c = name.charAt(i);
+            if (c < 0x20 || c == 0x7F || c == '/' || c == '\\') {
+                return false;
+            }
+        }
+        return true;
+    }
 
-    /**
-     * 单路径段 shell-safe 白名单（issue #501）：仅 {@link #SKILL_NAME_CHARS}，禁 {@code .} /
-     * {@code ..} 开头与含 {@code ..}——段名进 tar rel、farm 建链引号段与孤儿差集 {@code |}
-     * 分隔 case 字面集，{@code |}、{@code \} 等白名单外字符会破坏命令与差集边界
-     * （{@code name: .} 曾生成 {@code rm -rf '<cache>/oaf-package/.'}，GNU rm 拒绝删除
-     * {@code .} 使整条 && 链中断）。不安全段在 {@link #canonicalSkillName} 回落目录名、
-     * SkillsFarm 链名防线按段复用本判定跳过。
-     */
+    private static boolean isCanonicalName(String name) {
+        if (!isPathSegment(name) || name.startsWith(".") || name.contains("..")) {
+            return false;
+        }
+        for (int i = 0; i < name.length(); i++) {
+            var c = name.charAt(i);
+            if (Character.isWhitespace(c) || Character.isSpaceChar(c) || isShellMetaChar(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static boolean isShellSafeSegment(String name) {
-        if (name == null || name.isBlank()) {
-            return false;
-        }
-        if (name.startsWith(".") || name.contains("..")) {
-            return false;
-        }
-        return name.matches("[" + SKILL_NAME_CHARS + "]+");
+        return isCanonicalName(name);
     }
 
-    /** 技能名安全化：白名单外字符替换为下划线，不允许以 . 开头 */
+    /** 技能名安全化为单个路径段：仅替换路径分隔符与控制字符，其余字符（含中文标点）保留 */
+    private static boolean isShellMetaChar(char c) {
+        return c == '\'' || c == '"' || c == '|' || c == '&' || c == ';' || c == '$'
+            || c == '`' || c == '<' || c == '>' || c == '\n' || c == '\r';
+    }
+
     public static String sanitizeSkillName(String name) {
         if (name == null || name.isBlank()) {
             return null;
         }
-        var sanitized = name.replaceAll("[^" + SKILL_NAME_CHARS + "]", "_");
-        // 不允许以 . 开头（隐藏文件/目录）
+        var trimmed = name.strip();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        var sb = new StringBuilder(trimmed.length());
+        for (int i = 0; i < trimmed.length(); i++) {
+            var c = trimmed.charAt(i);
+            boolean unsafe = c < 0x20 || c == 0x7F || c == '/' || c == '\\'
+                || Character.isWhitespace(c) || Character.isSpaceChar(c)
+                || isShellMetaChar(c);
+            sb.append(unsafe ? '_' : c);
+        }
+        var sanitized = sb.toString();
+        while (sanitized.contains("..")) {
+            sanitized = sanitized.replace("..", "_");
+        }
         while (sanitized.startsWith(".")) {
             sanitized = "_" + sanitized.substring(1);
         }

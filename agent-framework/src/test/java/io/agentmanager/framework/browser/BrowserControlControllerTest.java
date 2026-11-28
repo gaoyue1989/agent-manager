@@ -262,4 +262,80 @@ class BrowserControlControllerTest {
         var mapping = method.getAnnotation(org.springframework.web.bind.annotation.PostMapping.class);
         assertEquals(0, mapping.produces().length);
     }
+
+    @Test
+    void releaseShouldRestoreControlLockAfterWaitingFrameAndNullEventErrorSse() {
+        var prev = new BrowserControlService.ControlView("HUMAN", "login", USER, "user", "2026-11-25T00:00:00Z", 600);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenReturn(Flux.just(
+                ServerSentEvent.<String>builder().data("{\"type\":\"waiting\",\"session_id\":\"" + SESSION + "\"}").build(),
+                ServerSentEvent.<String>builder().data("{\"type\":\"error\",\"error\":\"turn_in_progress\"}").build()));
+
+        controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        verify(control).restore(SESSION, prev);
+
+        org.mockito.Mockito.reset(control, chatStreamController);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenReturn(Flux.just(
+                ServerSentEvent.<String>builder().data("{\"type\":\"error\",\"error\":\"turn_pending_confirm\"}").build()));
+
+        controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        verify(control).restore(SESSION, prev);
+    }
+
+    @Test
+    void release404And409ShouldNegotiateJsonEvenWithAcceptEventStream() throws Exception {
+        var mvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
+            .standaloneSetup(controller)
+            .setControllerAdvice(new io.agentmanager.framework.controller.GlobalExceptionHandler())
+            .build();
+        when(sessionUserStore.findUserIdBySession("missing-sid")).thenReturn(null);
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/threads/missing-sid/browser/release")
+                .header("X-User-Id", USER)
+                .accept(org.springframework.http.MediaType.TEXT_EVENT_STREAM))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound())
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
+                .contentTypeCompatibleWith(org.springframework.http.MediaType.APPLICATION_JSON));
+
+        when(control.control(SESSION)).thenReturn(
+            new BrowserControlService.ControlView("HUMAN", "login", USER, "user", "2026-11-25T00:00:00Z", 600));
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenThrow(new IllegalStateException("conflict"));
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/threads/" + SESSION + "/browser/release")
+                .header("X-User-Id", USER)
+                .accept(org.springframework.http.MediaType.TEXT_EVENT_STREAM))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isConflict())
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
+                .contentTypeCompatibleWith(org.springframework.http.MediaType.APPLICATION_JSON));
+    }
+
+    @Test
+    void releaseShouldIgnoreHeartbeatCommentsAndRestoreLockOnErrorOrEmptyCompletion() {
+        var prev = new BrowserControlService.ControlView("HUMAN", "login", USER, "user", "2026-11-25T00:00:00Z", 600);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenReturn(Flux.just(
+                ServerSentEvent.<String>builder().comment("hb").build(),
+                ServerSentEvent.<String>builder().data("{\"type\":\"error\",\"code\":\"sandbox_create_failed\"}").build()));
+
+        controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        verify(control).restore(SESSION, prev);
+
+        org.mockito.Mockito.reset(control, chatStreamController);
+        when(control.control(SESSION)).thenReturn(prev);
+        when(control.release(SESSION)).thenReturn(true);
+        when(chatStreamController.chat(any(), any(), any(), any()))
+            .thenReturn(Flux.just(ServerSentEvent.<String>builder().comment("hb").build()));
+
+        controller.release(SESSION, USER, null, new HttpHeaders()).collectList().block();
+        verify(control).restore(SESSION, prev);
+    }
 }

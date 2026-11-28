@@ -103,7 +103,7 @@ public class BrowserControlController {
             return Flux.just(errorFrame("control_store_unavailable: " + e.getMessage()));
         }
         var request = new ChatStreamController.ChatRequest(RESUME_MESSAGE, owner,
-            sid, null, null, null, null);
+            sid, null, null, null, null, null);
         log.info("[browser-control] release accepted, resuming agent turn (sid={})", sid);
         Flux<ServerSentEvent<String>> stream;
         try {
@@ -115,14 +115,27 @@ public class BrowserControlController {
         var firstFrame = new java.util.concurrent.atomic.AtomicBoolean(true);
         return stream
             .doOnNext(sse -> {
-                if (firstFrame.compareAndSet(true, false) && sse != null) {
-                    var data = sse.data();
-                    if ("error".equals(sse.event()) || (data != null && data.contains("turn_in_progress"))) {
+                if (sse == null) {
+                    return;
+                }
+                var data = sse.data();
+                if (data == null || data.isBlank() || data.contains("\"type\":\"waiting\"")) {
+                    return;
+                }
+                if (firstFrame.compareAndSet(true, false)) {
+                    if ("error".equals(sse.event())
+                            || data.contains("\"type\":\"error\"")
+                            || data.contains("turn_in_progress")) {
                         control.restore(sid, prev);
                     }
                 }
             })
             .doOnError(e -> {
+                if (firstFrame.compareAndSet(true, false)) {
+                    control.restore(sid, prev);
+                }
+            })
+            .doOnComplete(() -> {
                 if (firstFrame.compareAndSet(true, false)) {
                     control.restore(sid, prev);
                 }

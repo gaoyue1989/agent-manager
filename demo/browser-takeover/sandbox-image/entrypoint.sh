@@ -3,7 +3,7 @@ set -euo pipefail
 
 export DISPLAY=:1
 
-Xtigervnc :1 -geometry 1280x800x24 -AlwaysShared -SecurityTypes None -rfbport 5901 &
+Xtigervnc :1 -localhost -geometry 1280x800x24 -AlwaysShared -SecurityTypes None -rfbport 5901 &
 XVNC_PID=$!
 
 websockify --web=/usr/share/novnc 6080 localhost:5901 &

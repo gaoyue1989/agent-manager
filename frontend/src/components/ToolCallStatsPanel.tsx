@@ -4,7 +4,7 @@
 // 仅数据获取函数（fetcher）不同。指标来自平台观测栈（backend PromQL 聚合），
 // 明细来自各 agent tool_audit_log（backend fan-out 合并）。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type ToolCallStatsView, type ToolCallServiceRow, type ToolCallToolRow } from "@/lib/api";
+import { type ToolCallStatsView, type ToolCallServiceRow, type ToolCallToolRow, type ToolCallTrendPoint } from "@/lib/api";
 import { Btn, Card, StatCard } from "@/components/ui";
 
 const RANGES = ["24h", "7d", "30d"];
@@ -19,26 +19,38 @@ export function ToolCallStatsPanel({ fetcher, testid }: {
   const [data, setData] = useState<ToolCallStatsView | null>(null);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
+  const fetcherRef = useRef(fetcher);
+  const reqSeqRef = useRef(0);
   const loadRef = useRef<(silent: boolean) => void>(() => {});
 
+  useEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
+
   const load = useCallback(async (silent: boolean, r: string) => {
+    const seq = ++reqSeqRef.current;
     if (!silent) setError("");
     try {
-      const view = await fetcher(r);
+      const view = await fetcherRef.current(r);
+      if (seq !== reqSeqRef.current) return;
       setData(view);
       setError("");
       setUpdatedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
     } catch (e: any) {
+      if (seq !== reqSeqRef.current) return;
       // 静默轮询失败保留旧数据（页面级门控口径，#377/#379）；首载失败展示错误态
       if (!silent) setError(e.message || "加载失败");
     }
-  }, [fetcher]);
+  }, []);
 
   useEffect(() => {
     loadRef.current = (silent: boolean) => { load(silent, range); };
     loadRef.current(false);
     const timer = setInterval(() => loadRef.current(true), REFRESH_MS);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      reqSeqRef.current += 1;
+    };
   }, [load, range]);
 
   return (
@@ -62,8 +74,8 @@ export function ToolCallStatsPanel({ fetcher, testid }: {
         </div>
       </div>
 
-      {error && !data && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-600"
+      {error && (
+        <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-600"
           data-testid={`${testid}-error`}>
           观测数据加载失败：{error}
         </div>
@@ -189,14 +201,26 @@ function ServiceRow({ row, testid }: { row: ToolCallServiceRow; testid: string }
 }
 
 /** 趋势柱状：蓝=调用，红=失败（底部叠加，零依赖 div 柱状） */
+function fmtBucket(p?: ToolCallTrendPoint): string {
+  if (!p) return "";
+  if (p.timestamp) {
+    const d = new Date(p.timestamp);
+    if (!Number.isNaN(d.getTime())) {
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+  }
+  return p.bucket ? `${p.bucket} UTC` : "";
+}
+
 function TrendChart({ trend, testid }: { trend: ToolCallStatsView["trend"]; testid: string }) {
   const max = Math.max(1, ...trend.map((p) => p.calls));
   return (
     <div>
       <div className="flex h-36 items-end gap-1" data-testid={testid}>
         {trend.map((p) => (
-          <div key={p.bucket} className="group relative h-full flex-1"
-            title={`${p.bucket} · 调用 ${fmtNum(p.calls)} · 失败 ${fmtNum(p.errors)}`}>
+          <div key={p.timestamp || p.bucket} className="group relative h-full flex-1"
+            title={`${fmtBucket(p)} · 调用 ${fmtNum(p.calls)} · 失败 ${fmtNum(p.errors)}`}>
             <div className="absolute bottom-0 w-full rounded-t bg-blue-500/80"
               style={{ height: `${(p.calls / max) * 100}%` }} />
             <div className="absolute bottom-0 w-full rounded-b bg-red-500/90"
@@ -205,12 +229,12 @@ function TrendChart({ trend, testid }: { trend: ToolCallStatsView["trend"]; test
         ))}
       </div>
       <div className="mt-1 flex justify-between text-[11px] text-gray-400">
-        <span>{trend[0]?.bucket}</span>
+        <span>{fmtBucket(trend[0])}</span>
         <span className="flex items-center gap-3">
           <em className="not-italic"><i className="mr-1 inline-block h-2 w-2 rounded-sm bg-blue-500/80" />调用</em>
           <em className="not-italic"><i className="mr-1 inline-block h-2 w-2 rounded-sm bg-red-500/90" />失败</em>
         </span>
-        <span>{trend[trend.length - 1]?.bucket}</span>
+        <span>{fmtBucket(trend[trend.length - 1])}</span>
       </div>
     </div>
   );

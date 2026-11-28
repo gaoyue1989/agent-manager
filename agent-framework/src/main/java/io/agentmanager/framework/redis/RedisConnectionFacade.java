@@ -3,6 +3,12 @@ package io.agentmanager.framework.redis;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 import org.slf4j.Logger;
@@ -20,7 +26,11 @@ import io.lettuce.core.cluster.RedisClusterClient;
 import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
 import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
 import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
+import io.lettuce.core.RedisChannelHandler;
+import io.lettuce.core.RedisConnectionStateAdapter;
 import io.lettuce.core.cluster.ClusterClientOptions;
+import io.lettuce.core.pubsub.RedisPubSubAdapter;
+import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 
 /**
  * Redis 连接门面：按 {@link AgentRedisProperties#mode()} 建 standalone / cluster 客户端，
@@ -68,6 +78,13 @@ public final class RedisConnectionFacade implements AutoCloseable {
     /** 惰性连接：启动时不建连，所以 Redis 可达与否不影响服务启动 */
     private volatile StatefulRedisConnection<String, String> standaloneConn;
     private volatile StatefulRedisClusterConnection<String, String> clusterConn;
+    private volatile StatefulRedisPubSubConnection<String, String> pubSubConn;
+    private final Object pubSubLock = new Object();
+    private final CopyOnWriteArraySet<String> subscribedChannels = new CopyOnWriteArraySet<>();
+    private final ConcurrentHashMap<String, CopyOnWriteArrayList<BiConsumer<String, String>>> channelHandlers =
+        new ConcurrentHashMap<>();
+    private volatile ExecutorService pubSubExecutor;
+    private volatile boolean closed;
 
     /** 上一次建连失败的原因（退避窗口内直接复用它抛出，避免造 Lettuce 异常对象） */
     private final java.util.concurrent.atomic.AtomicReference<RedisException> lastConnectFailure =
@@ -86,6 +103,27 @@ public final class RedisConnectionFacade implements AutoCloseable {
         this.clusterMode = props.isCluster();
         this.standaloneClient = standaloneClient;
         this.clusterClient = clusterClient;
+        registerReconnectResubscribe();
+    }
+
+    private void registerReconnectResubscribe() {
+        var listener = new RedisConnectionStateAdapter() {
+            @Override
+            public void onRedisConnected(RedisChannelHandler<?, ?> connection, java.net.SocketAddress socketAddress) {
+                if (connection == pubSubConn && !subscribedChannels.isEmpty() && !closed) {
+                    var exec = pubSubDispatchExecutor();
+                    if (exec != null) {
+                        exec.execute(() -> resubscribeAll(pubSubConn));
+                    }
+                }
+            }
+        };
+        if (standaloneClient != null) {
+            standaloneClient.addListener(listener);
+        }
+        if (clusterClient != null) {
+            clusterClient.addListener(listener);
+        }
     }
 
     /**
@@ -99,7 +137,9 @@ public final class RedisConnectionFacade implements AutoCloseable {
             logClusterSummary(props, client);
             return new RedisConnectionFacade(props, null, client);
         }
-        var client = RedisClient.create(RedisURI.create(props.url()));
+        var uri = RedisURI.create(props.url());
+        uri.setTimeout(Duration.ofMillis(props.commandTimeoutMs()));
+        var client = RedisClient.create(uri);
         client.setOptions(standaloneOptions(props));
         log.info("RedisClient configured (mode=standalone, host={}:{}, db={}, commandTimeout={}ms, "
                 + "connectTimeout={}ms, maxLenPerStream={}, prefix=\"{}\")",
@@ -118,7 +158,9 @@ public final class RedisConnectionFacade implements AutoCloseable {
         }
         var uris = new ArrayList<RedisURI>(nodeStrings.size());
         for (var s : nodeStrings) {
-            uris.add(RedisURI.create(s));
+            var u = RedisURI.create(s);
+            u.setTimeout(Duration.ofMillis(props.commandTimeoutMs()));
+            uris.add(u);
         }
         return uris;
     }
@@ -310,8 +352,214 @@ public final class RedisConnectionFacade implements AutoCloseable {
 
     // ---------------------------------------------------------------- 生命周期
 
+    public long publish(String rawChannel, String message) {
+        String channel = key(rawChannel);
+        return sync().publish(channel, message);
+    }
+
+    public void subscribeAsync(String rawChannel, BiConsumer<String, String> handler) {
+        if (rawChannel == null || rawChannel.isBlank() || handler == null || closed) {
+            return;
+        }
+        String channel = key(rawChannel);
+        channelHandlers.computeIfAbsent(channel, k -> new CopyOnWriteArrayList<>()).add(handler);
+        subscribedChannels.add(channel);
+        var exec = pubSubDispatchExecutor();
+        if (exec != null) {
+            exec.execute(this::ensurePubSubSubscribed);
+        }
+    }
+
+    private final java.util.concurrent.atomic.AtomicBoolean pubSubConnecting = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile long pubSubNextAttemptAtMs = 0L;
+    private volatile long pubSubBackoffMs = 5_000L;
+    private static final long PUBSUB_BACKOFF_MIN_MS = 5_000L;
+    private static final long PUBSUB_BACKOFF_MAX_MS = 30_000L;
+
+    public void ensurePubSubSubscribedAsync() {
+        if (closed || subscribedChannels.isEmpty()) {
+            return;
+        }
+        var conn = pubSubConn;
+        if (conn != null && conn.isOpen()) {
+            return;
+        }
+        if (System.currentTimeMillis() < pubSubNextAttemptAtMs) {
+            return;
+        }
+        if (!pubSubConnecting.compareAndSet(false, true)) {
+            return;
+        }
+        var exec = pubSubDispatchExecutor();
+        if (exec == null) {
+            pubSubConnecting.set(false);
+            return;
+        }
+        try {
+            exec.execute(() -> {
+                try {
+                    ensurePubSubSubscribed();
+                } finally {
+                    pubSubConnecting.set(false);
+                }
+            });
+        } catch (Exception e) {
+            pubSubConnecting.set(false);
+        }
+    }
+
+    public void ensurePubSubSubscribed() {
+        if (closed || subscribedChannels.isEmpty()) {
+            return;
+        }
+        StatefulRedisPubSubConnection<String, String> stale = null;
+        synchronized (pubSubLock) {
+            if (closed || subscribedChannels.isEmpty()) {
+                return;
+            }
+            var conn = pubSubConn;
+            if (conn != null && conn.isOpen()) {
+                resubscribeAll(conn);
+                return;
+            }
+            if (conn != null) {
+                stale = conn;
+                pubSubConn = null;
+            }
+        }
+        if (stale != null) {
+            try {
+                stale.close();
+            } catch (Exception ignored) {
+            }
+        }
+        StatefulRedisPubSubConnection<String, String> fresh;
+        try {
+            fresh = clusterMode
+                ? clusterClient.connectPubSub()
+                : standaloneClient.connectPubSub();
+            fresh.addListener(new RedisPubSubAdapter<>() {
+                @Override
+                public void message(String channel, String message) {
+                    dispatchPubSubMessage(channel, message);
+                }
+            });
+        } catch (Exception e) {
+            long delay = pubSubBackoffMs;
+            pubSubNextAttemptAtMs = System.currentTimeMillis() + delay;
+            pubSubBackoffMs = Math.min(delay * 2, PUBSUB_BACKOFF_MAX_MS);
+            log.debug("RedisConnectionFacade: pub/sub connect failed (will retry in {}ms): {}", delay, e.toString());
+            return;
+        }
+        synchronized (pubSubLock) {
+            if (closed) {
+                try {
+                    fresh.close();
+                } catch (Exception ignored) {
+                }
+                return;
+            }
+            var existing = pubSubConn;
+            if (existing != null && existing.isOpen()) {
+                try {
+                    fresh.close();
+                } catch (Exception ignored) {
+                }
+                resubscribeAll(existing);
+                return;
+            }
+            if (existing != null) {
+                try {
+                    existing.close();
+                } catch (Exception ignored) {
+                }
+            }
+            pubSubConn = fresh;
+            pubSubBackoffMs = PUBSUB_BACKOFF_MIN_MS;
+            pubSubNextAttemptAtMs = 0L;
+            resubscribeAll(fresh);
+        }
+    }
+
+    public boolean isPubSubOpen() {
+        var c = pubSubConn;
+        return c != null && c.isOpen();
+    }
+
+    private void resubscribeAll(StatefulRedisPubSubConnection<String, String> conn) {
+        if (conn == null || !conn.isOpen() || subscribedChannels.isEmpty() || closed) {
+            return;
+        }
+        try {
+            conn.async().subscribe(subscribedChannels.toArray(String[]::new));
+        } catch (Exception e) {
+            log.debug("RedisConnectionFacade: pub/sub subscribe failed: {}", e.toString());
+        }
+    }
+
+    private void dispatchPubSubMessage(String channel, String message) {
+        if (closed) {
+            return;
+        }
+        var handlers = channelHandlers.get(channel);
+        if (handlers == null || handlers.isEmpty()) {
+            return;
+        }
+        var exec = pubSubDispatchExecutor();
+        if (exec == null) {
+            return;
+        }
+        exec.execute(() -> {
+            for (var h : handlers) {
+                try {
+                    h.accept(channel, message);
+                } catch (Exception e) {
+                    log.warn("RedisConnectionFacade: pub/sub handler failed for channel={}: {}",
+                        channel, e.toString());
+                }
+            }
+        });
+    }
+
+    private ExecutorService pubSubDispatchExecutor() {
+        if (closed) {
+            return null;
+        }
+        var exec = pubSubExecutor;
+        if (exec != null) {
+            return exec;
+        }
+        synchronized (pubSubLock) {
+            if (closed) {
+                return null;
+            }
+            if (pubSubExecutor == null) {
+                pubSubExecutor = Executors.newSingleThreadExecutor(r -> {
+                    var t = new Thread(r, "redis-pubsub-dispatch");
+                    t.setDaemon(true);
+                    return t;
+                });
+            }
+            return pubSubExecutor;
+        }
+    }
+
     @Override
     public void close() {
+        closed = true;
+        synchronized (pubSubLock) {
+            if (pubSubConn != null) {
+                try {
+                    pubSubConn.close();
+                } catch (Exception ignored) {
+                }
+                pubSubConn = null;
+            }
+            if (pubSubExecutor != null) {
+                pubSubExecutor.shutdownNow();
+                pubSubExecutor = null;
+            }
+        }
         if (standaloneClient != null) {
             standaloneClient.shutdown();
         }

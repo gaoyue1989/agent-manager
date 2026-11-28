@@ -254,7 +254,7 @@ class OpenSandboxFilesystemSpecTest {
         var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
         spec.sharedFingerprintStore(shared);
         spec.recordScopedSkillCacheFingerprint("sbx-g1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-a");
-        org.mockito.Mockito.when(shared.slotScope("sbx-g1")).thenReturn("sess-B");
+        org.mockito.Mockito.when(shared.slotEntry("sbx-g1")).thenReturn(new ScopedFingerprintStore.SlotEntry("sess-B", "farm|fp-b"));
 
         assertNull(spec.scopedSkillCacheFingerprint("sbx-g1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
             "槽现役 scope=B ≠ 请求 scope=A：本 Pod 陈旧记录必须被权威否定");
@@ -269,7 +269,7 @@ class OpenSandboxFilesystemSpecTest {
         var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
         spec.sharedFingerprintStore(shared);
         spec.recordScopedSkillCacheFingerprint("sbx-g2", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-a");
-        org.mockito.Mockito.when(shared.slotScope("sbx-g2")).thenReturn("sess-A");
+        org.mockito.Mockito.when(shared.slotEntry("sbx-g2")).thenReturn(new ScopedFingerprintStore.SlotEntry("sess-A", "farm|fp-a"));
 
         assertEquals("fp-a", spec.scopedSkillCacheFingerprint("sbx-g2", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
             "槽现役 scope 一致=本 Pod 记录仍可信，稳态短路保持");

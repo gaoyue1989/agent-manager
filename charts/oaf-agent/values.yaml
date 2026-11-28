@@ -43,6 +43,43 @@ configInjection:
 # Secret.stringData）；渲染时空值键剔除（对齐平台 EnvSecret「空值不进入」语义，防 Spring 占位符
 # ${VAR:default} 遇空串不回落默认值）。平台保留键 AGENT_CONFIG_DIR/AGENT_WORKSPACE_DIR/SERVER_HOST/
 # SERVER_PORT 由导出渲染恒写入；手写 values 时必须自带。
+# 常用配置参考（按需取消注释并移入下方 env / secretEnv；全量变量与逐项说明见 agent-framework/.env.example）：
+# env:
+#   # --- 平台/运行时必配 ---
+#   AGENT_CONFIG_DIR: "/config"                                      # OAF 包只读挂载目录（须与 configInjection.dir 一致）
+#   AGENT_WORKSPACE_DIR: "/workspace"                                # 运行时可写工作目录
+#   SERVER_HOST: "0.0.0.0"                                           # 监听地址
+#   SERVER_PORT: "8100"                                              # HTTP 服务端口
+#   MANAGEMENT_SERVER_PORT: "9091"                                   # Actuator 独立运维端口（/actuator/health,metrics,prometheus）
+#   # --- LLM 系统模型 ---
+#   LLM_BASE_URL: "https://api.openai.com/v1"                        # OpenAI 兼容端点
+#   LLM_MODEL_ID: "gpt-4o"                                           # 系统默认模型 ID
+#   LLM_PROVIDER: "openai"                                           # 方言：openai | vllm | sglang | glm | deepseek
+#   LLM_TEMPERATURE: "0.3"                                           # 生成温度
+#   LLM_MAX_TOKENS: "16384"                                          # 单次最大输出 Token
+#   # --- 存储与事件流 ---
+#   CHECKPOINT_JDBC_URL: "jdbc:mysql://mysql:3306/oaf_checkpoint"    # MySQL Checkpoint 连接串
+#   AGENT_REDIS_URL: "redis://oaf-redis:6379"                        # Redis Streams 事件流与锁地址（集群必配）
+#   AGENT_REDIS_PREFIX: "my-agent:"                                  # 多 Agent 共用 Redis 时的 key 前缀（禁止含 { }）
+#   # --- OpenSandbox 沙箱与技能同步降级 ---
+#   SANDBOX_ENABLED: "false"                                         # 沙箱总开关（显式设置优先于包内 config.sandbox.enabled）
+#   OPENSANDBOX_SERVER_URL: "opensandbox:8090"                       # OpenSandbox 服务端地址
+#   SANDBOX_IMAGE: "opensandbox/code-interpreter:v1.1.0"             # 沙箱容器镜像
+#   SANDBOX_TIMEOUT_MINUTES: "30"                                    # 沙箱生命周期 TTL（分钟，随 turn 刷新）
+#   SANDBOX_SKILLS_SHARED_STORE: "/skills-store"                     # 共享只读技能存储路径；设为 off 强制走降级通道
+#   SANDBOX_SKILLS_FALLBACK_MODE: "push"                             # 共享存储缺失时的降级策略：push（流式推送）| off
+#   SANDBOX_LIFECYCLE_ENABLED: "true"                                # 沙箱配额/绑定/续期生命周期开关
+#   SANDBOX_USER_QUOTA: "5"                                          # 单用户沙箱配额（0=不限）
+#   # --- 外部记忆（OpenViking）与浏览器接管（默认关闭） ---
+#   AGENT_MEMORY_PROVIDER: "local"                                   # 记忆后端：local | openviking
+#   AGENT_BROWSER_ENABLED: "false"                                   # 浏览器人工接管总开关
+# secretEnv:
+#   LLM_API_KEY: ""                                                  # LLM API 密钥
+#   CHECKPOINT_USERNAME: ""                                          # MySQL 用户名
+#   CHECKPOINT_PASSWORD: ""                                          # MySQL 密码
+#   OPENSANDBOX_API_KEY: ""                                          # OpenSandbox API 密钥
+#   OVK_ADMIN_KEY: ""                                                # OpenViking 管理员密钥（启用 openviking 时）
+#   AGENT_PROTOCOL_AUTH_TOKEN: ""                                    # Agent Protocol 认证 Token（启用 AGENT_PROTOCOL_ENABLED 时）
 env: {}
 secretEnv: {}
 

@@ -69,4 +69,13 @@ class BrowserViewWebSocketConfigTest {
 
         verify(registration, never()).setAllowedOriginPatterns(any(String[].class));
     }
+
+    @Test
+    void browserPropertiesShouldRejectUnconstrainedWildcardOrigins636() {
+        for (String bad : List.of("*", "*://*", "http://*", "https://*", "http://*:5188")) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> new io.agentmanager.framework.config.BrowserProperties(true, 60, 6080, "/websockify", 60, List.of(bad)),
+                "must reject wildcard pattern: " + bad);
+        }
+    }
 }

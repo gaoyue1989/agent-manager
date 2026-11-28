@@ -62,7 +62,7 @@ export interface PlatformConfigView { groups: PlatformConfigGroup[]; updatedAt?:
 export interface ToolCallTotals { calls: number; errors: number; errorRate: number; toolKinds: number; serviceNum: number; }
 export interface ToolCallToolRow { tool: string; calls: number; errors: number; }
 export interface ToolCallServiceRow { service: string; name: string; status: string; calls: number; errors: number; hasData: boolean; }
-export interface ToolCallTrendPoint { bucket: string; calls: number; errors: number; }
+export interface ToolCallTrendPoint { bucket: string; timestamp?: string; calls: number; errors: number; }
 export interface ToolCallRecent { at: string; service: string; name: string; tool: string; sessionId: string; result: string; }
 export interface ToolCallStatsView {
   range: string;
@@ -479,6 +479,21 @@ export const api = {
         request<SkillVersionRec>(`/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/${action}`, { method: "POST" }),
       versionDownload: (ws: number | string, id: number, vid: number) =>
         `${BASE}/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/download`,
+      versionContent: (ws: number | string, id: number, vid: number) =>
+        request<{ content: string }>(`/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/content`),
+      updateVersionContent: (ws: number | string, id: number, vid: number, body: { content: string; changelog?: string }) =>
+        request<SkillVersionRec>(`/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/content`, { method: "PUT", body: JSON.stringify(body) }),
+      uploadVersionZip: (ws: number | string, id: number, vid: number, file: File, changelog?: string) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        if (changelog) fd.append("changelog", changelog);
+        return fetch(`${BASE}/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/upload`, { method: "POST", body: fd })
+          .then(async (res) => {
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body?.message || `HTTP ${res.status}`);
+            return body?.data as { version: SkillVersionRec; warnings: string[] };
+          });
+      },
     },
     skillMarket: {
       sources: (ws: number | string) => request<MarketSourceRec[]>(`/console/workspaces/${ws}/skill-market/sources`),

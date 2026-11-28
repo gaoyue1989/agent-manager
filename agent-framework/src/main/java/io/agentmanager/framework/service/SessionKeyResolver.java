@@ -45,9 +45,16 @@ import io.agentscope.core.agent.RuntimeContext;
 public class SessionKeyResolver {
 
     private final SessionUserStore sessionUserStore;
+    private final String tenantPrefix;
 
     public SessionKeyResolver(SessionUserStore sessionUserStore) {
+        this(sessionUserStore, null);
+    }
+
+    public SessionKeyResolver(SessionUserStore sessionUserStore, String tenantPrefix) {
         this.sessionUserStore = sessionUserStore;
+        var trimmed = trimToNull(tenantPrefix);
+        this.tenantPrefix = trimmed != null ? trimmed.replace("/", "-") : null;
     }
 
     /** 规范会话 id（= session_user.session_id）；无 store 时退化为 RuntimeContext 原值，无法解析时 null */
@@ -87,10 +94,9 @@ public class SessionKeyResolver {
             var real = uid != null ? lookup(uid) : null;
             return new Resolved(uid != null ? uid : sid, real != null ? real : uid);
         }
-        // A2A / direct invoke 链路：sid 是规范会话键；ctx.userId 是入口裁决后的真实用户，
-        // 禁止作为 session 键反查（否则攻击者抢注 session_id=受害者 userId 即可劫持身份）
-        var sidUser = lookup(sid);
-        return new Resolved(sid, sidUser != null ? sidUser : uid);
+        var canonicalSid = stripTenantPrefix(sid);
+        var sidUser = lookup(canonicalSid);
+        return new Resolved(canonicalSid, sidUser != null ? sidUser : uid);
     }
 
     /** session_user 命中返回该会话的 user_id；未登记/查库失败返回 null（按"未登记"处理） */
@@ -104,6 +110,17 @@ public class SessionKeyResolver {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private String stripTenantPrefix(String sid) {
+        if (tenantPrefix == null) {
+            return sid;
+        }
+        String prefix = tenantPrefix + "__";
+        if (sid.startsWith(prefix) && sid.length() > prefix.length()) {
+            return sid.substring(prefix.length());
+        }
+        return sid;
     }
 
     private static String trimToNull(String s) {

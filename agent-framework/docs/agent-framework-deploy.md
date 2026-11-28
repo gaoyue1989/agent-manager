@@ -142,6 +142,8 @@ Tomcat started on port 8100
 
 ### 4.1 环境变量完整列表
 
+> 完整带逐项中文注释的环境变量模板见 [`agent-framework/.env.example`](../.env.example)；完整 OAF 配置包示例（含 `AGENTS.md`、MCP `config.yaml`、`ActiveMCP.json`、`SKILL.md`）见 [`agent-framework/example/full-config-example/`](../example/full-config-example/)。
+
 > 来源：`src/main/resources/application.yml` + `config/AgentManagerProperties.java` + `config/SandboxConfig.java` + `config/AgentRedisProperties.java` + `config/HistoryConfig.java` + `config/AgentProtocolConfig.java` + `config/AgentA2aJobProperties.java`。
 > Spring 绑定键前缀：`agent.*`（见 `application.yml`）；`OTEL_*` 与 `server.port` 直接由 Spring Boot / OTel 读取。
 
@@ -192,20 +194,46 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 |------|------|--------|------|------|
 | `SANDBOX_ENABLED` | bool | `false` | | 沙箱模式开关（绑 `agent.sandbox.enabled`） |
 | `SANDBOX_IMAGE` | string | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像（绑 `agent.sandbox.image`） |
-| `SANDBOX_TIMEOUT_MINUTES` | int | `60` | | 沙箱超时（分钟，到期自动销毁；resume 404 自动降级重建，绑 `agent.sandbox.timeout-minutes`） |
+| `SANDBOX_TIMEOUT_MINUTES` | int | `30` | | 沙箱生命周期 TTL（分钟，随 turn 刷新：T1 创建起点 / T2 turn 收尾终刷 / T3 在途续期；resume 404 自动重建；绑 `agent.sandbox.timeout-minutes`） |
+| `SANDBOX_REQUEST_TIMEOUT_SECONDS` | int | `30` | | OpenSandbox API 单次请求超时（秒，绑 `agent.sandbox.request-timeout-seconds`） |
 | `SANDBOX_MEMORY_MB` | int | `1024` | | 沙箱内存限制 MiB（绑 `agent.sandbox.memory-mb`） |
 | `SANDBOX_CPU_COUNT` | int | `1` | | 沙箱 CPU 限制（绑 `agent.sandbox.cpu-count`） |
-| `SANDBOX_ENTRYPOINT` | string (csv) | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`）。⚠️ **该环境变量实际不生效**——`application.yml` 无 `agent.sandbox.entrypoint` 占位符，只靠 `@DefaultValue`；要覆盖需用 `AGENT_SANDBOX_ENTRYPOINT`（Spring 松弛绑定） |
+| `SANDBOX_ENTRYPOINT` | string (csv) | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；绑 `agent.sandbox.entrypoint`） |
 | `SANDBOX_PROJECTION_ENABLED` | bool | `true` | | 关闭后每次 sandbox start 不再 hydrate 投影目录。**skills 依赖强的包不要关**（绑 `agent.sandbox.projection-enabled`） |
-| `SANDBOX_GUARD_ENABLED` | bool | `true` | | Redis SET NX 串行化同 userId 沙箱获取，避免并发重复创建；Redis 不可用时 fail-open（绑 `agent.sandbox.guard-enabled`） |
+| `SANDBOX_GUARD_ENABLED` | bool | `true` | | Redis SET NX 串行化同 slot 沙箱获取，避免并发重复创建；Redis 不可用时 fail-open（绑 `agent.sandbox.guard-enabled`） |
 | `SANDBOX_GUARD_LEASE_SECONDS` | int | `900` | | 沙箱获取串行化租约时长（秒）（绑 `agent.sandbox.guard-lease-seconds`） |
-| `SANDBOX_PROJECTION_FINGERPRINT_CACHE` | bool | `true` | | 投影新鲜度检查 stat 指纹缓存（`agent.sandbox.projection-fingerprint-cache-enabled`）；关闭=每 call 全量 build |
 | `SANDBOX_SKILL_REVISION_GATE` | bool | `true` | | L4 物化 revision 门控（`agent.sandbox.skill-revision-gate-enabled`）；关闭=每 acquire 全量物化 |
 | `SANDBOX_SYNC_SNAPSHOT_DIFF` | bool | `true` | | 沙箱回写快照差分（`agent.sandbox.sync-snapshot-diff-enabled`）；关闭=每次 call 全量读容器 skills/ |
+| `SANDBOX_SYNC_SKIP_PACKAGE_BASELINE` | bool | `true` | | 沙箱同步跳过包基线文件回写（绑 `agent.sandbox.sync-skip-package-baseline-enabled`） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | duration | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x；绑 `agent.sandbox.execd-grace-shutdown`） |
-| `SANDBOX_SESSION_AGENT_ISOLATION` | bool | `true` | per-session agent 隔离（每会话独立 Agent 实例，消解同用户两会话的沙箱单槽互踩，上游 #2849 workaround；2026-10-22 d3e02d0 起默认 true。绑 `agent.sandbox.session-agent-isolation`） |
+| `SANDBOX_SESSION_AGENT_ISOLATION` | bool | `true` | | per-session agent 隔离（每会话独立 Agent 实例，消解同用户两会话的沙箱单槽互踩；绑 `agent.sandbox.session-agent-isolation`） |
+| `SANDBOX_SESSION_AGENT_CACHE_MAX` | int | `500` | | 会话级 Agent 实例缓存上限（绑 `agent.sandbox.session-agent-cache-max`） |
+| `SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES` | int | `30` | | 会话级 Agent 实例缓存空闲 TTL（分钟，绑 `agent.sandbox.session-agent-cache-ttl-minutes`） |
+| `SKILLSYNC_BUNDLE_CACHE_DIR` | path | 空 | | 本地技能打包缓存目录（空 = 使用默认临时目录；绑 `agent.sandbox.skills-bundle-cache-dir`） |
+| `SANDBOX_SKILLS_SHARED_STORE` | path | `/skills-store` | | 沙箱共享只读技能目录；设为 `off` 关闸强制走降级通道（绑 `agent.sandbox.skills-shared-store`） |
+| `SANDBOX_SKILLS_FALLBACK_MODE` | enum | `push` | | 共享存储不可用时的技能同步降级模式：`push`（OpenSandbox 二进制流式推送）\| `off`（绑 `agent.sandbox.skills-fallback-mode`） |
+| `SANDBOX_SKILLS_FALLBACK_STORE_DIR` | path | `/tmp/.skills-store` | | `push` 降级在沙箱内的目标根目录（绑 `agent.sandbox.skills-fallback-store-dir`） |
+| `SANDBOX_SKILLS_FALLBACK_MAX_BYTES` | long | `67108864` | | `push` 降级单次技能包体积上限（字节，默认 64MiB；绑 `agent.sandbox.skills-fallback-max-bytes`） |
+| `SANDBOX_SKILLS_FALLBACK_MAX_CONCURRENCY` | int | `4` | | `push` 降级单副本并发推送上限（绑 `agent.sandbox.skills-fallback-max-concurrency`） |
+| `SANDBOX_SKILLS_FALLBACK_ACQUIRE_TIMEOUT_MS` | long | `5000` | | `push` 降级并发信号量等待超时（毫秒；绑 `agent.sandbox.skills-fallback-acquire-timeout-ms`） |
+| `SANDBOX_SKILLS_FALLBACK_ON_VERSION_MISMATCH` | bool | `true` | | 共享存储存在但版本不匹配时是否触发 `push` 降级（绑 `agent.sandbox.skills-fallback-on-version-mismatch`） |
+| `SANDBOX_LIFECYCLE_ENABLED` | bool | `true` | | 沙箱生命周期总开关（配额/绑定/续期三件套，依赖 `SANDBOX_GUARD_ENABLED=true`；绑 `agent.sandbox.lifecycle.enabled`） |
+| `SANDBOX_POOL_REF` | string | 空 | | OpenSandbox 服务端暖池名；空 = 不用池，非空时 create 由池模板定义资源上限（绑 `agent.sandbox.lifecycle.pool-ref`） |
+| `SANDBOX_USER_QUOTA` | int | `5` | | 单用户沙箱配额（0 = 不限；满且全忙返回 409 / `user_quota_exhausted`；绑 `agent.sandbox.lifecycle.user-quota`） |
+| `SANDBOX_RENEW_INTERVAL_SECONDS` | int | `60` | | T3 在途续期扫描间隔（秒，须 `< TTL*60/2`；绑 `agent.sandbox.lifecycle.renew-interval-seconds`） |
+| `SANDBOX_CONFIRM_HOLD_MINUTES` | int | `20` | | T4 HITL 挂起保留窗（分钟，期间持续续期不被 LRU 驱逐；绑 `agent.sandbox.lifecycle.confirm-hold-minutes`） |
+| `SANDBOX_CREATE_MAX_ATTEMPTS` | int | `2` | | 沙箱创建瞬时失败最大重试次数（绑 `agent.sandbox.lifecycle.create-max-attempts`） |
+| `SANDBOX_CREATE_RETRY_BACKOFF_MS` | long | `1000` | | 沙箱创建重试退避毫秒（绑 `agent.sandbox.lifecycle.create-retry-backoff-ms`） |
+| `SANDBOX_LIFECYCLE_E2E_HOOKS` | bool | `false` | | `/debug/sandbox-cleanup` E2E 写钩子开关（生产务必保持 `false`；绑 `agent.sandbox.lifecycle.e2e-hooks`） |
+| `AGENT_SERVICE_K8S_NAME` | string | 空 | | （直读 env）服务 K8s 名（注入沙箱 `metadata.service`；空则回退读取 `HOST_NAME`） |
 | `OPENSANDBOX_SERVER_URL` | string | `192.168.31.155:8090` | | OpenSandbox Server 地址（绑 `agent.sandbox.opensandbox.server-url`） |
 | `OPENSANDBOX_API_KEY` | string | — | ✓(沙箱模式) | OpenSandbox API 密钥（绑 `agent.sandbox.opensandbox.api-key`） |
+| `SANDBOX_EXEC_TRANSLATE` | bool | `true` | | （直读 env）命令执行翻译层开关，优化路径与探测命令 |
+| `SANDBOX_EXEC_TRACE` | bool | `true` | | （直读 env）输出沙箱命令执行详细追踪日志（设为 `false` 关闭） |
+| `SANDBOX_EXEC_DATAPLANE_FAIL_LIMIT` | int | `3` | | （直读 env）数据面连续失败熔断/重建阈值 |
+| `SANDBOX_PROBE_EXECD_PING` | bool | `true` | | （直读 env）复用沙箱前通过 execd ping 探活 |
+| `SANDBOX_RUNTIME_READ_THROUGH` | bool | `false` | | （直读 env）记忆混合读穿开关（灰度须全副本同步切换） |
+| `SANDBOX_SKILL_CACHE_STOP_BACKFILL` | bool | `true` | | （直读 env）turn 收尾 `.skills-cache` 补投开关 |
 
 #### 4.1.5 文件上传下载 / 存储后端
 
@@ -228,6 +256,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_STORAGE_S3_ACCESS_KEY` | string | — | ✓(s3) | S3 AccessKey（绑 `agent.file.storage-s3-access-key`） |
 | `FILE_STORAGE_S3_SECRET_KEY` | string | — | ✓(s3) | S3 SecretKey（绑 `agent.file.storage-s3-secret-key`） |
 | `FILE_STORAGE_S3_BUCKET` | string | `agent-files` | | S3 Bucket（绑 `agent.file.storage-s3-bucket`） |
+| `FILE_SPOOL_DIR` | path | 空 | | 文件传输临时中转目录（空则回落 `{workspaceBase}/tmp/file-transfer`；绑 `agent.file.spool-dir`） |
 | `FILE_EXTERNAL_URL_PREFIXES` | string (csv) | 空（**禁用**） | | `present_url` 外部交付的 URL 前缀白名单，**防 SSRF**。留空即禁用外部交付；发布助手在集群内需设 `http://oaf-platform-backend.agent-platform.svc.cluster.local:8080`（Helm 部署的后端 Service 名）。非白名单 URL 返回 403 |
 
 #### 4.1.6 会话清理（`AGENT_CLEANUP_*`，见 [api.md](api.md) §清理配置）
@@ -241,6 +270,10 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `AGENT_CLEANUP_TURN_LEASE_RENEW_SECONDS` | int | `20` | turn 续租间隔（秒） |
 | `AGENT_CLEANUP_AUDIT_RETENTION_DAYS` | int | `30` | `tool_audit_log` 保留天数 |
 | `AGENT_CLEANUP_SESSION_RETENTION_DAYS` | int | `7` | `agent_state` / `agent_fs` 保留天数 |
+| `AGENT_CLEANUP_SKILL_CACHE_GC_ENABLED` | bool | `true` | 本地技能同步缓存定时 GC 开关 |
+| `AGENT_CLEANUP_SKILL_CACHE_RETENTION_DAYS` | int | `2` | 技能缓存文件保留天数 |
+| `AGENT_CLEANUP_SKILL_CACHE_MAX_TOTAL_MB` | int | `5120` | 技能缓存目录总容量上限（MiB） |
+| `AGENT_CLEANUP_SANDBOX_BINDING_RETENTION_DAYS` | int | `7` | 过期 `sandbox_binding` 绑定行保留天数 |
 
 #### 4.1.7 链路追踪（OTel，详见 [tracing-design.md](tracing-design.md)）
 
@@ -254,7 +287,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `OTEL_METRICS_EXPORTER` | string | `none` | 镜像默认 `none`（统一关闭避免对 collector 的 404 噪音） |
 | `OTEL_LOGS_EXPORTER` | string | `none` | 镜像默认 `none` |
 | `OTEL_SERVICE_NAME` | string | `agent-framework` | 链路服务名 |
-| `OTEL_TRACES_EXPORTER` | string | — | **保持 unset**；设为 `none` 会关闭 Agent 的 trace 导出 |
+| `OTEL_TRACES_EXPORTER` | string | `none` | **保持 unset**；设为 `none` 会关闭 Agent 的 trace 导出 |
 
 #### 4.1.8 事件流存储 / Redis（`agent.redis.*`，绑 `AgentRedisProperties`）
 
@@ -384,9 +417,43 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 
 | 变量 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `AGENT_TURN_STOP_ENABLED` | bool | `true` | 总开关；`false` 时端点返回 404、属主不轮询，行为回退「只能断流」（绑 `agent.turn-stop.enabled`） |
+| `AGENT_TURN_STOP_ENABLED` | bool | `true` | 总开关；`false` 时端点返回 503、属主不轮询，行为回退「只能断流」（绑 `agent.turn-stop.enabled`） |
 | `AGENT_TURN_STOP_POLL_MS` | int | `1000` | 属主副本对 `turn_stop` 表的全局轮询周期（毫秒；所有活跃 turn 共用一次查询，成本与并发 turn 数无关，下限 100；绑 `agent.turn-stop.poll-interval-ms`） |
 | `AGENT_TURN_STOP_GRACE_MS` | int | `15000` | 协作式停止告警阈值：超时仍无终态打 WARN（通常是阻塞中的工具调用，SDK 检查点在工具返回后）（绑 `agent.turn-stop.grace-ms`） |
+
+#### 4.1.16 外部记忆 / OpenViking（`agent.memory.*` / `agent.viking.*`）
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_MEMORY_PROVIDER` | enum | `local` | 记忆提供方：`local`（默认 MySQL/文件）\| `openviking`（OpenViking 语义记忆） |
+| `OPENVIKING_URL` | string | 空 | OpenViking 服务地址 |
+| `OPENVIKING_ACCOUNT` | string | 空 | OpenViking 租户/账号标识 |
+| `OVK_ADMIN_KEY` | string | 空 | OpenViking 管理员 API 密钥（敏感键，建议走 Secret） |
+| `OVK_USER_SEED` | string | 空 | 派生 OpenViking 用户标识的盐值种子 |
+| `OVK_SESSION_COMMIT` | bool | `false` | 异步将对话会话归档提交至 OpenViking（与 `AGENT_MEMORY_ENABLED` 双开关门控） |
+| `OVK_MCP_SHARED_CONTEXT` | bool | `false` | 装配合成 `openviking` MCP 工具以访问共享知识上下文 |
+| `OVK_SEARCH_TIMEOUT_MS` | int | `2000` | OpenViking 检索请求超时（毫秒） |
+| `OVK_INJECT_CACHE_TTL_SECONDS` | int | `300` | OpenViking 检索上下文注入缓存 TTL（秒） |
+
+#### 4.1.17 浏览器人工接管（`agent.browser.*`，默认关闭）
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_BROWSER_ENABLED` | bool | `false` | 浏览器人工接管总开关；`false` 时零装配、接管端点 404 |
+| `AGENT_BROWSER_TAKEOVER_TTL_MINUTES` | int | `60` | 人工接管控制权锁 TTL（分钟，Redis key `brw:ctrl:{sid}`） |
+| `AGENT_BROWSER_VIEW_PORT` | int | `6080` | 沙箱内实时画面端口（websockify） |
+| `AGENT_BROWSER_VIEW_PATH` | string | `/websockify` | 沙箱内 VNC WebSocket 上游路径 |
+| `AGENT_BROWSER_VNC_TICKET_TTL_SECONDS` | int | `60` | 一次性 VNC WS ticket 有效期（秒，消费即销毁） |
+| `AGENT_BROWSER_ALLOWED_ORIGIN_PATTERNS` | string (csv) | 空 | VNC WS 握手 Origin 白名单（逗号分隔）；空 = 同源放行，禁止无主机约束通配符（如 `*`） |
+
+#### 4.1.18 会话上下文、MCP 探活与 Actuator 管理端口
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_SESSION_CONTEXT_MAX_TOTAL_CHARS` | int | `30000` | 单会话 `POST /threads/{sid}/context` 注入参考资料合计字符上限（超限 413） |
+| `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | int | `30` | MCP 连接看门狗探活周期（秒，≤0 关闭） |
+| `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | int | `5` | 单次 MCP `listTools` 探活超时（秒） |
+| `MANAGEMENT_SERVER_PORT` | int | `9091` | Spring Boot Actuator 独立管理端口（暴露 `health,metrics,prometheus`） |
 
 ### 4.2 AGENTS.md 配置字段
 
@@ -404,6 +471,13 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `deniedTools` | list | | 排除的工具 |
 | `model` | object/string | | 模型配置 |
 | `agents` | list | | 子 Agent 声明 |
+| `config.require_confirmation` | bool | | MCP 未声明工具的默认兜底确认开关（`true` 一律 `ask`） |
+| `config.permission.mode` | enum | | 全局权限模式：`default` \| `accept_edits` \| `explore` \| `bypass` \| `dont_ask` |
+| `config.permission.tools` | map | | 自定义/内置工具精确名三态映射（`allow` \| `ask` \| `deny`） |
+| `config.sandbox.enabled` | bool | | 包级沙箱开关（优先级低于部署侧 `SANDBOX_ENABLED`） |
+| `harnessConfig` | object | | Harness 扩展配置（如 `deep-agents.a2ui.catalog_id`） |
+
+> 完整带逐项中文注释的 `AGENTS.md` 示例见 [`agent-framework/example/full-config-example/AGENTS.md`](../example/full-config-example/AGENTS.md)。
 
 ---
 
@@ -416,15 +490,37 @@ server: weather-service
 vendor: weather
 version: "1.0.0"
 connection:
-  type: streamableHttp   # sse / streamableHttp / stdio
+  type: streamableHttp          # sse（默认）| streamableHttp | http | stdio
   url: http://127.0.0.1:8811/mcp
-  timeout: 60
 auth:
-  type: bearer
-  token: ${MCP_TOKEN}    # 支持环境变量
+  token: ${MCP_TOKEN}           # 支持 ${ENV_VAR}，注入 Authorization: Bearer <token>
+userHeaders:                    # 可选：多租户用户身份与入站头透传
+  headers:
+    X-User-Id: userId           # userId 或 reqHeader:<小写头名>
+    X-Trace-Id: "reqHeader:x-request-id"
+  arguments:                    # 可选：自动补缺注入工具 params.arguments
+    operator_id: userId
+  on-missing: deny              # deny（默认）| passthrough
 permissions:
-  read_only: true         # 强制工具只读，绕过 HITL 授权
+  read_only: false              # 设为 true 会短路 HITL，切勿与 ask 混用
+  tools:                        # 按远端工具裸名声明三态：allow | ask | deny
+    get_weather: allow
+direct_return:                  # 可选：命中工具执行成功后结果原样直返前端、短路 ReAct
+  tools:
+    - export_report
+ui:                             # 可选：MCP Apps 前端卡片声明
+  tools:
+    show_chart: "ui://weather/chart.html"
+  app_only:
+    refresh_chart: "ui://weather/chart.html"
+  csp:
+    connect_domains: ["https://api.example.com"]
+    resource_domains: ["https://cdn.example.com"]
+startup:
+  required: false               # false=fail-soft（默认），true=启动强依赖
 ```
+
+> 完整带逐项中文注释的 `config.yaml` 与 `ActiveMCP.json` 示例见 [`agent-framework/example/full-config-example/mcp-configs/example-server/`](../example/full-config-example/mcp-configs/example-server/)。
 
 ### 5.2 permissions.read_only 说明
 
@@ -484,14 +580,14 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/threads/{sid}/status` | **刷新恢复判态**（5 态；存储不可用返回 503） |
 | POST | `/threads/chat` | 单次流 SSE 对话（唯一对话入口，sessionId 在 body，支持 fileIds / model） |
 | POST | `/threads/{sid}/confirm` / `/confirm-stream` | HITL 人工确认（同步 / 流式） |
-| POST | `/threads/{sid}/stop` | 跨副本协作式单轮停止（写 `turn_stop` 表由属主副本消费 interrupt，以 `cancelled` 终态帧收口；202/404/409/503，`AGENT_TURN_STOP_ENABLED=false` 时 404） |
+| POST | `/threads/{sid}/stop` | 跨副本协作式单轮停止（写 `turn_stop` 表由属主副本消费 interrupt，以 `cancelled` 终态帧收口；202/404/409/503，`AGENT_TURN_STOP_ENABLED=false` 时 503） |
 | POST | `/files/upload` | 文件上传 |
 | GET | `/files/{fileId}` | 文件下载/预览（`?inline=1` 内联） |
 | GET/POST | `/models` | 托管模型列表 / 新建（会话模型选择器的数据源） |
 | GET/PATCH/DELETE | `/models/{id}` | 托管模型详情 / 更新 / 删除 |
 | POST | `/models/{id}/test` | 模型连通性测试（失败 502） |
 | POST/GET | `/admin/reload` | OAF 包热加载（`?scope=auto`、`mcp`、`agent`）/ 只读状态 |
-| GET | `/actuator/health` | Actuator 健康检查（yml 无 `management:` 段，**只暴露 health**） |
+| GET | `:9091/actuator/{health,metrics,prometheus}` | Actuator 独立管理端口（`MANAGEMENT_SERVER_PORT`，默认 `9091`，暴露 `health,metrics,prometheus`；主端口 `8100` 不暴露） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 | POST/GET | `/a2a/jobs`、`/a2a/jobs/{key}` | A2A 幂等 Job 提交 / 状态查询（**默认关闭**，`AGENT_A2A_JOB_ENABLED=true` 开启；header `Idempotency-Key` + `Agent-A2A-Job-Token`） |
 | POST/GET | `/tasks`、`/tasks/{id}`、`/tasks/{id}/wait`、`/tasks/{id}/cancel`、`/tasks/{id}/events`、`/tasks/{id}/resume` | Agent Protocol 远程子 agent 服务端（**默认关闭**，`AGENT_PROTOCOL_ENABLED=true` 开启；`/tasks/{id}/events` 为 SSE；端点均在 `/tasks*` 认证 filter 覆盖面内，`AgentProtocolConfig.java:187`） |

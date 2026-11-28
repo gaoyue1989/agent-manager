@@ -14,14 +14,26 @@ export default function MemoryPage() {
   const [keyword, setKeyword] = useState("");
   const [selected, setSelected] = useState<number>(0);
   const [loading, setLoading] = useState(false);
+  const reqSeqRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!ws) return;
+    const seq = ++reqSeqRef.current;
     setLoading(true);
-    try { setRows(await api.console.memorySupply(ws, keyword)); } catch { setRows([]); }
-    setLoading(false);
+    try {
+      const next = await api.console.memorySupply(ws, keyword);
+      if (seq !== reqSeqRef.current) return;
+      setRows(next);
+    } catch {
+      if (seq !== reqSeqRef.current) return;
+      setRows([]);
+    }
+    if (seq === reqSeqRef.current) setLoading(false);
   }, [ws, keyword]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    return () => { reqSeqRef.current += 1; };
+  }, [load]);
 
   const sel = rows.find((r) => r.serviceId === selected) || null;
   const ovRows = rows.filter((r) => r.provider === "openviking");
@@ -68,8 +80,8 @@ export default function MemoryPage() {
 
       {sel && sel.provider === "openviking" && (
         <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
-          <MemoryCredentialCard ws={ws} item={sel} />
-          <MemoryBrowserCard ws={ws} item={sel} />
+          <MemoryCredentialCard key={sel.serviceId} ws={ws} item={sel} />
+          <MemoryBrowserCard key={sel.serviceId} ws={ws} item={sel} />
         </div>
       )}
       {!sel && ovRows.length > 0 && (
@@ -84,14 +96,30 @@ function MemoryCredentialCard({ ws, item }: { ws: number; item: MemorySupplyItem
   const [issuing, setIssuing] = useState(false);
   const [issued, setIssued] = useState<{ userKey: string; openVikingUrl: string } | null>(null);
   const [msg, setMsg] = useState("");
+  const mountedRef = useRef(true);
+  const reqSeqRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      reqSeqRef.current += 1;
+    };
+  }, [ws, item.serviceId]);
 
   const issue = async () => {
+    const seq = ++reqSeqRef.current;
     setIssuing(true); setMsg("");
     try {
       const out = await api.console.issueMemoryKey(ws, item.serviceId);
+      if (!mountedRef.current || seq !== reqSeqRef.current) return;
       setIssued({ userKey: out.userKey, openVikingUrl: out.openVikingUrl });
-    } catch (e: any) { setMsg(e.message); }
-    setIssuing(false);
+    } catch (e: any) {
+      if (!mountedRef.current || seq !== reqSeqRef.current) return;
+      setMsg(e.message);
+    } finally {
+      if (mountedRef.current && seq === reqSeqRef.current) setIssuing(false);
+    }
   };
 
   return (

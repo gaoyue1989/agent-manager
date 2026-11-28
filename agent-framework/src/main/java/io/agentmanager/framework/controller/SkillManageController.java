@@ -57,13 +57,17 @@ public class SkillManageController {
      * 区别于 GET /skills（只返回启用的），此端点返回全部，供管理页面使用。
      */
     @GetMapping("/manage")
-    public List<Map<String, Object>> listAll() {
-        return catalogService.listAll();
+    public ResponseEntity<List<Map<String, Object>>> listAll() {
+        return ResponseEntity.ok()
+            .header("X-Skills-Read-Only", String.valueOf(manageService.isReadOnly()))
+            .header("X-Skills-Toggle-Writable", String.valueOf(manageService.isToggleWritable()))
+            .body(catalogService.listAll());
     }
 
     /**
      * 列出可用的 Skill 摘要（供前端 /Skill 提示使用）。
-     * 仅返回已启用 Skill 的 name + description，精简字段降低传输开销。
+     * 仅返回已启用 Skill 的 name + description + displayName（中文显示名，SKILL.md
+     * frontmatter 的 displayName 字段，缺省空串），精简字段降低传输开销。
      * 前端可在输入框中检测 / 符号后调用此接口展示候选列表。
      */
     @GetMapping("/available")
@@ -114,6 +118,9 @@ public class SkillManageController {
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> upload(
             @RequestParam("file") MultipartFile file) {
+        if (manageService.isReadOnly()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载，不支持上传系统技能");
+        }
         if (file == null || file.isEmpty()) {
             return err(HttpStatus.BAD_REQUEST, "no_file", "请选择要上传的 zip 文件");
         }
@@ -151,6 +158,9 @@ public class SkillManageController {
         // 安全校验：防止路径注入
         if (name.contains("..") || name.contains("/") || name.contains("\\") || name.startsWith(".")) {
             return err(HttpStatus.BAD_REQUEST, "invalid_name", "无效的 Skill 名称");
+        }
+        if (manageService.isReadOnly()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载，不支持删除系统技能");
         }
         try {
             var deleted = manageService.deleteSkill(name);
@@ -201,6 +211,9 @@ public class SkillManageController {
         if (name.contains("..") || name.contains("/") || name.contains("\\") || name.startsWith(".")) {
             return err(HttpStatus.BAD_REQUEST, "invalid_name", "无效的 Skill 名称");
         }
+        if (!manageService.isToggleWritable()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载且未配置共享数据库，不支持切换系统技能状态");
+        }
         try {
             var nowEnabled = manageService.toggleSkill(name);
             var status = nowEnabled ? "已启用" : "已禁用";
@@ -249,6 +262,9 @@ public class SkillManageController {
         // 大小限制 100KB
         if (content.getBytes(StandardCharsets.UTF_8).length > 100 * 1024) {
             return err(HttpStatus.PAYLOAD_TOO_LARGE, "content_too_large", "SKILL.md 内容超过 100KB 限制");
+        }
+        if (manageService.isReadOnly()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载，不支持编辑系统技能");
         }
         try {
             manageService.writeSkillContent(name, content);

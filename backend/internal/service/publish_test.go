@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -874,4 +875,95 @@ func TestPublishObjectNameBudget(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrInvalidForm) || !strings.Contains(err.Error(), "name too long (max 128)") {
 		t.Fatalf("200-rune name: %v", err)
 	}
+}
+
+func TestRepublishRejectsCrossWorkspacePackage(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkgA := uploadTestPkg(t, core, "")
+	pkgB := uploadTestPkg(t, core, "2")
+	pubPkg := uploadTestPkg(t, core, "3")
+	if err := core.DB.Model(&store.OafPackage{}).Where("id = ?", pkgA.ID).Update("workspace_id", 10).Error; err != nil {
+		t.Fatalf("update pkgA ws: %v", err)
+	}
+	if err := core.DB.Model(&store.OafPackage{}).Where("id = ?", pkgB.ID).Update("workspace_id", 20).Error; err != nil {
+		t.Fatalf("update pkgB ws: %v", err)
+	}
+	svc := publishToRegisterFailed(t, core, fk, pkgA.ID, "")
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("workspace_id", 10).Error; err != nil {
+		t.Fatalf("update svc ws: %v", err)
+	}
+	if _, err := core.Republish(svc.ID, RepublishOptions{PackageID: &pkgB.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-workspace package, got %v", err)
+	}
+	updated, err := core.Republish(svc.ID, RepublishOptions{PackageID: &pubPkg.ID})
+	if err != nil {
+		t.Fatalf("public package should be allowed, got %v", err)
+	}
+	if updated.PackageID != pubPkg.ID {
+		t.Fatalf("expected package_id %d, got %d", pubPkg.ID, updated.PackageID)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
+}
+
+func TestRepublishOptionsJSONIgnoresInternalFields(t *testing.T) {
+	raw := []byte(`{"packageId":42,"ProvisionSandboxPool":true,"Actor":1}`)
+	var opt RepublishOptions
+	if err := json.Unmarshal(raw, &opt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if opt.PackageID == nil || *opt.PackageID != 42 {
+		t.Fatalf("expected packageId=42, got %v", opt.PackageID)
+	}
+	if opt.ProvisionSandboxPool {
+		t.Fatalf("ProvisionSandboxPool must not be bindable from JSON")
+	}
+	if opt.Actor != 0 {
+		t.Fatalf("Actor must not be bindable from JSON, got %d", opt.Actor)
+	}
+}
+
+func TestMaxEnvKeysConsistentAcrossPlatformKeysDeleteAndPool630(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+
+	env64 := make(map[string]string, MaxEnvKeys)
+	for i := 0; i < MaxEnvKeys-1; i++ {
+		env64[fmt.Sprintf("USER_K_%02d", i)] = "v"
+	}
+	env64["LLM_API_KEY"] = "secret-v1"
+	svc, err := core.Publish(PublishRequest{
+		Name: "max64-svc", PackageID: pkg.ID, Image: "agent-framework:latest",
+		Env: env64, ProvisionSandboxPool: true,
+	})
+	if err != nil {
+		t.Fatalf("64-key publish without OpenSandbox config must succeed, got %v", err)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusDeployFailed)
+
+	updateEnv := make(map[string]string, MaxEnvKeys+1)
+	for i := 0; i < MaxEnvKeys-1; i++ {
+		updateEnv[fmt.Sprintf("USER_K_%02d", i)] = "v"
+	}
+	updateEnv["LLM_API_KEY"] = ""
+	updateEnv["NEW_PLAIN_KEY"] = "added"
+	if _, err := core.UpdateEnv(svc.ID, updateEnv, nil); err != nil {
+		t.Fatalf("64-key delete secret + add plain must succeed, got %v", err)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusDeployFailed)
+
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("env_secret_json", `{"OVK_ADMIN_KEY":"adm","OVK_USER_SEED":"seed"}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	same64 := make(map[string]string, MaxEnvKeys)
+	for i := 0; i < MaxEnvKeys-1; i++ {
+		same64[fmt.Sprintf("USER_K_%02d", i)] = "v"
+	}
+	same64["NEW_PLAIN_KEY"] = "added"
+	if _, err := core.UpdateEnv(svc.ID, same64, nil); err != nil {
+		t.Fatalf("UpdateEnv with 64 user keys + 2 platform injected secret keys must succeed, got %v", err)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusDeployFailed)
 }

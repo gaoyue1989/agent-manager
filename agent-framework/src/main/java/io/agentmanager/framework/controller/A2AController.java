@@ -75,7 +75,7 @@ public class A2AController {
             @RequestHeader Map<String, String> header) {
         var converted = normalizeMessageSendBody(body, headerUserId);
         if (converted == null) {
-            return sessionAccessDenied(null);
+            return rejectionFor(body, sessionAccessDenied(null));
         }
 
         var rejection = recordSessionUser(converted, headerUserId);
@@ -205,11 +205,14 @@ public class A2AController {
             // 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId
             @SuppressWarnings("unchecked")
             var legacyMeta = (Map<String, Object>) params.get("metadata");
-            if (legacyMeta != null && !meta.containsKey("sessionId")) {
-                var tid = legacyMeta.get("thread_id");
-                if (tid != null && !tid.toString().isBlank()) {
-                    meta.put("sessionId", tid.toString());
+            if (legacyMeta != null) {
+                if (!meta.containsKey("sessionId")) {
+                    var tid = legacyMeta.get("thread_id");
+                    if (tid != null && !tid.toString().isBlank()) {
+                        meta.put("sessionId", tid.toString());
+                    }
                 }
+                // userId 回填与 sessionId 独立：新格式 sessionId + 旧格式 userId 可混用。
                 var uid = legacyMeta.get("userId");
                 if (uid != null && !meta.containsKey("userId")) {
                     meta.put("userId", uid.toString());
@@ -223,6 +226,9 @@ public class A2AController {
                 }
             }
             canonicalizeReservedMeta(meta);
+            var effectiveUserId = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(
+                nonBlank(sdkMetaString(meta, "userId")));
+            meta.put("userId", effectiveUserId);
             var effectiveSessionId = nonBlank(sdkMetaString(meta, "sessionId"));
             if (effectiveSessionId != null) {
                 meta.put("sessionId", io.agentmanager.framework.util.PathSafe.sanitize(effectiveSessionId));
@@ -391,22 +397,29 @@ public class A2AController {
      */
     @SuppressWarnings("unchecked")
     private Object recordSessionUser(String body, String headerUserId) {
+        Object requestId = null;
+        boolean ownershipCheckReached = false;
         try {
             var req = MAPPER.readValue(body, Map.class);
-            var method = (String) req.get("method");
-            if (!"message/send".equals(method) && !"message/stream".equals(method)) {
+            requestId = req.get("id");
+            var methodObj = req.get("method");
+            if (!(methodObj instanceof String method)
+                    || (!"message/send".equals(method) && !"message/stream".equals(method))) {
                 return null;
             }
-            var params = (Map<String, Object>) req.get("params");
-            if (params == null) return null;
-            var message = (Map<String, Object>) params.get("message");
-            if (message == null) return null;
+            if (!(req.get("params") instanceof Map<?, ?> rawParams)) {
+                return null;
+            }
+            var params = (Map<String, Object>) rawParams;
+            if (!(params.get("message") instanceof Map<?, ?> rawMessage)) {
+                return null;
+            }
+            var message = (Map<String, Object>) rawMessage;
 
-            // 从 message.metadata 中提取（normalizeMessageSendBody 已将顶层参数挪入 metadata）
-            var meta = (Map<String, Object>) message.get("metadata");
+            Map<String, Object> meta = message.get("metadata") instanceof Map<?, ?> rawMeta
+                ? (Map<String, Object>) rawMeta : null;
             var userId = nonBlank(sdkMetaString(meta, "userId"));
             var sessionId = nonBlank(sdkMetaString(meta, "sessionId"));
-            // 兜底：顶层参数（兼容未经 normalize 的请求）
             if (userId == null) {
                 userId = nonBlank(sdkMetaString(params, "userId"));
             }
@@ -414,22 +427,27 @@ public class A2AController {
                 sessionId = nonBlank(sdkMetaString(params, "sessionId"));
             }
 
+            var effectiveUid = io.agentmanager.framework.service.SessionAccessGuard.normalizeRequester(userId);
             if (sessionId == null) {
+                sessionUserStore.upsert("a2a-user:" + effectiveUid, effectiveUid);
                 return null;
             }
             var sanitizedSid = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
-            var sanitizedUid = userId != null ? io.agentmanager.framework.util.PathSafe.sanitize(userId) : null;
+            ownershipCheckReached = true;
             if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
-                    sessionUserStore, sanitizedSid, sanitizedUid)) {
-                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, sanitizedUid);
-                return sessionAccessDenied(req.get("id"));
+                    sessionUserStore, sanitizedSid, effectiveUid)) {
+                log.info("[A2A] reject foreign session access: sid={}, userId={}", sanitizedSid, effectiveUid);
+                return sessionAccessDenied(requestId);
             }
-            if (sanitizedUid != null) {
-                sessionUserStore.upsert(sanitizedSid, sanitizedUid);
-                log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, sanitizedUid);
-            }
+            ownershipCheckReached = false;
+            sessionUserStore.upsert(sanitizedSid, effectiveUid);
+            log.debug("[A2A] session_user upsert: sid={}, uid={}", sanitizedSid, effectiveUid);
             return null;
         } catch (Exception e) {
+            if (ownershipCheckReached || (headerUserId != null && !headerUserId.isBlank())) {
+                log.warn("[A2A] recordSessionUser failed closed: {}", e.getMessage());
+                return sessionAccessDenied(requestId);
+            }
             log.debug("[A2A] recordSessionUser skipped: {}", e.getMessage());
             return null;
         }

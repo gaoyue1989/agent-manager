@@ -46,6 +46,14 @@ public class McpUserContextMiddleware implements MiddlewareBase {
         this.sessionKeyResolver = sessionUserStore != null ? new SessionKeyResolver(sessionUserStore) : null;
     }
 
+    private McpUserContextMiddleware(SessionKeyResolver sessionKeyResolver, boolean direct) {
+        this.sessionKeyResolver = sessionKeyResolver;
+    }
+
+    public static McpUserContextMiddleware withResolver(SessionKeyResolver sessionKeyResolver) {
+        return new McpUserContextMiddleware(sessionKeyResolver, true);
+    }
+
     @Override
     public Flux<AgentEvent> onAgent(Agent agent, RuntimeContext ctx, AgentInput input,
                                     Function<AgentInput, Flux<AgentEvent>> next) {
