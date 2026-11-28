@@ -38,6 +38,8 @@ public final class ActingDenials {
 
     private static final class BridgeSlot {
         final ConcurrentLinkedQueue<AgentEvent> queue = new ConcurrentLinkedQueue<>();
+        final Set<String> suppressedIds = ConcurrentHashMap.newKeySet();
+        volatile AgentState state;
         volatile boolean active = true;
     }
 
@@ -56,20 +58,24 @@ public final class ActingDenials {
         var slot = new BridgeSlot();
         var agentEndEmitted = new AtomicBoolean(false);
         ctx.put(EVENT_BRIDGE_KEY, slot);
+        ctx.put(SUPPRESSED_DIRECT_RETURN_IDS_KEY, slot.suppressedIds);
         return next.apply(input)
             .concatMap(event -> {
-                if (event instanceof AgentEndEvent) {
+                restoreSuppressedToolResults(slot.state, slot.suppressedIds);
+                AgentEvent effective = restoreSuppressedEndEvent(event, slot.suppressedIds);
+                if (effective instanceof AgentEndEvent) {
                     agentEndEmitted.set(true);
                     slot.active = false;
                 }
                 var drained = drain(slot.queue);
                 if (drained.isEmpty()) {
-                    return Flux.just(event);
+                    return Flux.just(effective);
                 }
-                drained.add(event);
+                drained.add(effective);
                 return Flux.fromIterable(drained);
             })
             .concatWith(Flux.defer(() -> {
+                restoreSuppressedToolResults(slot.state, slot.suppressedIds);
                 if (agentEndEmitted.get()) {
                     slot.queue.clear();
                     return Flux.empty();
@@ -78,11 +84,13 @@ public final class ActingDenials {
                 return remaining.isEmpty() ? Flux.empty() : Flux.fromIterable(remaining);
             }))
             .doFinally(sig -> {
+                restoreSuppressedToolResults(slot.state, slot.suppressedIds);
                 slot.active = false;
                 try {
                     var extra = ctx.getExtra();
                     if (extra != null) {
                         extra.remove(EVENT_BRIDGE_KEY, slot);
+                        extra.remove(SUPPRESSED_DIRECT_RETURN_IDS_KEY, slot.suppressedIds);
                     }
                 } catch (UnsupportedOperationException ignored) {
                 }
@@ -158,7 +166,11 @@ public final class ActingDenials {
         if (allowed.isEmpty()) {
             return Flux.fromIterable(syntheticEvents);
         }
-        Set<String> suppressedIds = ConcurrentHashMap.newKeySet();
+        final BridgeSlot activeBridge = bridge;
+        Set<String> suppressedIds = activeBridge != null ? activeBridge.suppressedIds : ConcurrentHashMap.newKeySet();
+        if (activeBridge != null) {
+            activeBridge.state = state;
+        }
         Flux<AgentEvent> allowedFlux = Flux.defer(() -> {
             if (ctx != null) {
                 ctx.put(SUPPRESS_DIRECT_RETURN_KEY, Boolean.TRUE);
@@ -168,18 +180,46 @@ public final class ActingDenials {
                 .map(evt -> restoreSuppressedEndEvent(evt, suppressedIds))
                 .doOnComplete(() -> restoreSuppressedToolResults(state, suppressedIds));
         }).doFinally(sig -> {
+            restoreSuppressedToolResults(state, suppressedIds);
             if (ctx != null) {
                 try {
                     var extra = ctx.getExtra();
                     if (extra != null) {
                         extra.remove(SUPPRESS_DIRECT_RETURN_KEY, Boolean.TRUE);
-                        extra.remove(SUPPRESSED_DIRECT_RETURN_IDS_KEY, suppressedIds);
+                        if (activeBridge == null) {
+                            extra.remove(SUPPRESSED_DIRECT_RETURN_IDS_KEY, suppressedIds);
+                        }
                     }
                 } catch (UnsupportedOperationException ignored) {
                 }
             }
         });
         return Flux.concat(Flux.fromIterable(syntheticEvents), allowedFlux);
+    }
+
+    public static ToolResultState effectiveResultState(RuntimeContext ctx, ToolResultEndEvent end) {
+        if (end == null) {
+            return null;
+        }
+        if (end.getState() == ToolResultState.ERROR
+                && end.getToolCallId() != null
+                && ctx != null
+                && ctx.get(SUPPRESSED_DIRECT_RETURN_IDS_KEY) instanceof Set<?> rawSet
+                && rawSet.contains(end.getToolCallId())) {
+            return ToolResultState.SUCCESS;
+        }
+        return end.getState();
+    }
+
+    public static void restoreSuppressedToolResults(AgentState state, RuntimeContext ctx) {
+        if (state == null || ctx == null) {
+            return;
+        }
+        if (ctx.get(SUPPRESSED_DIRECT_RETURN_IDS_KEY) instanceof Set<?> rawSet && !rawSet.isEmpty()) {
+            @SuppressWarnings("unchecked")
+            Set<String> idSet = (Set<String>) rawSet;
+            restoreSuppressedToolResults(state, idSet);
+        }
     }
 
     private static AgentEvent restoreSuppressedEndEvent(AgentEvent evt, Set<String> suppressedIds) {

@@ -244,10 +244,10 @@ final class SkillsFarm {
     private StoreProbe probeStore(String store) {
         try {
             var execution = osbSandbox.commands().run("readlink '" + store + "/CURRENT' && test -d '" + store + "/CURRENT'");
-            if (execution == null || execution.getExitCode() == null || execution.getError() != null) {
+            if (execution == null || execution.getExitCode() == null) {
                 return new StoreProbe(null, false, true);
             }
-            if (Integer.valueOf(0).equals(execution.getExitCode())) {
+            if (Integer.valueOf(0).equals(execution.getExitCode()) && execution.getError() == null) {
                 var stdout = execution.getLogs() != null && execution.getLogs().getStdout() != null
                     ? execution.getLogs().getStdout().stream()
                         .map(msg -> msg.getText())
@@ -499,6 +499,9 @@ final class SkillsFarm {
             pkgDisabled = checker.packageDisabled();
         } catch (Exception e) {
             pkgDisabled = Set.of();
+        }
+        if (pkgDisabled != null) {
+            disabled.addAll(pkgDisabled);
         }
         for (String name : endpointSkills) {
             if (pkgDisabled.contains(name)) {

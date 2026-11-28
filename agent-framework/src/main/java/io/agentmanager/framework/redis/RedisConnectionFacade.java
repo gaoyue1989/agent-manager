@@ -137,7 +137,9 @@ public final class RedisConnectionFacade implements AutoCloseable {
             logClusterSummary(props, client);
             return new RedisConnectionFacade(props, null, client);
         }
-        var client = RedisClient.create(RedisURI.create(props.url()));
+        var uri = RedisURI.create(props.url());
+        uri.setTimeout(Duration.ofMillis(props.commandTimeoutMs()));
+        var client = RedisClient.create(uri);
         client.setOptions(standaloneOptions(props));
         log.info("RedisClient configured (mode=standalone, host={}:{}, db={}, commandTimeout={}ms, "
                 + "connectTimeout={}ms, maxLenPerStream={}, prefix=\"{}\")",
@@ -156,7 +158,9 @@ public final class RedisConnectionFacade implements AutoCloseable {
         }
         var uris = new ArrayList<RedisURI>(nodeStrings.size());
         for (var s : nodeStrings) {
-            uris.add(RedisURI.create(s));
+            var u = RedisURI.create(s);
+            u.setTimeout(Duration.ofMillis(props.commandTimeoutMs()));
+            uris.add(u);
         }
         return uris;
     }
@@ -366,10 +370,49 @@ public final class RedisConnectionFacade implements AutoCloseable {
         }
     }
 
+    private final java.util.concurrent.atomic.AtomicBoolean pubSubConnecting = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile long pubSubNextAttemptAtMs = 0L;
+    private volatile long pubSubBackoffMs = 5_000L;
+    private static final long PUBSUB_BACKOFF_MIN_MS = 5_000L;
+    private static final long PUBSUB_BACKOFF_MAX_MS = 30_000L;
+
+    public void ensurePubSubSubscribedAsync() {
+        if (closed || subscribedChannels.isEmpty()) {
+            return;
+        }
+        var conn = pubSubConn;
+        if (conn != null && conn.isOpen()) {
+            return;
+        }
+        if (System.currentTimeMillis() < pubSubNextAttemptAtMs) {
+            return;
+        }
+        if (!pubSubConnecting.compareAndSet(false, true)) {
+            return;
+        }
+        var exec = pubSubDispatchExecutor();
+        if (exec == null) {
+            pubSubConnecting.set(false);
+            return;
+        }
+        try {
+            exec.execute(() -> {
+                try {
+                    ensurePubSubSubscribed();
+                } finally {
+                    pubSubConnecting.set(false);
+                }
+            });
+        } catch (Exception e) {
+            pubSubConnecting.set(false);
+        }
+    }
+
     public void ensurePubSubSubscribed() {
         if (closed || subscribedChannels.isEmpty()) {
             return;
         }
+        StatefulRedisPubSubConnection<String, String> stale = null;
         synchronized (pubSubLock) {
             if (closed || subscribedChannels.isEmpty()) {
                 return;
@@ -379,21 +422,62 @@ public final class RedisConnectionFacade implements AutoCloseable {
                 resubscribeAll(conn);
                 return;
             }
-            try {
-                StatefulRedisPubSubConnection<String, String> fresh = clusterMode
-                    ? clusterClient.connectPubSub()
-                    : standaloneClient.connectPubSub();
-                fresh.addListener(new RedisPubSubAdapter<>() {
-                    @Override
-                    public void message(String channel, String message) {
-                        dispatchPubSubMessage(channel, message);
-                    }
-                });
-                pubSubConn = fresh;
-                resubscribeAll(fresh);
-            } catch (Exception e) {
-                log.debug("RedisConnectionFacade: pub/sub connect failed (will retry): {}", e.toString());
+            if (conn != null) {
+                stale = conn;
+                pubSubConn = null;
             }
+        }
+        if (stale != null) {
+            try {
+                stale.close();
+            } catch (Exception ignored) {
+            }
+        }
+        StatefulRedisPubSubConnection<String, String> fresh;
+        try {
+            fresh = clusterMode
+                ? clusterClient.connectPubSub()
+                : standaloneClient.connectPubSub();
+            fresh.addListener(new RedisPubSubAdapter<>() {
+                @Override
+                public void message(String channel, String message) {
+                    dispatchPubSubMessage(channel, message);
+                }
+            });
+        } catch (Exception e) {
+            long delay = pubSubBackoffMs;
+            pubSubNextAttemptAtMs = System.currentTimeMillis() + delay;
+            pubSubBackoffMs = Math.min(delay * 2, PUBSUB_BACKOFF_MAX_MS);
+            log.debug("RedisConnectionFacade: pub/sub connect failed (will retry in {}ms): {}", delay, e.toString());
+            return;
+        }
+        synchronized (pubSubLock) {
+            if (closed) {
+                try {
+                    fresh.close();
+                } catch (Exception ignored) {
+                }
+                return;
+            }
+            var existing = pubSubConn;
+            if (existing != null && existing.isOpen()) {
+                try {
+                    fresh.close();
+                } catch (Exception ignored) {
+                }
+                resubscribeAll(existing);
+                return;
+            }
+            if (existing != null) {
+                try {
+                    existing.close();
+                } catch (Exception ignored) {
+                }
+            }
+            pubSubConn = fresh;
+            pubSubBackoffMs = PUBSUB_BACKOFF_MIN_MS;
+            pubSubNextAttemptAtMs = 0L;
+            resubscribeAll(fresh);
         }
     }
 

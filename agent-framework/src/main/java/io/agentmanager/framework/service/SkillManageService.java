@@ -334,7 +334,7 @@ public class SkillManageService {
      * 与 bundle 打包收录同一目录）。路径越出 skills 目录
      * 抛 {@link IllegalArgumentException}；无匹配返回 null，由调用方按各自契约处理。
      */
-    private Path resolveSkillDir(String name) {
+    public Path resolveSkillDir(String name) {
         if (name == null || name.isBlank()) {
             return null;
         }

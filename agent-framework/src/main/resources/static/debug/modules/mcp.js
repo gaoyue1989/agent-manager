@@ -18,22 +18,37 @@ export default {
       <div class="module-scroll" id="mcpBody"><div class="empty">Loading...</div></div>
     </div>`;
     document.getElementById('btnRefreshMcp').addEventListener('click', loadMcp);
-    document.getElementById('btnReloadAllMcp').addEventListener('click', () => reloadMcpServer(null));
+    document.getElementById('btnReloadAllMcp').addEventListener('click', (e) => reloadMcpServer(null, e.currentTarget));
     loadMcp();
   },
   unmount() { ctx = null; }
 };
 
-async function reloadMcpServer(serverName) {
+async function reloadMcpServer(serverName, btnEl) {
+  if (!serverName && !window.confirm('确认重载全部 MCP 服务？重连期间相关工具调用可能短暂受影响。')) {
+    return;
+  }
+  if (btnEl) btnEl.disabled = true;
   try {
     const res = await ctx.api.triggerReload('mcp', serverName || undefined);
     if (!ctx) return;
-    ctx.utils.toast((serverName ? 'Reloaded ' + serverName : 'Reloaded all MCP servers') +
-      (res && res.error ? ' (' + res.error + ')' : ''), res && res.error ? 'warn' : 'success');
+    const failedServers = Array.isArray(res && res.mcp_servers)
+      ? res.mcp_servers.filter((item) => item && item.ok === false)
+      : [];
+    if (res && res.error) {
+      ctx.utils.toast((serverName ? '重载 ' + serverName : '重载 MCP') + ' 异常: ' + res.error, 'error');
+    } else if (failedServers.length > 0) {
+      const names = failedServers.map((item) => (item.server || '?') + '(' + (item.action || 'failed') + ')').join(', ');
+      ctx.utils.toast('部分 MCP 重载失败: ' + names, 'warn');
+    } else {
+      ctx.utils.toast(serverName ? '已重载 ' + serverName : '已重载全部 MCP 服务', 'success');
+    }
     await loadMcp();
   } catch (e) {
     if (!ctx) return;
     ctx.utils.toast('MCP 重载失败: ' + e.message, 'error');
+  } finally {
+    if (btnEl) btnEl.disabled = false;
   }
 }
 
@@ -46,7 +61,17 @@ async function loadMcp() {
     ]);
     if (!ctx) return;
     mcpData = servers || [];
-    regStatus = (reloadInfo && reloadInfo.registeredServers) || {};
+    const rawReg = reloadInfo && reloadInfo.registeredServers;
+    if (Array.isArray(rawReg)) {
+      regStatus = {};
+      for (const item of rawReg) {
+        if (item && item.server) regStatus[item.server] = item;
+      }
+    } else if (rawReg && typeof rawReg === 'object') {
+      regStatus = rawReg;
+    } else {
+      regStatus = {};
+    }
   } catch (e) {
     if (!ctx) return;
     body.innerHTML = '<div class="empty error-text">Failed to load MCP servers: ' + ctx.utils.esc(e.message) + '</div>';
@@ -61,11 +86,21 @@ async function loadMcp() {
 
   body.innerHTML = mcpData.map((m, idx) => {
     const serverName = m.server || '?';
-    const live = regStatus[serverName];
-    const liveBadge = live !== undefined
-      ? '<span class="badge ' + (String(live).toLowerCase().includes('fail') || String(live).toLowerCase().includes('err') ? 'red' : 'green') + '">' +
-        ctx.utils.esc(typeof live === 'object' ? (live.status || JSON.stringify(live)) : String(live)) + '</span>'
-      : '';
+    const live = Object.prototype.hasOwnProperty.call(regStatus, serverName) ? regStatus[serverName] : undefined;
+    let liveBadge = '';
+    if (live !== undefined) {
+      if (live && typeof live === 'object' && typeof live.connected === 'boolean') {
+        const cls = live.connected ? 'green' : 'red';
+        const label = live.connected
+          ? ('已连接' + (live.tool_count != null ? ' · ' + live.tool_count + ' 工具' : ''))
+          : '未连接';
+        liveBadge = '<span class="badge ' + cls + '">' + ctx.utils.esc(label) + '</span>';
+      } else {
+        const text = typeof live === 'object' ? (live.status || JSON.stringify(live)) : String(live);
+        const bad = text.toLowerCase().includes('fail') || text.toLowerCase().includes('err') || text.toLowerCase().includes('false');
+        liveBadge = '<span class="badge ' + (bad ? 'red' : 'green') + '">' + ctx.utils.esc(text) + '</span>';
+      }
+    }
     const badges = [
       liveBadge,
       m.connection_type ? '<span class="badge dim">' + ctx.utils.esc(m.connection_type) + '</span>' : '',
@@ -98,6 +133,6 @@ async function loadMcp() {
     });
   });
   body.querySelectorAll('.mcp-reload-btn').forEach((btn) => {
-    btn.addEventListener('click', () => reloadMcpServer(btn.dataset.server));
+    btn.addEventListener('click', () => reloadMcpServer(btn.dataset.server, btn));
   });
 }

@@ -49,12 +49,24 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
       });
     }
 
+    const backdropEl = root.querySelector('#chatSidebarBackdrop');
+    const closeMobileBtn = root.querySelector('#btnCloseMobileSessions');
+    const setMobileOpen = (open) => {
+      if (sidebarEl) sidebarEl.classList.toggle('mobile-open', open);
+      if (backdropEl) backdropEl.classList.toggle('mobile-open', open);
+    };
     const mobileSessBtn = root.querySelector('#btnMobileSessions');
     if (mobileSessBtn) {
       mobileSessBtn.innerHTML = icon('sessions', 16);
       mobileSessBtn.addEventListener('click', () => {
-        if (sidebarEl) sidebarEl.classList.toggle('mobile-open');
+        setMobileOpen(!(sidebarEl && sidebarEl.classList.contains('mobile-open')));
       });
+    }
+    if (closeMobileBtn) {
+      closeMobileBtn.addEventListener('click', () => setMobileOpen(false));
+    }
+    if (backdropEl) {
+      backdropEl.addEventListener('click', () => setMobileOpen(false));
     }
 
     if (contextBtnEl) {
@@ -64,6 +76,8 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
 
   function closeMobile() {
     if (sidebarEl) sidebarEl.classList.remove('mobile-open');
+    const backdropEl = document.getElementById('chatSidebarBackdrop');
+    if (backdropEl) backdropEl.classList.remove('mobile-open');
   }
 
   function renderList(threads) {
@@ -215,8 +229,10 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     contextDrawerEl.innerHTML = '<div class="empty">正在加载会话上下文...</div>';
     try {
       const data = await ctx.api.getThreadContext(sid, uid(), true);
+      if (sid !== currentSid()) return;
       renderContextDrawer(sid, data);
     } catch (e) {
+      if (sid !== currentSid()) return;
       if (e && e.status === 404) {
         renderContextDrawer(sid, { entries: [], totalChars: 0, maxTotalChars: 0, unpersisted: true });
         return;
@@ -278,10 +294,21 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     contextDrawerEl.querySelectorAll('[data-ctx-del]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const key = btn.dataset.ctxDel;
+        if (!window.confirm('确认移除上下文资料「' + key + '」？')) return;
+        const draftKey = (document.getElementById('ctxKeyInput') || {}).value || '';
+        const draftTitle = (document.getElementById('ctxTitleInput') || {}).value || '';
+        const draftContent = (document.getElementById('ctxContentInput') || {}).value || '';
         try {
           await ctx.api.deleteThreadContext(sid, key, uid());
+          if (sid !== currentSid()) return;
           ctx.utils.toast('已移除上下文: ' + key, 'success');
-          loadContextDrawer();
+          await loadContextDrawer();
+          const kEl = document.getElementById('ctxKeyInput');
+          const tEl = document.getElementById('ctxTitleInput');
+          const cEl = document.getElementById('ctxContentInput');
+          if (kEl && draftKey) kEl.value = draftKey;
+          if (tEl && draftTitle) tEl.value = draftTitle;
+          if (cEl && draftContent) cEl.value = draftContent;
         } catch (e) {
           ctx.utils.toast('移除失败: ' + e.message, 'error');
         }
@@ -302,7 +329,11 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
       } catch (e) {
         if (e && e.status === 413) {
           const d = e.data || {};
-          ctx.utils.toast('超出上下文字符预算（' + (d.totalChars || '?') + ' / ' + (d.maxTotalChars || '?') + ' 字符）', 'error');
+          if (d.error === 'context_entry_limit_exceeded' || d.maxEntries != null) {
+            ctx.utils.toast('超出上下文条目上限（' + (d.count != null ? d.count : '?') + ' / ' + (d.maxEntries != null ? d.maxEntries : '?') + ' 条）', 'error');
+          } else {
+            ctx.utils.toast('超出上下文字符预算（' + (d.totalChars != null ? d.totalChars : '?') + ' / ' + (d.maxTotalChars != null ? d.maxTotalChars : '?') + ' 字符）', 'error');
+          }
         } else {
           ctx.utils.toast('注入失败: ' + e.message, 'error');
         }
@@ -327,10 +358,12 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     }
     try {
       const data = await ctx.api.getBrowserState(sid, uid());
+      if (sid !== currentSid()) return;
       browserState = data;
       browserVisible = true;
       renderBrowserBar(sid, data);
     } catch (e) {
+      if (sid !== currentSid()) return;
       hideBrowserBar();
       if (e && e.status === 404) {
         ctx.utils.toast('当前服务未启用浏览器接管或会话尚未落库', 'info');
@@ -344,7 +377,7 @@ export function createChatSidebar({ ctx, onSelectThread, onNewThread, onThreadDe
     if (!browserBarEl || !browserVisible) return;
     const ctrl = (data && data.control) || {};
     const sb = (data && data.sandbox) || {};
-    const isHuman = ctrl.owner === 'human';
+    const isHuman = String(ctrl.owner || '').toUpperCase() === 'HUMAN';
     browserBarEl.classList.add('visible');
     browserBarEl.classList.toggle('human', isHuman);
 
