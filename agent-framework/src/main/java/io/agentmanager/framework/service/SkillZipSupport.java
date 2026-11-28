@@ -372,39 +372,21 @@ public final class SkillZipSupport {
         return true;
     }
 
-    /** 名称能否作为技能规范名：单路径段、非隐藏名、不含 {@code ..}、不含空白 */
     private static boolean isCanonicalName(String name) {
         if (!isPathSegment(name) || name.startsWith(".") || name.contains("..")) {
             return false;
         }
         for (int i = 0; i < name.length(); i++) {
-            if (Character.isWhitespace(name.charAt(i))) {
+            var c = name.charAt(i);
+            if (Character.isWhitespace(c) || Character.isSpaceChar(c) || isShellMetaChar(c)) {
                 return false;
             }
         }
         return true;
     }
 
-    /**
-     * 单路径段 shell-safe 判定（issue #501）：段名进 tar rel、farm 建链引号段与孤儿差集
-     * {@code |} 分隔 case 字面集，只拒绝会破坏 shell 结构或路径段的字符（引号/命令替换/
-     * 管道/分隔符/控制字符），中文标点等常规字符放行——白名单会误伤 {@code （）} 这类合法
-     * 中文技能名，使 SDK 渲染路径与 farm 链名无法对齐。
-     * {@code .}/{@code ..} 开头与含 {@code ..} 仍拒绝（{@code name: .} 曾生成
-     * {@code rm -rf '<cache>/oaf-package/.'}，GNU rm 拒绝删除 {@code .} 使整条 && 链中断）。
-     */
     public static boolean isShellSafeSegment(String name) {
-        if (!isCanonicalName(name)) {
-            return false;
-        }
-        for (int i = 0; i < name.length(); i++) {
-            var c = name.charAt(i);
-            if (c == '\'' || c == '"' || c == '|' || c == '&' || c == ';' || c == '$'
-                || c == '`' || c == '<' || c == '>' || c == '\n' || c == '\r') {
-                return false;
-            }
-        }
-        return true;
+        return isCanonicalName(name);
     }
 
     /** 技能名安全化为单个路径段：仅替换路径分隔符与控制字符，其余字符（含中文标点）保留 */

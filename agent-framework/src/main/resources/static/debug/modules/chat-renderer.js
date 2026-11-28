@@ -156,12 +156,8 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       msg.appendChild(bubbleEl);
     };
     const appendImage = (b) => {
-      const src = b.url
-        ? safeFileHref(b.url)
-        : (b.data && b.media_type && /^image\/[a-z0-9.+-]+$/i.test(b.media_type)
-            ? 'data:' + b.media_type + ';base64,' + b.data
-            : null);
-      if (!src || src === '#') return;
+      const src = resolveImageSrc(b.url, b.data, b.media_type || b.mediaType);
+      if (!src) return;
       if (opts && opts.directReturn && !directBadgeRendered) {
         msg.appendChild(renderDirectBadge(opts.toolName));
         directBadgeRendered = true;
@@ -553,26 +549,47 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     }
   }
 
+  function ensureToolCallPlaceholder(tcId) {
+    if (!tcId) return null;
+    let tc = pendingToolCalls[tcId];
+    if (!tc) {
+      tc = {
+        id: tcId,
+        name: '',
+        argsRaw: '',
+        resultRaw: '',
+        state: 'running',
+        summary: null,
+        preview: null,
+        directReturn: false
+      };
+      pendingToolCalls[tcId] = tc;
+    }
+    return tc;
+  }
+
   function onToolResultStart(r, tcId) {
-    const tc = pendingToolCalls[tcId];
+    const tc = ensureToolCallPlaceholder(tcId);
     if (tc && tc.resultRaw == null) tc.resultRaw = '';
   }
 
   function onToolResultDelta(r, tcId, delta) {
-    const tc = pendingToolCalls[tcId];
+    const tc = ensureToolCallPlaceholder(tcId);
     if (tc) tc.resultRaw = (tc.resultRaw || '') + (delta || '');
   }
 
   function onToolResultEnd(r, tcId, state, opts = {}) {
-    const tc = pendingToolCalls[tcId];
+    const tc = ensureToolCallPlaceholder(tcId);
     if (!tc) return;
     const norm = String(state || 'SUCCESS').toLowerCase();
     tc.state = norm === 'success' ? 'success' : (norm === 'interrupted' ? 'interrupted' : (norm === 'denied' ? 'denied' : 'error'));
     if (opts.directReturn) tc.directReturn = true;
-    for (const g of r.toolGroups) {
-      if (g.calls.some((c) => c.id === tcId)) {
-        rebuildToolRows(r, g);
-        updateToolGroupTitle(r, g);
+    if (r && r.toolGroups) {
+      for (const g of r.toolGroups) {
+        if (g.calls.some((c) => c.id === tcId)) {
+          rebuildToolRows(r, g);
+          updateToolGroupTitle(r, g);
+        }
       }
     }
   }
@@ -709,6 +726,27 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     onToolResultPreview({ toolGroups: p.toolGroups }, tcId, preview);
   }
 
+  function hasUnsafeRelPath(pathStr) {
+    const pathOnly = pathStr.split(/[?#]/, 1)[0];
+    if (pathOnly.includes('\\') || /[\x00-\x1f\x7f]/.test(pathOnly)) return true;
+    const checkSegs = (s) => {
+      if (s.includes('\\') || /[\x00-\x1f\x7f]/.test(s)) return true;
+      const segs = s.split('/');
+      return segs.includes('..') || segs.includes('.');
+    };
+    if (checkSegs(pathOnly)) return true;
+    let cur = pathOnly;
+    for (let i = 0; i < 3; i++) {
+      if (i > 0 && !/%[0-9a-fA-F]{2}/.test(cur)) return false;
+      let next;
+      try { next = decodeURIComponent(cur); } catch (e) { return true; }
+      if (checkSegs(next)) return true;
+      if (next === cur) return false;
+      cur = next;
+    }
+    return /%[0-9a-fA-F]{2}/.test(cur);
+  }
+
   function safeFileHref(rawUrl) {
     if (typeof rawUrl !== 'string') return '#';
     const trimmed = rawUrl.trim();
@@ -718,6 +756,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       return trimmed;
     }
     if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+      if (hasUnsafeRelPath(trimmed)) return '#';
       const base = (ctx && ctx.api && ctx.api.BASE) || '';
       if (base && trimmed.startsWith('/files/') && !trimmed.startsWith(base + '/')) {
         return base + trimmed;
@@ -725,6 +764,43 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       return trimmed;
     }
     return '#';
+  }
+
+  function resolveImageSrc(rawUrl, rawData, rawMediaType) {
+    if (typeof rawUrl === 'string' && rawUrl.trim()) {
+      const trimmed = rawUrl.trim();
+      const lower = trimmed.toLowerCase();
+      if (lower.startsWith('data:image/')) {
+        return trimmed;
+      }
+      const href = safeFileHref(trimmed);
+      return href === '#' ? null : href;
+    }
+    if (rawData && rawMediaType && /^image\/[a-z0-9.+-]+$/i.test(String(rawMediaType).trim())) {
+      return 'data:' + String(rawMediaType).trim() + ';base64,' + rawData;
+    }
+    return null;
+  }
+
+  function appendImageBlock(r, data) {
+    if (!r || !r.contentEl || !data) return;
+    const mediaType = data.media_type || data.mediaType || '';
+    const src = resolveImageSrc(data.url, data.data, mediaType);
+    if (!src) return;
+    endThinking(r);
+    if ((data.directReturn || data.direct_return) && !r.directBadgeRendered) {
+      r.contentEl.appendChild(renderDirectBadge(data.toolCallName || data.tool_call_name));
+      r.directBadgeRendered = true;
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-image-block';
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = data.alt || 'image';
+    img.loading = 'lazy';
+    wrap.appendChild(img);
+    r.contentEl.appendChild(wrap);
+    scrollToBottom(false);
   }
 
   function renderFileReadyCard(r, data) {
@@ -932,6 +1008,9 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     appendThinkingDelta,
     endThinking,
     appendTextDelta,
+    appendImageBlock,
+    safeFileHref,
+    resolveImageSrc,
     onToolCallStart,
     onToolCallDelta,
     onToolCallEnd,

@@ -14,13 +14,22 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import javax.sql.DataSource;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
+import io.agentmanager.framework.model.OafConfig;
 
 /**
  * Skill 包管理服务：zip 上传/解压、删除、启停状态管理。
@@ -43,17 +52,33 @@ public class SkillManageService {
     private static final String STATES_FILE = ".skill-states.json";
 
     private final Path skillsDir;
-    private final Path fallbackStateFile;
+    private final DataSource dataSource;
+    private final String agentSlug;
+    private volatile boolean stateTableReady;
 
     public SkillManageService(AgentManagerProperties props) {
+        this(props, null, null);
+    }
+
+    @Autowired
+    public SkillManageService(AgentManagerProperties props,
+                              @Autowired(required = false) DataSource dataSource,
+                              @Autowired(required = false) OafConfig oafConfig) {
         this.skillsDir = Path.of(props.resolvedConfigDir()).resolve("skills");
-        this.fallbackStateFile = Path.of(props.resolvedWorkspaceBaseDir()).resolve(STATES_FILE);
+        this.dataSource = dataSource;
+        String slug = oafConfig != null ? oafConfig.slug() : null;
+        this.agentSlug = (slug != null && !slug.isBlank()) ? slug.trim() : "default";
         try {
             Files.createDirectories(skillsDir);
         } catch (IOException e) {
             log.warn("Failed to create skills dir: {}", e.getMessage());
         }
-        log.info("SkillManageService initialized (skillsDir: {}, readOnly: {})", skillsDir, isReadOnly());
+        log.info("SkillManageService initialized (skillsDir: {}, readOnly: {}, sharedDb: {})",
+            skillsDir, isReadOnly(), dataSource != null);
+    }
+
+    public boolean isToggleWritable() {
+        return isSkillsDirWritable() || dataSource != null;
     }
 
     public Path getSkillsDir() {
@@ -384,22 +409,86 @@ public class SkillManageService {
 
     // ========== 启停状态持久化 ==========
 
-    private Path resolveStateFileForRead() {
-        var primary = skillsDir.resolve(STATES_FILE);
-        if (isReadOnly() && Files.isRegularFile(fallbackStateFile)) {
-            return fallbackStateFile;
+    private void ensureStateTable(Connection conn) throws SQLException {
+        if (stateTableReady) {
+            return;
         }
-        if (Files.isRegularFile(primary)) {
-            return primary;
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS skill_state ("
+                + "agent_slug VARCHAR(128) NOT NULL, "
+                + "skill_name VARCHAR(255) NOT NULL, "
+                + "disabled BOOLEAN NOT NULL DEFAULT TRUE, "
+                + "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                + "PRIMARY KEY (agent_slug, skill_name))");
         }
-        if (Files.isRegularFile(fallbackStateFile)) {
-            return fallbackStateFile;
+        stateTableReady = true;
+    }
+
+    private Set<String> loadDisabledSetFromDb() {
+        var out = new HashSet<String>();
+        try (Connection conn = dataSource.getConnection()) {
+            ensureStateTable(conn);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT skill_name FROM skill_state WHERE agent_slug = ? AND disabled = TRUE")) {
+                ps.setString(1, agentSlug);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        out.add(rs.getString(1));
+                    }
+                }
+            }
+            return normalizeToCanonicalNames(out);
+        } catch (Exception e) {
+            log.warn("Failed to load skill states from db: {}", e.getMessage());
+            return new HashSet<>();
         }
-        return primary;
+    }
+
+    private void saveDisabledSetToDb(Set<String> disabled) throws IOException {
+        try (Connection conn = dataSource.getConnection()) {
+            ensureStateTable(conn);
+            boolean prevAuto = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                try (PreparedStatement del = conn.prepareStatement(
+                        "DELETE FROM skill_state WHERE agent_slug = ?")) {
+                    del.setString(1, agentSlug);
+                    del.executeUpdate();
+                }
+                if (!disabled.isEmpty()) {
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            "INSERT INTO skill_state (agent_slug, skill_name, disabled) VALUES (?, ?, TRUE)")) {
+                        for (String name : disabled) {
+                            ins.setString(1, agentSlug);
+                            ins.setString(2, name);
+                            ins.addBatch();
+                        }
+                        ins.executeBatch();
+                    }
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException ignored) {
+                }
+                throw e;
+            } finally {
+                try {
+                    conn.setAutoCommit(prevAuto);
+                } catch (SQLException ignored) {
+                }
+            }
+        } catch (SQLException e) {
+            throw new IOException("共享数据库保存技能状态失败: " + e.getMessage(), e);
+        }
     }
 
     private Set<String> loadDisabledSet() {
-        var stateFile = resolveStateFileForRead();
+        if (!isSkillsDirWritable() && dataSource != null) {
+            return loadDisabledSetFromDb();
+        }
+        var stateFile = skillsDir.resolve(STATES_FILE);
         if (!Files.isRegularFile(stateFile)) {
             return new HashSet<>();
         }
@@ -447,16 +536,17 @@ public class SkillManageService {
     }
 
     private void saveDisabledSet(Set<String> disabled) throws IOException {
-        var json = MAPPER.writerWithDefaultPrettyPrinter()
-            .writeValueAsString(new ArrayList<>(disabled));
         if (isSkillsDirWritable()) {
             Files.createDirectories(skillsDir);
+            var json = MAPPER.writerWithDefaultPrettyPrinter()
+                .writeValueAsString(new ArrayList<>(disabled));
             Files.writeString(skillsDir.resolve(STATES_FILE), json, StandardCharsets.UTF_8);
             return;
         }
-        if (fallbackStateFile.getParent() != null) {
-            Files.createDirectories(fallbackStateFile.getParent());
+        if (dataSource != null) {
+            saveDisabledSetToDb(disabled);
+            return;
         }
-        Files.writeString(fallbackStateFile, json, StandardCharsets.UTF_8);
+        throw new IOException("当前技能目录为只读挂载且未配置共享数据库，无法持久化启停状态");
     }
 }

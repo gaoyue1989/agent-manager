@@ -57,8 +57,11 @@ public class SkillManageController {
      * 区别于 GET /skills（只返回启用的），此端点返回全部，供管理页面使用。
      */
     @GetMapping("/manage")
-    public List<Map<String, Object>> listAll() {
-        return catalogService.listAll();
+    public ResponseEntity<List<Map<String, Object>>> listAll() {
+        return ResponseEntity.ok()
+            .header("X-Skills-Read-Only", String.valueOf(manageService.isReadOnly()))
+            .header("X-Skills-Toggle-Writable", String.valueOf(manageService.isToggleWritable()))
+            .body(catalogService.listAll());
     }
 
     /**
@@ -207,6 +210,9 @@ public class SkillManageController {
     public ResponseEntity<Map<String, Object>> toggle(@PathVariable String name) {
         if (name.contains("..") || name.contains("/") || name.contains("\\") || name.startsWith(".")) {
             return err(HttpStatus.BAD_REQUEST, "invalid_name", "无效的 Skill 名称");
+        }
+        if (!manageService.isToggleWritable()) {
+            return err(HttpStatus.FORBIDDEN, "read_only", "当前技能目录为只读挂载且未配置共享数据库，不支持切换系统技能状态");
         }
         try {
             var nowEnabled = manageService.toggleSkill(name);

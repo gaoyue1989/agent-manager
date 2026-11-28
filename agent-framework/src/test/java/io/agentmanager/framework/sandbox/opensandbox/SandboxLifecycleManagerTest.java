@@ -737,4 +737,19 @@ class SandboxLifecycleManagerTest {
         }
     }
 
+
+    @Test
+    void acquireBlocksCrossUserBindingReuse840() {
+        var row = new SandboxBindingStore.BindingRow(1L, "bob", "charlie", "sbx-bob-trap",
+            "2099-01-01T00:00:00Z", "2026-11-28T00:00:00Z", true);
+        when(store.findBySessionId("charlie")).thenReturn(Optional.of(row));
+        var ex = assertThrows(Exception.class, () -> manager.acquire(
+            "charlie",
+            "charlie",
+            connector,
+            () -> { throw new AssertionError("must not create"); },
+            (h, id) -> mock(OpenSandbox.class)
+        ));
+        assertTrue(ex.getMessage().contains("owner mismatch"));
+    }
 }

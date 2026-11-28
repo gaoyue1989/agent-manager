@@ -1232,7 +1232,7 @@ test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同�
     try {
       const [hist] = await conn.query('SELECT version, success FROM flyway_schema_history ORDER BY installed_rank');
       const rows = hist as { version: string; success: number }[];
-      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19']);
+      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20']);
       expect(rows.every(x => x.success === 1), '迁移历史必须全 success').toBe(true);
     } finally { await conn.end(); }
   });

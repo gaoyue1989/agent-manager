@@ -53,7 +53,8 @@ public class SessionKeyResolver {
 
     public SessionKeyResolver(SessionUserStore sessionUserStore, String tenantPrefix) {
         this.sessionUserStore = sessionUserStore;
-        this.tenantPrefix = trimToNull(tenantPrefix);
+        var trimmed = trimToNull(tenantPrefix);
+        this.tenantPrefix = trimmed != null ? trimmed.replace("/", "-") : null;
     }
 
     /** 规范会话 id（= session_user.session_id）；无 store 时退化为 RuntimeContext 原值，无法解析时 null */
