@@ -454,18 +454,24 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
 
   function onToolCallStart(r, tcId, name, opts = {}) {
     const g = ensureToolGroupEl(r);
-    const tc = {
-      id: tcId,
-      name: name || 'tool',
-      argsRaw: '',
-      resultRaw: '',
-      state: 'running',
-      summary: null,
-      preview: null,
-      directReturn: !!opts.directReturn
-    };
-    pendingToolCalls[tcId] = tc;
-    g.calls.push(tc);
+    let tc = pendingToolCalls[tcId];
+    if (!tc) {
+      tc = {
+        id: tcId,
+        name: name || 'tool',
+        argsRaw: '',
+        resultRaw: '',
+        state: 'running',
+        summary: null,
+        preview: null,
+        directReturn: !!opts.directReturn
+      };
+      pendingToolCalls[tcId] = tc;
+    } else {
+      if (name && !tc.name) tc.name = name;
+      if (opts.directReturn) tc.directReturn = true;
+    }
+    if (!g.calls.some((c) => c.id === tcId)) g.calls.push(tc);
     rebuildToolRows(r, g);
     updateToolGroupTitle(r, g);
     if (name === 'agent_spawn') {
