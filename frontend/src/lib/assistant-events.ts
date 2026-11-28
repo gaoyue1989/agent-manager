@@ -140,6 +140,9 @@ export function isSafeFileDownloadUrl(url: string | undefined | null): boolean {
     if (hasUnsafePathSegments(pathOnly) || !matchesAllowedFilePath(pathOnly)) return false;
     let cur = pathOnly;
     for (let i = 0; i < 3; i++) {
+      if (i > 0 && !/%[0-9a-fA-F]{2}/.test(cur)) {
+        return true;
+      }
       let next: string;
       try {
         next = decodeURIComponent(cur);
@@ -152,7 +155,7 @@ export function isSafeFileDownloadUrl(url: string | undefined | null): boolean {
       }
       cur = next;
     }
-    return false;
+    return !/%[0-9a-fA-F]{2}/.test(cur);
   }
   return false;
 }

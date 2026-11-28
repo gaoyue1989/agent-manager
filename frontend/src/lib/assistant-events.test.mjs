@@ -271,3 +271,14 @@ test("isSafeFileDownloadUrl enforces safe protocols and relative file paths", as
   assert.equal(isSafeFileDownloadUrl(null), false);
   assert.equal(isSafeFileDownloadUrl(undefined), false);
 });
+
+test("isSafeFileDownloadUrl allows single-encoded literal percent filenames (#842)", async () => {
+  const { isSafeFileDownloadUrl } = await import("./assistant-events.ts");
+  assert.equal(isSafeFileDownloadUrl("/files/sales_100%25.pdf"), true);
+  assert.equal(isSafeFileDownloadUrl("/agent/my-bot/files/50%25_growth.png"), true);
+  assert.equal(isSafeFileDownloadUrl("/files/discount_20%25_off.xlsx"), true);
+  assert.equal(isSafeFileDownloadUrl("/files/%252e%252e/secret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%252f"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%255c/a"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/bad%ZZ.pdf"), false);
+});
