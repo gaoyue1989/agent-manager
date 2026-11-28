@@ -5,6 +5,7 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -719,5 +720,70 @@ func TestSkillDraftEditConsistencyAndValidation(t *testing.T) {
 	gotAfter, err := c.GetSkillVersionContent(ws.ID, s.ID, v1.ID)
 	if err != nil || !strings.Contains(gotAfter, "# updated") {
 		t.Fatalf("previous draft must remain intact after rejected edit, got=%q err=%v", gotAfter, err)
+	}
+}
+
+func TestUploadSkillVersionZipPersistsValidJSON828(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Slug: "ws-sk-828", Name: "ws-sk-828"}
+	if err := c.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+	s, err := c.CreateSkillFromMarkdown(ws.ID, 1, "zip-json-828", "Zip", "md", nil, "---\nname: zip-json-828\ndescription: md\n---\n# md\n", false)
+	if err != nil {
+		t.Fatalf("create skill: %v", err)
+	}
+	var v store.SkillVersion
+	if err := c.DB.Where("skill_id = ?", s.ID).Order("id DESC").First(&v).Error; err != nil {
+		t.Fatal(err)
+	}
+	rawZip, err := buildZipBytes(map[string][]byte{
+		"SKILL.md": []byte("---\nname: zip-json-828\ndescription: zip\n---\n# zip\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := c.UploadSkillVersionZip(ws.ID, s.ID, v.ID, "zip-json-828.zip", bytes.NewReader(rawZip), "")
+	if err != nil {
+		t.Fatalf("upload zip: %v", err)
+	}
+	if !json.Valid([]byte(updated.ContentJSON)) {
+		t.Fatalf("expected valid JSON content_json, got %q", updated.ContentJSON)
+	}
+	var dbVer store.SkillVersion
+	if err := c.DB.First(&dbVer, v.ID).Error; err != nil {
+		t.Fatalf("reload version: %v", err)
+	}
+	if !json.Valid([]byte(dbVer.ContentJSON)) {
+		t.Fatalf("expected persisted valid JSON content_json, got %q", dbVer.ContentJSON)
+	}
+}
+
+func TestUpdateSkillDraftValidatesPureMarkdown839(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Slug: "ws-sk-839", Name: "ws-sk-839"}
+	if err := c.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+	s, err := c.CreateSkillFromMarkdown(ws.ID, 1, "pure-md-839", "PureMD", "v1", nil, "---\nname: pure-md-839\ndescription: v1\n---\n# v1\n", false)
+	if err != nil {
+		t.Fatalf("create skill: %v", err)
+	}
+	if err := c.UpdateSkillDraft(ws.ID, s.ID, "   "); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm on blank content, got %v", err)
+	}
+	big := "---\nname: pure-md-839\ndescription: big\n---\n" + strings.Repeat("a", 300<<10)
+	if err := c.UpdateSkillDraft(ws.ID, s.ID, big); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm on >256KB content, got %v", err)
+	}
+	hijacked := "---\nname: wrong-name\ndescription: bad\n---\n# bad\n"
+	if err := c.UpdateSkillDraft(ws.ID, s.ID, hijacked); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("expected ErrInvalidForm on mismatched frontmatter name, got %v", err)
+	}
+	valid := "---\nname: pure-md-839\ndescription: v2\n---\n# v2\n"
+	if err := c.UpdateSkillDraft(ws.ID, s.ID, valid); err != nil {
+		t.Fatalf("expected valid pure markdown update to succeed: %v", err)
 	}
 }
