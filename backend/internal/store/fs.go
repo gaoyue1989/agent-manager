@@ -84,19 +84,22 @@ func (f *FS) InspectZip(r io.Reader) (*ZipInfo, error) {
 		if err := validateEntry(zf); err != nil {
 			return nil, err
 		}
-		total += int64(zf.UncompressedSize64)
-		if total > MaxExtracted {
+		if zf.UncompressedSize64 > uint64(MaxExtracted) || uint64(total) > uint64(MaxExtracted)-zf.UncompressedSize64 {
 			return nil, ErrExtractTooLarge
 		}
+		total += int64(zf.UncompressedSize64)
 		if zf.Name == "AGENTS.md" {
 			rc, err := zf.Open()
 			if err != nil {
 				return nil, err
 			}
-			info.AgentsMD, err = io.ReadAll(rc)
+			info.AgentsMD, err = io.ReadAll(io.LimitReader(rc, MaxExtracted+1))
 			rc.Close()
 			if err != nil {
 				return nil, err
+			}
+			if int64(len(info.AgentsMD)) > MaxExtracted {
+				return nil, ErrExtractTooLarge
 			}
 		}
 		if !zf.FileInfo().IsDir() {
@@ -134,10 +137,10 @@ func (f *FS) InspectSkillZip(r io.Reader) (*ZipInfo, error) {
 		if err := validateEntry(zf); err != nil {
 			return nil, err
 		}
-		total += int64(zf.UncompressedSize64)
-		if total > MaxExtracted {
+		if zf.UncompressedSize64 > uint64(MaxExtracted) || uint64(total) > uint64(MaxExtracted)-zf.UncompressedSize64 {
 			return nil, ErrExtractTooLarge
 		}
+		total += int64(zf.UncompressedSize64)
 		if !zf.FileInfo().IsDir() {
 			info.FileCount++
 		}
@@ -437,6 +440,47 @@ func (f *FS) WriteZipTo(rel string, zipData []byte) (int, int64, error) {
 			return 0, 0, ErrExtractTooLarge
 		}
 		count++
+	}
+	return count, total, nil
+}
+
+func (f *FS) ReplaceZipTo(rel string, zipData []byte) (int, int64, error) {
+	dest := f.PackageDir(rel)
+	parent := filepath.Dir(dest)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return 0, 0, err
+	}
+	tmpDir, err := os.MkdirTemp(parent, ".tmp-replace-*")
+	if err != nil {
+		return 0, 0, err
+	}
+	tmpRel, err := filepath.Rel(f.Root, tmpDir)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return 0, 0, err
+	}
+	count, total, err := f.WriteZipTo(tmpRel, zipData)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return 0, 0, err
+	}
+	var backupDir string
+	if _, statErr := os.Stat(dest); statErr == nil {
+		backupDir = dest + ".bak-" + filepath.Base(tmpDir)
+		if err := os.Rename(dest, backupDir); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			return 0, 0, err
+		}
+	}
+	if err := os.Rename(tmpDir, dest); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		if backupDir != "" {
+			_ = os.Rename(backupDir, dest)
+		}
+		return 0, 0, err
+	}
+	if backupDir != "" {
+		_ = os.RemoveAll(backupDir)
 	}
 	return count, total, nil
 }

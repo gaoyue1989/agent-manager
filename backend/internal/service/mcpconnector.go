@@ -34,6 +34,18 @@ type McpToolInfo struct {
 // validatePermissions 三态权限声明强校验：仅接受对象形态 {"tools":{<tool>:"allow|ask|deny"}}。
 // *json.RawMessage 捕获的是原始字节——双重编码的字符串 token 在此直接拒绝而非静默修复
 // （带引号入库会让 agentgen 解析失败，生成包静默丢失 permissions 段）。
+func normalizeToolScope(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return `{"mode":"all"}`, nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return "", fmt.Errorf("%w: toolScope must be a JSON object", ErrInvalidForm)
+	}
+	return trimmed, nil
+}
+
 func normalizeJSONObject(raw json.RawMessage) string {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
@@ -188,20 +200,27 @@ func (c *Core) CreateMcpConnector(workspaceID uint, in CreateMcpConnectorInput) 
 	if cnt > 0 {
 		return nil, fmt.Errorf("%w: duplicate_name", ErrDuplicateName)
 	}
+	authType := strings.TrimSpace(in.AuthType)
+	if authType == "" {
+		authType = "none"
+	}
+	if authType != "none" && authType != "bearer" {
+		return nil, fmt.Errorf("%w: invalid authType", ErrInvalidForm)
+	}
+	toolScope, err := normalizeToolScope(in.ToolScope)
+	if err != nil {
+		return nil, err
+	}
+	authToken := in.AuthToken
+	if authType == "none" {
+		authToken = ""
+	}
 	m := store.McpConnector{WorkspaceID: workspaceID, Name: in.Name,
 		Transport: in.Transport, Endpoint: in.Endpoint,
-		AuthType: in.AuthType, AuthToken: in.AuthToken, TimeoutSec: in.TimeoutSec,
-		Status: "unverified"}
-	if m.AuthType == "" {
-		m.AuthType = "none"
-	}
+		AuthType: authType, AuthToken: authToken, TimeoutSec: in.TimeoutSec,
+		Status: "unverified", ToolScope: toolScope}
 	if m.TimeoutSec <= 0 {
 		m.TimeoutSec = 120
-	}
-	if len(in.ToolScope) > 0 {
-		m.ToolScope = string(in.ToolScope)
-	} else {
-		m.ToolScope = `{"mode":"all"}`
 	}
 	m.Permissions = normalizeJSONObject(in.Permissions)
 	m.DirectReturn = normalizeJSONObject(in.DirectReturn)
@@ -267,18 +286,32 @@ func (c *Core) UpdateMcpConnector(workspaceID, id uint, in PatchMcpConnectorInpu
 		updates["endpoint"] = endpoint
 		updates["status"] = "unverified"
 	}
-	if in.AuthType != nil && *in.AuthType != "" {
-		updates["auth_type"] = *in.AuthType
+	if in.AuthType != nil {
+		authType := strings.TrimSpace(*in.AuthType)
+		if authType != "none" && authType != "bearer" {
+			return nil, fmt.Errorf("%w: invalid authType", ErrInvalidForm)
+		}
+		updates["auth_type"] = authType
+		updates["status"] = "unverified"
+		if authType == "none" {
+			updates["auth_token"] = ""
+		}
 	}
 	if in.AuthToken != nil {
-		updates["auth_token"] = *in.AuthToken
+		if effAuth, ok := updates["auth_type"].(string); !ok || effAuth != "none" {
+			updates["auth_token"] = *in.AuthToken
+		}
 		updates["status"] = "unverified"
 	}
 	if in.TimeoutSec != nil && *in.TimeoutSec > 0 {
 		updates["timeout_sec"] = *in.TimeoutSec
 	}
 	if in.ToolScope != nil {
-		updates["tool_scope"] = string(*in.ToolScope)
+		scope, err := normalizeToolScope(*in.ToolScope)
+		if err != nil {
+			return nil, err
+		}
+		updates["tool_scope"] = scope
 	}
 	if in.Permissions != nil {
 		if err := validatePermissions(*in.Permissions); err != nil {
@@ -329,7 +362,11 @@ func (c *Core) VerifyMcpConnector(workspaceID, id uint) (map[string]interface{},
 	if timeout <= 0 {
 		timeout = 30
 	}
-	tools, latency, err := mcpListTools(m.Endpoint, m.AuthToken, timeout)
+	probeToken := ""
+	if m.AuthType == "bearer" {
+		probeToken = m.AuthToken
+	}
+	tools, latency, err := mcpListTools(m.Endpoint, probeToken, timeout)
 	now := time.Now()
 	if err != nil {
 		reason := []rune(err.Error())
