@@ -452,12 +452,12 @@ class SkillBundleServiceTest {
 
         var version = service.currentVersion();
 
-        assertEquals(List.of("bslash-dir", "dot-dir", "dotdot-dir", "escape-dir", "foo|bar",
-            "has'quote", "hidden-dir", "slash-dir", "space-dir"), version.skills(),
-            "非法标识回落目录名；shell 元字符名保留规范名");
+        assertEquals(List.of("bslash-dir", "dot-dir", "dotdot-dir", "escape-dir",
+            "hidden-dir", "pipe-dir", "quote-dir", "slash-dir", "space-dir"), version.skills(),
+            "非法标识与 shell 元字符名统一回落目录名");
         assertEquals(List.of(
             "bslash-dir/SKILL.md", "dot-dir/SKILL.md", "dotdot-dir/SKILL.md", "escape-dir/SKILL.md",
-            "foo|bar/SKILL.md", "has'quote/SKILL.md", "hidden-dir/SKILL.md", "slash-dir/SKILL.md",
+            "hidden-dir/SKILL.md", "pipe-dir/SKILL.md", "quote-dir/SKILL.md", "slash-dir/SKILL.md",
             "space-dir/SKILL.md"), bundleEntryNames(service, version.version()),
             "bundle 顶层段 = 规范名，不得出现 '../' 等路径穿越条目");
     }
