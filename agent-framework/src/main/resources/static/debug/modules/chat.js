@@ -19,6 +19,8 @@ let activeAbort = null;
 let activeChatHandle = null;
 let activeSubHandle = null;
 let stopSlowTimer = null;
+let reconnectTimer = null;
+let stopConfirmPending = false;
 let resumeSyncTimer = null;
 let activeSyncTimer = null;
 let refreshTimer = null;
@@ -56,10 +58,14 @@ function currentThreadTitle() {
 function renderTemplate() {
   return `
   <div class="chat-module">
+    <div id="chatSidebarBackdrop" class="chat-sidebar-backdrop"></div>
     <div class="chat-sidebar">
       <div class="chat-sidebar-header">
         <span class="cs-title">会话列表</span>
-        <button id="btnNewThread" class="btn small ghost" title="新建会话"></button>
+        <div style="display:flex;align-items:center;gap:4px">
+          <button id="btnNewThread" class="btn small ghost" title="新建会话"></button>
+          <button id="btnCloseMobileSessions" class="btn small ghost chat-mobile-close-btn" title="关闭">✕</button>
+        </div>
       </div>
       <div class="chat-sidebar-search">
         <input id="threadSearch" class="input" type="search" placeholder="搜索会话...">
@@ -320,10 +326,29 @@ async function loadThreads() {
   } catch (e) {}
 }
 
+function cleanupSessionStreams() {
+  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
+  if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) {} activeChatHandle = null; }
+  if (activeAbort) { try { activeAbort.abort(); } catch (e) {} activeAbort = null; }
+  if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
+  if (activeSyncTimer) { clearInterval(activeSyncTimer); activeSyncTimer = null; }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (stopSlowTimer) { clearTimeout(stopSlowTimer); stopSlowTimer = null; }
+  if (currentReply) {
+    renderer.finishReply(currentReply.replyId);
+    currentReply = null;
+  }
+  currentReplyId = null;
+  lastEventId = 0;
+  reconnectAttempts = 0;
+  stopConfirmPending = false;
+  stoppingBuffer = [];
+  resetStreamingState();
+}
+
 async function selectThread(sessionId) {
   if (!sessionId) return;
-  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
-  if (resumeSyncTimer) { clearInterval(resumeSyncTimer); resumeSyncTimer = null; }
+  cleanupSessionStreams();
   ctx.state.setState('threads.current', sessionId);
   sidebar.renderList(ctx.state.getState('threads.list') || []);
   sidebar.hideBrowserBar();
@@ -332,33 +357,71 @@ async function selectThread(sessionId) {
   const llmBtn = document.getElementById('btnLlmCalls');
   if (llmBtn) llmBtn.disabled = false;
   await loadThreadHistory(sessionId);
+  if (currentSessionId() !== sessionId) return;
   await tryResumeSSE(sessionId);
 }
 
 async function tryResumeSSE(sessionId) {
   try {
     const status = await ctx.api.getStatus(sessionId, uid());
+    if (currentSessionId() !== sessionId) return;
     if (!status || status.state === 'idle' || status.state === 'completed') return;
+    if (status.state === 'failed') {
+      handleEvent({ type: 'error', error: status.error || 'turn failed' });
+      return;
+    }
     if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
       currentReplyId = status.reply_id || null;
+      lastEventId = currentReplyId ? 0 : (status.latest_event_seq || 0);
+      reconnectAttempts = 0;
+      stopConfirmPending = false;
       enterStreamingUi();
       if (status.stopping) enterStoppingUi();
-      activeSubHandle = transport().subscribe(sessionId, {
-        afterSeq: 0,
-        replyId: currentReplyId,
-        userId: uid(),
-        onEvent: (evt) => handleEvent(evt),
-        onError: () => resetStreamingState(),
-        onEnd: () => resetStreamingState()
-      });
+      const subscribeResume = (afterSeq) => {
+        if (currentSessionId() !== sessionId) return;
+        if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} }
+        activeSubHandle = transport().subscribe(sessionId, {
+          afterSeq,
+          replyId: currentReplyId,
+          userId: uid(),
+          onEvent: (evt) => {
+            if (currentSessionId() !== sessionId) return;
+            reconnectAttempts = 0;
+            syncLastEventIdFromHandles();
+            if (evt.replyId || evt.turnId) currentReplyId = evt.replyId || evt.turnId;
+            handleEvent(evt);
+          },
+          onError: () => {
+            if (currentSessionId() !== sessionId || !isStreaming) {
+              resetStreamingState();
+              return;
+            }
+            syncLastEventIdFromHandles();
+            if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+              handleEvent({ type: 'error', error: '连接已断开，重连次数已达上限，请刷新页面' });
+              resetStreamingState();
+              return;
+            }
+            const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts), 30000);
+            reconnectAttempts++;
+            reconnectTimer = setTimeout(() => subscribeResume(lastEventId), delay);
+          },
+          onEnd: () => {
+            if (currentReply) {
+              renderer.finishReply(currentReply.replyId);
+              currentReply = null;
+            }
+            resetStreamingState();
+          }
+        });
+      };
+      subscribeResume(lastEventId);
     }
   } catch (e) {}
 }
 
 function newThread() {
-  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) {} activeSubHandle = null; }
-  if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) {} activeChatHandle = null; }
-  resetStreamingState();
+  cleanupSessionStreams();
   ctx.state.setState('threads.current', null);
   renderer.resetAll();
   sidebar.hideBrowserBar();
@@ -455,7 +518,8 @@ async function loadThreadHistory(sessionId) {
         const userMsgEl = renderer.addMessage('user', m.content || '');
         for (const f of (m.files || [])) renderer.renderFileReadyCard({ contentEl: userMsgEl }, f);
       } else if (m.role === 'assistant' || m.role === 'agent') {
-        const refs = renderer.addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks);
+        const isDirectHist = m.generate_reason === 'TOOL_RETURN_DIRECT' || m.generateReason === 'TOOL_RETURN_DIRECT';
+        const refs = renderer.addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks, { directReturn: isDirectHist });
         lastAssistantEl = refs.msgEl;
         lastAssistantContentEl = refs.contentEl;
         if (m.stopped) refs.msgEl.appendChild(renderer.renderStoppedBadge());
@@ -474,6 +538,8 @@ async function loadThreadHistory(sessionId) {
       }
     }
   } catch (e) {
+    if (currentSessionId() !== sessionId) return;
+    sidebar.setContextFromHistory([]);
     messagesEl.innerHTML = '<div class="msg system">历史消息加载失败</div>';
   }
 }
@@ -572,6 +638,8 @@ function handleEvent(data) {
       if (data.usage) currentReply.serverUsage = data.usage;
       if (data.elapsed_ms != null) currentReply.serverElapsedMs = data.elapsed_ms;
     }
+    if (stoppingBuffer.length > 0) flushStoppingBuffer();
+    stopConfirmPending = false;
     renderer.finishReply(currentReply ? currentReply.replyId : null);
     currentReply = null;
     resetStreamingState();
@@ -579,6 +647,23 @@ function handleEvent(data) {
     scrollToBottom(true);
     loadThreads();
     setTimeout(() => { if (currentSessionId()) loadThreads(); }, 4000);
+    return;
+  }
+
+  if (data.type === 'interrupted') {
+    const el = document.createElement('div');
+    el.className = 'msg system';
+    el.textContent = data.message || 'Interrupted';
+    messagesEl.appendChild(el);
+    scrollToBottom(true);
+    return;
+  }
+  if (data.type === 'error') {
+    const el = document.createElement('div');
+    el.className = 'msg system error-text';
+    el.textContent = 'Error: ' + (data.error || data.message || 'unknown error');
+    messagesEl.appendChild(el);
+    scrollToBottom(true);
     return;
   }
 
@@ -591,12 +676,17 @@ function handleEvent(data) {
 
   switch (data.type) {
     case 'TEXT_BLOCK_DELTA': {
-      if (isStoppingUi()) {
-        stoppingBuffer.push({ type: 'TEXT_BLOCK_DELTA', delta: data.delta || '' });
+      const isDirect = Boolean(
+        data.directReturn ||
+        data.generateReason === 'TOOL_RETURN_DIRECT' ||
+        data.generate_reason === 'TOOL_RETURN_DIRECT'
+      );
+      if (stopConfirmPending) {
+        stoppingBuffer.push({ type: 'TEXT_BLOCK_DELTA', delta: data.delta || '', directReturn: isDirect, toolName: data.toolName || data.tool });
         break;
       }
       renderer.appendTextDelta(r, data.delta || '', {
-        directReturn: !!data.directReturn,
+        directReturn: isDirect,
         toolName: data.toolName || data.tool
       });
       scrollToBottom(false);
@@ -611,7 +701,7 @@ function handleEvent(data) {
       break;
     }
     case 'THINKING_BLOCK_DELTA': {
-      if (isStoppingUi()) {
+      if (stopConfirmPending) {
         stoppingBuffer.push({ type: 'THINKING_BLOCK_DELTA', delta: data.delta || '' });
         break;
       }
@@ -701,6 +791,9 @@ function handleEvent(data) {
       break;
     }
     case 'cancelled': {
+      if (stoppingBuffer.length > 0) flushStoppingBuffer();
+      stopConfirmPending = false;
+      renderer.endThinking(r);
       r.msgEl.appendChild(renderer.renderStoppedBadge());
       break;
     }
@@ -823,8 +916,10 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
     }
     const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts), 30000);
     reconnectAttempts++;
-    setTimeout(() => {
+    reconnectTimer = setTimeout(() => {
+      if (currentSessionId() !== sid || !isStreaming) return;
       ctx.api.getStatus(sid, uid()).then((status) => {
+        if (currentSessionId() !== sid || !isStreaming) return;
         if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
           currentReplyId = status.reply_id || currentReplyId;
           if (status.stopping) enterStoppingUi();
@@ -835,11 +930,14 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
         } else {
           finishStream();
         }
-      }).catch(() => subscribeWithReconnect(sid, lastEventId, currentReplyId));
+      }).catch(() => {
+        if (currentSessionId() === sid && isStreaming) subscribeWithReconnect(sid, lastEventId, currentReplyId);
+      });
     }, delay);
   };
 
   reconnectAttempts = 0;
+  let terminalReceived = false;
   activeChatHandle = transport().sendChat(sid, text, uid(), fileIds, {
     model,
     onWaiting: () => {
@@ -847,17 +945,33 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
       showWaiting();
     },
     onEvent: (evt) => {
+      if (currentSessionId() !== sid) return;
       reconnectAttempts = 0;
       syncLastEventIdFromHandles();
+      if (evt.replyId || evt.turnId) currentReplyId = evt.replyId || evt.turnId;
+      if (evt.type === 'AGENT_END' || evt.type === 'cancelled') terminalReceived = true;
       hideWaiting();
       handleEvent(evt);
     },
     onError: (e) => {
       hideWaiting();
+      if (currentSessionId() !== sid) return;
+      const isHttpErr = e && typeof e.status === 'number' && e.status >= 400 && e.status < 500;
+      if (isStreaming && !terminalReceived && !isHttpErr && transport().subscribe) {
+        startReconnect();
+        return;
+      }
       handleEvent({ type: 'error', error: e.message || String(e) });
       finishStream();
     },
-    onEnd: () => finishStream()
+    onEnd: () => {
+      if (currentSessionId() !== sid) return;
+      if (isStreaming && !terminalReceived && transport().subscribe && currentReplyId) {
+        startReconnect();
+        return;
+      }
+      finishStream();
+    }
   });
 }
 
@@ -902,14 +1016,19 @@ function releaseBrowserAndStream(sid, onDone) {
 async function submitConfirm(calls, approved) {
   const sid = currentSessionId();
   if (!sid) return;
+  const myCard = renderer.getPendingConfirmCard();
   const results = calls.map((c) => ({
     tool_call_id: c.tool_call_id || c.id,
     confirmed: !!approved,
     accept_rule: false
   }));
   enterStreamingUi();
-  currentReply = renderer.ensureReply('confirm-' + Date.now());
+  const replyId = 'confirm-' + Date.now();
+  currentReply = renderer.ensureReply(replyId);
+  let failed = false;
   try {
+    const t = transport();
+    const confirmFn = (t && typeof t.confirmStream === 'function') ? t.confirmStream : ctx.api.confirmStream;
     await new Promise((resolve, reject) => {
       let settled = false;
       const done = (err) => {
@@ -917,7 +1036,7 @@ async function submitConfirm(calls, approved) {
         settled = true;
         if (err) reject(err); else resolve();
       };
-      activeSubHandle = ctx.api.confirmStream(sid, results, {
+      activeSubHandle = confirmFn(sid, results, {
         userId: uid(),
         onEvent: (evt) => {
           if (evt.type === 'done') { done(); return; }
@@ -925,15 +1044,22 @@ async function submitConfirm(calls, approved) {
           handleEvent(evt);
           if (evt.type === 'AGENT_END') done();
         },
-        onError: (e) => done(e)
+        onError: (e) => done(e),
+        onEnd: () => done()
       });
     });
+    renderer.dismissConfirmCard(myCard);
   } catch (e) {
+    failed = true;
+    renderer.restoreConfirmCard(myCard);
     ctx.utils.toast('确认提交失败: ' + e.message, 'error');
   } finally {
-    renderer.dismissConfirmCard();
+    if (currentReply) {
+      renderer.finishReply(currentReply.replyId);
+      currentReply = null;
+    }
     resetStreamingState();
-    loadThreads();
+    if (!failed) loadThreads();
   }
 }
 
@@ -948,12 +1074,15 @@ function stop() {
     stopBtn.dataset.stopping = '1';
     stopBtn.textContent = '停止中...';
     stopBtn.disabled = true;
+    stopConfirmPending = true;
     requestServerStop(sid, uid()).then(() => {
+      stopConfirmPending = false;
       clearTimeout(stopSlowTimer);
       stopSlowTimer = setTimeout(() => {
         if (isStreaming) ctx.utils.toast('已受理停止请求，正在等待运行中的工具返回', 'warn');
       }, 10000);
     }).catch((err) => {
+      stopConfirmPending = false;
       if (err && err.status === 409 && !isRetryableStopError(err)) {
         showStopButton();
         flushStoppingBuffer();
@@ -961,7 +1090,7 @@ function stop() {
         return;
       }
       delete stopBtn.dataset.stopping;
-      stoppingBuffer = [];
+      if (stoppingBuffer.length > 0) flushStoppingBuffer();
       if (!err || err.status !== 404) {
         ctx.utils.toast('停止请求失败: ' + ((err && err.message) || '未知错误'), 'warn');
       }
@@ -975,6 +1104,7 @@ function stop() {
 function isRetryableStopError(e) {
   if (!e || e.status !== 409) return false;
   if (e.retryable === true || (e.data && e.data.retryable === true)) return true;
+  if (e.code === 'turn_not_ready' || (e.data && e.data.error === 'turn_not_ready')) return true;
   return String(e.message || '').includes('turn_not_ready');
 }
 

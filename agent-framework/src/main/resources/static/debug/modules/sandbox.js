@@ -15,18 +15,30 @@ export default {
   unmount() { ctx = null; }
 };
 
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const DANGEROUS_ENV_KEYS = new Set(['PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'PYTHONPATH', 'NODE_OPTIONS']);
+
 function parseEnvText(text) {
   const env = {};
-  for (const rawLine of String(text || '').split('\n')) {
-    const line = rawLine.trim();
+  const invalidLines = [];
+  const lines = String(text || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
     if (!line || line.startsWith('#')) continue;
     const eq = line.indexOf('=');
-    if (eq <= 0) continue;
+    if (eq <= 0) {
+      invalidLines.push(i + 1);
+      continue;
+    }
     const key = line.slice(0, eq).trim();
-    const val = line.slice(eq + 1);
-    if (key) env[key] = val;
+    const val = line.slice(eq + 1).trim();
+    if (!ENV_KEY_RE.test(key)) {
+      invalidLines.push(i + 1);
+      continue;
+    }
+    env[key] = val;
   }
-  return env;
+  return { env, invalidLines };
 }
 
 function renderEnvInjectPanel() {
@@ -64,18 +76,28 @@ function bindEnvInjectEvents() {
     const sessionId = (document.getElementById('sbEnvSid').value || '').trim();
     const pairsEl = document.getElementById('sbEnvPairs');
     const resultEl = document.getElementById('sbEnvResult');
-    const env = parseEnvText(pairsEl.value);
+    const { env, invalidLines } = parseEnvText(pairsEl.value);
     if (!userId || !sessionId) {
       ctx.utils.toast('请填写 userId 与 sessionId', 'warn');
       return;
     }
-    if (Object.keys(env).length === 0) {
+    if (invalidLines.length > 0) {
+      ctx.utils.toast('第 ' + invalidLines.join(', ') + ' 行格式无效，请使用 KEY=VALUE 格式', 'error');
+      return;
+    }
+    const keysList = Object.keys(env);
+    if (keysList.length === 0) {
       ctx.utils.toast('请至少输入一行 KEY=VALUE', 'warn');
+      return;
+    }
+    const risky = keysList.filter((k) => DANGEROUS_ENV_KEYS.has(k) || k.startsWith('AGENT_'));
+    if (risky.length > 0 && !window.confirm('检测到高危环境变量（' + risky.join(', ') + '），可能影响沙箱运行环境，确认注入？')) {
       return;
     }
     submit.disabled = true;
     try {
       const res = await ctx.api.updateSandboxEnv(userId, sessionId, env);
+      if (!ctx) return;
       pairsEl.value = '';
       const keys = (res.updatedKeys || []).join(', ');
       if (resultEl) {
@@ -84,13 +106,14 @@ function bindEnvInjectEvents() {
       }
       ctx.utils.toast('已更新沙箱环境变量: ' + keys, 'success');
     } catch (e) {
+      if (!ctx) return;
       if (resultEl) {
         resultEl.style.color = 'var(--red)';
         resultEl.textContent = e.message;
       }
       ctx.utils.toast('更新沙箱环境变量失败: ' + e.message, 'error');
     } finally {
-      submit.disabled = false;
+      if (submit) submit.disabled = false;
     }
   });
 }
