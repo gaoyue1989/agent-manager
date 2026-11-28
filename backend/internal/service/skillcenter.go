@@ -239,26 +239,9 @@ func (c *Core) CreateSkillFromZip(workspaceID, userID uint, filename string, r i
 	if err != nil {
 		return nil, nil, err
 	}
-	// 读取全部条目（InspectSkillZip 已做 zip-slip/大小/条目数校验）
-	raw := map[string][]byte{}
-	for _, zf := range zi.Reader.File {
-		if zf.FileInfo().IsDir() {
-			continue
-		}
-		p := path.Clean(strings.Trim(zf.Name, "/"))
-		if p == "." || p == "" || p == ".." || strings.HasPrefix(p, "../") {
-			continue
-		}
-		rc, err := zf.Open()
-		if err != nil {
-			return nil, nil, err
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil, nil, err
-		}
-		raw[p] = data
+	raw, err := readZipEntriesBounded(zi.Reader, store.MaxExtracted, true)
+	if err != nil {
+		return nil, nil, err
 	}
 	// 布局归一（2026-10-20 / 2026-11-25）：真实技能包有多种形态，统一归一为包内 skills/<name>/ 结构：
 	//   A) skills/<name>/SKILL.md（OAF 包内技能目录风格）
@@ -637,6 +620,10 @@ func (c *Core) UpdateSkillDraft(workspaceID, skillID uint, content string) error
 			return err
 		}
 	}
+	if draft.StorageDir != "" {
+		_, err = c.UpdateSkillVersionContent(workspaceID, skillID, draft.ID, content, nil)
+		return err
+	}
 	return c.DB.Model(&draft).Update("content_json", mustJSON(map[string]string{"content": content})).Error
 }
 
@@ -843,6 +830,12 @@ func (c *Core) UpdateSkillVersionContent(workspaceID, skillID, versionID uint, c
 	if strings.TrimSpace(content) == "" {
 		return nil, fmt.Errorf("%w: content is required", ErrInvalidForm)
 	}
+	if utf8.RuneCountInString(content) > 256<<10 {
+		return nil, fmt.Errorf("%w: markdown content must be 1-256KB", ErrInvalidForm)
+	}
+	if fmName, _, ok := parseSkillFrontmatter(content); ok && fmName != "" && fmName != s.Name {
+		return nil, fmt.Errorf("%w: SKILL.md frontmatter name %q does not match skill name %q", ErrInvalidForm, fmName, s.Name)
+	}
 	if v.StorageDir != "" {
 		existingZip, err := c.FS.ZipPackage(v.StorageDir)
 		if err != nil {
@@ -852,31 +845,16 @@ func (c *Core) UpdateSkillVersionContent(workspaceID, skillID, versionID uint, c
 		if err != nil {
 			return nil, err
 		}
-		files := map[string][]byte{}
-		for _, zf := range zr.File {
-			if zf.FileInfo().IsDir() {
-				continue
-			}
-			rc, err := zf.Open()
-			if err != nil {
-				return nil, err
-			}
-			data, err := io.ReadAll(rc)
-			rc.Close()
-			if err != nil {
-				return nil, err
-			}
-			files[zf.Name] = data
+		files, err := readZipEntriesBounded(zr, store.MaxExtracted, false)
+		if err != nil {
+			return nil, err
 		}
 		files["skills/"+s.Name+"/SKILL.md"] = []byte(content)
 		normalized, err := buildZipBytes(files)
 		if err != nil {
 			return nil, err
 		}
-		if err := c.FS.RemovePackage(v.StorageDir); err != nil {
-			return nil, err
-		}
-		if _, _, err := c.FS.WriteZipTo(v.StorageDir, normalized); err != nil {
+		if _, _, err := c.FS.ReplaceZipTo(v.StorageDir, normalized); err != nil {
 			return nil, err
 		}
 		sum := sha256.Sum256(normalized)
@@ -912,25 +890,9 @@ func (c *Core) UploadSkillVersionZip(workspaceID, skillID, versionID uint, filen
 	if err != nil {
 		return nil, nil, err
 	}
-	raw := map[string][]byte{}
-	for _, zf := range zi.Reader.File {
-		if zf.FileInfo().IsDir() {
-			continue
-		}
-		fp := path.Clean(strings.Trim(zf.Name, "/"))
-		if fp == "." || fp == "" || fp == ".." || strings.HasPrefix(fp, "../") {
-			continue
-		}
-		rc, err := zf.Open()
-		if err != nil {
-			return nil, nil, err
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil, nil, err
-		}
-		raw[fp] = data
+	raw, err := readZipEntriesBounded(zi.Reader, store.MaxExtracted, true)
+	if err != nil {
+		return nil, nil, err
 	}
 	prefix, _, err := resolveSkillZipLayout(raw, s.Name)
 	if err != nil {
@@ -980,14 +942,12 @@ func (c *Core) UploadSkillVersionZip(workspaceID, skillID, versionID uint, filen
 		return nil, nil, err
 	}
 	targetDir := fmt.Sprintf("skills/%d/%s", skillID, v.Version)
-	if err := c.FS.RemovePackage(targetDir); err != nil {
-		return nil, nil, err
-	}
-	if _, _, err := c.FS.WriteZipTo(targetDir, normalized); err != nil {
+	if _, _, err := c.FS.ReplaceZipTo(targetDir, normalized); err != nil {
 		return nil, nil, err
 	}
 	sum := sha256.Sum256(normalized)
 	v.StorageDir = targetDir
+	v.ContentJSON = ""
 	v.Checksum = hex.EncodeToString(sum[:])
 	if filesInfo, ferr := c.skillVersionFiles(skillID, v.Version); ferr == nil {
 		v.FilesJSON = mustJSON(filesInfo)
@@ -1238,3 +1198,40 @@ func (c *Core) SkillRefAgents(workspaceID uint, skillName string) []SkillRefAgen
 	}
 	return out
 }
+
+func readZipEntriesBounded(zr *zip.Reader, maxTotal int64, cleanPath bool) (map[string][]byte, error) {
+	raw := map[string][]byte{}
+	var total int64
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		key := zf.Name
+		if cleanPath {
+			key = path.Clean(strings.Trim(zf.Name, "/"))
+			if key == "." || key == "" || key == ".." || strings.HasPrefix(key, "../") {
+				continue
+			}
+		}
+		remaining := maxTotal - total
+		if remaining < 0 {
+			return nil, store.ErrExtractTooLarge
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(io.LimitReader(rc, remaining+1))
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > remaining {
+			return nil, store.ErrExtractTooLarge
+		}
+		total += int64(len(data))
+		raw[key] = data
+	}
+	return raw, nil
+}
+

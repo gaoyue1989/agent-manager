@@ -359,3 +359,63 @@ func TestMcpConnectorPermissionsNormalizeAndUpdateValidation(t *testing.T) {
 		t.Fatalf("updating null permissions must normalize to {}, got %q", updated.Permissions)
 	}
 }
+
+func TestMcpConnectorAuthTypeResetAndNoTokenLeakWhenNone(t *testing.T) {
+	prev := allowLoopbackProbeForTest
+	allowLoopbackProbeForTest = true
+	t.Cleanup(func() { allowLoopbackProbeForTest = prev })
+
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Slug: "ws-mcp-auth", Name: "ws-mcp-auth"}
+	if err := c.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var seenAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	}))
+	defer srv.Close()
+
+	v, err := c.CreateMcpConnector(ws.ID, CreateMcpConnectorInput{
+		Name:      "auth-conn",
+		Endpoint:  srv.URL,
+		AuthType:  "bearer",
+		AuthToken: "secret-tok",
+		ToolScope: json.RawMessage("null"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if v.ToolScope != `{"mode":"all"}` {
+		t.Fatalf("toolScope null should normalize, got %q", v.ToolScope)
+	}
+
+	badAuth := "basic"
+	if _, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{AuthType: &badAuth}); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("invalid authType should fail, got %v", err)
+	}
+
+	if err := c.DB.Model(&store.McpConnector{}).Where("id = ?", v.ID).Update("status", "verified").Error; err != nil {
+		t.Fatal(err)
+	}
+	noneAuth := "none"
+	updated, err := c.UpdateMcpConnector(ws.ID, v.ID, PatchMcpConnectorInput{AuthType: &noneAuth})
+	if err != nil {
+		t.Fatalf("update to none: %v", err)
+	}
+	if updated.Status != "unverified" || updated.AuthToken != "" {
+		t.Fatalf("switching authType to none must reset status & clear token, got status=%q tok=%q", updated.Status, updated.AuthToken)
+	}
+
+	if err := c.DB.Model(&store.McpConnector{}).Where("id = ?", v.ID).Updates(map[string]any{"auth_type": "none", "auth_token": "legacy-tok"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, _ = c.VerifyMcpConnector(ws.ID, v.ID)
+	if seenAuth != "" {
+		t.Fatalf("authType=none must not send Authorization header, got %q", seenAuth)
+	}
+}

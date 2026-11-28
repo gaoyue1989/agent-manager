@@ -678,3 +678,46 @@ func TestSkillVersionUploadZipAndUpdateContent(t *testing.T) {
 		t.Fatalf("published version content must remain immutable, got err=%v content=%q", err, pubContent)
 	}
 }
+
+func TestSkillDraftEditConsistencyAndValidation(t *testing.T) {
+	c, _, cleanup := newTestCore(t)
+	defer cleanup()
+	ws := store.Workspace{Slug: "ws-sk-792", Name: "ws-sk-792"}
+	if err := c.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+	s, err := c.CreateSkillFromMarkdown(ws.ID, 1, "md-skill", "MD", "desc", nil, "---\nname: md-skill\ndescription: desc\n---\n# v1", false)
+	if err != nil {
+		t.Fatalf("create md: %v", err)
+	}
+	var v1 store.SkillVersion
+	if err := c.DB.Where("skill_id = ?", s.ID).Order("id DESC").First(&v1).Error; err != nil {
+		t.Fatal(err)
+	}
+	zipBytes, err := buildZipBytes(map[string][]byte{
+		"SKILL.md": []byte("---\nname: md-skill\ndescription: from zip\n---\n# zip body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.UploadSkillVersionZip(ws.ID, s.ID, v1.ID, "s.zip", bytes.NewReader(zipBytes), "upload zip"); err != nil {
+		t.Fatalf("upload zip on md skill: %v", err)
+	}
+	if err := c.UpdateSkillDraft(ws.ID, s.ID, "---\nname: md-skill\ndescription: edited\n---\n# updated"); err != nil {
+		t.Fatalf("UpdateSkillDraft after zip: %v", err)
+	}
+	got, err := c.GetSkillVersionContent(ws.ID, s.ID, v1.ID)
+	if err != nil || !strings.Contains(got, "# updated") {
+		t.Fatalf("expected updated content, got=%q err=%v", got, err)
+	}
+	if _, err := c.UpdateSkillVersionContent(ws.ID, s.ID, v1.ID, "---\nname: hijacked\ndescription: bad\n---\n# bad", nil); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("mismatched frontmatter name must fail, got %v", err)
+	}
+	if _, err := c.UpdateSkillVersionContent(ws.ID, s.ID, v1.ID, strings.Repeat("a", (256<<10)+10), nil); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("oversized content must fail, got %v", err)
+	}
+	gotAfter, err := c.GetSkillVersionContent(ws.ID, s.ID, v1.ID)
+	if err != nil || !strings.Contains(gotAfter, "# updated") {
+		t.Fatalf("previous draft must remain intact after rejected edit, got=%q err=%v", gotAfter, err)
+	}
+}

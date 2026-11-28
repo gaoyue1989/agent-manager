@@ -192,9 +192,18 @@ public class SessionStreamController {
         }
 
         boolean stopping = false;
-        if ("working".equals(state) && turnStopStore != null && !replyId.isBlank()) {
+        if ("working".equals(state) && turnStopStore != null) {
             var stopReq = turnStopStore.find(sessionId);
-            stopping = stopReq != null && replyId.equals(stopReq.replyId());
+            if (stopReq != null && stopReq.replyId() != null) {
+                String activeEventReplyId = probe.running()
+                        && latestEvent != null
+                        && !SessionEventTailer.isTerminalType(latestEvent.type())
+                        && latestEvent.replyId() != null
+                    ? latestEvent.replyId()
+                    : "";
+                stopping = (!replyId.isBlank() && replyId.equals(stopReq.replyId()))
+                    || (!activeEventReplyId.isBlank() && activeEventReplyId.equals(stopReq.replyId()));
+            }
         }
 
         return ResponseEntity.ok(Map.of(

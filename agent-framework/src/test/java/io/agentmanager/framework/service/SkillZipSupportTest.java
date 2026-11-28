@@ -36,7 +36,10 @@ class SkillZipSupportTest {
     @Test
     void sanitizeShouldNotAllowLeadingDot() {
         assertEquals("_hidden", SkillZipSupport.sanitizeSkillName(".hidden"));
-        assertEquals("_.", SkillZipSupport.sanitizeSkillName(".."));
+        assertEquals("_", SkillZipSupport.sanitizeSkillName(".."));
+        assertTrue(SkillZipSupport.isShellSafeSegment(SkillZipSupport.sanitizeSkillName("Q&A")));
+        assertTrue(SkillZipSupport.isShellSafeSegment(SkillZipSupport.sanitizeSkillName("my skill")));
+        assertTrue(SkillZipSupport.isShellSafeSegment(SkillZipSupport.sanitizeSkillName("a/../b")));
     }
 
     @Test

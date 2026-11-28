@@ -82,12 +82,20 @@ public class ToolCallObservabilityMiddleware implements MiddlewareBase {
         return next.apply(input)
             .doOnNext(evt -> {
                 if (evt instanceof ToolResultEndEvent end && !AgentEventSseSerializer.isRemoteForwarded(evt)) {
-                    boolean success = end.getState() == ToolResultState.SUCCESS;
+                    boolean success = ActingDenials.effectiveResultState(ctx, end) == ToolResultState.SUCCESS;
                     count(end.getToolCallName(), success);
                     auditResult(end, sessionId, end.getToolCallName(), end.getToolCallId(),
                         success ? "success" : "error");
                 }
             });
+    }
+
+    @Override
+    public Flux<AgentEvent> onReasoning(Agent agent, RuntimeContext ctx,
+                                        io.agentscope.core.middleware.ReasoningInput input,
+                                        Function<io.agentscope.core.middleware.ReasoningInput, Flux<AgentEvent>> next) {
+        ActingDenials.restoreSuppressedToolResults(RuntimeContext.resolveAgentState(ctx, agent), ctx);
+        return next.apply(input);
     }
 
     @Override

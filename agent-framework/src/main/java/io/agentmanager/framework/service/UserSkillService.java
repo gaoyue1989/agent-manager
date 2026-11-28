@@ -197,11 +197,10 @@ public class UserSkillService {
 
     /** 技能名合法性：禁止 .. / \ 与 . / _ 开头（元数据目录约定）、控制字符，长度受限 */
     public static boolean isValidSkillName(String name) {
-        if (name == null || name.isBlank() || name.length() > 128 || hasControlChar(name)) {
+        if (name == null || name.isBlank() || name.length() > 128 || name.startsWith("_")) {
             return false;
         }
-        return !name.contains("..") && !name.contains("/") && !name.contains("\\")
-            && !name.startsWith(".") && !name.startsWith("_");
+        return SkillZipSupport.isShellSafeSegment(name);
     }
 
     /** 用户标识合法性：sanitize 幂等（命名空间与 SDK 一致）、禁路径穿越、长度受限 */
@@ -713,8 +712,8 @@ public class UserSkillService {
         if (!isValidUserId(userId) || !isValidSkillName(name)) {
             throw new IllegalArgumentException("无效的用户标识或 Skill 名称");
         }
-        var sourceDir = skillManageService.getSkillsDir().resolve(name);
-        if (!Files.isDirectory(sourceDir)) {
+        var sourceDir = skillManageService.resolveSkillDir(name);
+        if (sourceDir == null || !Files.isDirectory(sourceDir)) {
             return Optional.empty();
         }
         return Optional.of(materializeFromDirectory(userId, name, sourceDir));
@@ -978,8 +977,8 @@ public class UserSkillService {
         if (!isValidSkillName(name)) {
             return false;
         }
-        return Files.isRegularFile(
-            skillManageService.getSkillsDir().resolve(name).resolve(WorkspaceReader.SKILL_FILE));
+        var dir = skillManageService.resolveSkillDir(name);
+        return dir != null && Files.isRegularFile(dir.resolve(WorkspaceReader.SKILL_FILE));
     }
 
     /** 包内技能的文件相对路径列表（无此技能返回空列表） */
@@ -988,8 +987,8 @@ public class UserSkillService {
         if (!isValidSkillName(name)) {
             return files;
         }
-        var dir = skillManageService.getSkillsDir().resolve(name);
-        if (!Files.isDirectory(dir)) {
+        var dir = skillManageService.resolveSkillDir(name);
+        if (dir == null || !Files.isDirectory(dir)) {
             return files;
         }
         try (Stream<Path> stream = Files.walk(dir)) {
@@ -1012,8 +1011,12 @@ public class UserSkillService {
         if (!isValidSkillName(name) || !isValidSkillFilePath(relPath)) {
             return null;
         }
-        var root = skillManageService.getSkillsDir().normalize();
-        var target = root.resolve(name).resolve(relPath).normalize();
+        var dir = skillManageService.resolveSkillDir(name);
+        if (dir == null) {
+            return null;
+        }
+        var root = dir.normalize();
+        var target = root.resolve(relPath).normalize();
         if (!target.startsWith(root) || !Files.isRegularFile(target)) {
             return null;
         }

@@ -21,7 +21,7 @@ agentKey: full-config-example
 version: "1.0.0"
 
 # [可选] URL 友好短标识（用于路由或展示）
-slug: full-config-example
+slug: example-vendor/full-config-example
 
 # [必填] Agent 职责与能力简述（展示于 AgentCard 与多 Agent 委派提示）
 description: "全量配置参考示例 Agent：演示 OAF frontmatter、Skills、MCP、Sub-Agent 委派、权限控制与沙箱配置。"

@@ -49,9 +49,10 @@ function matchesFilter(tool) {
     tool.fullName,
     tool.server,
     tool.description,
-    tool.directReturn ? 'direct return' : '',
-    tool.uiResourceUri ? 'mcp app ui' : '',
-    tool.appOnly ? 'app only' : ''
+    tool.directReturn ? 'direct return 直返' : '',
+    tool.uiResourceUri ? 'mcp app ui mcp 界面' : '',
+    tool.appOnly ? 'app only 仅卡片可调' : '',
+    (tool.sessionControllable === false && !tool.appOnly) ? 'always on 始终启用' : ''
   ].filter(Boolean).join(' ').toLowerCase();
   return hay.includes(searchQuery);
 }
@@ -61,7 +62,7 @@ function renderBadges(t) {
   if (t.directReturn) badges.push('<span class="badge accent">直返</span>');
   if (t.uiResourceUri) badges.push('<span class="badge green" title="' + ctx.utils.esc(t.uiResourceUri) + '">MCP 界面</span>');
   if (t.appOnly) badges.push('<span class="badge yellow">仅卡片可调</span>');
-  if (t.sessionControllable === false) badges.push('<span class="badge dim">始终启用</span>');
+  if (t.sessionControllable === false && !t.appOnly) badges.push('<span class="badge dim">始终启用</span>');
   return badges.join('');
 }
 
