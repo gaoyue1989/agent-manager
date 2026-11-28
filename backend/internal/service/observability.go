@@ -559,7 +559,8 @@ func emptyToolCallStats(rangeKey string, r toolCallRange) *ToolCallStatsView {
 	start := time.Now().UTC().Add(-time.Duration(r.Points-1) * r.Step)
 	v.Trend = make([]ToolCallTrendPoint, r.Points)
 	for i := range v.Trend {
-		v.Trend[i] = ToolCallTrendPoint{Bucket: start.Add(time.Duration(i) * r.Step).Format("01-02 15:04")}
+		t := start.Add(time.Duration(i) * r.Step).UTC()
+		v.Trend[i] = ToolCallTrendPoint{Bucket: t.Format("01-02 15:04"), Timestamp: t.Format(time.RFC3339)}
 	}
 	v.ByTool = []ToolCallToolRow{}
 	v.ByService = []ToolCallServiceRow{}
