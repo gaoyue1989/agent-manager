@@ -229,7 +229,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `OPENSANDBOX_SERVER_URL` | string | `192.168.31.155:8090` | | OpenSandbox Server 地址（绑 `agent.sandbox.opensandbox.server-url`） |
 | `OPENSANDBOX_API_KEY` | string | — | ✓(沙箱模式) | OpenSandbox API 密钥（绑 `agent.sandbox.opensandbox.api-key`） |
 | `SANDBOX_EXEC_TRANSLATE` | bool | `true` | | （直读 env）命令执行翻译层开关，优化路径与探测命令 |
-| `SANDBOX_EXEC_TRACE` | bool | `false` | | （直读 env）输出沙箱命令执行详细追踪日志 |
+| `SANDBOX_EXEC_TRACE` | bool | `true` | | （直读 env）输出沙箱命令执行详细追踪日志（设为 `false` 关闭） |
 | `SANDBOX_EXEC_DATAPLANE_FAIL_LIMIT` | int | `3` | | （直读 env）数据面连续失败熔断/重建阈值 |
 | `SANDBOX_PROBE_EXECD_PING` | bool | `true` | | （直读 env）复用沙箱前通过 execd ping 探活 |
 | `SANDBOX_RUNTIME_READ_THROUGH` | bool | `false` | | （直读 env）记忆混合读穿开关（灰度须全副本同步切换） |
@@ -417,7 +417,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 
 | 变量 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `AGENT_TURN_STOP_ENABLED` | bool | `true` | 总开关；`false` 时端点返回 404、属主不轮询，行为回退「只能断流」（绑 `agent.turn-stop.enabled`） |
+| `AGENT_TURN_STOP_ENABLED` | bool | `true` | 总开关；`false` 时端点返回 503、属主不轮询，行为回退「只能断流」（绑 `agent.turn-stop.enabled`） |
 | `AGENT_TURN_STOP_POLL_MS` | int | `1000` | 属主副本对 `turn_stop` 表的全局轮询周期（毫秒；所有活跃 turn 共用一次查询，成本与并发 turn 数无关，下限 100；绑 `agent.turn-stop.poll-interval-ms`） |
 | `AGENT_TURN_STOP_GRACE_MS` | int | `15000` | 协作式停止告警阈值：超时仍无终态打 WARN（通常是阻塞中的工具调用，SDK 检查点在工具返回后）（绑 `agent.turn-stop.grace-ms`） |
 
@@ -580,14 +580,14 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/threads/{sid}/status` | **刷新恢复判态**（5 态；存储不可用返回 503） |
 | POST | `/threads/chat` | 单次流 SSE 对话（唯一对话入口，sessionId 在 body，支持 fileIds / model） |
 | POST | `/threads/{sid}/confirm` / `/confirm-stream` | HITL 人工确认（同步 / 流式） |
-| POST | `/threads/{sid}/stop` | 跨副本协作式单轮停止（写 `turn_stop` 表由属主副本消费 interrupt，以 `cancelled` 终态帧收口；202/404/409/503，`AGENT_TURN_STOP_ENABLED=false` 时 404） |
+| POST | `/threads/{sid}/stop` | 跨副本协作式单轮停止（写 `turn_stop` 表由属主副本消费 interrupt，以 `cancelled` 终态帧收口；202/404/409/503，`AGENT_TURN_STOP_ENABLED=false` 时 503） |
 | POST | `/files/upload` | 文件上传 |
 | GET | `/files/{fileId}` | 文件下载/预览（`?inline=1` 内联） |
 | GET/POST | `/models` | 托管模型列表 / 新建（会话模型选择器的数据源） |
 | GET/PATCH/DELETE | `/models/{id}` | 托管模型详情 / 更新 / 删除 |
 | POST | `/models/{id}/test` | 模型连通性测试（失败 502） |
 | POST/GET | `/admin/reload` | OAF 包热加载（`?scope=auto`、`mcp`、`agent`）/ 只读状态 |
-| GET | `/actuator/health` | Actuator 健康检查（yml 无 `management:` 段，**只暴露 health**） |
+| GET | `:9091/actuator/{health,metrics,prometheus}` | Actuator 独立管理端口（`MANAGEMENT_SERVER_PORT`，默认 `9091`，暴露 `health,metrics,prometheus`；主端口 `8100` 不暴露） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 | POST/GET | `/a2a/jobs`、`/a2a/jobs/{key}` | A2A 幂等 Job 提交 / 状态查询（**默认关闭**，`AGENT_A2A_JOB_ENABLED=true` 开启；header `Idempotency-Key` + `Agent-A2A-Job-Token`） |
 | POST/GET | `/tasks`、`/tasks/{id}`、`/tasks/{id}/wait`、`/tasks/{id}/cancel`、`/tasks/{id}/events`、`/tasks/{id}/resume` | Agent Protocol 远程子 agent 服务端（**默认关闭**，`AGENT_PROTOCOL_ENABLED=true` 开启；`/tasks/{id}/events` 为 SSE；端点均在 `/tasks*` 认证 filter 覆盖面内，`AgentProtocolConfig.java:187`） |

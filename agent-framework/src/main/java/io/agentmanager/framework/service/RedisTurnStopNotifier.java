@@ -70,7 +70,7 @@ public class RedisTurnStopNotifier implements TurnStopNotifier {
     @Override
     public void ensureSubscribed() {
         if (facade != null && (settings == null || settings.enabled()) && !facade.isPubSubOpen()) {
-            facade.ensurePubSubSubscribed();
+            facade.ensurePubSubSubscribedAsync();
         }
     }
 
@@ -99,8 +99,26 @@ public class RedisTurnStopNotifier implements TurnStopNotifier {
         if (agentNamespace == null || agentNamespace.isBlank()) {
             return BASE_CHANNEL;
         }
-        String sanitized = agentNamespace.trim().replaceAll("[^a-zA-Z0-9._-]", "_");
-        return sanitized.isEmpty() ? BASE_CHANNEL : BASE_CHANNEL + ":" + sanitized;
+        String trimmed = agentNamespace.trim();
+        String sanitized = trimmed.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (sanitized.isEmpty()) {
+            sanitized = "ns";
+        }
+        return BASE_CHANNEL + ":" + sanitized + "-" + shortSha256(trimmed);
+    }
+
+    private static String shortSha256(String input) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var sb = new StringBuilder(8);
+            for (int i = 0; i < 4; i++) {
+                sb.append(String.format("%02x", digest[i] & 0xff));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(input.hashCode());
+        }
     }
 
     private static String resolveAgentNamespace(ObjectProvider<OafConfigHolder> holderProvider) {
@@ -115,11 +133,11 @@ public class RedisTurnStopNotifier implements TurnStopNotifier {
         if (cfg == null) {
             return null;
         }
-        if (cfg.agentKey() != null && !cfg.agentKey().isBlank()) {
-            return cfg.agentKey();
-        }
         if (cfg.slug() != null && !cfg.slug().isBlank()) {
             return cfg.slug();
+        }
+        if (cfg.agentKey() != null && !cfg.agentKey().isBlank()) {
+            return cfg.agentKey();
         }
         return cfg.name();
     }

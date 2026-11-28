@@ -131,7 +131,7 @@ public class SkillInjectionService {
         }
 
         // 3. 扫描消息中的 /SkillName（已知名最长前缀匹配）
-        var mentions = findSkillMentions(message, enabledSkills);
+        var mentions = findSkillMentions(message, enabledSkills, allKnownSkillNames(userId));
         if (mentions.isEmpty()) {
             return message;
         }
@@ -211,7 +211,7 @@ public class SkillInjectionService {
 
         var enabledSkills = enabledSkillNames(userId, skillNames);
 
-        return findSkillMentions(message, enabledSkills).stream()
+        return findSkillMentions(message, enabledSkills, allKnownSkillNames(userId)).stream()
             .map(SkillMention::name)
             .distinct()
             .toList();
@@ -224,8 +224,56 @@ public class SkillInjectionService {
      * 按已知技能名做最长前缀匹配：名字集合已知，避免用字符类穷举中文标点边界。
      * 同一位置优先长名（{@code pdf-pro} 先于 {@code pdf}）；已被前一个匹配覆盖的 "/" 跳过。
      */
-    private static List<SkillMention> findSkillMentions(String message, java.util.Set<String> enabledNames) {
-        var ordered = enabledNames.stream()
+    private java.util.Set<String> allKnownSkillNames(String userId) {
+        var all = new java.util.LinkedHashSet<String>();
+        catalogService.list().stream()
+            .map(m -> (String) m.get("name"))
+            .filter(n -> n != null && !n.isBlank())
+            .forEach(all::add);
+        if (userId != null && !userId.isBlank()) {
+            try {
+                for (var skill : userSkillService.listSkills(userId)) {
+                    if (skill.name() != null && !skill.name().isBlank()) {
+                        all.add(skill.name());
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        try {
+            var l2Disabled = manageService.getDisabledSet();
+            if (l2Disabled != null) {
+                all.addAll(l2Disabled);
+            }
+        } catch (Exception ignored) {
+        }
+        return all;
+    }
+
+    private static boolean isAsciiIdentChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == '_' || c == '-';
+    }
+
+    private static boolean hasValidRightBoundary(String message, String name, int end) {
+        if (end >= message.length() || name.isEmpty()) {
+            return true;
+        }
+        char last = name.charAt(name.length() - 1);
+        if (!isAsciiIdentChar(last)) {
+            return true;
+        }
+        char next = message.charAt(end);
+        return !isAsciiIdentChar(next) && next != '.' && next != '/';
+    }
+
+    private static List<SkillMention> findSkillMentions(String message, java.util.Set<String> enabledNames,
+                                                        java.util.Set<String> allKnownNames) {
+        var candidates = new java.util.LinkedHashSet<String>(enabledNames);
+        if (allKnownNames != null) {
+            candidates.addAll(allKnownNames);
+        }
+        var ordered = candidates.stream()
             .sorted(java.util.Comparator.comparingInt(String::length).reversed()
                 .thenComparing(java.util.Comparator.naturalOrder()))
             .toList();
@@ -233,14 +281,17 @@ public class SkillInjectionService {
         var matcher = SLASH_TRIGGER.matcher(message);
         int consumedTo = -1;
         while (matcher.find()) {
-            if (matcher.start() <= consumedTo) {
+            if (matcher.start() < consumedTo) {
                 continue;
             }
             var nameStart = matcher.end();
             for (var name : ordered) {
-                if (message.startsWith(name, nameStart)) {
-                    mentions.add(new SkillMention(matcher.start(), nameStart + name.length(), name));
-                    consumedTo = nameStart + name.length();
+                int end = nameStart + name.length();
+                if (message.startsWith(name, nameStart) && hasValidRightBoundary(message, name, end)) {
+                    consumedTo = end;
+                    if (enabledNames.contains(name)) {
+                        mentions.add(new SkillMention(matcher.start(), end, name));
+                    }
                     break;
                 }
             }

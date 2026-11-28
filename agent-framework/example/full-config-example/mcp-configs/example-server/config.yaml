@@ -2,7 +2,7 @@
 # MCP Server 配置文件（mcp-configs/<server>/config.yaml 全量字段示例）
 # 说明：
 #   1. 由 agent-framework 的 McpToolRegistrar.java 在启动或 /admin/reload 时扫描加载
-#   2. 支持 ${ENV_VAR} 占位符从环境变量注入敏感 Token 或动态地址
+#   2. 支持 ${ENV_VAR} 占位符从环境变量注入敏感 Token（url 字段不支持占位符）
 #   3. 同目录可放置 ActiveMCP.json（可选，用于通过 selectedTools 按工具粒度裁剪注册列表）
 # ==============================================================================
 
