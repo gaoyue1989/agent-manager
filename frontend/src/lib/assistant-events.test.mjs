@@ -256,6 +256,14 @@ test("isSafeFileDownloadUrl enforces safe protocols and relative file paths", as
   assert.equal(isSafeFileDownloadUrl("/files/%5csecret"), false);
   assert.equal(isSafeFileDownloadUrl("/files/%ZZbad"), false);
   assert.equal(isSafeFileDownloadUrl("/files/report%20v1.pdf"), true);
+  assert.equal(isSafeFileDownloadUrl("/files/%252e%252e/internal/secret"), false);
+  assert.equal(isSafeFileDownloadUrl("/agent/a1/files/%252e%252e/threads"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%255csecret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%252e%252e%252fsecret"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%2f"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/."), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%2e"), false);
+  assert.equal(isSafeFileDownloadUrl("/files/%2525252e%2525252e/secret"), false);
   assert.equal(isSafeFileDownloadUrl("/agent/my-bot/files/../secret"), false);
   assert.equal(isSafeFileDownloadUrl("/files/"), false);
   assert.equal(isSafeFileDownloadUrl("/other/path"), false);
