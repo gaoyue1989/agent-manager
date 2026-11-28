@@ -2,6 +2,7 @@ package io.agentmanager.framework.service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import io.agentscope.core.agent.Agent;
@@ -17,7 +18,11 @@ import reactor.core.publisher.Flux;
 
 public class StageProgressMiddleware implements MiddlewareBase {
 
+    public static final String METADATA_STAGE_PROGRESS_KEY = "agent_stage_progress";
     static final String MARKER = "<stage>";
+
+    private static final String METADATA_SYNTHETIC = "agentscope_synthetic";
+    private static final String METADATA_CONFIRM_RESULTS = "agentscope_confirm_results";
 
     private static final String INSTRUCTION = "\n\n[执行阶段播报规范]\n"
         + "1. 当你需要调用一个或多个工具来推进新阶段时，在发起工具调用前，先单独输出一行 "
@@ -44,7 +49,7 @@ public class StageProgressMiddleware implements MiddlewareBase {
             return next.apply(input);
         }
         List<Msg> messages = input.messages();
-        if (messages == null || hasInstruction(messages)) {
+        if (messages == null || !isEnabledForTurn(messages) || hasInstruction(messages)) {
             return next.apply(input);
         }
         List<Msg> updated = new ArrayList<>(messages.size() + 1);
@@ -61,6 +66,24 @@ public class StageProgressMiddleware implements MiddlewareBase {
             updated.add(0, Msg.builder().role(MsgRole.SYSTEM).textContent(INSTRUCTION.trim()).build());
         }
         return next.apply(new ReasoningInput(List.copyOf(updated), input.tools(), input.options()));
+    }
+
+    static boolean isEnabledForTurn(List<Msg> messages) {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Msg m = messages.get(i);
+            if (m == null || m.getRole() != MsgRole.USER) {
+                continue;
+            }
+            Map<String, Object> meta = m.getMetadata();
+            if (meta != null) {
+                if (Boolean.TRUE.equals(meta.get(METADATA_SYNTHETIC)) || meta.containsKey(METADATA_CONFIRM_RESULTS)) {
+                    continue;
+                }
+                return Boolean.TRUE.equals(meta.get(METADATA_STAGE_PROGRESS_KEY));
+            }
+            return false;
+        }
+        return false;
     }
 
     private static boolean hasInstruction(List<Msg> messages) {

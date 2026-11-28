@@ -191,6 +191,9 @@ public class VikingSessionCommitStateStore implements AgentStateStore {
                 }
                 var role = msg.getRole() != null ? msg.getRole().name().toLowerCase() : "user";
                 var text = msg.getTextContent();
+                if ("assistant".equals(role) && text != null) {
+                    text = StageProgressParser.parse(text).cleanText();
+                }
                 if (text == null || text.isBlank()) {
                     continue;
                 }

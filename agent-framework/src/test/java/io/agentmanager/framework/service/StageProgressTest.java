@@ -1,8 +1,10 @@
 package io.agentmanager.framework.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -14,11 +16,13 @@ import org.junit.jupiter.api.Test;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentscope.core.event.AgentEndEvent;
+import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.ModelCallEndEvent;
 import io.agentscope.core.event.ModelCallStartEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.TextBlockEndEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
+import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.middleware.ReasoningInput;
@@ -114,39 +118,62 @@ class StageProgressTest {
     }
 
     @Test
-    void middlewareInjectsInstructionOnlyWhenToolsPresentAndIdempotent() {
-        var mw = new StageProgressMiddleware();
-        var sys = Msg.builder().role(MsgRole.SYSTEM).textContent("你是助手").build();
-        var user = Msg.builder().role(MsgRole.USER).textContent("查服务").build();
-        var tool = ToolSchema.builder().name("list_services").description("list").build();
+    void trackerPassesDirectReturnDeltaThroughUntouched() {
+        List<String> emitted = new ArrayList<>();
+        var tracker = new StageProgressTracker("sid-1", "rid-1", (type, payload) -> emitted.add(type), null);
+        var delta = new TextBlockDeltaEvent("rid-1", "b1", "<stage>raw-direct</stage>");
+        delta.withMetadata(Map.of(AgentEvent.METADATA_GENERATE_REASON, GenerateReason.TOOL_RETURN_DIRECT.name()));
 
-        ReasoningInput[] captured = new ReasoningInput[1];
-        mw.onReasoning(null, null, new ReasoningInput(List.of(sys, user), List.of(tool), null), in -> {
-            captured[0] = in;
-            return Flux.empty();
-        }).blockLast();
-
-        assertNotNull(captured[0]);
-        assertTrue(captured[0].messages().get(0).getTextContent().contains("<stage>"));
-
-        ReasoningInput[] second = new ReasoningInput[1];
-        mw.onReasoning(null, null, captured[0], in -> {
-            second[0] = in;
-            return Flux.empty();
-        }).blockLast();
-        assertEquals(captured[0], second[0]);
-
-        ReasoningInput[] noTools = new ReasoningInput[1];
-        var rawNoTools = new ReasoningInput(List.of(sys, user), List.of(), null);
-        mw.onReasoning(null, null, rawNoTools, in -> {
-            noTools[0] = in;
-            return Flux.empty();
-        }).blockLast();
-        assertEquals(rawNoTools, noTools[0]);
+        var out = tracker.process(delta);
+        assertSame(delta, out);
+        assertTrue(emitted.isEmpty());
     }
 
     @Test
-    void stateDataParserStripsTagsAndPopulatesStagesAndSummary() throws Exception {
+    void middlewareInjectsOnlyWhenOptedInAndSurvivesConfirmResume() {
+        var mw = new StageProgressMiddleware();
+        var sys = Msg.builder().role(MsgRole.SYSTEM).textContent("你是助手").build();
+        var tool = ToolSchema.builder().name("list_services").description("list").build();
+
+        var a2aUser = Msg.builder().role(MsgRole.USER).textContent("查服务").build();
+        ReasoningInput[] a2aCaptured = new ReasoningInput[1];
+        var a2aInput = new ReasoningInput(List.of(sys, a2aUser), List.of(tool), null);
+        mw.onReasoning(null, null, a2aInput, in -> {
+            a2aCaptured[0] = in;
+            return Flux.empty();
+        }).blockLast();
+        assertSame(a2aInput, a2aCaptured[0]);
+        assertFalse(a2aCaptured[0].messages().get(0).getTextContent().contains("<stage>"));
+
+        var chatUser = Msg.builder()
+            .role(MsgRole.USER)
+            .textContent("查服务")
+            .metadata(Map.of(StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE))
+            .build();
+        var confirmResume = Msg.builder()
+            .role(MsgRole.USER)
+            .textContent("人工已批准")
+            .metadata(Map.of("agentscope_confirm_results", List.of()))
+            .build();
+        ReasoningInput[] chatCaptured = new ReasoningInput[1];
+        mw.onReasoning(null, null, new ReasoningInput(List.of(sys, chatUser, confirmResume), List.of(tool), null), in -> {
+            chatCaptured[0] = in;
+            return Flux.empty();
+        }).blockLast();
+
+        assertNotNull(chatCaptured[0]);
+        assertTrue(chatCaptured[0].messages().get(0).getTextContent().contains("<stage>"));
+
+        ReasoningInput[] second = new ReasoningInput[1];
+        mw.onReasoning(null, null, chatCaptured[0], in -> {
+            second[0] = in;
+            return Flux.empty();
+        }).blockLast();
+        assertEquals(chatCaptured[0], second[0]);
+    }
+
+    @Test
+    void stateDataParserStripsTagsAndFallsBackWhenStageOmitted() throws Exception {
         String stateJson = """
             {"context": [
               {"role": "USER", "content": [{"type": "text", "text": "查服务"}]},
@@ -155,17 +182,21 @@ class StageProgressTest {
                 {"type": "tool_use", "id": "c1", "name": "mcp__platform-publisher__list_services", "input": {}}
               ]},
               {"role": "ASSISTANT", "content": [
+                {"type": "tool_use", "id": "c2", "name": "read_file", "input": {"path": "a.txt"}}
+              ]},
+              {"role": "ASSISTANT", "content": [
                 {"type": "text", "text": "<summary>已查询平台已发布服务</summary>\\n\\n服务列表如下。"}
               ]}
             ]}
             """;
         var arr = StateDataParser.findMessagesArray(stateJson);
         var list = StateDataParser.toRoleContentList(arr);
-        assertEquals(3, list.size());
+        assertEquals(4, list.size());
         assertEquals("", list.get(1).get("content"));
         assertEquals(List.of("正在查询平台服务"), list.get(1).get("stages"));
-        assertEquals("服务列表如下。", list.get(2).get("content"));
-        assertEquals("已查询平台已发布服务", list.get(2).get("turn_summary"));
+        assertEquals(List.of("正在查阅并分析相关文件"), list.get(2).get("stages"));
+        assertEquals("服务列表如下。", list.get(3).get("content"));
+        assertEquals("已查询平台已发布服务", list.get(3).get("turn_summary"));
         assertNull(list.get(0).get("stages"));
     }
 }

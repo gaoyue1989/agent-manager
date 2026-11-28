@@ -62,6 +62,9 @@ public final class StageProgressTracker {
             return event;
         }
         if (event instanceof TextBlockDeltaEvent delta) {
+            if (isDirectReturn(delta)) {
+                return event;
+            }
             lastTextReplyId = delta.getReplyId();
             lastTextBlockId = delta.getBlockId();
             String raw = delta.getDelta();
@@ -241,6 +244,12 @@ public final class StageProgressTracker {
         payload.put("stageCount", stages.size());
         payload.put("replyId", replyId);
         emitter.emit("turn_progress_summary", AgentEventSseSerializer.payload(payload));
+    }
+
+    private static boolean isDirectReturn(TextBlockDeltaEvent delta) {
+        Map<String, Object> meta = delta.getMetadata();
+        return meta != null && io.agentscope.core.message.GenerateReason.TOOL_RETURN_DIRECT.name()
+            .equals(meta.get(AgentEvent.METADATA_GENERATE_REASON));
     }
 
     private static int trailingPrefixLength(String s) {

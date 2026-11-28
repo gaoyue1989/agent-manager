@@ -488,8 +488,22 @@ public final class StateDataParser {
             if (turnReplyId != null) {
                 msg.put("turn_reply_id", turnReplyId);
             }
-            if (!stageParsed.stages().isEmpty()) {
-                msg.put("stages", stageParsed.stages());
+            List<String> resolvedStages = stageParsed.stages();
+            if ("assistant".equals(role) && resolvedStages.isEmpty() && !tools.isEmpty()) {
+                List<String> names = new ArrayList<>(tools.size());
+                for (var t : tools) {
+                    Object n = t.get("name");
+                    if (n != null) {
+                        names.add(String.valueOf(n));
+                    }
+                }
+                String fb = StageProgressParser.fallbackStageForTools(names);
+                if (!fb.isEmpty()) {
+                    resolvedStages = List.of(fb);
+                }
+            }
+            if (!resolvedStages.isEmpty()) {
+                msg.put("stages", resolvedStages);
             }
             if (stageParsed.turnSummary() != null) {
                 msg.put("turn_summary", stageParsed.turnSummary());

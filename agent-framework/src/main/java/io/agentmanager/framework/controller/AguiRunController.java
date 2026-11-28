@@ -301,7 +301,7 @@ public class AguiRunController {
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
             var stageProgress = new io.agentmanager.framework.service.StageProgressTracker(
                 threadId, runId,
-                (type, payload) -> eventBus.emitSynthetic(threadId, runId, type, payload),
+                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
                 mcpToolRegistrar::displayNameFor);
             // run 级编码上下文：blockId→messageId 映射、token 累计、pending interrupts
             // 都是 run 级状态——必须跨事件复用，不能逐事件新建
@@ -319,6 +319,7 @@ public class AguiRunController {
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, threadId);
                 // 逐轮归属锚点（与 /threads/chat 同构）：runId 即本 turn 的 replyId
                 msgMeta.put(io.agentmanager.framework.service.StateDataParser.METADATA_TURN_REPLY_ID, runId);
+                msgMeta.put(io.agentmanager.framework.service.StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE);
                 var msg = Msg.builder().role(MsgRole.USER).name(userId)
                     .metadata(msgMeta)
                     .textContent(processedMessage).build();
@@ -444,7 +445,7 @@ public class AguiRunController {
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
             var stageProgress = new io.agentmanager.framework.service.StageProgressTracker(
                 threadId, runId,
-                (type, payload) -> eventBus.emitSynthetic(threadId, runId, type, payload),
+                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
                 mcpToolRegistrar::displayNameFor);
             var codecCtx = codec.newContext(threadId, runId);
             var renderer = new AguiTailRenderer(threadId, runId);
