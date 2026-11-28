@@ -95,6 +95,9 @@ public class AguiRunController {
     private final SessionUserStore sessionUserStore;
     private final SkillInjectionService skillInjectionService;
     private final McpToolRegistrar mcpToolRegistrar;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.config.StageProgressConfig stageProgressConfig;
     private final AguiEventCodec codec;
     private final Duration heartbeatInterval;
 
@@ -299,10 +302,12 @@ public class AguiRunController {
                 mcpToolRegistrar::resolveToolCallMeta,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
-            var stageProgress = new io.agentmanager.framework.service.StageProgressTracker(
-                threadId, runId,
-                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
-                mcpToolRegistrar::displayNameFor);
+            var stageProgress = (stageProgressConfig == null || stageProgressConfig.enabled())
+                ? new io.agentmanager.framework.service.StageProgressTracker(
+                    threadId, runId,
+                    (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
+                    mcpToolRegistrar::displayNameFor)
+                : null;
             // run 级编码上下文：blockId→messageId 映射、token 累计、pending interrupts
             // 都是 run 级状态——必须跨事件复用，不能逐事件新建
             var codecCtx = codec.newContext(threadId, runId);
@@ -319,7 +324,9 @@ public class AguiRunController {
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, threadId);
                 // 逐轮归属锚点（与 /threads/chat 同构）：runId 即本 turn 的 replyId
                 msgMeta.put(io.agentmanager.framework.service.StateDataParser.METADATA_TURN_REPLY_ID, runId);
-                msgMeta.put(io.agentmanager.framework.service.StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE);
+                if (stageProgress != null) {
+                    msgMeta.put(io.agentmanager.framework.service.StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE);
+                }
                 var msg = Msg.builder().role(MsgRole.USER).name(userId)
                     .metadata(msgMeta)
                     .textContent(processedMessage).build();
@@ -443,10 +450,12 @@ public class AguiRunController {
                 mcpToolRegistrar::resolveToolCallMeta,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
-            var stageProgress = new io.agentmanager.framework.service.StageProgressTracker(
-                threadId, runId,
-                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
-                mcpToolRegistrar::displayNameFor);
+            var stageProgress = (stageProgressConfig == null || stageProgressConfig.enabled())
+                ? new io.agentmanager.framework.service.StageProgressTracker(
+                    threadId, runId,
+                    (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
+                    mcpToolRegistrar::displayNameFor)
+                : null;
             var codecCtx = codec.newContext(threadId, runId);
             var renderer = new AguiTailRenderer(threadId, runId);
 
@@ -602,9 +611,11 @@ public class AguiRunController {
             return;
         }
         event = directReturnJoiner.apply(event);
-        event = stageProgress.process(event);
-        if (event == null) {
-            return;
+        if (stageProgress != null) {
+            event = stageProgress.process(event);
+            if (event == null) {
+                return;
+            }
         }
         directReturnSignal.onEvent(event);
 

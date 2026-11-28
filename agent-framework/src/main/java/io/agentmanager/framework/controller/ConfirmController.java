@@ -63,6 +63,9 @@ public class ConfirmController {
     private final SessionEventBus eventBus;
     private final SessionUserStore sessionUserStore;
     private final McpToolRegistrar mcpToolRegistrar;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.config.StageProgressConfig stageProgressConfig;
     private final RemoteConfirmBridge remoteConfirmBridge;
 
     /** 会话消息轨存储：confirm 恢复 turn 失败留痕（字段注入 required=false，单测直接 new 时为 null） */
@@ -353,10 +356,12 @@ public class ConfirmController {
             // 直返多块文本分隔（issue #494，与 ChatStreamController 同契约）：恢复段直返
             // delta 按 /history 换行拼接口径重写。turn 闭包局部对象，随 turn 丢弃。
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
-            var stageProgress = new io.agentmanager.framework.service.StageProgressTracker(
-                finalSessionId, replyId,
-                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
-                mcpToolRegistrar::displayNameFor);
+            var stageProgress = (stageProgressConfig == null || stageProgressConfig.enabled())
+                ? new io.agentmanager.framework.service.StageProgressTracker(
+                    finalSessionId, replyId,
+                    (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
+                    mcpToolRegistrar::displayNameFor)
+                : null;
             // 为何本 turn 只收尾一次（同 ChatStreamController，迟到的回调不得重复 closeSession/release）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -473,9 +478,11 @@ public class ConfirmController {
 
         // 直返多块文本分隔（issue #494）：先于一切消费方重写，SSE/落库/回放同帧一致
         event = directReturnJoiner.apply(event);
-        event = stageProgress.process(event);
-        if (event == null) {
-            return;
+        if (stageProgress != null) {
+            event = stageProgress.process(event);
+            if (event == null) {
+                return;
+            }
         }
 
         // 直返完成信号跟踪（issue #492，同 ChatStreamController）

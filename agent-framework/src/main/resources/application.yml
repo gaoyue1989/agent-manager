@@ -67,6 +67,8 @@ agent:
   # false = 完全回退现状（不写归档表、history 仅读 agent_state）
   history:
     archive-enabled: ${AGENT_HISTORY_ARCHIVE_ENABLED:true}
+  stage-progress:
+    enabled: ${AGENT_STAGE_PROGRESS_ENABLED:true}
   # 单轮停止（POST /threads/{sessionId}/stop，docs/turn-stop-design.md）
   # enabled=false 时端点 503、属主不轮询（行为回退「只能断流」）；
   # poll-interval-ms 为属主副本的全局轮询周期（所有活跃 turn 共用一次查询）；

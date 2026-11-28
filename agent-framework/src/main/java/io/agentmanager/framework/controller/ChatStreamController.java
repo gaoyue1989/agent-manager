@@ -139,6 +139,9 @@ public class ChatStreamController {
     @Autowired(required = false)
     private io.agentmanager.framework.config.HistoryConfig historyConfig;
 
+    @Autowired(required = false)
+    private io.agentmanager.framework.config.StageProgressConfig stageProgressConfig;
+
     /**
      * 排队 turn 意图存储（字段注入，同 sessionMessageStore：避免改动全部构造调用点）。
      * 排队期间把本轮 turn id 提前暴露给 /status，使「排队中刷新」仍能续传。
@@ -634,10 +637,12 @@ public class ChatStreamController {
             // 直返多块文本分隔（issue #494）：SDK 直返 delta 块间无分隔而 /history 以
             // 换行拼接，实时流按 /history 口径重写。turn 闭包局部对象，随 turn 丢弃。
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
-            var stageProgress = new io.agentmanager.framework.service.StageProgressTracker(
-                finalSessionId, replyId,
-                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
-                mcpToolRegistrar::displayNameFor);
+            var stageProgress = (stageProgressConfig == null || stageProgressConfig.enabled())
+                ? new io.agentmanager.framework.service.StageProgressTracker(
+                    finalSessionId, replyId,
+                    (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
+                    mcpToolRegistrar::displayNameFor)
+                : null;
 
             // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
             // 见 TurnFinalizer#abortSetup 的教训注释。
@@ -673,7 +678,9 @@ public class ChatStreamController {
                 // 逐轮归属锚点：history 按此把本轮（可能多条）assistant 消息归到同一 reply_id，
                 // 不依赖 Redis 事件索引 TTL（见 StateDataParser.METADATA_TURN_REPLY_ID）
                 msgMeta.put(io.agentmanager.framework.service.StateDataParser.METADATA_TURN_REPLY_ID, replyId);
-                msgMeta.put(io.agentmanager.framework.service.StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE);
+                if (stageProgress != null) {
+                    msgMeta.put(io.agentmanager.framework.service.StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE);
+                }
                 // 本轮技能白名单随本条用户消息下传（SkillFilterMiddleware 读取；仅本轮生效）。
                 // 显式空列表也要写入（= 无技能），因此只判 null 不判空
                 if (body.skills() != null) {
@@ -904,9 +911,11 @@ public class ChatStreamController {
 
         // 直返多块文本分隔（issue #494）：先于一切消费方重写，SSE/落库/回放同帧一致
         event = directReturnJoiner.apply(event);
-        event = stageProgress.process(event);
-        if (event == null) {
-            return;
+        if (stageProgress != null) {
+            event = stageProgress.process(event);
+            if (event == null) {
+                return;
+            }
         }
 
         // 直返完成信号跟踪（issue #492）：纯图片直返轮 SDK 零文本帧，AGENT_END 前由

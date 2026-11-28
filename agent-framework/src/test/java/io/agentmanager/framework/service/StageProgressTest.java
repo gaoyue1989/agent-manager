@@ -199,4 +199,26 @@ class StageProgressTest {
         assertEquals("已查询平台已发布服务", list.get(3).get("turn_summary"));
         assertNull(list.get(0).get("stages"));
     }
+
+    @Test
+    void disabledMiddlewareSkipsInjectionEvenWhenOptedIn() {
+        var mw = new StageProgressMiddleware(false);
+        var sys = Msg.builder().role(MsgRole.SYSTEM).textContent("你是助手").build();
+        var user = Msg.builder()
+            .role(MsgRole.USER)
+            .textContent("查服务")
+            .metadata(Map.of(StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE))
+            .build();
+        var tool = ToolSchema.builder().name("list_services").description("list").build();
+        var raw = new ReasoningInput(List.of(sys, user), List.of(tool), null);
+
+        ReasoningInput[] captured = new ReasoningInput[1];
+        mw.onReasoning(null, null, raw, in -> {
+            captured[0] = in;
+            return Flux.empty();
+        }).blockLast();
+
+        assertSame(raw, captured[0]);
+        assertTrue(io.agentmanager.framework.config.StageProgressConfig.defaults().enabled());
+    }
 }
