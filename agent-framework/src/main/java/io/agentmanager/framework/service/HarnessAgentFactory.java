@@ -281,6 +281,7 @@ public class HarnessAgentFactory {
                 .middleware(new LlmLoggingMiddleware(llmLogger, sessionKeyResolver))
                 // ToolUseBlock 完整性校验（vLLM/Qwen3 流式输出畸形 tool call 防御）
                 .middleware(new ToolCallValidationMiddleware())
+                .middleware(new StageProgressMiddleware())
                 // 会话级工具过滤（本轮 tools 声明，session-tool-list-design §4）：作用域限
                 // MCP+自定义，内置恒保留（内置启停走包级 deniedTools/tools.json）。
                 // onReasoning 收敛模型侧 schema（主防线），onActing 兜底 DENY 白名单外

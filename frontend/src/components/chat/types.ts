@@ -34,4 +34,6 @@ export type ChatMsg = {
   quota?: import("@/lib/sandbox-quota").QuotaPayload;
   files?: FileCard[];  // file_ready 渲染的下载卡片
   context?: { key: string; title: string; createdAt: string; updatedAt: string };
+  stages?: string[];
+  turnSummary?: string;
 };

@@ -428,10 +428,14 @@ public final class StateDataParser {
             // user 消息的可见文本只保留用户自己敲的内容：
             //  - /Skill 注入区块（整篇 SKILL.md）为模型上下文，展示层剥离
             //  - 上传文件的路径提示为框架自动追加，展示层剥离（文件卡片另经 files 字段下发）
-            var content = "user".equals(role)
+            var rawContent = "user".equals(role)
                 ? UploadWorkspaceInjector.stripUploadHints(
                     SkillInjectionService.stripInjectedSkills(extractContentText(m)))
                 : extractContentText(m);
+            StageProgressParser.ParsedContent stageParsed = "assistant".equals(role)
+                ? StageProgressParser.parse(rawContent)
+                : new StageProgressParser.ParsedContent(rawContent, List.of(), null);
+            var content = stageParsed.cleanText();
             // 用户主动停止后的 SDK 恢复消息（generateReason=INTERRUPTED，文案固定为
             // "I noticed that you have interrupted me…"）：不是模型输出，history 展示层
             // 换成本地化提示并打 stopped 标记，与实时流的 cancelled 终态帧对齐。
@@ -450,7 +454,7 @@ public final class StateDataParser {
             // 真实内容（ImageBlock）经 blocks 下发，不得按"空消息"剪掉
             boolean directReturn = generateReason.equals(
                 io.agentscope.core.message.GenerateReason.TOOL_RETURN_DIRECT.name());
-            if (content.isBlank() && tools.isEmpty() && fileIds.isEmpty() && !directReturn) {
+            if (content.isBlank() && tools.isEmpty() && fileIds.isEmpty() && !directReturn && stageParsed.stages().isEmpty() && stageParsed.turnSummary() == null) {
                 continue;
             }
             var msg = new java.util.LinkedHashMap<String, Object>();
@@ -483,6 +487,12 @@ public final class StateDataParser {
             var turnReplyId = extractTurnReplyId(m);
             if (turnReplyId != null) {
                 msg.put("turn_reply_id", turnReplyId);
+            }
+            if (!stageParsed.stages().isEmpty()) {
+                msg.put("stages", stageParsed.stages());
+            }
+            if (stageParsed.turnSummary() != null) {
+                msg.put("turn_summary", stageParsed.turnSummary());
             }
             if (!tools.isEmpty()) {
                 msg.put("tool_calls", tools);
@@ -648,7 +658,7 @@ public final class StateDataParser {
         for (var block : content) {
             var type = block.path("type").asText("");
             if ("text".equals(type)) {
-                var text = block.path("text").asText("");
+                var text = StageProgressParser.parse(block.path("text").asText("")).cleanText();
                 if (text.isBlank()) {
                     continue;
                 }

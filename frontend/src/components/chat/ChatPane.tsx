@@ -9,6 +9,7 @@
 //     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
 import { useCallback, useEffect, useRef, useState } from "react";
 import { buildHistoryAssistantMessage, completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
+import { appendStageStep, groupRenderItems, setTurnSummary } from "@/lib/stage-progress";
 import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import { isQuotaError, makeQuotaError, parseQuota409, quotaFromSseError, stopThreadUrl } from "@/lib/sandbox-quota";
 import { contextMessagesFromHistory, isWelcomeState } from "@/lib/session-context";
@@ -161,10 +162,24 @@ export default function ChatPane({
       }
       const data = await resp.json();
       msgs.push(...contextMessagesFromHistory(data));
+      let pendingStages: string[] = [];
+      let pendingSummary: string | undefined;
       for (const m of (data.messages ?? [])) {
         if (m.role === "user") {
+          pendingStages = [];
+          pendingSummary = undefined;
           msgs.push({ role: "user", content: m.content ?? "" });
         } else if (m.role === "assistant") {
+          if (Array.isArray(m.stages)) {
+            for (const s of m.stages) {
+              if (typeof s === "string" && s.trim() && pendingStages[pendingStages.length - 1] !== s.trim()) {
+                pendingStages.push(s.trim());
+              }
+            }
+          }
+          if (typeof m.turn_summary === "string" && m.turn_summary.trim()) {
+            pendingSummary = m.turn_summary.trim();
+          }
           // 工具调用步骤渲染在 assistant 文本之前（与实时流一致：步骤在上、答案在下）。
           // state 与 output 来自 AgentState（DB 权威来源，官方 SDK 自动持久化）：
           // 含 HITL 批准后的恢复段；无 state 的调用（未批准）渲染中性态，不臆造成败
@@ -185,7 +200,13 @@ export default function ChatPane({
           }
           const assistantMsg = buildHistoryAssistantMessage(m);
           if (assistantMsg) {
-            msgs.push(assistantMsg);
+            msgs.push({
+              ...assistantMsg,
+              ...(pendingStages.length > 0 ? { stages: pendingStages } : {}),
+              ...(pendingSummary ? { turnSummary: pendingSummary } : {}),
+            });
+            pendingStages = [];
+            pendingSummary = undefined;
           }
         }
       }
@@ -251,6 +272,12 @@ export default function ChatPane({
           break;
         case "THINKING_BLOCK_DELTA":
           break; // 思考过程不上屏
+        case "stage_progress":
+          setMessages((prev) => appendStageStep(prev, ev.text));
+          break;
+        case "turn_progress_summary":
+          setMessages((prev) => setTurnSummary(prev, ev.summary));
+          break;
         case "TOOL_CALL_START":
           // 工具步骤插到最后一条 assistant 气泡之前（步骤在上、答案在下），同一轮的多个步骤按时间顺序堆叠。
           // 幂等：同一 toolCallId 已存在（刷新续传/恢复流重放）时只更新 pending，不重复插入
@@ -830,9 +857,9 @@ export default function ChatPane({
           <>
             <div ref={listRef} className="chat-scroll relative mt-1 flex-1 overflow-y-auto">
               <div className="mx-auto max-w-3xl space-y-4 px-3 pb-4 pt-3">
-                {messages.map((m, i) => (
-                  <div key={i} className="animate-fade-in space-y-2">
-                    <MessageItem msg={m} />
+                {groupRenderItems(messages).map(({ key, msg: m, tools }, i) => (
+                  <div key={key} className="animate-fade-in space-y-2">
+                    <MessageItem msg={m} tools={tools} />
                     {m.confirm && (
                       <div className="pl-10">
                         <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />

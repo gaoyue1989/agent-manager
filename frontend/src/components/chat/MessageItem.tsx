@@ -6,6 +6,7 @@
 import { memo, useState } from "react";
 import Markdown from "./Markdown";
 import type { ChatMsg } from "./types";
+import StageTimeline from "./StageTimeline";
 import { toolStatus } from "@/lib/assistant-events";
 import { IconAlert, IconCheck, IconChevronDown, IconDownload, IconFileText, IconImage, IconLoader, IconMinus, IconShieldCheck, IconSparkles, IconX } from "./icons";
 
@@ -161,7 +162,7 @@ function ContextCard({ msg }: { msg: ChatMsg }) {
   );
 }
 
-function MessageItem({ msg }: { msg: ChatMsg }) {
+function MessageItem({ msg, tools = [] }: { msg: ChatMsg; tools?: ChatMsg[] }) {
   if (msg.role === "context") return <ContextCard msg={msg} />;
   if (msg.role === "tool") return <ToolStep msg={msg} />;
   if (msg.role === "system") return <SystemBanner content={msg.content} />;
@@ -181,6 +182,15 @@ function MessageItem({ msg }: { msg: ChatMsg }) {
         <IconSparkles className="size-4" />
       </span>
       <div className="min-w-0 flex-1 space-y-2">
+        {(msg.stages?.length || msg.turnSummary) && (
+          <StageTimeline
+            stages={msg.stages ?? []}
+            turnSummary={msg.turnSummary}
+            running={!!msg.pending}
+            hasContent={!!msg.content}
+            tools={tools}
+          />
+        )}
         <div data-testid="assistant-msg" className="text-sm leading-relaxed text-gray-800">
           {msg.content ? (
             <>

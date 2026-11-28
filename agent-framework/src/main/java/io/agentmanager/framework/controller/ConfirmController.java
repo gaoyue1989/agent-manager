@@ -353,6 +353,10 @@ public class ConfirmController {
             // 直返多块文本分隔（issue #494，与 ChatStreamController 同契约）：恢复段直返
             // delta 按 /history 换行拼接口径重写。turn 闭包局部对象，随 turn 丢弃。
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
+            var stageProgress = new io.agentmanager.framework.service.StageProgressTracker(
+                finalSessionId, replyId,
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
+                mcpToolRegistrar::displayNameFor);
             // 为何本 turn 只收尾一次（同 ChatStreamController，迟到的回调不得重复 closeSession/release）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -409,7 +413,7 @@ public class ConfirmController {
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
                         turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary, turnSkills,
-                        usage, directReturnSignal, directReturnJoiner),
+                        usage, directReturnSignal, directReturnJoiner, stageProgress),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -460,7 +464,8 @@ public class ConfirmController {
                                     java.util.List<String> turnSkills,
                                     io.agentmanager.framework.service.TurnUsageTracker usage,
                                     io.agentmanager.framework.service.DirectReturnSignalTracker directReturnSignal,
-                                    io.agentmanager.framework.service.DirectReturnDeltaJoiner directReturnJoiner) {
+                                    io.agentmanager.framework.service.DirectReturnDeltaJoiner directReturnJoiner,
+                                    io.agentmanager.framework.service.StageProgressTracker stageProgress) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
@@ -468,6 +473,10 @@ public class ConfirmController {
 
         // 直返多块文本分隔（issue #494）：先于一切消费方重写，SSE/落库/回放同帧一致
         event = directReturnJoiner.apply(event);
+        event = stageProgress.process(event);
+        if (event == null) {
+            return;
+        }
 
         // 直返完成信号跟踪（issue #492，同 ChatStreamController）
         directReturnSignal.onEvent(event);
