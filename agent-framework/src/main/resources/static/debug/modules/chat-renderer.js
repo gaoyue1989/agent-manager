@@ -131,7 +131,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     return msg;
   }
 
-  function addAssistantHistory(content, toolCalls, blocks) {
+  function addAssistantHistory(content, toolCalls, blocks, opts = {}) {
     const messagesEl = getMessagesEl();
     const msg = document.createElement('div');
     msg.className = 'msg assistant';
@@ -144,11 +144,36 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       state: 'success',
       directReturn: !!tc.directReturn
     });
+    let directBadgeRendered = false;
     const appendBubble = (text) => {
+      if (opts && opts.directReturn && !directBadgeRendered) {
+        msg.appendChild(renderDirectBadge(opts.toolName));
+        directBadgeRendered = true;
+      }
       const bubbleEl = document.createElement('div');
       bubbleEl.className = 'msg-bubble';
       writeMarkdown(bubbleEl, renderMarkdown(text));
       msg.appendChild(bubbleEl);
+    };
+    const appendImage = (b) => {
+      const src = b.url
+        ? safeFileHref(b.url)
+        : (b.data && b.media_type && /^image\/[a-z0-9.+-]+$/i.test(b.media_type)
+            ? 'data:' + b.media_type + ';base64,' + b.data
+            : null);
+      if (!src || src === '#') return;
+      if (opts && opts.directReturn && !directBadgeRendered) {
+        msg.appendChild(renderDirectBadge(opts.toolName));
+        directBadgeRendered = true;
+      }
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-image-block';
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = b.alt || 'image';
+      img.loading = 'lazy';
+      wrap.appendChild(img);
+      msg.appendChild(wrap);
     };
     if (Array.isArray(blocks) && blocks.length > 0) {
       let group = null;
@@ -159,10 +184,14 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
       for (const b of blocks) {
         if (b && b.type === 'tool') {
           if (!group) group = [];
-          group.push(callOf(b));
+          const tc = (toolCalls || []).find((c) => b.id && c.id === b.id) || b;
+          group.push(callOf(tc));
         } else if (b && b.type === 'text' && b.text) {
           flushGroup();
           appendBubble(b.text);
+        } else if (b && b.type === 'image') {
+          flushGroup();
+          appendImage(b);
         }
       }
       flushGroup();
@@ -362,6 +391,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
   function finishReply(replyId) {
     const r = replyId ? replyMap[replyId] : null;
     if (!r) return;
+    endThinking(r);
     r.finished = true;
     if (r.footerTimer) { clearInterval(r.footerTimer); r.footerTimer = null; }
     if (r.textEl) {
@@ -426,6 +456,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
   }
 
   function appendTextDelta(r, delta, opts = {}) {
+    endThinking(r);
     const bubble = ensureTextBubble(r);
     if (opts.directReturn && !r.directBadgeAdded) {
       r.contentEl.insertBefore(renderDirectBadge(opts.toolName), bubble);
@@ -453,6 +484,7 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
   }
 
   function onToolCallStart(r, tcId, name, opts = {}) {
+    endThinking(r);
     const g = ensureToolGroupEl(r);
     let tc = pendingToolCalls[tcId];
     if (!tc) {
@@ -677,13 +709,32 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     onToolResultPreview({ toolGroups: p.toolGroups }, tcId, preview);
   }
 
+  function safeFileHref(rawUrl) {
+    if (typeof rawUrl !== 'string') return '#';
+    const trimmed = rawUrl.trim();
+    if (!trimmed) return '#';
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith('http://') || lower.startsWith('https://')) {
+      return trimmed;
+    }
+    if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+      const base = (ctx && ctx.api && ctx.api.BASE) || '';
+      if (base && trimmed.startsWith('/files/') && !trimmed.startsWith(base + '/')) {
+        return base + trimmed;
+      }
+      return trimmed;
+    }
+    return '#';
+  }
+
   function renderFileReadyCard(r, data) {
     if (!r || !r.contentEl || !data) return;
-    const isUpload = data.source === 'user_upload' || data.kind === 'upload';
+    const isUpload = data.origin === 'upload' || data.source === 'user_upload' || data.kind === 'upload';
     const card = document.createElement('div');
     card.className = 'file-ready-card' + (isUpload ? ' upload-card' : '');
-    const href = data.download_url || data.url || (data.file_id ? ctx.api.BASE + '/files/' + encodeURIComponent(data.file_id) : '#');
-    const name = data.filename || data.name || data.file_id || 'file';
+    const rawHref = data.download_url || data.url || (data.file_id ? '/files/' + encodeURIComponent(data.file_id) : '');
+    const href = safeFileHref(rawHref);
+    const name = data.file_name || data.filename || data.name || data.file_id || 'file';
     const descParts = [];
     if (data.size != null) descParts.push(ctx.utils.formatBytes(data.size));
     if (data.description) descParts.push(data.description);
@@ -741,7 +792,20 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     scrollToBottom(true);
   }
 
-  function dismissConfirmCard() {
+  function getPendingConfirmCard() {
+    return pendingConfirm ? pendingConfirm.cardEl : null;
+  }
+
+  function restoreConfirmCard(cardEl) {
+    if (!cardEl) return;
+    cardEl.classList.remove('processing');
+    cardEl.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+  }
+
+  function dismissConfirmCard(expectedCardEl) {
+    if (expectedCardEl && (!pendingConfirm || pendingConfirm.cardEl !== expectedCardEl)) {
+      return;
+    }
     if (pendingConfirm && pendingConfirm.cardEl) {
       try { pendingConfirm.cardEl.remove(); } catch (e) {}
     }
@@ -766,11 +830,13 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     r.contentEl.appendChild(card);
     const bodyEl = card.querySelector('.mcp-apps-body');
     const host = new McpAppHost({
-      api: ctx.api,
+      tcId,
       server,
       resourceUri: uri,
-      sessionId: getCurrentSessionId(),
-      onToolCallConfirm: (call) => renderAppConfirmCard(r, call)
+      toolName: data.toolName || '',
+      callbacks: {
+        needsConfirm: (call) => renderAppConfirmCard(r, call)
+      }
     });
     appHosts[tcId] = host;
     mountAppCard(host, bodyEl);
@@ -882,6 +948,8 @@ export function createChatRenderer({ ctx, getMessagesEl, scrollToBottom, getCurr
     finishSubagentExposed,
     renderFileReadyCard,
     renderConfirmCard,
+    getPendingConfirmCard,
+    restoreConfirmCard,
     dismissConfirmCard,
     renderMcpAppCard,
     teardownAllAppHosts,

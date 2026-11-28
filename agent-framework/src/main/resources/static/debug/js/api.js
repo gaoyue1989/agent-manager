@@ -11,6 +11,7 @@ async function httpError(resp, path) {
   const err = new Error(msg);
   err.status = resp.status;
   err.code = data && data.error ? data.error : null;
+  err.retryable = Boolean(data && data.retryable === true);
   err.data = data;
   return err;
 }
@@ -110,16 +111,17 @@ function consumeSsePost(path, body, headers, { onEvent, onWaiting, onError, onEn
           if (!dataStr) continue;
           let evt;
           try { evt = JSON.parse(dataStr); } catch (e) { continue; }
-          if (evt.type === 'done') { if (onEnd) onEnd(evt); continue; }
-          if (evt.type === 'error') { if (onError) onError(new Error(evt.error)); continue; }
+          if (evt.type === 'done') { active = false; if (onEnd) onEnd(evt); return; }
+          if (evt.type === 'error') { active = false; if (onError) onError(new Error(evt.error || evt.message || 'stream error')); return; }
           if (evt.type === 'waiting') { if (onWaiting) onWaiting(evt); continue; }
           if (onEvent) onEvent(evt);
         }
       }
     } catch (e) {
+      active = false;
       if (!controller.signal.aborted && onError) onError(e);
     } finally {
-      if (active && onEnd) onEnd();
+      if (active && !controller.signal.aborted && onEnd) onEnd();
     }
   };
   connect();
@@ -327,7 +329,7 @@ export const api = {
   confirmToolCall: (sessionId, results, userId) =>
     post('/threads/' + encodeURIComponent(sessionId) + '/confirm', { results }, userHeader(userId)),
 
-  confirmStream: (sessionId, results, { onEvent, onError, userId } = {}) => {
+  confirmStream: (sessionId, results, { onEvent, onError, onEnd, userId } = {}) => {
     const path = '/threads/' + encodeURIComponent(sessionId) + '/confirm-stream';
     const controller = new AbortController();
     const connect = async () => {
@@ -344,15 +346,19 @@ export const api = {
         if (onError) onError(e);
         return;
       }
-      if (!resp.ok || !resp.body) { if (onError) onError(new Error('HTTP ' + resp.status)); return; }
+      if (!resp.ok || !resp.body) {
+        if (onError) onError(await httpError(resp, path));
+        return;
+      }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let terminated = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          if (controller.signal.aborted) break;
+          if (controller.signal.aborted) { terminated = true; break; }
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
@@ -363,11 +369,18 @@ export const api = {
             try {
               const parsed = JSON.parse(dataStr);
               if (onEvent) onEvent(parsed);
+              if (parsed.type === 'done' || parsed.type === 'error') {
+                terminated = true;
+                return;
+              }
             } catch (e) {}
           }
         }
       } catch (e) {
+        terminated = true;
         if (!controller.signal.aborted && onError) onError(e);
+      } finally {
+        if (!terminated && !controller.signal.aborted && onEnd) onEnd();
       }
     };
     connect();
