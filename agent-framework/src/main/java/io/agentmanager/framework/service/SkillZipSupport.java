@@ -408,16 +408,31 @@ public final class SkillZipSupport {
     }
 
     /** 技能名安全化为单个路径段：仅替换路径分隔符与控制字符，其余字符（含中文标点）保留 */
+    private static boolean isShellMetaChar(char c) {
+        return c == '\'' || c == '"' || c == '|' || c == '&' || c == ';' || c == '$'
+            || c == '`' || c == '<' || c == '>' || c == '\n' || c == '\r';
+    }
+
     public static String sanitizeSkillName(String name) {
         if (name == null || name.isBlank()) {
             return null;
         }
-        var sb = new StringBuilder(name.length());
-        for (int i = 0; i < name.length(); i++) {
-            var c = name.charAt(i);
-            sb.append(c < 0x20 || c == 0x7F || c == '/' || c == '\\' ? '_' : c);
+        var trimmed = name.strip();
+        if (trimmed.isEmpty()) {
+            return null;
         }
-        var sanitized = sb.toString().strip();
+        var sb = new StringBuilder(trimmed.length());
+        for (int i = 0; i < trimmed.length(); i++) {
+            var c = trimmed.charAt(i);
+            boolean unsafe = c < 0x20 || c == 0x7F || c == '/' || c == '\\'
+                || Character.isWhitespace(c) || Character.isSpaceChar(c)
+                || isShellMetaChar(c);
+            sb.append(unsafe ? '_' : c);
+        }
+        var sanitized = sb.toString();
+        while (sanitized.contains("..")) {
+            sanitized = sanitized.replace("..", "_");
+        }
         while (sanitized.startsWith(".")) {
             sanitized = "_" + sanitized.substring(1);
         }

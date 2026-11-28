@@ -277,6 +277,7 @@ public class SessionEventTailer {
                 ? startIntent.error() : "turn_failed")
             : null;
 
+        boolean scopedReply = replyId != null && !replyId.isBlank();
         var terminalSeenInReplay = new java.util.concurrent.atomic.AtomicBoolean(false);
         Flux<ServerSentEvent<String>> replay = afterSeq < 0
             ? Flux.empty()
@@ -285,8 +286,12 @@ public class SessionEventTailer {
                 : eventStore.queryAfter(sessionId, replyId, afterSeq))
                 .doOnNext(e -> {
                     cursor.set(e.seq());
-                    if (isTerminalType(e.type())) {
-                        terminalSeenInReplay.set(true);
+                    if (scopedReply) {
+                        if (isTerminalType(e.type())) {
+                            terminalSeenInReplay.set(true);
+                        }
+                    } else {
+                        terminalSeenInReplay.set(isTerminalType(e.type()));
                     }
                 })
                 .flatMapIterable(e -> renderer.render(e, sessionId));
@@ -302,7 +307,7 @@ public class SessionEventTailer {
             var st = new LiveState();
             st.queuedReply = startQueued;
             st.errorPending = startError;
-            st.donePending = terminalSeenInReplay.get();
+            st.donePending = terminalSeenInReplay.get() && (scopedReply || turnLeaseStore == null || !turnLeaseStore.isHeld(sessionId));
             liveStateRef.set(st);
             return st;
         }, (st, sink) -> {

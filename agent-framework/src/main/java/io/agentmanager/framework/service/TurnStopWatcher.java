@@ -162,29 +162,25 @@ public class TurnStopWatcher {
         if (!settings.enabled()) {
             return;
         }
+        evictExpiredRecentStops();
+        if (!active.isEmpty()) {
+            try {
+                var rows = stopStore.findAll();
+                for (var row : rows) {
+                    var reg = active.get(row.replyId());
+                    if (reg != null) {
+                        dispatch(reg);
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[turn-stop] poll failed: {}", e.getMessage());
+            }
+        }
         if (notifier != null) {
             try {
                 notifier.ensureSubscribed();
             } catch (Exception ignored) {
             }
-        }
-        evictExpiredRecentStops();
-        if (active.isEmpty()) {
-            return;
-        }
-        try {
-            var rows = stopStore.findAll();
-            if (rows.isEmpty()) {
-                return;
-            }
-            for (var row : rows) {
-                var reg = active.get(row.replyId());
-                if (reg != null) {
-                    dispatch(reg);
-                }
-            }
-        } catch (Exception e) {
-            log.warn("[turn-stop] poll failed: {}", e.getMessage());
         }
     }
 
