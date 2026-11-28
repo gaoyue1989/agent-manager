@@ -1,21 +1,68 @@
-/* ===== Config 模块：环境变量 + OAF 配置 ===== */
-
 let ctx = null;
+let lastReloadResult = null;
 
 export default {
   mount(container, c) {
     ctx = c;
+    lastReloadResult = null;
     container.innerHTML = `
     <div class="module-page">
-      <div class="module-header"><h2>Configuration</h2>
-        <span class="sub"><button class="btn small" id="btnReloadConfig">Reload</button></span></div>
+      <div class="module-header">
+        <h2>系统配置</h2>
+        <span class="sub">
+          <select id="reloadScope" class="input" style="padding:4px 8px;font-size:12px">
+            <option value="auto">热重载：自动</option>
+            <option value="mcp">热重载：仅 MCP</option>
+            <option value="agent">热重载：重建 Agent</option>
+          </select>
+          <button class="btn small primary" id="btnHotReload">触发热重载</button>
+          <button class="btn small" id="btnRefreshConfig">刷新</button>
+        </span>
+      </div>
       <div class="module-scroll" id="configBody"><div class="empty">Loading...</div></div>
     </div>`;
-    document.getElementById('btnReloadConfig').addEventListener('click', loadConfig);
+    document.getElementById('btnRefreshConfig').addEventListener('click', loadConfig);
+    document.getElementById('btnHotReload').addEventListener('click', triggerHotReload);
     loadConfig();
   },
   unmount() { ctx = null; }
 };
+
+async function triggerHotReload() {
+  const btn = document.getElementById('btnHotReload');
+  const scopeEl = document.getElementById('reloadScope');
+  const scope = scopeEl ? scopeEl.value : 'auto';
+  if (btn) { btn.disabled = true; btn.textContent = '重载中...'; }
+  try {
+    const res = await ctx.api.triggerReload(scope);
+    if (!ctx) return;
+    lastReloadResult = { ok: true, data: res };
+    ctx.utils.toast('热重载（' + scope + '）成功', 'success');
+    await loadConfig();
+  } catch (e) {
+    if (!ctx) return;
+    lastReloadResult = { ok: false, error: e.message };
+    ctx.utils.toast('热重载失败: ' + e.message, 'error');
+    await loadConfig();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '触发热重载'; }
+  }
+}
+
+function renderReloadBanner() {
+  if (!lastReloadResult) return '';
+  if (!lastReloadResult.ok) {
+    return '<div class="reload-result-banner error"><strong>热重载失败:</strong> ' +
+      ctx.utils.esc(lastReloadResult.error) + '</div>';
+  }
+  const d = lastReloadResult.data || {};
+  return '<div class="reload-result-banner">' +
+    '<strong>热重载结果</strong>' +
+    '<span class="badge accent">scope: ' + ctx.utils.esc(d.scope || 'auto') + '</span>' +
+    '<span class="badge ' + (d.fingerprint_changed ? 'green' : 'dim') + '">fingerprint_changed: ' + String(!!d.fingerprint_changed) + '</span>' +
+    '<span class="badge ' + (d.agent_rebuilt ? 'green' : 'dim') + '">agent_rebuilt: ' + String(!!d.agent_rebuilt) + '</span>' +
+  '</div>';
+}
 
 async function loadConfig() {
   const body = document.getElementById('configBody');
@@ -23,18 +70,16 @@ async function loadConfig() {
   try {
     [env, oaf] = await Promise.all([ctx.api.getEnvConfig(), ctx.api.getOafConfig()]);
   } catch (e) {
-    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
+    if (!ctx) return;
     body.innerHTML = '<div class="empty error-text">Failed to load config: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
+  if (!ctx) return;
 
-  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
+  let html = renderReloadBanner();
 
-  let html = '';
-
-  // 环境变量
   if (env) {
-    html += '<div class="panel"><div class="panel-header"><span class="title">Environment Variables</span></div><div class="panel-body">';
+    html += '<div class="panel"><div class="panel-header"><span class="title">环境变量</span></div><div class="panel-body">';
     const groups = [
       ['LLM', env.llm && [
         ['LLM_API_KEY', env.llm.api_key],
@@ -44,7 +89,7 @@ async function loadConfig() {
         ['LLM_TEMPERATURE', env.llm.temperature],
         ['LLM_MAX_TOKENS', env.llm.max_tokens],
         ['LLM_TIMEOUT', env.llm.timeout],
-        ['LLM_FALLBACK_MODEL_ID', env.llm.fallback_model_id || '(未启用)']
+        ['LLM_FALLBACK_MODEL_ID', env.llm.fallback_model_id || '(disabled)']
       ]],
       ['Server', env.server && [
         ['SERVER_HOST', env.server.host],
@@ -59,9 +104,9 @@ async function loadConfig() {
     ];
     for (const [group, items] of groups) {
       if (!items) continue;
-      html += '<div style="margin-bottom:10px"><div class="lc-label" style="margin-bottom:4px">' + group + '</div>';
+      html += '<div style="margin-bottom:12px"><div class="lc-label" style="margin-bottom:4px;font-weight:600;color:var(--text-dim);font-size:11px;text-transform:uppercase">' + group + '</div>';
       for (const [k, v] of items) {
-        html += '<div class="info-row"><span class="label" style="font-family:var(--mono);font-size:11px">' + k + '</span>' +
+        html += '<div class="info-row"><span class="label" style="font-family:var(--mono)">' + k + '</span>' +
           '<span class="value">' + ctx.utils.esc(v != null ? String(v) : '') + '</span></div>';
       }
       html += '</div>';
@@ -69,9 +114,8 @@ async function loadConfig() {
     html += '</div></div>';
   }
 
-  // OAF 配置
   if (oaf) {
-    html += '<div class="panel"><div class="panel-header"><span class="title">OAF Configuration (AGENTS.md frontmatter)</span></div><div class="panel-body">';
+    html += '<div class="panel"><div class="panel-header"><span class="title">OAF 配置（AGENTS.md）</span></div><div class="panel-body">';
     const fields = [
       ['Name', oaf.name],
       ['Slug', oaf.slug],
@@ -92,15 +136,13 @@ async function loadConfig() {
       html += '<div class="info-row"><span class="label">' + k + '</span>' +
         '<span class="value" style="white-space:normal">' + ctx.utils.esc(String(v)) + '</span></div>';
     }
-    html += '<button class="btn small oaf-raw-btn" style="margin-top:8px">View Raw OAF JSON</button>';
+    html += '<button class="btn small oaf-raw-btn" style="margin-top:10px">查看原始 JSON</button>';
     html += '</div></div>';
   }
 
   body.innerHTML = html;
   const rawBtn = body.querySelector('.oaf-raw-btn');
   if (rawBtn) {
-    rawBtn.addEventListener('click', () => {
-      ctx.utils.showJsonModal('OAF Configuration', oaf);
-    });
+    rawBtn.addEventListener('click', () => ctx.utils.showJsonModal('OAF Configuration', oaf));
   }
 }

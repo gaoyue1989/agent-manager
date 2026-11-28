@@ -1,5 +1,3 @@
-/* ===== Sandbox 模块：沙箱配置 + 配额与绑定（sandbox-pool-opensandbox-design §4.8，PR-D）===== */
-
 let ctx = null;
 
 export default {
@@ -7,8 +5,8 @@ export default {
     ctx = c;
     container.innerHTML = `
     <div class="module-page">
-      <div class="module-header"><h2>Sandbox</h2>
-        <span class="sub"><button class="btn small" id="btnReloadSb">Reload</button></span></div>
+      <div class="module-header"><h2>沙箱管理</h2>
+        <span class="sub"><button class="btn small" id="btnReloadSb">刷新</button></span></div>
       <div class="module-scroll" id="sbBody"><div class="empty">Loading...</div></div>
     </div>`;
     document.getElementById('btnReloadSb').addEventListener('click', loadSandbox);
@@ -17,31 +15,109 @@ export default {
   unmount() { ctx = null; }
 };
 
+function parseEnvText(text) {
+  const env = {};
+  for (const rawLine of String(text || '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1);
+    if (key) env[key] = val;
+  }
+  return env;
+}
+
+function renderEnvInjectPanel() {
+  const defaultUid = (ctx && ctx.state.getState('ui.userId')) || 'debug-user';
+  const defaultSid = (ctx && ctx.state.getState('threads.current')) || '';
+  return '<div class="panel collapsible-panel" id="sbEnvPanel">' +
+    '<div class="panel-header collapsible-head" id="sbEnvToggle">' +
+      '<span class="title">注入沙箱环境变量</span>' +
+      '<span class="count"><span class="badge dim">PUT /sandbox/env</span></span>' +
+    '</div>' +
+    '<div class="panel-body collapsible-body">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
+        '<input id="sbEnvUser" class="input" type="text" placeholder="userId" value="' + ctx.utils.esc(defaultUid) + '">' +
+        '<input id="sbEnvSid" class="input" type="text" placeholder="sessionId" value="' + ctx.utils.esc(defaultSid) + '">' +
+      '</div>' +
+      '<textarea id="sbEnvPairs" class="input" rows="4" style="width:100%;font-family:var(--mono);font-size:12px;resize:vertical" placeholder="每行一个 KEY=VALUE（提交后自动清空，不保留敏感值）"></textarea>' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px">' +
+        '<span id="sbEnvResult" class="status-text"></span>' +
+        '<button class="btn small primary" id="sbEnvSubmit">应用环境变量</button>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function bindEnvInjectEvents() {
+  const panel = document.getElementById('sbEnvPanel');
+  const toggle = document.getElementById('sbEnvToggle');
+  if (panel && toggle) {
+    toggle.addEventListener('click', () => panel.classList.toggle('open'));
+  }
+  const submit = document.getElementById('sbEnvSubmit');
+  if (!submit) return;
+  submit.addEventListener('click', async () => {
+    const userId = (document.getElementById('sbEnvUser').value || '').trim();
+    const sessionId = (document.getElementById('sbEnvSid').value || '').trim();
+    const pairsEl = document.getElementById('sbEnvPairs');
+    const resultEl = document.getElementById('sbEnvResult');
+    const env = parseEnvText(pairsEl.value);
+    if (!userId || !sessionId) {
+      ctx.utils.toast('请填写 userId 与 sessionId', 'warn');
+      return;
+    }
+    if (Object.keys(env).length === 0) {
+      ctx.utils.toast('请至少输入一行 KEY=VALUE', 'warn');
+      return;
+    }
+    submit.disabled = true;
+    try {
+      const res = await ctx.api.updateSandboxEnv(userId, sessionId, env);
+      pairsEl.value = '';
+      const keys = (res.updatedKeys || []).join(', ');
+      if (resultEl) {
+        resultEl.style.color = 'var(--green)';
+        resultEl.textContent = 'Updated [' + keys + '] on ' + (res.sandboxId || 'sandbox') + ' (' + (res.applied || 'next_exec') + ')';
+      }
+      ctx.utils.toast('已更新沙箱环境变量: ' + keys, 'success');
+    } catch (e) {
+      if (resultEl) {
+        resultEl.style.color = 'var(--red)';
+        resultEl.textContent = e.message;
+      }
+      ctx.utils.toast('更新沙箱环境变量失败: ' + e.message, 'error');
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
 async function loadSandbox() {
   const body = document.getElementById('sbBody');
   let sb;
   try {
     sb = (await ctx.api.getSandbox()) || {};
   } catch (e) {
-    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
+    if (!ctx) return;
     body.innerHTML = '<div class="empty error-text">Failed to load sandbox: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
-
-  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染（下方 row() 依赖 ctx.utils）
+  if (!ctx) return;
 
   if (!sb.enabled) {
     body.innerHTML = '<div class="panel"><div class="panel-header"><span class="title">Sandbox</span></div>' +
       '<div class="panel-body"><div class="info-row"><span class="label">Status</span>' +
-      '<span class="value" style="color:var(--yellow)">Disabled (RemoteFilesystemSpec 模式)</span></div>' +
-      '<div class="info-row"><span class="label">启用方式</span><span class="value">设置 SANDBOX_ENABLED=true</span></div>' +
+      '<span class="value" style="color:var(--yellow)">Disabled (RemoteFilesystemSpec)</span></div>' +
+      '<div class="info-row"><span class="label">Enable</span><span class="value">Set SANDBOX_ENABLED=true</span></div>' +
       '</div></div>';
     return;
   }
 
-  // 沙箱配置面板
-  let html = '<div class="panel"><div class="panel-header"><span class="title">Sandbox Configuration</span>' +
-    '<span class="badge" style="color:var(--green)">Enabled</span></div><div class="panel-body">' +
+  let html = '<div class="panel"><div class="panel-header"><span class="title">沙箱配置</span>' +
+    '<span class="count"><span class="badge green">Enabled</span></span></div><div class="panel-body">' +
     row('Image', sb.image) +
     row('Timeout (min)', sb.timeout_minutes) +
     row('Memory (MiB)', sb.memory_mb) +
@@ -50,12 +126,12 @@ async function loadSandbox() {
     row('API Key', sb.api_key_configured ? 'Configured' : '<span style="color:var(--red)">Missing</span>') +
     '</div></div>';
 
-  // 配额与绑定区块（§4.8，fail-soft：端点不可用只提示，不阻塞配置展示）
+  html += renderEnvInjectPanel();
   html += await loadBindingsSection();
   body.innerHTML = html;
+  bindEnvInjectEvents();
 }
 
-/** 「配额与绑定」区块：配置回显 + 绑定表（turn_running 派生）+ 注册表健康 + 事件流 */
 async function loadBindingsSection() {
   if (!ctx) return '';
   let data;
@@ -64,91 +140,83 @@ async function loadBindingsSection() {
   } catch (e) {
     if (!ctx) return '';
     return panel('配额与绑定',
-      '<div class="empty error-text">sandbox-bindings 端点不可用（fail-soft）：' + ctx.utils.esc(e.message) + '</div>');
+      '<div class="empty error-text">sandbox-bindings unavailable: ' + ctx.utils.esc(e.message) + '</div>');
   }
   if (!ctx) return '';
   if (!data || !data.enabled) {
     return panel('配额与绑定',
       '<div class="info-row"><span class="label">Lifecycle</span><span class="value" style="color:var(--yellow)">Disabled</span></div>' +
-      '<div class="info-row"><span class="label">启用方式</span><span class="value">' +
-      ctx.utils.esc((data && data.reason) || '设置 SANDBOX_LIFECYCLE_ENABLED=true') + '</span></div>');
+      '<div class="info-row"><span class="label">Enable</span><span class="value">' +
+      ctx.utils.esc((data && data.reason) || 'Set SANDBOX_LIFECYCLE_ENABLED=true') + '</span></div>');
   }
 
   const cfg = data.config || {};
-  let html = panel('配额与绑定 · 配置',
+  let html = panel('配额与绑定 · Config',
     row('Lifecycle', 'Enabled') +
-    row('Pool Ref', cfg.pool_ref || '<span style="color:var(--yellow)">未配置（不用服务端池）</span>') +
+    row('Pool Ref', cfg.pool_ref || '<span style="color:var(--yellow)">Not configured</span>') +
     row('User Quota', cfg.user_quota) +
     row('TTL (min)', cfg.ttl_minutes) +
     row('Renew Interval (s)', cfg.renew_interval_seconds) +
     row('Confirm Hold (min)', cfg.confirm_hold_minutes) +
-    row('Grace (s, busy 阈值)', cfg.grace_seconds));
+    row('Grace (s)', cfg.grace_seconds));
 
-  // 绑定表（跨副本聚合；turn_running 由 turn_lease JOIN + updated_at 新鲜度派生）
   const bindings = data.bindings || [];
   let rows;
   if (!bindings.length) {
-    rows = '<div class="empty">暂无绑定行</div>';
+    rows = '<div class="empty">No active bindings</div>';
   } else {
     rows = '<table class="data-table"><thead><tr>' +
       '<th>user_key</th><th>session_id</th><th>sandbox_id</th><th>expires_at</th><th>turn_running</th>' +
       '</tr></thead><tbody>' +
-      bindings.map(b => {
+      bindings.map((b) => {
         const pending = (b.sandbox_id || '').indexOf('pending:') === 0;
         const sandboxCell = pending
           ? '<span style="color:var(--yellow)">' + ctx.utils.esc(b.sandbox_id) + '</span>'
           : ctx.utils.esc(b.sandbox_id);
         return '<tr>' +
-          '<td>' + ctx.utils.esc(b.user_key) + '</td>' +
-          '<td>' + ctx.utils.esc(b.session_id) + '</td>' +
-          '<td>' + sandboxCell + '</td>' +
+          '<td class="mono">' + ctx.utils.esc(b.user_key) + '</td>' +
+          '<td class="mono">' + ctx.utils.esc(b.session_id) + '</td>' +
+          '<td class="mono">' + sandboxCell + '</td>' +
           '<td>' + expiryCell(b.expires_at) + '</td>' +
           '<td>' + (b.turn_running
-            ? '<span style="color:var(--green)">running</span>'
-            : '<span style="color:var(--muted)">idle</span>') + '</td>' +
+            ? '<span class="badge green">running</span>'
+            : '<span class="badge dim">idle</span>') + '</td>' +
           '</tr>';
       }).join('') + '</tbody></table>';
   }
-  html += panel('配额与绑定 · 绑定表（集群级，' + bindings.length + ' 条' +
-    (data.bindings_error ? '，<span style="color:var(--red)">读取失败: ' + ctx.utils.esc(data.bindings_error) + '</span>' : '') + ')',
-    rows);
+  html += panel('配额与绑定 · Table (' + bindings.length + ')', rows);
 
-  // 注册表健康（本副本）：注册数 / 最老条目年龄 / 守护线程循环滞后
   const reg = data.registry || {};
   const lagMs = Number(reg.loop_lag_ms || 0);
-  html += panel('配额与绑定 · 续期注册表（本副本）',
-    row('注册条目数', reg.size) +
-    row('turn 注册数', reg.active_turns) +
-    row('最老条目年龄', fmtDuration(reg.oldest_entry_age_ms)) +
-    row('循环滞后', lagMs > 5000
-      ? '<span style="color:var(--red)">' + lagMs + 'ms（busy 判定退化预警）</span>'
-      : lagMs + 'ms') +
-    row('最近扫描', reg.last_sweep_at || '-'));
+  html += panel('配额与绑定 · Renew Registry',
+    row('Registered', reg.size) +
+    row('Active Turns', reg.active_turns) +
+    row('Oldest Age', fmtDuration(reg.oldest_entry_age_ms)) +
+    row('Loop Lag', lagMs > 5000 ? '<span style="color:var(--red)">' + lagMs + 'ms</span>' : lagMs + 'ms') +
+    row('Last Sweep', reg.last_sweep_at || '-'));
 
-  // 事件环形缓冲（100 条；借出/LRU 复用/懒剔除/renew 失败分类/fail-open）
   const events = data.events || [];
   const eventRows = events.length
-    ? events.slice().reverse().map(ev => {
+    ? events.slice().reverse().map((ev) => {
         const color = ev.type === 'renew_fail' || ev.type === 'fail_open' || ev.type === 'create_failed'
-          ? 'var(--red)' : 'var(--muted)';
+          ? 'var(--red)' : 'var(--text-dim)';
         return '<div class="info-row"><span class="label" style="color:' + color + '">' +
           ctx.utils.esc(ev.type) + '</span><span class="value">' +
           ctx.utils.esc((ev.sandbox_id || '') + ' ' + (ev.detail || '') + ' @' + (ev.at || '')) +
           '</span></div>';
       }).join('')
-    : '<div class="empty">暂无事件</div>';
-  html += panel('配额与绑定 · 事件流（环形缓冲 ' + events.length + '/100）', eventRows);
+    : '<div class="empty">No events</div>';
+  html += panel('配额与绑定 · Events (' + events.length + '/100)', eventRows);
   return html;
 }
 
-/** expires_at 倒计时单元格（过期红 / 一小时内黄 / 正常灰） */
 function expiryCell(expiresAt) {
   if (!expiresAt) return '-';
   const t = Date.parse((expiresAt || '').replace(' ', 'T') + 'Z');
   if (isNaN(t)) return ctx.utils.esc(expiresAt);
   const remainMin = Math.round((t - Date.now()) / 60000);
-  const color = remainMin < 0 ? 'var(--red)' : remainMin < 60 ? 'var(--yellow)' : 'var(--muted)';
-  const label = remainMin < 0 ? 'expired ' + (-remainMin) + 'm 前' : '剩 ' + remainMin + 'm';
+  const color = remainMin < 0 ? 'var(--red)' : remainMin < 60 ? 'var(--yellow)' : 'var(--text-dim)';
+  const label = remainMin < 0 ? 'expired ' + (-remainMin) + 'm ago' : remainMin + 'm left';
   return '<span style="color:' + color + '" title="' + ctx.utils.esc(expiresAt) + '">' + label + '</span>';
 }
 
