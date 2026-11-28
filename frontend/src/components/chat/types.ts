@@ -35,4 +35,6 @@ export type ChatMsg = {
   files?: FileCard[];  // file_ready 渲染的下载卡片
   blocks?: import("@/lib/assistant-events").AssistantBlock[];
   context?: { key: string; title: string; createdAt: string; updatedAt: string };
+  stages?: string[];
+  turnSummary?: string;
 };

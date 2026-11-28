@@ -95,6 +95,9 @@ public class AguiRunController {
     private final SessionUserStore sessionUserStore;
     private final SkillInjectionService skillInjectionService;
     private final McpToolRegistrar mcpToolRegistrar;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.config.StageProgressConfig stageProgressConfig;
     private final AguiEventCodec codec;
     private final Duration heartbeatInterval;
 
@@ -298,6 +301,12 @@ public class AguiRunController {
                 mcpToolRegistrar::resolveToolCallMeta,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
+            var stageProgress = (stageProgressConfig == null || stageProgressConfig.enabled())
+                ? new io.agentmanager.framework.service.StageProgressTracker(
+                    threadId, runId,
+                    (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
+                    mcpToolRegistrar::displayNameFor)
+                : null;
             // run 级编码上下文：blockId→messageId 映射、token 累计、pending interrupts
             // 都是 run 级状态——必须跨事件复用，不能逐事件新建
             var codecCtx = codec.newContext(threadId, runId);
@@ -314,6 +323,9 @@ public class AguiRunController {
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, threadId);
                 // 逐轮归属锚点（与 /threads/chat 同构）：runId 即本 turn 的 replyId
                 msgMeta.put(io.agentmanager.framework.service.StateDataParser.METADATA_TURN_REPLY_ID, runId);
+                if (stageProgress != null) {
+                    msgMeta.put(io.agentmanager.framework.service.StageProgressMiddleware.METADATA_STAGE_PROGRESS_KEY, Boolean.TRUE);
+                }
                 var msg = Msg.builder().role(MsgRole.USER).name(userId)
                     .metadata(msgMeta)
                     .textContent(processedMessage).build();
@@ -356,7 +368,7 @@ public class AguiRunController {
                     .subscribe(
                         event -> handleEventAndEmit(event, threadId, runId, lease, sink,
                             turnEnded, toolSummary, codecCtx, turnBucketKeys, null,
-                            directReturnSignal, directReturnJoiner),
+                            directReturnSignal, directReturnJoiner, stageProgress),
                         e -> {
                             log.warn("[agui] run stream error (sid={}): {}", threadId, e.getMessage());
                             if (!lease.isLost()) {
@@ -437,6 +449,12 @@ public class AguiRunController {
                 mcpToolRegistrar::resolveToolCallMeta,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
             var directReturnJoiner = new io.agentmanager.framework.service.DirectReturnDeltaJoiner();
+            var stageProgress = (stageProgressConfig == null || stageProgressConfig.enabled())
+                ? new io.agentmanager.framework.service.StageProgressTracker(
+                    threadId, runId,
+                    (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
+                    mcpToolRegistrar::displayNameFor)
+                : null;
             var codecCtx = codec.newContext(threadId, runId);
             var renderer = new AguiTailRenderer(threadId, runId);
 
@@ -502,7 +520,7 @@ public class AguiRunController {
                 event -> handleEventAndEmit(event, threadId, runId, lease, sink,
                     turnEnded, toolSummary, codecCtx,
                     turnBucketKeys, turnSkills,
-                    directReturnSignal, directReturnJoiner),
+                    directReturnSignal, directReturnJoiner, stageProgress),
                 e -> {
                     log.warn("[agui] resume stream error (sid={}): {}", threadId, e.getMessage());
                     if (!lease.isLost()) {
@@ -585,13 +603,20 @@ public class AguiRunController {
                                     java.util.Set<String> turnBucketKeys,
                                     java.util.List<String> turnSkills,
                                     io.agentmanager.framework.service.DirectReturnSignalTracker directReturnSignal,
-                                    io.agentmanager.framework.service.DirectReturnDeltaJoiner directReturnJoiner) {
+                                    io.agentmanager.framework.service.DirectReturnDeltaJoiner directReturnJoiner,
+                                    io.agentmanager.framework.service.StageProgressTracker stageProgress) {
         // 租约丢失：停写 + 本连接 RUN_ERROR（不走 TurnFinalizer——其终态帧是 native 词表，
         // 本面客户端需要 AG-UI 语义的帧）
         if (stopIfLeaseLost(lease, sessionId, replyId, sink)) {
             return;
         }
         event = directReturnJoiner.apply(event);
+        if (stageProgress != null) {
+            event = stageProgress.process(event);
+            if (event == null) {
+                return;
+            }
+        }
         directReturnSignal.onEvent(event);
 
         if (event instanceof ToolCallStartEvent start

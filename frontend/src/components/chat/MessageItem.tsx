@@ -6,6 +6,7 @@
 import { memo, useState } from "react";
 import Markdown from "./Markdown";
 import type { ChatMsg } from "./types";
+import StageTimeline from "./StageTimeline";
 import { isSafeFileDownloadUrl, isSafeInlineImageUrl, toolStatus } from "@/lib/assistant-events";
 import { IconAlert, IconCheck, IconChevronDown, IconDownload, IconFileText, IconImage, IconLoader, IconMinus, IconShieldCheck, IconSparkles, IconX } from "./icons";
 
@@ -163,7 +164,7 @@ function ContextCard({ msg }: { msg: ChatMsg }) {
   );
 }
 
-function MessageItem({ msg, agentBase = "/agent/release-agent" }: { msg: ChatMsg; agentBase?: string }) {
+function MessageItem({ msg, agentBase = "/agent/release-agent", tools = [] }: { msg: ChatMsg; agentBase?: string; tools?: ChatMsg[] }) {
   if (msg.role === "context") return <ContextCard msg={msg} />;
   if (msg.role === "tool") return <ToolStep msg={msg} />;
   if (msg.role === "system") return <SystemBanner content={msg.content} />;
@@ -183,6 +184,15 @@ function MessageItem({ msg, agentBase = "/agent/release-agent" }: { msg: ChatMsg
         <IconSparkles className="size-4" />
       </span>
       <div className="min-w-0 flex-1 space-y-2">
+        {(msg.stages?.length || msg.turnSummary) && (
+          <StageTimeline
+            stages={msg.stages ?? []}
+            turnSummary={msg.turnSummary}
+            running={!!msg.pending}
+            hasContent={!!msg.content || !!(msg.blocks && msg.blocks.length > 0)}
+            tools={tools}
+          />
+        )}
         {msg.blocks && msg.blocks.length > 0 ? (
           <div data-testid="assistant-msg" className="space-y-2 text-sm leading-relaxed text-gray-800">
             {msg.blocks.map((block, idx) =>
